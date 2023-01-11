@@ -63,7 +63,9 @@ library
     import:           shared-properties
 
     exposed-modules:
-                      HBS2.Hash
+                    , HBS2.Defaults
+                    , HBS2.Hash
+                    , HBS2.Merkle
                     , HBS2.Clock
                     , HBS2.Prelude
                     , HBS2.Prelude.Plated
@@ -86,6 +88,7 @@ library
                      , hashable
                      , interpolatedstring-perl6
                      , memory
+                     , microlens-platform
                      , prettyprinter
                      , safe
                      , serialise
