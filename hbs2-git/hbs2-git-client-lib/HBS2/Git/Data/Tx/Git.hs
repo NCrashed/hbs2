@@ -1,6 +1,7 @@
-module HBS2.Git.Data.Tx
-  ( module HBS2.Git.Data.Tx
+module HBS2.Git.Data.Tx.Git
+  ( module HBS2.Git.Data.Tx.Git
   , OperationError(..)
+  , RepoHead(..)
   ) where
 
 import HBS2.Git.Client.Prelude
@@ -16,6 +17,7 @@ import HBS2.Storage.Operations.ByteString
 import HBS2.Storage.Operations.Missed
 
 import HBS2.Git.Data.GK
+import HBS2.Git.Data.RepoHead
 
 import HBS2.Git.Local
 
@@ -38,29 +40,6 @@ type LBS = LBS.ByteString
 
 type RepoTx = RefLogUpdate L4Proto
 
-data RepoHeadType = RepoHeadType1
-                    deriving stock (Enum,Generic)
-
-data RepoHeadExt = RepoHeadExt
-                   deriving stock Generic
-
-data RepoHead =
-  RepoHeadSimple
-  { _repoHeadType   :: RepoHeadType
-  , _repoHeadTime   :: Word64
-  , _repoHeadGK0    :: Maybe HashRef
-  , _repoHeadName   :: Text
-  , _repoHeadBrief  :: Text
-  , _repoManifest   :: Maybe Text
-  , _repoHeadRefs   :: [(GitRef, GitHash)]
-  , _repoHeadExt    :: [RepoHeadExt]
-  }
-  deriving stock (Generic)
-
-
-instance Serialise RepoHeadType
-instance Serialise RepoHeadExt
-instance Serialise RepoHead
 
 data TxKeyringNotFound = TxKeyringNotFound
                          deriving stock (Show, Typeable, Generic)
@@ -69,7 +48,7 @@ instance Exception TxKeyringNotFound
 
 class GroupKeyOperations m where
   openGroupKey :: GK0 -> m (Maybe GroupSecret)
-  loadKeyrings :: HashRef -> m [KeyringEntry HBS2Basic]
+  loadKeyrings :: HashRef -> m [KeyringEntry 'HBS2Basic]
 
 makeRepoHeadSimple :: MonadIO m
                    => Text
@@ -85,7 +64,7 @@ makeRepoHeadSimple name brief manifest gk refs = do
 writeRepoHead :: MonadUnliftIO  m => AnyStorage -> RepoHead -> m HashRef
 writeRepoHead sto rh = writeAsMerkle sto (serialise rh) <&> HashRef
 
-makeTx :: forall s m . (MonadUnliftIO m, GroupKeyOperations m, s ~ HBS2Basic)
+makeTx :: forall s m . (MonadUnliftIO m, GroupKeyOperations m, s ~ 'HBS2Basic)
        => AnyStorage
        -> Bool   -- ^ rewrite bundle merkle tree with new gk0
        -> Rank   -- ^ tx rank
@@ -98,7 +77,7 @@ makeTx :: forall s m . (MonadUnliftIO m, GroupKeyOperations m, s ~ HBS2Basic)
 
 makeTx sto rewrite r puk findSk rh prev lbss = do
 
-  let rfk = RefLogKey @HBS2Basic puk
+  let rfk = RefLogKey @'HBS2Basic puk
 
   privk <- findSk puk
              >>= orThrow TxKeyringNotFound
@@ -140,7 +119,7 @@ makeTx sto rewrite r puk findSk rh prev lbss = do
 
             debug $ "update GK0 for existed block" <+> pretty bh
             let rcpt = HM.keys (recipients (wbeGk0 writeEnv))
-            gk1 <- generateGroupKey @HBS2Basic (Just gks) rcpt
+            gk1 <- generateGroupKey @'HBS2Basic (Just gks) rcpt
 
             gk1h <- writeAsMerkle sto (serialise gk1)
 
@@ -161,12 +140,21 @@ makeTx sto rewrite r puk findSk rh prev lbss = do
 
   let meRef = HashRef me
 
+  -- FIXME: ASAP-race-condition-on-seq-ref
+  --   При разборе транзакции, если по какой-то причине
+  --   голова сразу не подъезжает, то не подъедет уже никогда,
+  --   и бранчи не приедут (Import).
+  --
+  --   Возможные решения: запатчить процедуру импорта (1)
+  --   Добавить ссылкун а RepoHead в блок, где приезжают
+  --   пулы
+
   -- TODO: post-real-rank-for-tx
   let tx = SequentialRef r (AnnotatedHashRef (Just headRef) meRef)
             & serialise
             & LBS.toStrict
 
-  makeRefLogUpdate @L4Proto @HBS2Basic puk privk tx
+  makeRefLogUpdate @L4Proto @'HBS2Basic puk privk tx
 
 
 unpackTx :: MonadIO m
@@ -209,10 +197,11 @@ readTx sto href = do
   pure (n, rhh, rh, blkh)
 
 
+
 readRepoHeadFromTx :: MonadIO m
        => AnyStorage
        -> HashRef
-       -> m (Maybe RepoHead)
+       -> m (Maybe (HashRef, RepoHead))
 
 readRepoHeadFromTx sto href = runMaybeT do
 
@@ -226,6 +215,7 @@ readRepoHeadFromTx sto href = runMaybeT do
     >>= toMPlus
     <&> deserialiseOrFail @RepoHead
     >>= toMPlus
+    <&> (rhh,)
 
 
 data BundleMeta =
