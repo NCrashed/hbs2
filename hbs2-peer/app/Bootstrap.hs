@@ -57,7 +57,7 @@ bootstrapDnsLoop (PeerConfig syn) = do
     debug "I'm a bootstrapLoop"
 
     dns <- runReaderT(cfgValue @PeerDnsBootStrapKey) syn
-             <&> (<> Set.singleton "bootstrap.hbs2.net")
+             <&> (<> Set.singleton "bootstrap.hbs2.app")
 
     -- FIXME: utf8-domains
     for_ (Set.toList dns) $ \dn -> do

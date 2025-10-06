@@ -150,7 +150,7 @@ http-port 5001
 key    "./key"
 storage  "/root/.local/share/hbs2"
 accept-block-announce *
-bootstrap-dns "bootstrap.hbs2.net"
+bootstrap-dns "bootstrap.hbs2.app"
 known-peer "10.250.0.1:7354"
 
 ; poll reflog 1 "2YNGdnDBnciF1Kgmx1EZTjKUp1h5pvYAjrHoApbArpeX"
