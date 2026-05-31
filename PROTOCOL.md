@@ -352,8 +352,18 @@ data RefChanNotify e
 ```
 
 `Notify` broadcasts an application-defined signed payload to
-subscribers. `ActionRequest` is a control message (block requests,
-re-announce, and so on; **(verify)** complete set).
+subscribers. `ActionRequest` is a control message with exactly two
+constructors
+([`RefChan/Types.hs:87-90`](hbs2-peer/lib/HBS2/Peer/Proto/RefChan/Types.hs#L87-L90)):
+
+```
+data RefChanActionRequest
+  = RefChanAnnounceBlock HashRef
+  | RefChanFetch         HashRef
+```
+
+`RefChanAnnounceBlock` asks subscribers to (re-)announce a block;
+`RefChanFetch` asks them to fetch a block they may be missing.
 
 #### LWWRef
 
@@ -380,15 +390,27 @@ would be overkill.
 
 #### AnyRef
 
-File: `AnyRef.hs`. Polymorphic reference key wrapper used in
-generic ref operations.
+File: `AnyRef.hs`. Polymorphic reference key wrapper used in generic
+ref operations.
 
 ```
 newtype AnyRefKey t s = AnyRefKey (PubKey 'Sign s)
 ```
 
-Carries a type tag at the Haskell level. On the wire it is just the
-public key. **(verify)** how the tag is recovered by readers.
+The type tag `t` is a phantom type that exists only at the Haskell
+type level. There is no explicit `Serialise` instance, so the
+newtype encodes identically to its inner `PubKey 'Sign s`; the tag
+does **not** appear on the wire and cannot be recovered from a wire
+message alone. Consuming code knows the tag from context (which RPC
+endpoint or which protocol message carried the key).
+
+The tag does, however, affect **content addressing**: the
+`Hashed HbSync (AnyRefKey t s)` instance prefixes the serialised
+pubkey with the literal byte string `anyref|` before hashing
+([`AnyRef.hs:23-24`](hbs2-peer/lib/HBS2/Peer/Proto/AnyRef.hs#L23-L24)),
+so the content hash of an `AnyRefKey` differs from the content hash
+of the bare pubkey. The tag still does not leak through, since the
+prefix is constant across all tag values.
 
 ## Encryption
 
@@ -484,8 +506,6 @@ source before this document is treated as normative. A short list:
 
 - Exact framing of the messaging layer that demultiplexes protocols
   by identifier.
-- The full set of `RefChanActionRequest` constructors.
-- How `AnyRefKey`'s type tag survives the wire round trip.
 
 Closing these is a good first deeper-protocol review for someone who
 wants to maintain hbs2 long-term, or who is implementing a peer in
