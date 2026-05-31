@@ -28,9 +28,7 @@ with-compiler: ghc-9.6.6
 -- accidentally.
 index-state: 2026-05-31T00:00:00Z
 
--- TODO: remove allow-newer:all and pin via cabal.project.freeze.
--- Tracked as part of the dependency hygiene pass.
-allow-newer: all
+-- allow-newer: all  ; removed; exact pins live in cabal.project.freeze.
 
 -- Lower-bound constraints. Exact pins live in cabal.project.freeze.
 
