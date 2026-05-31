@@ -18,8 +18,11 @@ This is the first written version of the protocol spec. It is
 derived from the current source tree, not from a separate design
 document. Where the source has multiple versions of a message (v0,
 v1, v2), all are listed; the wire format must support all of them.
-Areas that need deeper verification before being treated as
-normative are tagged **(verify)**.
+
+The initial draft flagged several items with **(verify)** tags
+pending deeper investigation. Those have since been closed against
+the source. A "Re-verification on change" section at the end lists
+the areas where future code changes should be reflected here.
 
 ## Foundations
 
@@ -145,9 +148,53 @@ the wire messages.
 
 The protocol stack runs on top of a generic messaging layer that
 multiplexes by protocol identifier. The identifier is a `Nat`
-assigned to each protocol's `HasProtocol` instance; the layer
-dispatches incoming bytes to the correct decoder by reading the
-identifier first. **(verify)** the exact framing.
+assigned to each protocol's `HasProtocol` instance
+([`Net/Proto/Types.hs:145-150`](hbs2-core/lib/HBS2/Net/Proto/Types.hs#L145-L150)).
+
+On the wire, each message is framed as a two-element CBOR tuple:
+
+```
+serialise (protoId :: Integer, payload :: ByteString)
+```
+
+The first element is the protocol's `Nat` ID promoted to `Integer`;
+the second is the CBOR-encoded protocol-specific payload, treated as
+opaque bytes at the framing layer. This is the encoding used by the
+`Messaging (Fabriq e) e (AnyMessage ByteString e)` instance in
+[`Actors/Peer.hs:64-71`](hbs2-core/lib/HBS2/Actors/Peer.hs#L64-L71).
+On receive, the framing layer decodes the tuple, looks up a handler
+for the ID, and feeds the payload bytes to that handler's decoder.
+
+Protocol IDs are assigned per (protocol type, transport) pair. The
+authoritative registry is
+[`hbs2-peer/lib/HBS2/Peer/Proto.hs`](hbs2-peer/lib/HBS2/Peer/Proto.hs).
+Current assignments for `L4Proto` (UDP/TCP peers) are:
+
+| ID | Protocol |
+|---:|---|
+| 1 | `BlockInfo` |
+| 2 | `BlockChunks` |
+| 3 | `BlockAnnounce` |
+| 4 | `PeerHandshake` |
+| 5 | `PeerAnnounce` |
+| 6 | `PeerExchange` |
+| 7 | `RefLogUpdate` |
+| 8 | `RefLogRequest` |
+| 9 | `PeerMetaProto` |
+| 11001 | `RefChanHead` |
+| 11002 | `RefChanUpdate` |
+| 11003 | `RefChanRequest` |
+| 11004 | `RefChanNotify` |
+| 12001 | `LWWRefProto` |
+
+Several additional IDs in the same registry cover Unix-socket-only
+protocols (notify channels, validators, the RPC service IDs); those
+are not part of the peer-to-peer wire protocol and a non-Haskell
+peer implementation can ignore them.
+
+If the encrypted transport overlay is enabled, the two-element CBOR
+tuple above is the cleartext that gets sealed by `ByPass.hs` (see
+[Encryption](#encryption)) before going on the wire.
 
 ### Peer handshake
 
@@ -499,14 +546,21 @@ own structure (see each protocol's definition).
   `git-remote-hbs2` is git's documented remote-helper protocol, not
   an hbs2 invention.
 
-## Open verification items
+## Re-verification on change
 
-The items tagged **(verify)** above should be confirmed against the
-source before this document is treated as normative. A short list:
+All items initially flagged as needing verification in the first
+draft of this document have been closed against the current source.
+Future maintainers should re-verify the following whenever the
+related code changes:
 
-- Exact framing of the messaging layer that demultiplexes protocols
-  by identifier.
-
-Closing these is a good first deeper-protocol review for someone who
-wants to maintain hbs2 long-term, or who is implementing a peer in
-another language.
+- The set of hand-rolled `Serialise` instances (only `GroupKey 'Symm
+  s` today; new ones may break interoperability with previously
+  shipped peers).
+- The `ProtocolId` registry in `hbs2-peer/lib/HBS2/Peer/Proto.hs`.
+  Adding a protocol means adding a row to the table above.
+- The frame layout in
+  `HBS2.Actors.Peer`'s `Messaging` instance: any change there breaks
+  interop with every existing peer.
+- The cryptographic primitives used by the symmetric group key, the
+  asymmetric group key, and the transport-level overlay. These are
+  load-bearing for security and should not change silently.
