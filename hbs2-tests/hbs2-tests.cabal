@@ -280,6 +280,9 @@ executable test-unix
 
 -- executable test-proto-service
 test-suite test-proto-service
+    -- Bit-rotted against current HBS2.Net.Proto API; needs a rewrite.
+    -- See PrototypeGenericService.hs.
+    buildable: False
     import:           shared-properties
     import:           common-deps
     default-language: Haskell2010
@@ -380,6 +383,9 @@ test-suite test-storage-service
 
 
 test-suite test-tcp
+    -- Bit-rotted against current Messaging.TCP API; see TestTCP.hs.
+    -- TestTCPNet exercises the live TCP path.
+    buildable: False
     import:           shared-properties
     import:           common-deps
     default-language: Haskell2010
