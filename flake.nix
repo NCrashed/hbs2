@@ -34,12 +34,8 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       "hbs2-core"
       "hbs2-storage-simple"
       "hbs2-git"
-      "hbs2-git-dashboard"
-      "hbs2-qblf"
-      "hbs2-fixer"
       "hbs2-cli"
       "hbs2-sync"
-      "fixme-new"
       ];
 
     miscellaneous =
