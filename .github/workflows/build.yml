@@ -34,9 +34,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
-          key: cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project') }}-${{ hashFiles('**/*.cabal') }}
+          key: cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project', 'cabal.project.freeze') }}-${{ hashFiles('**/*.cabal') }}
           restore-keys: |
-            cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project') }}-
+            cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project', 'cabal.project.freeze') }}-
             cabal-${{ runner.os }}-ghc-9.6.6-
 
       - name: Update Hackage index

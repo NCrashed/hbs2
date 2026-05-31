@@ -32,6 +32,8 @@ index-state: 2026-05-31T00:00:00Z
 -- Tracked as part of the dependency hygiene pass.
 allow-newer: all
 
+-- Lower-bound constraints. Exact pins live in cabal.project.freeze.
+
 constraints:
     pandoc >=3.1.11
   , suckless-conf >= 0.1.2.7
