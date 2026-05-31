@@ -1,0 +1,86 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Haskell toolchain
+        uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.6.6'
+          cabal-version: '3.12.1.0'
+
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libsodium-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libicu-dev \
+            libmagic-dev
+
+      - name: Install system libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config libsodium openssl@3 icu4c libmagic
+
+      - name: Point cabal at brew library paths (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cat > cabal.project.local <<EOF
+          package *
+            extra-include-dirs:
+              $(brew --prefix libmagic)/include
+              $(brew --prefix openssl@3)/include
+              $(brew --prefix icu4c)/include
+              $(brew --prefix libsodium)/include
+            extra-lib-dirs:
+              $(brew --prefix libmagic)/lib
+              $(brew --prefix openssl@3)/lib
+              $(brew --prefix icu4c)/lib
+              $(brew --prefix libsodium)/lib
+          EOF
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "=== cabal.project.local ==="
+          cat cabal.project.local
+          echo "=== libmagic contents ==="
+          ls -la "$(brew --prefix libmagic)/lib" "$(brew --prefix libmagic)/include"
+
+      - name: Cache cabal store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project', 'cabal.project.freeze') }}-${{ hashFiles('**/*.cabal') }}
+          restore-keys: |
+            cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project', 'cabal.project.freeze') }}-
+            cabal-${{ runner.os }}-ghc-9.6.6-
+
+      - name: Update Hackage index
+        run: cabal update
+
+      - name: Build dependencies
+        run: cabal build all --enable-tests --only-dependencies
+
+      - name: Build
+        run: cabal build all --enable-tests
+
+      # Test run is intentionally not enabled yet. The test suite is
+      # legacy code that has not been audited for the current API and
+      # runtime environment. Enable cabal test all here once the suite
+      # is reviewed.
