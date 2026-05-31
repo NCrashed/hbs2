@@ -1,5 +1,4 @@
 packages: **/*.cabal
-  examples/*/*.cabal
   **/*/*.cabal
 
 allow-newer: all

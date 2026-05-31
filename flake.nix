@@ -29,7 +29,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
 
     topLevelPackages =
       [
-      "hbs2"
       "hbs2-peer"
       "hbs2-core"
       "hbs2-storage-simple"
@@ -38,8 +37,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       "hbs2-cli"
       "hbs2-sync"
       "hbs2-log-structured"
-      "fixme-new"
-      "suckless-conf"
       ];
 
     miscellaneous =
