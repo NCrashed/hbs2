@@ -44,19 +44,23 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cat > cabal.project.local <<EOF
-          extra-include-dirs:
-            $(brew --prefix libmagic)/include
-            $(brew --prefix openssl@3)/include
-            $(brew --prefix icu4c)/include
-            $(brew --prefix libsodium)/include
-
-          extra-lib-dirs:
-            $(brew --prefix libmagic)/lib
-            $(brew --prefix openssl@3)/lib
-            $(brew --prefix icu4c)/lib
-            $(brew --prefix libsodium)/lib
+          package *
+            extra-include-dirs:
+              $(brew --prefix libmagic)/include
+              $(brew --prefix openssl@3)/include
+              $(brew --prefix icu4c)/include
+              $(brew --prefix libsodium)/include
+            extra-lib-dirs:
+              $(brew --prefix libmagic)/lib
+              $(brew --prefix openssl@3)/lib
+              $(brew --prefix icu4c)/lib
+              $(brew --prefix libsodium)/lib
           EOF
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "=== cabal.project.local ==="
+          cat cabal.project.local
+          echo "=== libmagic contents ==="
+          ls -la "$(brew --prefix libmagic)/lib" "$(brew --prefix libmagic)/include"
 
       - name: Cache cabal store
         uses: actions/cache@v4
