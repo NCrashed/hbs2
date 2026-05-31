@@ -150,7 +150,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         (pkgs.lib.getAttrs packageNames (ourHaskellPackages pkgs))
         ;
       in ps // {
-        bf6-git-hbs2 = pkgs.callPackage ./nix/bf6-hbs2-git.nix { inherit (ps) suckless-conf; };
+        bf6-git-hbs2 = pkgs.callPackage ./nix/bf6-hbs2-git.nix { inherit (pkgs.haskellPackages) suckless-conf; };
       };
 
     packagesDynamic = makePackages pkgs;
