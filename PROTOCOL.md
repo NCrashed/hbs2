@@ -34,9 +34,17 @@ The CBOR encoding for each type follows `serialise`'s default
 generic derivation rules. A non-Haskell implementation must match
 those rules; the
 [`serialise` source](https://hackage.haskell.org/package/serialise)
-documents them. **(verify)** for each protocol message that the
-derived encoding is what is actually shipped (some types may
-override).
+documents them.
+
+Only one protocol type ships with a hand-rolled `Serialise` instance:
+`GroupKey 'Symm s` in
+[`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:194`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs#L194).
+It carries a forward-compatibility scheme: the encoder writes a
+`GroupKeySymmV1` payload, then a version tag (currently `2`), then
+extension data (group-key id scheme, id, and timestamp). The decoder
+reads V1, checks for remaining bytes, then optionally decodes the
+extension. Other implementations must match this layout for symmetric
+group keys; everything else uses default Generic derivation.
 
 ### Hashing
 
@@ -415,17 +423,38 @@ A random symmetric secret is generated and encrypted under each
 authorized reader's public encryption key. Readers decrypt the
 secret and use it to decrypt the data. Wraps a `MTreeAnn` payload
 whose `_mtaCrypt` field indicates `EncryptGroupNaClSymm1` or
-`EncryptGroupNaClSymm2`. **(verify)** exact symmetric primitive
-(crypto_secretbox / chacha20-poly1305 / ...).
+`EncryptGroupNaClSymm2`.
+
+The symmetric primitive is **NaCl `crypto_secretbox`**
+(XSalsa20-Poly1305), invoked via saltine's
+`Crypto.Saltine.Core.SecretBox.secretbox` / `secretboxOpen` in
+[`GroupKeySymm.hs`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs).
+The `EncryptGroupNaClSymm2` variant additionally derives per-block
+keys via SipHash-based block indexing
+(`EncryptGroupNaClSymmBlockSIP`) so that different blocks of the
+same tree are encrypted under different nonces and keys.
 
 ### Transport-level encryption
 
 The messaging layer at
 [`hbs2-core/lib/HBS2/Net/Messaging/Encrypted/`](hbs2-core/lib/HBS2/Net/Messaging/Encrypted)
 wraps any transport (UDP, TCP, Unix) with peer-to-peer encryption.
+Two pieces:
+
+- **`ByPass.hs`** uses NaCl `crypto_box` (X25519 ECDH + XSalsa20 +
+  Poly1305) via saltine's `Crypto.Saltine.Core.Box`. Each pair of
+  peers precomputes a shared key (`CombinedKey`) once and then uses
+  it to seal and open messages. Includes SipHash-based keyed
+  indexing of trusted peers.
+- **`RandomPrefix.hs`** is a small bytecode-driven obfuscation layer
+  prepended to encrypted packets. The "bytecode" is a sequence of
+  primitive operations (`NOP`, `LOADB`, `SKIPBI`, `ANDBI`, `ORBI`,
+  `XORBI`, `ADDBI`, `SUBBI`, `MULTBI`, `REPEAT`, `RET`) interpreted
+  to produce a per-packet variable-length prefix. The goal is to
+  hinder naive traffic analysis and protocol fingerprinting.
+
 This is layered below the protocol stack and is independent of the
-group-key schemes used at the data layer. **(verify)** scheme and
-key derivation.
+group-key schemes used at the data layer.
 
 ## Auxiliary types
 
@@ -455,12 +484,8 @@ source before this document is treated as normative. A short list:
 
 - Exact framing of the messaging layer that demultiplexes protocols
   by identifier.
-- Whether each protocol type relies purely on default `Serialise`
-  derivation or has a hand-rolled encoding.
 - The full set of `RefChanActionRequest` constructors.
 - How `AnyRefKey`'s type tag survives the wire round trip.
-- Symmetric primitive used by `EncryptGroupNaClSymm1` / `Symm2`.
-- Transport-level encryption scheme and key derivation.
 
 Closing these is a good first deeper-protocol review for someone who
 wants to maintain hbs2 long-term, or who is implementing a peer in
