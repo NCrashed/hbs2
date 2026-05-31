@@ -122,6 +122,10 @@ in `hbs2-peer`:
 Each protocol has both a wire-level part (how transactions propagate
 between peers) and a storage part (how state is persisted).
 
+For a side-by-side comparison of `RefLog` and `LWWRef` (consistency
+model, conflict resolution, when to use which), see
+[`docs/LWWREF_VS_REFLOG.md`](docs/LWWREF_VS_REFLOG.md).
+
 ### Peer identity
 
 A peer is identified by an Ed25519 public signing key, generated
