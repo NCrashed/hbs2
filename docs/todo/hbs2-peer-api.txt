@@ -1,2 +1,0 @@
-TODO: http-api-for-send-raw
-  Сделать HTTP ручку для постинга транзакций

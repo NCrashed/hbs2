@@ -1,4 +1,0 @@
-TODO: move-to-crypton
-  cryptonite depracated.
-
-  Переехать на crypton ASAP.
