@@ -1,15 +1,38 @@
-packages: **/*.cabal
-  examples/*/*.cabal
-  **/*/*.cabal
+-- Project packages, explicit list (avoids surprises from globs).
 
+packages:
+  hbs2/hbs2.cabal
+  hbs2-cli/hbs2-cli.cabal
+  hbs2-core/hbs2-core.cabal
+  hbs2-git/hbs2-git.cabal
+  hbs2-keyman/hbs2-keyman/hbs2-keyman.cabal
+  hbs2-keyman/hbs2-keyman-direct-lib/hbs2-keyman-direct-lib.cabal
+  hbs2-peer/hbs2-peer.cabal
+  hbs2-storage-simple/hbs2-storage-simple.cabal
+  hbs2-sync/hbs2-sync.cabal
+  hbs2-tests/hbs2-tests.cabal
+
+  -- Vendored forks of upstream libraries with project-specific patches.
+  -- De-vendoring is a separate cleanup task.
+  miscellaneous/bytestring-mmap/bytestring-mmap.cabal
+  miscellaneous/db-pipe/db-pipe.cabal
+  miscellaneous/fuzzy-parse/fuzzy-parse.cabal
+  miscellaneous/saltine/saltine.cabal
+  miscellaneous/suckless-conf/suckless-conf.cabal
+
+-- GHC version. Match what nix develop provides so dev shell and
+-- standalone cabal builds agree.
+with-compiler: ghc-9.6.6
+
+-- Pin Hackage snapshot for reproducibility. Bump deliberately, not
+-- accidentally.
+index-state: 2026-05-31T00:00:00Z
+
+-- TODO: remove allow-newer:all and pin via cabal.project.freeze.
+-- Tracked as part of the dependency hygiene pass.
 allow-newer: all
 
 constraints:
     pandoc >=3.1.11
   , suckless-conf >= 0.1.2.7
   , http-client >=0.7.16 && <0.8
-
--- executable-static: True
--- profiling: True
--- library-profiling: False
-
