@@ -41,7 +41,7 @@ documents them.
 
 Only one protocol type ships with a hand-rolled `Serialise` instance:
 `GroupKey 'Symm s` in
-[`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:194`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs#L194).
+[`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:195`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs#L195).
 It carries a forward-compatibility scheme: the encoder writes a
 `GroupKeySymmV1` payload, then a version tag (currently `2`), then
 extension data (group-key id scheme, id, and timestamp). The decoder
@@ -186,11 +186,22 @@ Current assignments for `L4Proto` (UDP/TCP peers) are:
 | 11003 | `RefChanRequest` |
 | 11004 | `RefChanNotify` |
 | 12001 | `LWWRefProto` |
+| 13001 | `MailBoxProto HBS2Basic` |
+
+The mailbox protocol (13001) is the wire layer behind the experimental
+mailbox feature; its application surface is not exposed in this fork's
+CLI but the protocol IDs are assigned in
+[`Proto.hs:161`](hbs2-peer/lib/HBS2/Peer/Proto.hs#L161) so peers that
+implement it interoperate.
 
 Several additional IDs in the same registry cover Unix-socket-only
 protocols (notify channels, validators, the RPC service IDs); those
 are not part of the peer-to-peer wire protocol and a non-Haskell
-peer implementation can ignore them.
+peer implementation can ignore them. Examples:
+`RefChanValidate UNIX = 0xFFFA0001`, `RefChanNotify UNIX = 0xFFFB0001`,
+the notify-protocol IDs in
+[`Notify.hs`](hbs2-peer/lib/HBS2/Peer/Notify.hs), and the service-RPC
+IDs in `hbs2-peer/lib/HBS2/Peer/RPC/API/`.
 
 If the encrypted transport overlay is enabled, the two-element CBOR
 tuple above is the cleartext that gets sealed by `ByPass.hs` (see
@@ -543,7 +554,7 @@ own structure (see each protocol's definition).
 - **Storage on-disk format (NCQ3).** Persistence layout, not wire
   format.
 - **Git remote helper protocol.** The interaction between `git` and
-  `git-remote-hbs2` is git's documented remote-helper protocol, not
+  `git-remote-hbs23` is git's documented remote-helper protocol, not
   an hbs2 invention.
 
 ## Re-verification on change
