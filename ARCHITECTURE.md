@@ -36,7 +36,7 @@ distributing the underlying blocks.
 | `hbs2-peer` | The P2P daemon. Listens on UDP/TCP/Unix, runs the protocols (block announcement, download, reflog, refchan, lwwref), exposes an RPC API for local clients. |
 | `hbs2-keyman` | Key manager service. Tracks where local private keys live and serves them to local clients that need to sign or decrypt. The `hbs2-keyman-direct-lib` subpackage is the in-process client API. |
 | `hbs2-cli` | Primary command-line interface. Talks to a running `hbs2-peer` over its RPC socket. Handles keyring generation, refchan and lwwref inspection, storage operations, peer status. Replaces most subcommands of the legacy `hbs2` monolith. |
-| `hbs2-git3` | Git remote helper. Provides the `hbs2://` protocol for git (via `git-remote-hbs23`), the `git hbs2 ...` subcommand surface, and repository initialisation. Replaces the legacy `hbs2-git` package. |
+| `hbs2-git3` | Git remote helper. Provides the `hbs23://` URL scheme for git (via `git-remote-hbs23`), the `git hbs2 ...` subcommand surface, and repository initialisation. Replaces the legacy `hbs2-git` package, which used the `hbs2://` scheme. |
 | `hbs2-sync` | Directory synchronization tool. Uses a refchan as the shared substrate for keeping a folder in sync between several machines. |
 | `hbs2-tests` | Test harness: integration tests, network probes, storage benchmarks. |
 | `miscellaneous/` | Vendored forks of upstream libraries with project-specific patches. Being de-vendored over time. |
@@ -71,7 +71,7 @@ when you run `git push hbs2`.
    Other peers that are subscribed to this reflog pull the blocks
    and append the same transaction to their own state.
 
-A `git clone hbs2://<KEY>` is the same flow in reverse: helper asks
+A `git clone hbs23://<KEY>` is the same flow in reverse: helper asks
 the peer for the current reflog value, reads the merkle tree, asks
 for blocks, reconstructs git objects.
 

@@ -62,7 +62,7 @@ The base hash type is `Hash HbSync`, defined in
   `hash bytes :: Digest Blake2b_256` from `cryptonite`'s
   `Crypto.Hash`.
 - Wire representation: 32-byte `ByteString`.
-- Display form: base58 (used in URLs like `hbs2://<base58>`).
+- Display form: base58 (used in URLs like `hbs23://<base58>`).
 
 `HashRef` (in `hbs2-core/lib/HBS2/Data/Types/Refs.hs`) is a thin
 newtype around `Hash HbSync` used for references to merkle trees and
