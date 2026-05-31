@@ -39,11 +39,24 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install pkg-config libsodium openssl@3 icu4c libmagic
-          {
-            echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$PKG_CONFIG_PATH"
-            echo "LDFLAGS=-L$(brew --prefix libmagic)/lib"
-            echo "CPPFLAGS=-I$(brew --prefix libmagic)/include"
-          } >> "$GITHUB_ENV"
+
+      - name: Point cabal at brew library paths (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cat > cabal.project.local <<EOF
+          extra-include-dirs:
+            $(brew --prefix libmagic)/include
+            $(brew --prefix openssl@3)/include
+            $(brew --prefix icu4c)/include
+            $(brew --prefix libsodium)/include
+
+          extra-lib-dirs:
+            $(brew --prefix libmagic)/lib
+            $(brew --prefix openssl@3)/lib
+            $(brew --prefix icu4c)/lib
+            $(brew --prefix libsodium)/lib
+          EOF
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Cache cabal store
         uses: actions/cache@v4
