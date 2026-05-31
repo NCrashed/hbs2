@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Haskell toolchain
+        uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.6.6'
+          cabal-version: '3.12.1.0'
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libsodium-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libicu-dev \
+            libmagic-dev
+
+      - name: Cache cabal store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project') }}-${{ hashFiles('**/*.cabal') }}
+          restore-keys: |
+            cabal-${{ runner.os }}-ghc-9.6.6-${{ hashFiles('cabal.project') }}-
+            cabal-${{ runner.os }}-ghc-9.6.6-
+
+      - name: Update Hackage index
+        run: cabal update
+
+      - name: Build dependencies
+        run: cabal build all --enable-tests --only-dependencies
+
+      - name: Build
+        run: cabal build all --enable-tests
+
+      - name: Run tests
+        run: cabal test all --test-show-details=direct
