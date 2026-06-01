@@ -133,7 +133,7 @@ Add the flake as an input to your Home Manager configuration:
 Then enable the module:
 ```
 {
-    imports = [ hbs2.homeManagerModules.${system}.default ];
+    imports = [ hbs2.homeManagerModules.default ];
     services.hbs2.enable = true;
 }
 ```

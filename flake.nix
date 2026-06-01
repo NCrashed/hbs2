@@ -112,7 +112,11 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       };
 
   in
-  { overlays.default = overlay; }
+  {
+    overlays.default = overlay;
+    homeManagerModules.default = import ./nix/hm-module.nix self;
+    nixosModules.default = import ./nix/nixos-module.nix self;
+  }
   //
   (flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"]
   (system:
@@ -157,8 +161,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     packagesStatic = makePackages pkgs.pkgsStatic;
     in  {
     legacyPackages = pkgs;
-    homeManagerModules.default = import ./nix/hm-module.nix self;
-    nixosModules.default = import ./nix/nixos-module.nix self;
 
     packages =
       packagesDynamic //
