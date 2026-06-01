@@ -173,6 +173,12 @@ in {
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
 
+      # Re-deploy with a changed config (poll lines, peers, ports, ...)
+      # must restart the daemon. Without this, the deploy updates the
+      # file on disk but the running process keeps its old in-memory
+      # config until something else triggers a restart.
+      restartTriggers = [ configFile ];
+
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
