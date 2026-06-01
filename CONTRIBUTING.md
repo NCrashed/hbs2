@@ -33,6 +33,36 @@ If you are using Cabal + ghcup, make sure your toolchain matches the
 pinned versions (GHC 9.6.6, Cabal 3.12.1.0) so `cabal.project`'s
 `with-compiler` directive is satisfied.
 
+## Getting the source
+
+The canonical source is on GitHub:
+```
+git clone https://github.com/NCrashed/hbs2.git
+```
+
+You can also clone the repository through hbs2 itself. This is the
+project dogfooding its own distributed-git layer. The mirror is
+served by a public bootstrap node at `bootstrap.hbs2.app`, so once
+you have a local `hbs2-peer` running (see
+[`QUICKSTART.md`](QUICKSTART.md) for the five-minute setup) the
+clone will work without depending on the maintainer's machine being
+online:
+
+```
+git clone hbs23://9gtFy65ap1Hk9Mc71pMjc32zFsKcNZLVPWbBAbnkE4dP hbs2
+```
+
+`9gtFy65ap1Hk9Mc71pMjc32zFsKcNZLVPWbBAbnkE4dP` is this repository's
+public signing key (lwwref key). It is stable: same source, same
+key, forever. If it ever changes that fact will be announced.
+
+The hbs2 mirror is **read-only for everyone except the maintainer**
+because only the maintainer's private key can sign updates to this
+particular reference. Contributors send changes back via GitHub
+pull requests, the same as if they cloned from GitHub directly. The
+hbs2 mirror is an availability and discovery improvement, not an
+alternative submission path.
+
 ## Building and testing
 
 ```
