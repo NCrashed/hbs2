@@ -5,3 +5,12 @@ bin/
 .hbs2-git3/
 
 temp/
+
+# Working drafts of design proposals — kept local, not committed.
+# voidlizard's pre-existing pep-02..pep-04 were tracked before this
+# rule and stay tracked; only new files in docs/drafts/ are ignored.
+docs/drafts/*
+!docs/drafts/pep-02-acb.md
+!docs/drafts/pep-03.md
+!docs/drafts/pep-04.txt
+!docs/drafts/pep-04-01.txt
