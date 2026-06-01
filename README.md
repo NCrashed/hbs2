@@ -1,5 +1,7 @@
 # hbs2
 
+[![Build](https://github.com/NCrashed/hbs2/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/NCrashed/hbs2/actions/workflows/build.yml)
+
 A peer-to-peer content-addressable storage system with two primary
 applications: **distributed git hosting** and **file synchronization**
 across your devices.
