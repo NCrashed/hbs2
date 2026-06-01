@@ -158,6 +158,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     in  {
     legacyPackages = pkgs;
     homeManagerModules.default = import ./nix/hm-module.nix self;
+    nixosModules.default = import ./nix/nixos-module.nix self;
 
     packages =
       packagesDynamic //
