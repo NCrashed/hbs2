@@ -24,6 +24,34 @@ pending deeper investigation. Those have since been closed against
 the source. A "Re-verification on change" section at the end lists
 the areas where future code changes should be reflected here.
 
+## Stability
+
+The wire protocol is **frozen as of release `0.25.3.0`** at the
+following surface:
+
+  - Every `ProtocolId` currently assigned in `hbs2-peer/lib/HBS2/Peer/Proto.hs`
+    keeps its number and payload shape. The full registry is in the
+    "Protocol IDs" table further down this document.
+  - The CBOR framing (`(natVal, payload)` two-element tuple, see
+    "Foundations / Framing" below) does not change.
+  - The encrypted overlay (`HBS2.Net.Messaging.Encrypted.ByPass`)
+    and its handshake do not change.
+  - The hand-rolled `Serialise` instance for `GroupKey 'Symm`
+    (`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:195`) does not
+    change.
+  - Hash type, merkle tree layout, and reference (RefLog, RefChan,
+    LWWRef) wire formats do not change.
+
+Future wire-level features receive **new** ProtocolIds. Existing
+ProtocolIds do not get new payload versions. Peers running `0.25.3.0`
+interoperate with the prior `0.24.x` line and will interoperate with
+all future releases that respect this freeze.
+
+A break of this commitment requires a major version bump and a new
+section in this document. The "Re-verification on change" list at the
+end remains the canonical place to record what to check whenever a
+release does propose breaking wire compatibility.
+
 ## Foundations
 
 ### Encoding
