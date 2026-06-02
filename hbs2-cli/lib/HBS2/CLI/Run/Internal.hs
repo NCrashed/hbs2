@@ -35,6 +35,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString qualified as BS
 import Data.Text qualified as Text
 import Lens.Micro.Platform
+import System.Exit (die)
 
 
 data HBS2CliEnv =
@@ -61,42 +62,47 @@ newtype HBS2Cli m a = HBS2Cli { fromHBS2Cli :: ReaderT (TVar (Maybe HBS2CliEnv))
 withHBS2Cli :: TVar (Maybe HBS2CliEnv) -> HBS2Cli m a -> m a
 withHBS2Cli env action = runReaderT (fromHBS2Cli action) env
 
+-- Eagerly probes for an hbs2-peer RPC socket and, if found, sets up the
+-- service callers before running `what`. This guarantees `what` is executed
+-- exactly once: the old catch+retry version would re-run `what` after
+-- PeerNotConnectedException, which broke any command reading stdin
+-- (strict BS.getContents drains and closes the handle on the first attempt).
 recover :: HBS2Cli IO a -> HBS2Cli IO a
 recover what = do
-  catch what $ \case
-    PeerNotConnectedException -> do
+  envVar <- ask
+  readTVarIO envVar >>= \case
+    Just _ -> what
+    Nothing -> detectRPC >>= \case
+      Nothing ->
+        catch what $ \PeerNotConnectedException ->
+          liftIO $ die "can't locate hbs2-peer rpc"
+      Just soname ->
+        flip runContT pure do
 
-      soname <- detectRPC
-                  `orDie` "can't locate hbs2-peer rpc"
+          client <- lift $ race (pause @'Seconds 1) (newMessagingUnix False 1.0 soname)
+                      >>= orThrowUser ("can't connect to" <+> pretty soname)
 
-      flip runContT pure do
+          void $ ContT $ withAsync $ runMessagingUnix client
 
-        client <- lift $ race (pause @'Seconds 1) (newMessagingUnix False 1.0 soname)
-                    >>= orThrowUser ("can't connect to" <+> pretty soname)
+          peerAPI    <- makeServiceCaller @PeerAPI (fromString soname)
+          refLogAPI  <- makeServiceCaller @RefLogAPI (fromString soname)
+          refChanAPI <- makeServiceCaller @RefChanAPI (fromString soname)
+          storageAPI <- makeServiceCaller @StorageAPI (fromString soname)
+          lwwAPI     <- makeServiceCaller @LWWRefAPI (fromString soname)
 
-        void $ ContT $ withAsync $ runMessagingUnix client
+          let endpoints = [ Endpoint @UNIX  peerAPI
+                          , Endpoint @UNIX  refLogAPI
+                          , Endpoint @UNIX  refChanAPI
+                          , Endpoint @UNIX  lwwAPI
+                          , Endpoint @UNIX  storageAPI
+                          ]
 
-        peerAPI    <- makeServiceCaller @PeerAPI (fromString soname)
-        refLogAPI  <- makeServiceCaller @RefLogAPI (fromString soname)
-        refChanAPI <- makeServiceCaller @RefChanAPI (fromString soname)
-        storageAPI <- makeServiceCaller @StorageAPI (fromString soname)
-        lwwAPI     <- makeServiceCaller @LWWRefAPI (fromString soname)
+          void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
 
-        -- let sto = AnyStorage (StorageClient storageAPI)
+          let env = Just (HBS2CliEnv soname refChanAPI refLogAPI lwwAPI peerAPI storageAPI)
+          atomically $ writeTVar envVar env
 
-        let endpoints = [ Endpoint @UNIX  peerAPI
-                        , Endpoint @UNIX  refLogAPI
-                        , Endpoint @UNIX  refChanAPI
-                        , Endpoint @UNIX  lwwAPI
-                        , Endpoint @UNIX  storageAPI
-                        ]
-
-        void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
-
-        let env = Just (HBS2CliEnv soname refChanAPI refLogAPI lwwAPI peerAPI storageAPI)
-        tv <- newTVarIO env
-
-        liftIO $ withHBS2Cli tv what
+          lift what
 
 
 runHBS2Cli :: MonadUnliftIO m => HBS2Cli m a -> m a
