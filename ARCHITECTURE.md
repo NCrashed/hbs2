@@ -75,6 +75,14 @@ A `git clone hbs23://<KEY>` is the same flow in reverse: helper asks
 the peer for the current reflog value, reads the merkle tree, asks
 for blocks, reconstructs git objects.
 
+Note on packing: `hbs2-git3` stores git data as zstd-compressed
+segments rather than reusing git's native pack format. The reason is
+that git packing does not guarantee minimal data duplication in a P2P
+environment - the same logical object can end up in several different
+packs across peers, defeating content-addressed deduplication. When
+the helper exports a tree to git, it produces standard pack files;
+that translation happens locally.
+
 ## Core primitives
 
 These types live in `hbs2-core/lib/HBS2/`.

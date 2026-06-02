@@ -63,6 +63,10 @@ For installation options (Nix, Cabal, prebuilt binaries) see
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) - tour of the components and
   how they fit together.
 - [`PROTOCOL.md`](PROTOCOL.md) - wire format specification.
+- [`docs/FAQ.md`](docs/FAQ.md) - frequently asked questions, including
+  comparisons with Syncthing, Radicle, and IPFS.
+- [`docs/COOKBOOK.md`](docs/COOKBOOK.md) - working recipes for common
+  tasks beyond the git path.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) - how to build, test, and
   submit changes.
 - [`HISTORY.md`](HISTORY.md) - origin of the project.
