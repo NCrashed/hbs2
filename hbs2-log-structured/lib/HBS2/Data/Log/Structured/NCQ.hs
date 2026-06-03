@@ -42,6 +42,7 @@ import System.Posix.Fcntl
 import System.Posix.IO
 import System.Posix.Files (setFileSize)
 import System.Posix.IO.ByteString as Posix
+import Foreign.Ptr (castPtr)
 import System.FilePath.Posix
 import System.IO.MMap
 import System.IO.Temp
@@ -216,7 +217,9 @@ nwayFileAllocate :: Fd -> COff -> COff -> IO ()
 nwayFileAllocate fd offset size = do
   let chunk = BS.replicate (fromIntegral size) 0
   _ <- fdSeek fd AbsoluteSeek (fromIntegral offset)
-  void $ Posix.fdWrite fd chunk
+  -- fdWriteBuf for portability across unix 2.7 (String fdWrite) and 2.8+.
+  void $ BS.useAsCStringLen chunk $ \(p, n) ->
+    fdWriteBuf fd (castPtr p) (fromIntegral n)
 #else
 nwayFileAllocate = fileAllocate
 #endif

@@ -25,6 +25,8 @@ import System.Posix.Files qualified as PFS
 import Lens.Micro.Platform
 import UnliftIO.IO.File
 
+import HBS2.Storage.NCQ3.Internal.UnixCompat (fdWriteBS)
+
 {-HLINT ignore "Functor law"-}
 
 ncqEntryUnwrap :: ByteString
@@ -281,7 +283,7 @@ appendSection :: forall m . MonadUnliftIO m
 appendSection fh sect = do
   -- off <- liftIO $ fdSeek fh SeekFromEnd 0
   -- pure (fromIntegral off, fromIntegral len)
-  liftIO (Posix.fdWrite fh sect) <&> fromIntegral
+  liftIO (fdWriteBS fh sect) <&> fromIntegral
 {-# INLINE appendSection #-}
 
 appendTailSection :: MonadIO m => Fd -> m NCQFileSize

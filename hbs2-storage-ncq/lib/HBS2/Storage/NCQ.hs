@@ -82,8 +82,8 @@ import System.IO.Error (catchIOError)
 import System.IO.MMap as MMap
 import System.IO.Temp (emptyTempFile)
 import System.Mem
--- import Foreign.Ptr
--- import Foreign di
+
+import HBS2.Storage.NCQ3.Internal.UnixCompat (fdReadBS, fdWriteBS, openFdCompat)
 import qualified Data.ByteString.Internal as BSI
 import Streaming.Prelude qualified as S
 
@@ -459,7 +459,7 @@ ncqStorageRun ncq@NCQStorage{..} = flip runContT pure do
             trace $ "READER: PROCEED REQUEST" <+> viaShow fd <+> pretty off
             atomically $ modifyTVar ncqCurrentUsage (IntMap.adjust pred (fromIntegral fd))
             fdSeek fd AbsoluteSeek (fromIntegral $ 4 + 32 + off)
-            bs <- Posix.fdRead fd (fromIntegral l)
+            bs <- fdReadBS fd (fromIntegral l)
 
             unless (BS.length bs == fromIntegral l) do
               err $ "READ MISMATCH" <+> pretty l <+> pretty (BS.length bs)
@@ -631,7 +631,7 @@ ncqStorageRun ncq@NCQStorage{..} = flip runContT pure do
             ww <- if isNothing wqData && wqNew then
                     pure 0
                   else do
-                    liftIO (Posix.fdWrite fh (ws <> LBS.toStrict wbs))
+                    liftIO (fdWriteBS fh (ws <> LBS.toStrict wbs))
                       <&> fromIntegral
 
             let item = (h, (fromIntegral off, fromIntegral len))
@@ -1110,9 +1110,9 @@ ncqOpenCurrent :: MonadUnliftIO m => NCQStorage -> m ()
 ncqOpenCurrent ncq@NCQStorage{..} = do
   let fp = ncqGetCurrentName ncq
   touch fp
-  let flags = defaultFileFlags { exclusive = False, creat = Just 0o666 }
-  fdw <- liftIO (PosixBase.openFd fp  Posix.ReadWrite flags) <&> WFd
-  fdr <- liftIO (PosixBase.openFd fp Posix.ReadOnly flags) <&> RFd
+  let flags = defaultFileFlags { exclusive = False }
+  fdw <- liftIO (openFdCompat fp Posix.ReadWrite (Just 0o666) flags) <&> WFd
+  fdr <- liftIO (openFdCompat fp Posix.ReadOnly (Just 0o666) flags) <&> RFd
   atomically $ writeTVar ncqCurrentFd (Just (fdr, fdw))
 
 ncqWithCurrent :: MonadUnliftIO m => NCQStorage -> ((RFd, WFd) -> m a) -> m a
