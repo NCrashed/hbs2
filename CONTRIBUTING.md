@@ -129,6 +129,40 @@ Avoid adding new vendored forks under `miscellaneous/`. We are
 working *down* from the existing set, not up. If you need an
 upstream patch, prefer a real PR upstream over a fork.
 
+## Cutting a release
+
+Releases are tagged in the form `MAJOR.MINOR.PATCH.BUILD` (no `v`
+prefix), matching the `version:` field in the `.cabal` files. Pushing
+a matching tag triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml),
+which:
+
+1. Builds `.#packages.x86_64-linux.static` (a musl-linked tarball of
+   every shipped binary) using the GitHub Actions cache via
+   `magic-nix-cache-action`.
+2. Packages the result as `hbs2-${TAG}-x86_64-linux-musl.tar.gz`
+   alongside a `.sha256` file.
+3. Uploads both to the corresponding GitHub Release.
+
+The first run on a cold cache is slow (multi-hour). Subsequent runs
+reuse the warm cache and are faster. The workflow is also reachable
+via `workflow_dispatch` so the maintainer can re-run it against an
+existing tag if the first attempt times out or fails partway.
+
+Local fallback, if CI times out: build locally and upload by hand.
+
+```
+nix build .#packages.x86_64-linux.static --no-link --print-out-paths
+STATIC=$(nix eval --raw .#packages.x86_64-linux.static)
+TAG=0.25.3.0
+DIR="hbs2-${TAG}-x86_64-linux-musl"
+mkdir -p "${DIR}/bin"
+cp -L "${STATIC}/bin"/* "${DIR}/bin/"
+tar czf "${DIR}.tar.gz" "${DIR}"
+sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+gh release upload "${TAG}" "${DIR}.tar.gz" "${DIR}.tar.gz.sha256"
+```
+
 ## Questions
 
 Open a GitHub issue. There is no separate chat channel yet.

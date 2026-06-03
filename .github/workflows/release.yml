@@ -1,0 +1,81 @@
+name: Release
+
+# Triggered when a version tag is pushed. The existing tag format on this
+# repo is MAJOR.MINOR.PATCH.BUILD (no `v` prefix), e.g. 0.25.3.0.
+#
+# Also exposed as `workflow_dispatch` so the maintainer can rebuild and
+# re-upload assets for an existing tag without re-tagging.
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and upload assets for'
+        required: true
+        type: string
+
+jobs:
+  static-linux-x86_64:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # for creating/updating the release and uploading assets
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Set up nix store cache (GitHub Actions cache)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build .#packages.x86_64-linux.static
+        run: |
+          nix build .#packages.x86_64-linux.static --no-link --print-out-paths -L
+
+      - name: Package binaries
+        id: pkg
+        run: |
+          set -euo pipefail
+          STATIC=$(nix eval --raw .#packages.x86_64-linux.static)
+          TAG="${{ steps.tag.outputs.name }}"
+          DIR="hbs2-${TAG}-x86_64-linux-musl"
+          mkdir -p "${DIR}/bin"
+          # cp -L resolves the symlinkJoin's symlinks into actual files.
+          cp -L "${STATIC}/bin"/* "${DIR}/bin/"
+          chmod +w "${DIR}/bin"/*   # strip read-only from nix store
+          # Include a small README so the archive is self-explanatory.
+          cat > "${DIR}/README.txt" <<EOF
+          hbs2 ${TAG}, statically linked against musl libc.
+          Tested on x86_64-linux. No runtime dependencies; copy the bin/
+          contents anywhere on PATH.
+          Source: https://github.com/NCrashed/hbs2
+          EOF
+          ARCHIVE="${DIR}.tar.gz"
+          tar czf "${ARCHIVE}" "${DIR}"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+          ls -la "${ARCHIVE}"
+          sha256sum "${ARCHIVE}" | tee "${ARCHIVE}.sha256"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          files: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+          fail_on_unmatched_files: true

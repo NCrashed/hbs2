@@ -1,16 +1,38 @@
 # Installation
 
-hbs2 is a Haskell project. There are three supported ways to install
+hbs2 is a Haskell project. There are four supported ways to install
 it; they produce the same binaries. Pick whichever fits your setup.
 
 ## Requirements
 
 - Linux on x86_64 or aarch64. macOS and Windows-WSL have been used
   in the past but are not currently tested.
-- About 4 GB of disk space for the dependency build.
+- About 4 GB of disk space for the dependency build (only required
+  for the source-build options below).
 - A network connection for the first build (deps come from Hackage).
 
-## Option 1: Cabal + ghcup
+## Option 1: Prebuilt static binary (Linux x86_64)
+
+The fastest path. No toolchain, no dependencies, no build. Pulls a
+statically linked (musl) tarball from the GitHub release page.
+
+```
+TAG=0.25.3.0  # set to the release you want
+curl -fL -o hbs2.tar.gz "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz"
+curl -fL -o hbs2.tar.gz.sha256 "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz.sha256"
+sha256sum -c hbs2.tar.gz.sha256
+tar xzf hbs2.tar.gz
+sudo cp hbs2-${TAG}-x86_64-linux-musl/bin/* /usr/local/bin/
+```
+
+Skip ahead to "Verifying the install" below.
+
+The binaries depend on nothing at runtime; they will work on any
+modern Linux distribution. Note that releases prior to 0.25.3.1 may
+not have a binary tarball attached; for those use the source paths
+below.
+
+## Option 2: Cabal + ghcup
 
 The path with the broadest reach. Does not require Nix.
 
@@ -97,7 +119,7 @@ chmod +x ~/.local/bin/git-hbs2
 The Nix flake builds and installs a `git-hbs2` wrapper for you, so
 this step is only needed for the cabal install path.
 
-## Option 2: Nix flake
+## Option 3: Nix flake
 
 For users who already have Nix with flakes enabled.
 
@@ -119,7 +141,7 @@ cd hbs2
 nix develop
 ```
 
-## Option 3: Home Manager module
+## Option 4: Home Manager module
 
 For NixOS or Home Manager users who want `hbs2-peer` running as a
 user systemd service.
