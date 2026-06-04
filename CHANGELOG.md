@@ -1,3 +1,81 @@
+# 0.25.3.1  2026-06-04
+
+Patch release. Resolves the two open code-level items on the 0.25.3.0
+"Known issues" list (`hbs2-cli` stdin and `.#static` build), ports the
+FAQ and cookbook material from voidlizard's original site into the
+repository, and adds a release workflow that publishes a statically
+linked Linux binary on every version tag.
+
+## Fixes
+
+  - **`hbs2-cli` reads piped stdin.** `recover` in
+    `HBS2.CLI.Run.Internal` previously used a catch-and-retry pattern
+    around the user's action. When the action read stdin via strict
+    `Data.ByteString.getContents` (which drains and closes the handle
+    on the first attempt) the retry tripped on a closed handle. The
+    rewritten `recover` probes for the peer up front, populates the
+    RPC env once, and runs the user's action exactly once. Closes
+    [#4](https://github.com/NCrashed/hbs2/issues/4).
+
+  - **`.#packages.x86_64-linux.static` builds end-to-end.** pkgsStatic
+    ships GHC 9.4 with unix 2.7.3, which differs from the dynamic
+    toolchain's GHC 9.6 / unix 2.8 in three `Posix.IO` APIs the
+    storage layer uses: `openFd` argument list, `fdRead` return type,
+    and `fdWrite` argument type. New module
+    `HBS2.Storage.NCQ3.Internal.UnixCompat` carries CPP-shimmed
+    `openFdCompat`, `fdReadBS`, and `fdWriteBS`; the storage call
+    sites in `NCQ.hs`, `Fossil.hs`, and `Run.hs` route through it.
+    A darwin-only fdWrite in `HBS2.Data.Log.Structured.NCQ` is
+    inline-fixed similarly. Closes
+    [#6](https://github.com/NCrashed/hbs2/issues/6).
+
+## Release
+
+  - **Static binary tarball published on tag push.** New workflow
+    `.github/workflows/release.yml` builds
+    `.#packages.x86_64-linux.static` with the GitHub Actions cache
+    (`magic-nix-cache-action`), packages the result as
+    `hbs2-${TAG}-x86_64-linux-musl.tar.gz` with a SHA256 sidecar,
+    and uploads both to the corresponding GitHub Release. The
+    workflow is also reachable via `workflow_dispatch` so the
+    maintainer can re-run it for an existing tag. INSTALL.md
+    promotes this to the primary install option for Linux x86_64
+    users; CONTRIBUTING.md documents the release process and a
+    local-build fallback.
+
+## Documentation
+
+  - **`docs/FAQ.md`** (new). What hbs2 is, crypto primitives,
+    side-by-side comparisons with Syncthing, Radicle, and IPFS, the
+    CBOR-not-JSON rationale, what the parens in `hbs2-cli`
+    invocations mean. Material restructured from
+    [`hbs2.krizanic.net`](https://hbs2.krizanic.net) (the restored
+    mirror of voidlizard's original site).
+
+  - **`docs/COOKBOOK.md`** (new). Working recipes for non-git tasks:
+    file sharing between two peers, polling a remote `lwwref`,
+    reaching content over the peer's HTTP gateway, deleting local
+    blocks and trees, encrypting trees with a group key, storing
+    small inline content via `block:put`. Every recipe was verified
+    against the binaries shipped in this release.
+
+  - **`hbs2-storage-ncq/README.md`** (new). On-disk layout (KPD
+    records, N-way cuckoo index), runtime structure (sharded
+    memtable, IO queues), defaults table, NCQv1 -> NCQ3 migration,
+    reported performance figures (attributed to voidlizard's
+    historical measurements, not re-measured for this release), and
+    a code map.
+
+  - **`ARCHITECTURE.md`**: short note on why `hbs2-git3` stores zstd
+    segments rather than reusing git's native pack format.
+
+  - **`README.md`**: links to the two new docs.
+
+## Removed
+
+  - "Known issues" listed under 0.25.3.0 for `hbs2-cli` stdin and
+    `.#static` build are resolved by the fixes above.
+
 # 0.25.3.0  2026-06-01
 
 First release under new maintenance, continuing the work Dmitry Zuikov
