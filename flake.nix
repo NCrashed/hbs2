@@ -159,6 +159,83 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
 
     packagesDynamic = makePackages pkgs;
     packagesStatic = makePackages pkgs.pkgsStatic;
+
+    # hbs2-peer container image. Built from the static (musl) binaries
+    # so the layer carries no glibc or distro userspace. The image
+    # bundles the full shipped binary set (matches `.#static`) so that
+    # `docker exec <name> hbs2-cli ...`, `... hbs2-keyman ...`, and
+    # `... git hbs2 ...` work without a second image or host install;
+    # this follows the conventional postgres/redis pattern of shipping
+    # the admin CLI alongside the daemon. Loadable with
+    # `docker load < ./result`.
+    #
+    # We re-derive each binary via `cp -L` so the image's runtime
+    # closure is only the actual binary contents, not the Haskell
+    # `lib/` outputs (which reference the compiler and library
+    # archives, ~3 GiB per package). The static musl binaries are
+    # self-contained, so the trimmed closure is on the order of MBs.
+    stripPackageToBin = pkg: pkgs.runCommand "${pkg.pname}-bin" { } ''
+      shopt -s nullglob
+      mkdir -p $out/bin
+      for f in ${pkg}/bin/*; do
+        cp -L "$f" $out/bin/
+      done
+      chmod -R u+w $out 2>/dev/null || true
+    '';
+
+    dockerImage = pkgs.dockerTools.buildImage {
+      name = "hbs2-peer";
+      tag = packagesStatic.hbs2-peer.version;
+      created = "now";
+
+      copyToRoot = pkgs.buildEnv {
+        name = "hbs2-image-root";
+        # bf6-git-hbs2 is excluded: it is a single-line shebang script
+        # `#! /nix/store/...-suckless-conf-static/bin/bf6 file` that
+        # pulls suckless-conf-static into the runtime closure, which in
+        # turn drags in the full GHC + GCC toolchain (~2.3 GiB). The
+        # symlink below provides the `git hbs2 ...` dispatch without
+        # the bf6 dependency, mirroring the cabal-install fallback
+        # documented in INSTALL.md.
+        paths = (map stripPackageToBin (builtins.attrValues
+                  (removeAttrs packagesStatic [ "bf6-git-hbs2" ]))) ++ [
+          (pkgs.runCommand "git-hbs2-symlink" { } ''
+            mkdir -p $out/bin
+            ln -s hbs2-git3 $out/bin/git-hbs2
+          '')
+          pkgs.cacert
+          pkgs.tzdata
+        ];
+        pathsToLink = [ "/bin" "/etc" "/share" ];
+      };
+
+      config = {
+        # No Entrypoint, so `docker run image hbs2-cli ...` works as
+        # naturally as `docker run image` (which falls through to Cmd).
+        Cmd = [ "/bin/hbs2-peer" "run" ];
+        # Defaults from QUICKSTART; operators map -p as needed.
+        ExposedPorts = {
+          "7351/udp" = { };
+          "10351/tcp" = { };
+          "5000/tcp" = { };
+        };
+        # Single volume holds config (~/.config/hbs2-peer), keys
+        # (~/.hbs2-keyman/keys/), and storage (~/.local/share/hbs2).
+        # HOME=/data routes all three into it.
+        Volumes = {
+          "/data" = { };
+        };
+        WorkingDir = "/data";
+        Env = [
+          "HOME=/data"
+          # PATH=/bin lets `docker run image hbs2-cli ...` and
+          # `docker exec ... hbs2-cli ...` resolve bare command names.
+          "PATH=/bin"
+          "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+        ];
+      };
+    };
+
     in  {
     legacyPackages = pkgs;
 
@@ -175,6 +252,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           name = "hbs2-static";
           paths = builtins.attrValues packagesStatic;
         };
+        docker = dockerImage;
       };
 
 

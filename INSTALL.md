@@ -1,6 +1,6 @@
 # Installation
 
-hbs2 is a Haskell project. There are four supported ways to install
+hbs2 is a Haskell project. There are five supported ways to install
 it; they produce the same binaries. Pick whichever fits your setup.
 
 ## Requirements
@@ -32,7 +32,58 @@ modern Linux distribution. Note that releases prior to 0.25.3.1 may
 not have a binary tarball attached; for those use the source paths
 below.
 
-## Option 2: Cabal + ghcup
+## Option 2: Docker image (running hbs2-peer as a service)
+
+Targeted at server deployments. The image (~40 MB compressed) bundles
+the full hbs2 binary set on top of musl-static binaries, following the
+same convention as official postgres/redis/mysql images that ship
+their admin CLI alongside the daemon. You get `hbs2-peer` (the
+daemon) plus `hbs2-cli`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`,
+`git-hbs2`, `hbs2-sync`, and `ncq3` ready for `docker exec`.
+
+Pull and run:
+
+```
+docker pull ghcr.io/ncrashed/hbs2-peer:latest
+docker run --name hbs2-peer \
+  -v hbs2-data:/data \
+  -p 7351:7351/udp \
+  -p 10351:10351 \
+  -p 5000:5000 \
+  ghcr.io/ncrashed/hbs2-peer:latest
+```
+
+The image uses `/data` for config (`/data/.config/hbs2-peer`), keys
+(`/data/.hbs2-keyman/keys/`), and storage (`/data/.local/share/hbs2`)
+via `HOME=/data`. On first start `hbs2-peer` creates a default
+config; edit it via `docker exec` or by mounting your own directory
+in place of the named volume.
+
+Day-to-day management is via `docker exec`. The common operations
+follow the same patterns as a native install but with a `docker exec
+hbs2-peer ` prefix:
+
+```
+docker exec hbs2-peer hbs2-peer poke
+docker exec hbs2-peer hbs2-peer poll add <REF> lwwref 31
+docker exec hbs2-peer hbs2-cli "(hbs2:tree:metadata:get \"<HASH>\")"
+docker exec hbs2-peer hbs2-keyman list
+```
+
+For initial peer setup (one-time):
+
+```
+docker exec hbs2-peer hbs2-peer init
+docker exec hbs2-peer sh -c 'hbs2-cli hbs2:keyring:new > /data/.config/hbs2-peer/default.key'
+docker exec hbs2-peer hbs2-keyman add-mask "/data/.config/hbs2-peer/*.key"
+docker exec hbs2-peer hbs2-keyman update
+docker restart hbs2-peer
+```
+
+Image tags follow the source release tags (`0.25.3.1`, etc.). Use a
+pinned tag in production; `latest` follows the most recent release.
+
+## Option 3: Cabal + ghcup
 
 The path with the broadest reach. Does not require Nix.
 
@@ -119,7 +170,7 @@ chmod +x ~/.local/bin/git-hbs2
 The Nix flake builds and installs a `git-hbs2` wrapper for you, so
 this step is only needed for the cabal install path.
 
-## Option 3: Nix flake
+## Option 4: Nix flake
 
 For users who already have Nix with flakes enabled.
 
@@ -141,7 +192,7 @@ cd hbs2
 nix develop
 ```
 
-## Option 4: Home Manager module
+## Option 5: Home Manager module
 
 For NixOS or Home Manager users who want `hbs2-peer` running as a
 user systemd service.

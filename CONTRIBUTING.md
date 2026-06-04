@@ -135,32 +135,46 @@ Releases are tagged in the form `MAJOR.MINOR.PATCH.BUILD` (no `v`
 prefix), matching the `version:` field in the `.cabal` files. Pushing
 a matching tag triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which:
+which runs two parallel jobs:
 
-1. Builds `.#packages.x86_64-linux.static` (a musl-linked tarball of
-   every shipped binary) using the GitHub Actions cache via
-   `magic-nix-cache-action`.
-2. Packages the result as `hbs2-${TAG}-x86_64-linux-musl.tar.gz`
-   alongside a `.sha256` file.
-3. Uploads both to the corresponding GitHub Release.
+1. `static-linux-x86_64`: builds `.#packages.x86_64-linux.static`
+   (a musl-linked tarball of every shipped binary) using the GitHub
+   Actions cache via `magic-nix-cache-action`, packages the result
+   as `hbs2-${TAG}-x86_64-linux-musl.tar.gz` with a SHA256 sidecar,
+   and uploads both to the corresponding GitHub Release.
+2. `docker-linux-x86_64`: builds `.#packages.x86_64-linux.docker`
+   (the hbs2-peer container image, built on top of the static
+   binaries and bundling the full hbs2 admin CLI surface for
+   `docker exec`) and pushes it to `ghcr.io/<owner>/hbs2-peer:${TAG}`
+   and `:latest`.
 
 The first run on a cold cache is slow (multi-hour). Subsequent runs
 reuse the warm cache and are faster. The workflow is also reachable
 via `workflow_dispatch` so the maintainer can re-run it against an
 existing tag if the first attempt times out or fails partway.
 
-Local fallback, if CI times out: build locally and upload by hand.
+Local fallback, if CI times out:
 
 ```
+TAG=0.25.3.1
+
+# 1. Static tarball
 nix build .#packages.x86_64-linux.static --no-link --print-out-paths
 STATIC=$(nix eval --raw .#packages.x86_64-linux.static)
-TAG=0.25.3.0
 DIR="hbs2-${TAG}-x86_64-linux-musl"
 mkdir -p "${DIR}/bin"
 cp -L "${STATIC}/bin"/* "${DIR}/bin/"
 tar czf "${DIR}.tar.gz" "${DIR}"
 sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 gh release upload "${TAG}" "${DIR}.tar.gz" "${DIR}.tar.gz.sha256"
+
+# 2. Docker image
+nix build .#packages.x86_64-linux.docker --print-out-paths
+docker load < ./result
+docker tag hbs2-peer:${TAG} ghcr.io/ncrashed/hbs2-peer:${TAG}
+docker tag hbs2-peer:${TAG} ghcr.io/ncrashed/hbs2-peer:latest
+docker push ghcr.io/ncrashed/hbs2-peer:${TAG}
+docker push ghcr.io/ncrashed/hbs2-peer:latest
 ```
 
 ## Questions

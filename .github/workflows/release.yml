@@ -79,3 +79,50 @@ jobs:
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.archive }}.sha256
           fail_on_unmatched_files: true
+
+  docker-linux-x86_64:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write   # for pushing to ghcr.io
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Set up nix store cache (GitHub Actions cache)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build .#packages.x86_64-linux.docker
+        run: |
+          nix build .#packages.x86_64-linux.docker --print-out-paths -L
+
+      - name: Load and push image
+        env:
+          # GITHUB_TOKEN has packages:write on this job via the permissions
+          # block above; ghcr.io accepts it for github.repository_owner.
+          REGISTRY: ghcr.io
+          IMAGE: ghcr.io/${{ github.repository_owner }}/hbs2-peer
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          # `docker load` reads the gzipped OCI tarball produced by buildImage.
+          IMAGE_LOCAL=$(docker load -i ./result | awk '/Loaded image:/ {print $NF}')
+          echo "Loaded: ${IMAGE_LOCAL}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker tag "${IMAGE_LOCAL}" "${IMAGE}:${TAG}"
+          docker tag "${IMAGE_LOCAL}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
