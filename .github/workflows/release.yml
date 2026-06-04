@@ -18,8 +18,23 @@ on:
         type: string
 
 jobs:
-  static-linux-x86_64:
-    runs-on: ubuntu-latest
+  static-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The amd64 leg is the "primary": it also extracts the CHANGELOG
+          # section for the release body. The arm64 leg only uploads its
+          # tarball + sha256, so we never race on the body content.
+          - arch: x86_64-linux
+            arch_short: amd64
+            runner: ubuntu-latest
+            primary: true
+          - arch: aarch64-linux
+            arch_short: arm64
+            runner: ubuntu-24.04-arm
+            primary: false
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write   # for creating/updating the release and uploading assets
 
@@ -43,17 +58,17 @@ jobs:
       - name: Set up nix store cache (GitHub Actions cache)
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Build .#packages.x86_64-linux.static
+      - name: Build .#packages.${{ matrix.arch }}.static
         run: |
-          nix build .#packages.x86_64-linux.static --no-link --print-out-paths -L
+          nix build .#packages.${{ matrix.arch }}.static --no-link --print-out-paths -L
 
       - name: Package binaries
         id: pkg
         run: |
           set -euo pipefail
-          STATIC=$(nix eval --raw .#packages.x86_64-linux.static)
+          STATIC=$(nix eval --raw .#packages.${{ matrix.arch }}.static)
           TAG="${{ steps.tag.outputs.name }}"
-          DIR="hbs2-${TAG}-x86_64-linux-musl"
+          DIR="hbs2-${TAG}-${{ matrix.arch_short }}-linux-musl"
           mkdir -p "${DIR}/bin"
           # cp -L resolves the symlinkJoin's symlinks into actual files.
           cp -L "${STATIC}/bin"/* "${DIR}/bin/"
@@ -61,7 +76,7 @@ jobs:
           # Include a small README so the archive is self-explanatory.
           cat > "${DIR}/README.txt" <<EOF
           hbs2 ${TAG}, statically linked against musl libc.
-          Tested on x86_64-linux. No runtime dependencies; copy the bin/
+          Built for ${{ matrix.arch }}. No runtime dependencies; copy the bin/
           contents anywhere on PATH.
           Source: https://github.com/NCrashed/hbs2
           EOF
@@ -72,6 +87,7 @@ jobs:
           sha256sum "${ARCHIVE}" | tee "${ARCHIVE}.sha256"
 
       - name: Extract release notes from CHANGELOG
+        if: matrix.primary
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.name }}"
@@ -92,7 +108,8 @@ jobs:
           cat release-body.md
           echo "--- end ---"
 
-      - name: Upload to GitHub Release
+      - name: Upload to GitHub Release (primary, with body)
+        if: matrix.primary
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
@@ -102,8 +119,28 @@ jobs:
             ${{ steps.pkg.outputs.archive }}.sha256
           fail_on_unmatched_files: true
 
-  docker-linux-x86_64:
-    runs-on: ubuntu-latest
+      - name: Upload to GitHub Release (secondary, assets only)
+        if: ${{ !matrix.primary }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          files: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+          fail_on_unmatched_files: true
+
+  docker-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            arch_short: amd64
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            arch_short: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       packages: write   # for pushing to ghcr.io
 
@@ -127,11 +164,11 @@ jobs:
       - name: Set up nix store cache (GitHub Actions cache)
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Build .#packages.x86_64-linux.docker
+      - name: Build .#packages.${{ matrix.arch }}.docker
         run: |
-          nix build .#packages.x86_64-linux.docker --print-out-paths -L
+          nix build .#packages.${{ matrix.arch }}.docker --print-out-paths -L
 
-      - name: Load and push image
+      - name: Load and push per-arch image
         env:
           # GITHUB_TOKEN has packages:write on this job via the permissions
           # block above; ghcr.io accepts it for github.repository_owner.
@@ -141,6 +178,7 @@ jobs:
           # lowercase. Normalise here.
           OWNER_RAW: ${{ github.repository_owner }}
           TAG: ${{ steps.tag.outputs.name }}
+          ARCH_SHORT: ${{ matrix.arch_short }}
         run: |
           set -euo pipefail
           OWNER="${OWNER_RAW,,}"
@@ -149,7 +187,46 @@ jobs:
           IMAGE_LOCAL=$(docker load -i ./result | awk '/Loaded image:/ {print $NF}')
           echo "Loaded: ${IMAGE_LOCAL}"
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          docker tag "${IMAGE_LOCAL}" "${IMAGE}:${TAG}"
-          docker tag "${IMAGE_LOCAL}" "${IMAGE}:latest"
-          docker push "${IMAGE}:${TAG}"
-          docker push "${IMAGE}:latest"
+          # Per-arch tag only; the manifest list pinning :TAG / :latest is
+          # done by the docker-manifest job once both arches are pushed.
+          docker tag "${IMAGE_LOCAL}" "${IMAGE}:${TAG}-${ARCH_SHORT}"
+          docker push "${IMAGE}:${TAG}-${ARCH_SHORT}"
+
+  docker-manifest:
+    needs: docker-linux
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to GHCR
+        env:
+          REGISTRY: ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Create multi-arch manifest for :TAG and :latest
+        env:
+          REGISTRY: ghcr.io
+          OWNER_RAW: ${{ github.repository_owner }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          OWNER="${OWNER_RAW,,}"
+          IMAGE="${REGISTRY}/${OWNER}/hbs2-peer"
+          # docker buildx imagetools is preinstalled on ubuntu-latest.
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+          docker buildx imagetools create -t "${IMAGE}:latest" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
