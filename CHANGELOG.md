@@ -1,3 +1,51 @@
+# 0.25.3.2  2026-06-04
+
+Patch release. Adds a Docker image as a third distribution path
+alongside the static tarball.
+
+## Release
+
+  - **Docker image published on tag push.** The release workflow
+    grows a second job (`docker-linux-x86_64`) that runs in parallel
+    with the static tarball build. It produces a single OCI image
+    bundling the full hbs2 binary surface (hbs2-peer, hbs2-cli,
+    hbs2-keyman, hbs2-git3, git-remote-hbs23, git-hbs2, hbs2-sync,
+    ncq3) on top of the musl-static binaries, and pushes it to
+    `ghcr.io/${owner}/hbs2-peer:${TAG}` and `:latest`. Total size is
+    ~40 MB compressed. This follows the postgres/redis convention of
+    shipping the admin CLI alongside the daemon so that all common
+    operator tasks work via `docker exec`. Image config: `HOME=/data`
+    routes config (`~/.config/hbs2-peer`), keys
+    (`~/.hbs2-keyman/keys/`), and storage (`~/.local/share/hbs2`)
+    into a single `/data` volume; no Entrypoint, so `docker run image
+    hbs2-cli ...` works as smoothly as the default `hbs2-peer run`.
+
+## Build internals
+
+  - New flake output `packages.x86_64-linux.docker` built via
+    `dockerTools.buildImage`. A `stripPackageToBin` helper re-derives
+    each shipped binary through a one-shot `cp -L` so the image's
+    runtime closure carries only the actual binary content rather
+    than the Haskell `lib/` outputs, which would otherwise drag in
+    the GHC + GCC toolchain for every package (~3 GiB per package,
+    432 MB compressed for the image without the trim).
+  - `bf6-git-hbs2` is excluded from the image because it is a
+    shebang script hardcoding a `/nix/store/...-suckless-conf`
+    path, which would re-introduce the GHC toolchain into the
+    closure. `git hbs2 ...` dispatching is provided instead by a
+    symlink `/bin/git-hbs2 -> hbs2-git3`, mirroring the cabal-install
+    fallback documented in INSTALL.md.
+
+## Documentation
+
+  - INSTALL.md: Docker becomes Option 2; gains a section with
+    common `docker exec` operator commands (peer poke, poll add,
+    metadata lookup, initial setup, etc.). Cabal, Nix flake, and
+    Home Manager paths bumped by one.
+  - CONTRIBUTING.md: release section describes the two parallel
+    jobs and a local-build fallback for both the tarball and the
+    image.
+
 # 0.25.3.1  2026-06-04
 
 Patch release. Resolves the two open code-level items on the 0.25.3.0
