@@ -71,10 +71,32 @@ jobs:
           ls -la "${ARCHIVE}"
           sha256sum "${ARCHIVE}" | tee "${ARCHIVE}.sha256"
 
+      - name: Extract release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"
+          # Pull the section starting at `# ${TAG}` up to the next
+          # top-level version header.
+          awk -v tag="${TAG}" '
+            /^# [0-9]/ {
+              if (found) exit
+              if ($2 == tag) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ]; then
+            echo "::warning::No CHANGELOG section found for ${TAG}; release body will be empty"
+            echo "Release ${TAG}." > release-body.md
+          fi
+          echo "--- release-body.md ---"
+          cat release-body.md
+          echo "--- end ---"
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
+          body_path: release-body.md
           files: |
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.archive }}.sha256
