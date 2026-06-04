@@ -114,10 +114,15 @@ jobs:
           # GITHUB_TOKEN has packages:write on this job via the permissions
           # block above; ghcr.io accepts it for github.repository_owner.
           REGISTRY: ghcr.io
-          IMAGE: ghcr.io/${{ github.repository_owner }}/hbs2-peer
+          # github.repository_owner preserves the original GitHub case
+          # (e.g. NCrashed), but OCI image references must be all
+          # lowercase. Normalise here.
+          OWNER_RAW: ${{ github.repository_owner }}
           TAG: ${{ steps.tag.outputs.name }}
         run: |
           set -euo pipefail
+          OWNER="${OWNER_RAW,,}"
+          IMAGE="${REGISTRY}/${OWNER}/hbs2-peer"
           # `docker load` reads the gzipped OCI tarball produced by buildImage.
           IMAGE_LOCAL=$(docker load -i ./result | awk '/Loaded image:/ {print $NF}')
           echo "Loaded: ${IMAGE_LOCAL}"
