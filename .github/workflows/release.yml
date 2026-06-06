@@ -202,6 +202,57 @@ jobs:
             dist-darwin/hbs2-${{ steps.tag.outputs.name }}-aarch64-apple-darwin.tar.gz.sha256
           fail_on_unmatched_files: true
 
+  homebrew-tap:
+    # Bumps version/url/sha256 in NCrashed/homebrew-hbs2 once the darwin
+    # asset is uploaded. Pushing to another repo needs more than the
+    # job-scoped GITHUB_TOKEN: a fine-grained PAT with contents:write on
+    # homebrew-hbs2, stored as the HOMEBREW_TAP_TOKEN secret. If the
+    # secret is absent the job warns and exits green so tap-less forks
+    # do not break the release.
+    needs: darwin-bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump formula in homebrew-hbs2
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret not set; skipping formula bump"
+            exit 0
+          fi
+          ASSET="hbs2-${TAG}-aarch64-apple-darwin.tar.gz"
+          SHA=$(curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${ASSET}.sha256" | awk '{print $1}')
+          echo "sha256: ${SHA}"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${OWNER}/homebrew-hbs2.git" tap
+          cd tap
+          F=Formula/hbs2-peer.rb
+          sed -i -E "s|^(  version \").*(\")|\1${TAG}\2|" "$F"
+          sed -i -E "s|releases/download/[^/]+/hbs2-[^/]+-aarch64-apple-darwin\.tar\.gz|releases/download/${TAG}/${ASSET}|" "$F"
+          sed -i -E "s|^(      sha256 \").*(\")|\1${SHA}\2|" "$F"
+          git diff
+          if git diff --quiet; then
+            echo "Formula already up to date for ${TAG}"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "hbs2-peer ${TAG}"
+          git push
+
   docker-linux:
     strategy:
       fail-fast: false
