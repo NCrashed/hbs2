@@ -129,6 +129,64 @@ jobs:
             ${{ steps.pkg.outputs.archive }}.sha256
           fail_on_unmatched_files: true
 
+  darwin-bundle:
+    # macos-latest is an Apple Silicon (arm64) runner since macos-14,
+    # which is exactly the only darwin target we ship (the formula in
+    # NCrashed/homebrew-hbs2 is on_arm-only).
+    runs-on: macos-latest
+    permissions:
+      contents: write   # for uploading release assets
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Set up nix store cache (GitHub Actions cache)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build darwin bundle
+        run: ./scripts/bundle-darwin.sh "${{ steps.tag.outputs.name }}"
+
+      - name: Smoke test bundle
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"
+          BUNDLE="dist-darwin/hbs2-${TAG}-aarch64-apple-darwin"
+          # No leftover /nix/store references may survive bundling.
+          for f in "${BUNDLE}/bin"/* "${BUNDLE}/lib"/*; do
+            [ -L "$f" ] && continue
+            if otool -L "$f" | grep -q '/nix/store'; then
+              echo "::error::${f} still references /nix/store"
+              otool -L "$f"
+              exit 1
+            fi
+          done
+          "${BUNDLE}/bin/hbs2-peer" version
+          "${BUNDLE}/bin/hbs2-cli" --help >/dev/null
+          "${BUNDLE}/bin/hbs2-sync" --help >/dev/null
+
+      - name: Upload to GitHub Release (assets only)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          files: |
+            dist-darwin/hbs2-${{ steps.tag.outputs.name }}-aarch64-apple-darwin.tar.gz
+            dist-darwin/hbs2-${{ steps.tag.outputs.name }}-aarch64-apple-darwin.tar.gz.sha256
+          fail_on_unmatched_files: true
+
   docker-linux:
     strategy:
       fail-fast: false
