@@ -160,20 +160,26 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     packagesDynamic = makePackages pkgs;
     packagesStatic = makePackages pkgs.pkgsStatic;
 
-    # hbs2-peer container image. Built from the static (musl) binaries
-    # so the layer carries no glibc or distro userspace. The image
-    # bundles the full shipped binary set (matches `.#static`) so that
-    # `docker exec <name> hbs2-cli ...`, `... hbs2-keyman ...`, and
-    # `... git hbs2 ...` work without a second image or host install;
-    # this follows the conventional postgres/redis pattern of shipping
-    # the admin CLI alongside the daemon. Loadable with
-    # `docker load < ./result`.
+    # hbs2-peer container image. On x86_64 it is built from the static
+    # (musl) binaries so the layer carries no glibc or distro
+    # userspace. On aarch64-linux the musl cross-GHC does not build
+    # (rts compile errors), so the image falls back to the dynamic
+    # (glibc) binaries instead: justStaticExecutables already links the
+    # Haskell libs statically, so the dynamic closure only adds glibc
+    # plus a handful of system libs (gmp, libsodium, zlib, ...), which
+    # nix pulls into the image automatically via store references.
+    #
+    # The image bundles the full shipped binary set (matches
+    # `.#static`) so that `docker exec <name> hbs2-cli ...`,
+    # `... hbs2-keyman ...`, and `... git hbs2 ...` work without a
+    # second image or host install; this follows the conventional
+    # postgres/redis pattern of shipping the admin CLI alongside the
+    # daemon. Loadable with `docker load < ./result`.
     #
     # We re-derive each binary via `cp -L` so the image's runtime
     # closure is only the actual binary contents, not the Haskell
     # `lib/` outputs (which reference the compiler and library
-    # archives, ~3 GiB per package). The static musl binaries are
-    # self-contained, so the trimmed closure is on the order of MBs.
+    # archives, ~3 GiB per package).
     stripPackageToBin = pkg: pkgs.runCommand "${pkg.pname}-bin" { } ''
       shopt -s nullglob
       mkdir -p $out/bin
@@ -183,9 +189,9 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       chmod -R u+w $out 2>/dev/null || true
     '';
 
-    dockerImage = pkgs.dockerTools.buildImage {
+    dockerImageFor = imagePackages: pkgs.dockerTools.buildImage {
       name = "hbs2-peer";
-      tag = packagesStatic.hbs2-peer.version;
+      tag = imagePackages.hbs2-peer.version;
       created = "now";
 
       copyToRoot = pkgs.buildEnv {
@@ -198,7 +204,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         # the bf6 dependency, mirroring the cabal-install fallback
         # documented in INSTALL.md.
         paths = (map stripPackageToBin (builtins.attrValues
-                  (removeAttrs packagesStatic [ "bf6-git-hbs2" ]))) ++ [
+                  (removeAttrs imagePackages [ "bf6-git-hbs2" ]))) ++ [
           (pkgs.runCommand "git-hbs2-symlink" { } ''
             mkdir -p $out/bin
             ln -s hbs2-git3 $out/bin/git-hbs2
@@ -252,7 +258,10 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           name = "hbs2-static";
           paths = builtins.attrValues packagesStatic;
         };
-        docker = dockerImage;
+        # See the dockerImageFor comment: aarch64-linux cannot build
+        # the musl cross-GHC, so its image ships dynamic binaries.
+        docker = dockerImageFor
+          (if system == "aarch64-linux" then packagesDynamic else packagesStatic);
       };
 
 

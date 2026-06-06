@@ -24,16 +24,14 @@ jobs:
       matrix:
         include:
           # The amd64 leg is the "primary": it also extracts the CHANGELOG
-          # section for the release body. The arm64 leg only uploads its
-          # tarball + sha256, so we never race on the body content.
+          # section for the release body. No arm64 leg: the static
+          # (musl) cross-GHC fails to build for aarch64-linux (rts
+          # compile errors), so there is nothing to ship; the arm64
+          # docker image covers that platform with dynamic binaries.
           - arch: x86_64-linux
             arch_short: amd64
             runner: ubuntu-latest
             primary: true
-          - arch: aarch64-linux
-            arch_short: arm64
-            runner: ubuntu-24.04-arm
-            primary: false
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write   # for creating/updating the release and uploading assets
