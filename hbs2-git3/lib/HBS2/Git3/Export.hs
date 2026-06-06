@@ -98,12 +98,12 @@ exportEntries prefix = do
               _ -> none
 
     let refs = HM.toList $ HM.fromList refs'
-    export (Just h) refs
+    export (Just h) refs []
 
 export :: forall m . ( Git3Perks m
                      )
-       => Maybe GitHash -> [(GitRef, GitHash)] -> Git3 m ()
-export mbh refs = withStateDo do
+       => Maybe GitHash -> [(GitRef, GitHash)] -> [GitHash] -> Git3 m ()
+export mbh refs extras = withStateDo do
       tn <- getNumCapabilities
 
       updateReflogIndex
@@ -281,10 +281,25 @@ export mbh refs = withStateDo do
         mapM_ link workers
         mapM_ wait workers
 
-        exported <- readTVarIO _exported
+        for_ extras $ \gh -> do
+          fresh <- notWrittenYet gh
+          when fresh $ do
+            (_t, lbs) <- lift (gitCatBatchQ gh)
+                            >>= orThrow (GitReadError (show $ pretty gh))
 
-        when (exported == 0 && not (L.null refs)) do
-          notice $ "no new segments, but refs" <+> pretty lastCommit
+            atomically do
+              modifyTVar _already (HS.insert gh)
+              modifyTVar _exported succ
+
+            let e = [ Builder.byteString (coerce gh)
+                    , Builder.char8 (headDef 'B' $ show $ pretty $ Short _t)
+                    , Builder.lazyByteString lbs
+                    ] & Builder.toLazyByteString . mconcat
+
+            atomically $ writeTBQueue sourceQ (Just e)
+
+        when (L.null r && not (L.null refs)) do
+          notice $ "no new commits, but refs" <+> pretty lastCommit
           writeRefSectionSome sourceQ refs
           atomically $ modifyTVar _exported succ
 

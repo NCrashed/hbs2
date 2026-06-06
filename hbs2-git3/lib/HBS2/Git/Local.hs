@@ -45,7 +45,7 @@ mkGitRef = GitRef
 instance Pretty GitRef where
   pretty (GitRef x) = pretty @String [qc|{x}|]
 
-data GitObjectType = Commit | Tree | Blob
+data GitObjectType = Commit | Tree | Blob | Tag
                      deriving stock (Eq,Ord,Show,Generic,Enum)
 
 instance Serialise GitObjectType
@@ -55,6 +55,7 @@ instance IsString GitObjectType where
     "commit" -> Commit
     "tree"   -> Tree
     "blob"   -> Blob
+    "tag"    -> Tag
     x        -> error [qc|invalid git object type {x}|]
 
 instance FromStringMaybe GitObjectType where
@@ -62,6 +63,7 @@ instance FromStringMaybe GitObjectType where
     "commit" -> Just Commit
     "tree"   -> Just Tree
     "blob"   -> Just Blob
+    "tag"    -> Just Tag
     _        -> Nothing
 
 instance Pretty GitObjectType where
@@ -69,5 +71,6 @@ instance Pretty GitObjectType where
     Commit -> pretty @String "commit"
     Tree   -> pretty @String "tree"
     Blob   -> pretty @String "blob"
+    Tag    -> pretty @String "tag"
 
 

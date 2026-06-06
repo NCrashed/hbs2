@@ -127,6 +127,16 @@ gitRevParse ref = do
 gitRevParseThrow :: (Pretty ref, MonadIO m) => ref -> m GitHash
 gitRevParseThrow r = gitRevParse r >>= orThrow (UnknownRev (show $ pretty r))
 
+gitReadObjectTypeMay :: (Pretty ref, MonadIO m) => ref -> m (Maybe GitObjectType)
+gitReadObjectTypeMay ref = do
+  gitRunCommand [qc|git cat-file -t {pretty ref}|]
+    >>= orThrowPassIO
+    <&> LBS8.words
+    <&> maybe Nothing (fromStringMay . LBS8.unpack) . headMay
+
+gitReadObjectTypeThrow :: (Pretty ref, MonadIO m) => ref -> m GitObjectType
+gitReadObjectTypeThrow r = gitReadObjectTypeMay r >>= orThrow (UnknownRev (show $ pretty r))
+
 gitImportObjectSlow :: MonadIO m => GitObjectType -> ByteString -> m (Either ExitCode ())
 gitImportObjectSlow t lbs = do
   let cmd = "git"

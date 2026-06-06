@@ -1,3 +1,37 @@
+# 0.25.3.3  2026-06-07
+
+Patch release. Restores annotated tag push to `hbs23://` remotes.
+
+## Fixes
+
+  - **Annotated tag push to `hbs23://`.** `git push hbs2 <annotated-tag>`
+    previously failed with a generic "failed to push some refs" because
+    `r:push` handed the tag-object SHA straight to the commit-chain
+    walker; the walker then tried to parse the tag body as a commit
+    and threw `InvalidObjectFormat`. The remote helper now inspects
+    the type of the pushed SHA via `git cat-file -t`. For a tag
+    object it peels to the commit with `<sha>^{commit}` for the
+    chain walk and passes the tag SHA as an extra object so the
+    final segment includes the tag body itself. The export pipeline
+    grows a third `[GitHash]` "extras" parameter that is serialised
+    into the same source queue after the commit workers finish.
+    `GitObjectType` gains a `Tag` constructor, the segment encoding
+    learns an `'A'` short marker, and `gitPackTypeOf` maps `Tag` to
+    `OBJ_TAG` so `git index-pack` accepts the resulting pack on the
+    fetch side. Lightweight tag push is unchanged. Closes
+    [#7](https://github.com/NCrashed/hbs2/issues/7).
+
+## Compatibility
+
+  - **Segment marker `'A'` is new in this release.** Peers from
+    0.25.3.0..0.25.3.2 decoding a segment that contains an annotated
+    tag will fall through the `FromStringMaybe (Short ...)` default
+    branch and silently relabel the tag object as `Blob`. Concretely:
+    on replication from a 0.25.3.3 peer to an older peer, annotated
+    tags become unreachable on the older peer. The on-wire fix is to
+    upgrade the receiving peer to 0.25.3.3. There is no mixed-cluster
+    fallback.
+
 # 0.25.3.2  2026-06-04
 
 Patch release. Adds a Docker image as a third distribution path

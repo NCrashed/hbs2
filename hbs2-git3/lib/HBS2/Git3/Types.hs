@@ -22,6 +22,7 @@ instance Pretty (Short GitObjectType) where
     (Short Tree)   -> "T"
     (Short Blob)   -> "B"
     (Short Commit) -> "C"
+    (Short Tag)    -> "A"
 
 
 instance FromStringMaybe (Short GitObjectType) where
@@ -29,6 +30,7 @@ instance FromStringMaybe (Short GitObjectType) where
     "T" -> Just (Short Tree)
     "B" -> Just (Short Blob)
     "C" -> Just (Short Commit)
+    "A" -> Just (Short Tag)
     _   -> Just (Short Blob)
 
 
@@ -37,6 +39,7 @@ instance FromStringMaybe (Short SegmentObjectType) where
     "T" -> Just (Short (GitObject Tree))
     "B" -> Just (Short (GitObject Blob))
     "C" -> Just (Short (GitObject Commit))
+    "A" -> Just (Short (GitObject Tag))
     "R" -> Just (Short RefObject)
     _   -> Just (Short (GitObject Blob))
 

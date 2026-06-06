@@ -110,16 +110,24 @@ localDict DeferredOps{..} = makeDict @C do
     sendLine ""
 
   entry $ bindMatch "r:push" $ nil_ $ splitPushArgs $ \pushFrom pushTo -> lift do
-    r0 <- for pushFrom gitRevParseThrow
+    pushObj <- for pushFrom $ \src -> do
+      h <- gitRevParseThrow src
+      t <- gitReadObjectTypeThrow h
+      pure (h, t)
 
     debug $ pretty $ [qc|ok {pretty pushTo}|]
 
-    case (r0, pushTo) of
+    case (pushObj, pushTo) of
       (Nothing, ref) -> do
-        export Nothing [(ref, nullHash)]
+        export Nothing [(ref, nullHash)] []
 
-      (Just h, ref)-> do
-        export (Just h) [(ref, h)]
+      (Just (h, Tag), ref) -> do
+        let peelExpr = show (pretty h) <> "^{commit}" :: String
+        peeled <- gitRevParseThrow peelExpr
+        export (Just peeled) [(ref, h)] [h]
+
+      (Just (h, _), ref) -> do
+        export (Just h) [(ref, h)] []
 
     sendLine [qc|ok {pretty pushTo}|]
 

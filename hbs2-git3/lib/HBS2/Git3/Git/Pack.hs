@@ -51,6 +51,7 @@ instance HasGitPackType GitObjectType where
     Commit -> OBJ_COMMIT
     Tree   -> OBJ_TREE
     Blob   -> OBJ_BLOB
+    Tag    -> OBJ_TAG
 
 encodeObjectSize :: PackFileObjectType -> Natural -> ByteString
 encodeObjectSize objType size =
