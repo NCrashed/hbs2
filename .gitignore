@@ -1,5 +1,7 @@
 .fixme-new/refchan.local
 dist-newstyle/
+# Output of scripts/bundle-darwin.sh
+dist-darwin/
 bin/
 .direnv/
 .hbs2-git3/
