@@ -55,8 +55,8 @@ selectively, and verifiable without trusting any particular host.
 A five-minute walkthrough - from zero to a working distributed git
 repository - is in [`QUICKSTART.md`](QUICKSTART.md).
 
-For installation options (Nix, Cabal, prebuilt binaries) see
-[`INSTALL.md`](INSTALL.md).
+For installation options (prebuilt binaries, Homebrew, Docker, Nix,
+Cabal) see [`INSTALL.md`](INSTALL.md).
 
 ## Documentation
 

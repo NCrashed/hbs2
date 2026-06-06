@@ -1,12 +1,13 @@
 # Installation
 
-hbs2 is a Haskell project. There are five supported ways to install
+hbs2 is a Haskell project. There are six supported ways to install
 it; they produce the same binaries. Pick whichever fits your setup.
 
 ## Requirements
 
-- Linux on x86_64 or aarch64. macOS and Windows-WSL have been used
-  in the past but are not currently tested.
+- Linux on x86_64 or aarch64, or macOS on Apple Silicon (Homebrew
+  or Nix). Windows-WSL has been used in the past but is not
+  currently tested.
 - About 4 GB of disk space for the dependency build (only required
   for the source-build options below).
 - A network connection for the first build (deps come from Hackage).
@@ -32,7 +33,41 @@ modern Linux distribution. Note that releases prior to 0.25.3.1 may
 not have a binary tarball attached; for those use the source paths
 below.
 
-## Option 2: Docker image (running hbs2-peer as a service)
+## Option 2: Homebrew (macOS, Apple Silicon)
+
+No toolchain, no build: installs a prebuilt bundle from the GitHub
+release page via the [NCrashed/homebrew-hbs2](https://github.com/NCrashed/homebrew-hbs2)
+tap.
+
+```
+brew install ncrashed/hbs2/hbs2-peer
+```
+
+This puts the full binary set on PATH: `hbs2-peer`, `hbs2-cli`,
+`hbs2-sync`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`,
+`git-hbs2` (so `git hbs2 ...` works), and `ncq3`.
+
+To run the peer as a background service via launchd:
+
+```
+hbs2-peer init   # one-time setup, before the first start
+brew services start hbs2-peer
+```
+
+Logs go to `$(brew --prefix)/var/log/hbs2-peer.log`; configuration
+lives in `~/.config/hbs2-peer/`.
+
+Notes:
+
+- Apple Silicon only. On Intel Macs use the Nix flake (Option 5) or
+  Docker (Option 3).
+- `hbs2-sync`'s `mount` subcommand requires
+  [macFUSE](https://osxfuse.github.io/); everything else works
+  without it.
+
+Skip ahead to "Verifying the install" below.
+
+## Option 3: Docker image (running hbs2-peer as a service)
 
 Targeted at server deployments. The image (~40 MB compressed) bundles
 the full hbs2 binary set on top of musl-static binaries, following the
@@ -83,7 +118,7 @@ docker restart hbs2-peer
 Image tags follow the source release tags (`0.25.3.1`, etc.). Use a
 pinned tag in production; `latest` follows the most recent release.
 
-## Option 3: Cabal + ghcup
+## Option 4: Cabal + ghcup
 
 The path with the broadest reach. Does not require Nix.
 
@@ -170,7 +205,7 @@ chmod +x ~/.local/bin/git-hbs2
 The Nix flake builds and installs a `git-hbs2` wrapper for you, so
 this step is only needed for the cabal install path.
 
-## Option 4: Nix flake
+## Option 5: Nix flake
 
 For users who already have Nix with flakes enabled.
 
@@ -192,7 +227,7 @@ cd hbs2
 nix develop
 ```
 
-## Option 5: Home Manager module
+## Option 6: Home Manager module
 
 For NixOS or Home Manager users who want `hbs2-peer` running as a
 user systemd service.
