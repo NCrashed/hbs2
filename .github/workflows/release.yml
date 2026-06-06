@@ -157,6 +157,21 @@ jobs:
       - name: Set up nix store cache (GitHub Actions cache)
         uses: DeterminateSystems/magic-nix-cache-action@main
 
+      - name: Overlay bundle script from workflow ref
+        # The checkout above is at the release tag, but older tags predate
+        # scripts/bundle-darwin.sh. Take the script from the commit this
+        # workflow run was dispatched from (github.sha) so the script and
+        # the workflow always evolve together; for tag pushes github.sha
+        # is the tag commit and this is a no-op.
+        run: |
+          set -euo pipefail
+          if [ ! -x scripts/bundle-darwin.sh ]; then
+            git fetch --depth 1 origin "${{ github.sha }}"
+            mkdir -p scripts
+            git show "${{ github.sha }}:scripts/bundle-darwin.sh" > scripts/bundle-darwin.sh
+            chmod +x scripts/bundle-darwin.sh
+          fi
+
       - name: Build darwin bundle
         run: ./scripts/bundle-darwin.sh "${{ steps.tag.outputs.name }}"
 
