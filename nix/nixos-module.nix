@@ -7,6 +7,13 @@ let
 
   cfg = config.services.hbs2-peer;
 
+  # PeerMain.hs derives the mailbox SQLite root as
+  # `takeDirectory storageDir </> "hbs2-mailbox"` (a sibling of the
+  # storage directory). The path is not exposed as a config knob,
+  # so the module has to manage it explicitly: create it and let
+  # the sandboxed unit write into it.
+  mailboxDir = "${dirOf (toString cfg.storageDir)}/hbs2-mailbox";
+
   configFile = pkgs.writeText "hbs2-peer.conf" ''
     listen "${cfg.listenAddress}:${toString cfg.listenPort}"
     ${optionalString (cfg.listenTcpPort != null) ''
@@ -161,6 +168,7 @@ in {
 
     systemd.tmpfiles.rules = [
       "d '${cfg.storageDir}' 0750 ${cfg.user} ${cfg.group} - -"
+      "d '${mailboxDir}' 0750 ${cfg.user} ${cfg.group} - -"
     ];
 
     environment.etc."hbs2-peer/config" = {
@@ -194,7 +202,7 @@ in {
         PrivateTmp = false;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ cfg.storageDir "/tmp" ];
+        ReadWritePaths = [ cfg.storageDir mailboxDir "/tmp" ];
 
         RestrictAddressFamilies =
           [ "AF_INET" "AF_UNIX" ] ++ optional cfg.enableIpv6 "AF_INET6";
