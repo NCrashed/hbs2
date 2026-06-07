@@ -145,7 +145,19 @@ in {
     group = mkOption {
       type = types.str;
       default = "hbs2";
-      description = "Group under which hbs2-peer runs.";
+      description = ''
+        Group under which hbs2-peer runs. Also the RPC access group:
+        the daemon runs with `UMask=0007`, so the Unix RPC socket at
+        `/tmp/hbs2-rpc.socket` is created mode `0770` with this group,
+        and any user added to it can talk to the peer via `hbs2-cli`,
+        `hbs2-keyman`, `git-remote-hbs23`, etc.
+
+        To grant a user RPC access, in your system config:
+
+            users.users.alice.extraGroups = [ "hbs2" ];
+
+        This mirrors the standard `docker` group pattern.
+      '';
     };
 
     openFirewall = mkOption {
@@ -197,6 +209,16 @@ in {
         WorkingDirectory = cfg.storageDir;
 
         Environment = "XDG_CONFIG_HOME=/etc";
+
+        # Socket is hardcoded at /tmp/hbs2-rpc.socket and the daemon
+        # binds it without an explicit fchmod, so the perms come from
+        # the process umask. 0007 yields `srwxrwx---`, which lets
+        # members of `cfg.group` connect (write to the socket file is
+        # required by Unix-domain `connect(2)`) while keeping everyone
+        # else out. Trade-off: brains/mailbox SQLite files in storage
+        # also become group-rw, which we accept because group members
+        # are trusted operators by definition.
+        UMask = "0007";
 
         NoNewPrivileges = true;
         PrivateTmp = false;
