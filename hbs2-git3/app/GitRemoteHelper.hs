@@ -23,6 +23,8 @@ import System.Posix.IO
 import System.Exit qualified as Exit
 import System.Environment (getArgs,lookupEnv)
 import Text.InterpolatedString.Perl6 (qc)
+import Control.Applicative ((<|>))
+import Data.ByteString.Char8 qualified as BS8
 import Data.Text qualified as Text
 import Data.Either
 import Data.Maybe
@@ -97,11 +99,20 @@ localDict DeferredOps{..} = makeDict @C do
         notice $ yellow "REF" <+> pretty h <+> pretty r
         sendLine $ show $ pretty h <+> pretty r
 
-      let l = lastMay rrefs
+      -- Pick a symbolic HEAD target so the clone lands on a branch
+      -- instead of detached HEAD. Prefer master, then main, then any
+      -- refs/heads/*; if the repo only has tags, drop the HEAD line.
+      -- Closes #8.
+      let nameOf (GitRef bs) = bs
+          isExact n (r,_)  = nameOf r == n
+          isBranch (r,_)   = "refs/heads/" `BS8.isPrefixOf` nameOf r
+          headTarget       = List.find (isExact "refs/heads/master") rrefs
+                         <|> List.find (isExact "refs/heads/main")   rrefs
+                         <|> List.find isBranch                      rrefs
 
-      for_ l $ \(r,h) -> do
-        debug $ pretty h <+> pretty "HEAD"
-        sendLine $ show $ pretty h <+> pretty "HEAD"
+      for_ headTarget $ \(r,_) -> do
+        debug $ "@" <> pretty r <+> pretty "HEAD"
+        sendLine $ "@" <> show (pretty r) <> " HEAD"
 
       sendLine ""
 
