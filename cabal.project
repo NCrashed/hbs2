@@ -15,7 +15,6 @@ packages:
 
   -- Vendored forks of upstream libraries with project-specific patches.
   -- De-vendoring is a separate cleanup task.
-  miscellaneous/bytestring-mmap/bytestring-mmap.cabal
   miscellaneous/db-pipe/db-pipe.cabal
   miscellaneous/fuzzy-parse/fuzzy-parse.cabal
   miscellaneous/suckless-conf/suckless-conf.cabal

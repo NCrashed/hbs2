@@ -41,7 +41,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
 
     miscellaneous =
       [
-      "bytestring-mmap"
       "db-pipe"
       "fuzzy-parse"
       "suckless-conf"
@@ -63,6 +62,11 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     hpOverridesPre = pkgs: new: old: with pkgs.haskell.lib; {
       scotty = new.callHackage "scotty" "0.21" {};
       skylighting-lucid = new.callHackage "skylighting-lucid" "1.0.4" { };
+      bytestring-mmap-compat = new.callHackageDirect {
+        pkg = "bytestring-mmap-compat";
+        ver = "0.2.3";
+        sha256 = "0psd8fc3ryrs3f909hr77c2snckazhy188jy0496ll3402h0fcj1";
+      } {};
       wai-app-file-cgi = dontCoverage (dontCheck (jailbreakUnbreak pkgs old.wai-app-file-cgi));
       libyaml =
         if pkgs.hostPlatform.isStatic

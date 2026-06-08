@@ -85,7 +85,7 @@ library
                     , binary
                     , bitvec
                     , bytestring
-                    , bytestring-mmap
+                    , bytestring-mmap-compat
                     , containers
                     , directory
                     , filelock

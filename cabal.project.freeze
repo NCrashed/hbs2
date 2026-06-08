@@ -39,6 +39,7 @@ constraints:
              any.bsb-http-chunked ==0.0.0.4,
              any.byteorder ==1.0.4,
              any.bytestring ==0.11.5.3,
+             any.bytestring-mmap-compat ==0.2.3,
              any.Cabal ==3.10.3.0,
              any.Cabal-syntax ==3.10.3.0,
              any.cache ==0.1.3.0,
