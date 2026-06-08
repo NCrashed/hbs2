@@ -22,3 +22,4 @@ docs/drafts/*
 !docs/drafts/pep-13-pq-encryption.md
 !docs/drafts/pep-14-encrypted-keystore.md
 !docs/drafts/pep-15-hd-mnemonic-keys.md
+!docs/drafts/pep-17-hbs2-hub.md
