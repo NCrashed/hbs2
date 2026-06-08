@@ -154,16 +154,18 @@ SSH private keys: back them up where you would back up
 ## Where to go next
 
 - **Replicate to a second machine.** Repeat steps 1-4 on another
-  machine. Configure both peers to find each other via `known-peer`
-  in the config, or by setting up a DNS TXT record and pointing
-  `bootstrap-dns` at it. The two peers will then replicate the
-  repository. See [`docs/MIRROR_SETUP.md`](docs/MIRROR_SETUP.md) for
-  a multi-machine mirror setup.
+  machine, connect the two peers via `known-peer` or `bootstrap-dns`,
+  and clone the repository on the second machine; pushes then
+  replicate automatically. See
+  [`docs/multi-machine.md`](docs/multi-machine.md) for the full
+  walkthrough, or [`docs/MIRROR_SETUP.md`](docs/MIRROR_SETUP.md) for a
+  dedicated mirror node with no checkout of its own.
 
 - **Encrypted repositories.** Use group keys to make a repository
-  readable only by holders of specific keys. `git hbs2 init --new
-  --encrypted <group-key-hash>` initialises a repository with
-  symmetric group encryption.
+  readable only by holders of specific keys
+  (`git hbs2 init --new --encrypted <group-key-hash>`). See
+  [`docs/encrypted-repos.md`](docs/encrypted-repos.md) for the full
+  walkthrough.
 
 - **Architecture.** See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a
   tour of the components involved in what you just did.
