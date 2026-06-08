@@ -1,6 +1,19 @@
-# 0.25.3.3  2026-06-07
+# 0.25.4.0  2026-06-08
 
-Patch release. Restores annotated tag push to `hbs23://` remotes.
+Feature and maintenance release. Adds an opt-in announce flag to the
+CLI, de-vendors four bundled libraries onto Hackage, restores
+annotated tag push, and ships new documentation.
+
+## Features
+
+  - **`block:put --announce`.** `hbs2-cli hbs2:peer:storage:block:put`
+    now accepts an optional `--announce` flag that broadcasts a
+    `BlockAnnounce` right after storing, so a "put on A, get on B" flow
+    works without a separate `hbs2-peer announce`. Off by default so
+    encrypted-refchan and group-key workflows that gate publication are
+    not surprised; higher-level flows (git push, sync) announce
+    internally and do not need it. Closes
+    [#5](https://github.com/NCrashed/hbs2/issues/5).
 
 ## Fixes
 
@@ -20,17 +33,41 @@ Patch release. Restores annotated tag push to `hbs23://` remotes.
     `OBJ_TAG` so `git index-pack` accepts the resulting pack on the
     fetch side. Lightweight tag push is unchanged. Closes
     [#7](https://github.com/NCrashed/hbs2/issues/7).
+  - **`r:list` emits HEAD as a symbolic ref** instead of a duplicate
+    object line, so clients resolve the default branch correctly.
+  - **NixOS module:** create and whitelist the `hbs2-mailbox` sibling
+    directory, and grant the RPC group access to the peer socket.
+
+## Dependencies
+
+  - hbs2 no longer vendors `saltine`, `bytestring-mmap`, `db-pipe`, or
+    `suckless-conf`. They are now consumed from Hackage
+    (`saltine-0.2.2.0`, `bytestring-mmap-compat-0.2.3`,
+    `db-pipe-0.1.0.1`, `suckless-conf-0.1.2.9`; the latter three are
+    published and maintained under <https://github.com/NCrashed>).
+    This is a step toward a plain `cabal install` story; there are no
+    runtime behaviour changes.
+
+## Docs
+
+  - New walkthroughs: `docs/multi-machine.md` (replicating a
+    repository to a second machine) and `docs/encrypted-repos.md`
+    (group-key encrypted repositories, including key backup).
+  - Design proposals published under `docs/drafts/`: PEP-05 (Tor
+    transport), PEP-13 (post-quantum encryption), PEP-14 (encrypted
+    keystore), PEP-15 (HD keys from a mnemonic), PEP-16 (barter
+    storage).
 
 ## Compatibility
 
-  - **Segment marker `'A'` is new in this release.** Peers from
-    0.25.3.0..0.25.3.2 decoding a segment that contains an annotated
-    tag will fall through the `FromStringMaybe (Short ...)` default
-    branch and silently relabel the tag object as `Blob`. Concretely:
-    on replication from a 0.25.3.3 peer to an older peer, annotated
-    tags become unreachable on the older peer. The on-wire fix is to
-    upgrade the receiving peer to 0.25.3.3. There is no mixed-cluster
-    fallback.
+  - **Segment marker `'A'` (annotated tags) is new since 0.25.3.2.**
+    Peers from 0.25.3.0..0.25.3.2 decoding a segment that contains an
+    annotated tag will fall through the `FromStringMaybe (Short ...)`
+    default branch and silently relabel the tag object as `Blob`.
+    Concretely: on replication from a 0.25.4.0 peer to an older peer,
+    annotated tags become unreachable on the older peer. The on-wire
+    fix is to upgrade the receiving peer to 0.25.4.0. There is no
+    mixed-cluster fallback.
 
 # 0.25.3.2  2026-06-04
 
