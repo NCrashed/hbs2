@@ -200,6 +200,7 @@ constraints:
              any.rts ==1.0.2,
              any.safe ==0.3.21,
              any.safe-exceptions ==0.1.7.4,
+             any.saltine ==0.2.2.0,
              any.scientific ==0.3.7.0,
              any.scotty ==0.21,
              any.semialign ==1.3.1,
