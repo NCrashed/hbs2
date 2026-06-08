@@ -59,21 +59,27 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     hpOverridesPre = pkgs: new: old: with pkgs.haskell.lib; {
       scotty = new.callHackage "scotty" "0.21" {};
       skylighting-lucid = new.callHackage "skylighting-lucid" "1.0.4" { };
-      bytestring-mmap-compat = new.callHackageDirect {
+      # doJailbreak: these forks carry version bounds derived from the
+      # GHC 9.6.6 freeze, but the static (pkgsStatic) toolchain uses GHC
+      # 9.4.8 (mtl 2.2.2, older containers, ...). The bounds are
+      # otherwise unsatisfiable there; the code itself built fine on
+      # 9.4.8 when these were vendored unbounded. Stripping bounds
+      # restores that. cabal builds are unaffected (they use the freeze).
+      bytestring-mmap-compat = doJailbreak (new.callHackageDirect {
         pkg = "bytestring-mmap-compat";
         ver = "0.2.3";
         sha256 = "0psd8fc3ryrs3f909hr77c2snckazhy188jy0496ll3402h0fcj1";
-      } {};
-      db-pipe = new.callHackageDirect {
+      } {});
+      db-pipe = doJailbreak (new.callHackageDirect {
         pkg = "db-pipe";
         ver = "0.1.0.1";
         sha256 = "14ih3x3apwbd2kl9spng8mvczaigsm1rlh6j849i8f0f7qws7c3b";
-      } {};
-      suckless-conf = new.callHackageDirect {
+      } {});
+      suckless-conf = doJailbreak (new.callHackageDirect {
         pkg = "suckless-conf";
         ver = "0.1.2.9";
         sha256 = "sha256-wmX55tmBMgY4yUVc9uCXbGJGDDEuCdcmPyOQCe5ECAg=";
-      } {};
+      } {});
       wai-app-file-cgi = dontCoverage (dontCheck (jailbreakUnbreak pkgs old.wai-app-file-cgi));
       libyaml =
         if pkgs.hostPlatform.isStatic
