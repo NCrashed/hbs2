@@ -1,7 +1,10 @@
-Barter storage: overall vision and breakdown into PEPs
+PEP-16: barter-storage (umbrella over PEP-06..12)
 
-Status: draft, discussion started 2026-06-04, local, not published.
+Status: draft, discussion started 2026-06-04.
 Author: NCrashed (Anton Gushcha)
+
+This is the umbrella vision; the concrete work is split into the
+sub-proposals PEP-06..12 defined below.
 
 
 Goal
