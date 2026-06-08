@@ -15,7 +15,6 @@ packages:
 
   -- Vendored forks of upstream libraries with project-specific patches.
   -- De-vendoring is a separate cleanup task.
-  miscellaneous/db-pipe/db-pipe.cabal
   miscellaneous/fuzzy-parse/fuzzy-parse.cabal
   miscellaneous/suckless-conf/suckless-conf.cabal
 
@@ -25,7 +24,7 @@ with-compiler: ghc-9.6.6
 
 -- Pin Hackage snapshot for reproducibility. Bump deliberately, not
 -- accidentally.
-index-state: 2026-05-31T00:00:00Z
+index-state: 2026-06-08T14:02:36Z
 
 -- Lower-bound constraints documenting intent. Exact pins live in
 -- cabal.project.freeze; a freeze regeneration will pick versions

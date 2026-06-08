@@ -67,6 +67,7 @@ constraints:
              any.crypton-x509-system ==1.6.7,
              any.crypton-x509-validation ==1.6.12,
              any.data-default ==0.7.1.1,
+             any.db-pipe ==0.1.0.1,
              any.data-default-class ==0.1.2.0,
              any.data-default-instances-containers ==0.0.1,
              any.data-default-instances-dlist ==0.0.1,

@@ -41,7 +41,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
 
     miscellaneous =
       [
-      "db-pipe"
       "fuzzy-parse"
       "suckless-conf"
       ];
@@ -66,6 +65,11 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         pkg = "bytestring-mmap-compat";
         ver = "0.2.3";
         sha256 = "0psd8fc3ryrs3f909hr77c2snckazhy188jy0496ll3402h0fcj1";
+      } {};
+      db-pipe = new.callHackageDirect {
+        pkg = "db-pipe";
+        ver = "0.1.0.1";
+        sha256 = "14ih3x3apwbd2kl9spng8mvczaigsm1rlh6j849i8f0f7qws7c3b";
       } {};
       wai-app-file-cgi = dontCoverage (dontCheck (jailbreakUnbreak pkgs old.wai-app-file-cgi));
       libyaml =
