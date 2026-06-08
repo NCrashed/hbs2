@@ -88,38 +88,50 @@ peerEntries = do
 
     _ -> throwIO $ BadFormException @c nil
 
-  -- stores *small* block
-  entry $ bindMatch "hbs2:peer:storage:block:put" $ \case
+  -- stores *small* block. With the optional --announce flag, emits a
+  -- BlockAnnounce after storing so other peers learn the block exists.
+  -- Off by default so encrypted-refchan and group-key workflows that
+  -- gate publication are not surprised.
+  brief "stores a small block; with --announce also broadcasts a BlockAnnounce"
+    $ entry $ bindMatch "hbs2:peer:storage:block:put" $ \syn -> do
 
-    [isOpaqueOf @LBS.ByteString -> Just lbs] -> do
-      sto <- getStorage
-      (putBlock sto lbs <&> fmap (mkSym . show . pretty . HashRef) )
-        >>= orThrowUser "storage error"
+    let isAnnounceFlag = \case { SymbolVal "--announce" -> True; _ -> False }
+        (flags, rest)  = L.partition isAnnounceFlag syn
+        doAnnounce     = not (L.null flags)
 
-    [isOpaqueOf @BS.ByteString -> Just bs] -> do
-      sto <- getStorage
-      (putBlock sto (LBS.fromStrict bs) <&> fmap (mkSym . show . pretty . HashRef) )
-        >>= orThrowUser "storage error"
+    let putArgs = \case
 
-    -- FIXME: deprecate-this
-    [ListVal [SymbolVal "blob", LitStrVal s]] -> do
-      flip runContT pure do
-        sto <- getStorage
-        lift $ putTextLit sto s
+          [isOpaqueOf @LBS.ByteString -> Just lbs] -> do
+            sto <- getStorage
+            putBlock sto lbs >>= orThrowUser "storage error" <&> (Just . HashRef)
 
-    [LitStrVal s] -> do
-      flip runContT pure do
-        sto <- getStorage
-        lift $ putTextLit sto s
+          [isOpaqueOf @BS.ByteString -> Just bs] -> do
+            sto <- getStorage
+            putBlock sto (LBS.fromStrict bs) >>= orThrowUser "storage error" <&> (Just . HashRef)
 
-    [] -> do
-        bs <- liftIO BS.getContents
-        sto <- getStorage
-        putBlock sto (LBS.fromStrict bs) >>= \case
-          Nothing -> pure nil
-          Just h  -> pure $ mkSym (show $ pretty $ HashRef h)
+          -- FIXME: deprecate-this
+          [ListVal [SymbolVal "blob", LitStrVal s]] -> do
+            sto <- getStorage
+            putBlock sto (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
 
-    e -> throwIO $ BadFormException @c (mkList e)
+          [LitStrVal s] -> do
+            sto <- getStorage
+            putBlock sto (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
+
+          [] -> do
+            bs <- liftIO BS.getContents
+            sto <- getStorage
+            putBlock sto (LBS.fromStrict bs) <&> fmap HashRef
+
+          e -> throwIO $ BadFormException @c (mkList e)
+
+    putArgs rest >>= \case
+      Nothing -> pure nil
+      Just h  -> do
+        when doAnnounce do
+          api <- getClientAPI @PeerAPI @UNIX
+          void $ callRpcWaitMay @RpcAnnounce (TimeoutSec 1) api h
+        pure $ mkSym (show $ pretty h)
 
   brief "checks if peer available"
     $ noArgs

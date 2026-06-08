@@ -140,7 +140,23 @@ Merkle layer:
 echo "some content" | hbs2-cli hbs2:peer:storage:block:put
 ```
 
-The output is the block hash. Read it back with:
+The output is the block hash.
+
+By default `block:put` only writes to your local peer's storage; other
+peers do not learn the block exists until something emits a
+`BlockAnnounce`. Pass `--announce` to broadcast one right after
+storing, so a "put on A, get on B" flow works without a separate
+`hbs2-peer announce`:
+
+```
+hbs2-cli "(hbs2:peer:storage:block:put --announce \"some content\")"
+```
+
+It is off by default so encrypted-refchan and group-key workflows that
+gate publication are not surprised. Higher-level flows (git push, sync)
+do not need it: they emit reflog transactions that announce internally.
+
+Read it back with:
 
 ```
 hbs2-cli "(hbs2:peer:storage:block:get \"<HASH>\")"
