@@ -1,1 +1,0 @@
-module Data.Config.Suckless.Types where

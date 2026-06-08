@@ -225,6 +225,7 @@ constraints:
              any.streaming-commons ==0.2.2.6,
              any.strict ==0.5,
              any.string-conversions ==0.4.0.1,
+             any.suckless-conf ==0.1.2.9,
              any.syb ==0.7.2.4,
              any.system-cxx-std-lib ==1.0,
              any.tagged ==0.8.8,
