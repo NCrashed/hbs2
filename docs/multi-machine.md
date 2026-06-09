@@ -198,3 +198,8 @@ walkthrough.
 - **Heads and history.** For how `lwwref` and `reflog` differ and why
   there are two of them, see
   [`LWWREF_VS_REFLOG.md`](LWWREF_VS_REFLOG.md).
+
+- **Running over Tor.** To host your peer as an onion service (NAT
+  traversal without exposing your IP) or run an onion-only node, see
+  [`TOR_DEPLOYMENT.md`](TOR_DEPLOYMENT.md). Approach 3 above is the
+  outbound-only half of that.

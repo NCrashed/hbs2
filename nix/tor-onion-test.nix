@@ -108,13 +108,18 @@ in {
         # static part of the config; the cross-wired known-peer line is
         # appended at runtime once Tor has minted the other peer's onion name
         mkStaticConfig = name: p: pkgs.writeText "hbs2-onion-${name}.conf" ''
-          # UDP on 0.0.0.0, not 127.0.0.1: the daemon always pings the
-          # hard-coded bootstrap.hbs2.app over UDP, and a loopback-bound
-          # socket sending to a routable address fails with EINVAL, which
-          # (via peerThread -> GoAgainException) respawns the whole peer.
-          listen "0.0.0.0:${toString p.udp}"
+          # Onion-only posture: loopback binds, no LAN multicast discovery,
+          # no clearnet DNS bootstrap. With multicast off the two peers can
+          # ONLY reach each other through their onion known-peer, so the
+          # session below is unambiguously over Tor (no udp/loopback
+          # shortcut). bootstrap off avoids the hard-coded bootstrap.hbs2.app
+          # UDP ping (which from a loopback socket fails EINVAL and, via
+          # peerThread -> GoAgainException, respawns the peer).
+          listen "127.0.0.1:${toString p.udp}"
           # TCP stays on loopback: reachable only through the onion service.
           listen-tcp "127.0.0.1:${toString p.tcp}"
+          multicast off
+          bootstrap off
           # No HTTP API for the test (default port is 5005 for every peer,
           # so two instances collide on bind and respawn-loop).
           http-port "off"

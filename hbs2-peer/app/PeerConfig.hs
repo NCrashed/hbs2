@@ -48,6 +48,8 @@ data PeerTrace1Key
 data PeerProxyFetchKey
 data PeerTcpSOCKS5
 data PeerDownloadThreadKey
+data PeerMulticastKey
+data PeerBootstrapKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -79,6 +81,18 @@ instance HasCfgKey PeerTcpSOCKS5 (Maybe String) where
 
 instance HasCfgKey PeerDownloadThreadKey (Maybe Int) where
   key = "download-threads"
+
+-- Local UDP multicast peer discovery. On by default; `multicast off`
+-- disables it (needed for a clean onion-only / Tor deployment, where
+-- LAN discovery both leaks reachability and bypasses the onion transport).
+instance HasCfgKey PeerMulticastKey b where
+  key = "multicast"
+
+-- DNS bootstrap loop (always includes the hard-coded bootstrap.hbs2.app).
+-- On by default; `bootstrap off` disables it, so an onion-only peer does
+-- not phone clearnet seeds over UDP.
+instance HasCfgKey PeerBootstrapKey b where
+  key = "bootstrap"
 
 
 
@@ -117,6 +131,24 @@ instance {-# OVERLAPPABLE #-} (HasConf m, HasCfgKey a b) => HasCfgValue a Featur
     where
       val syn = [ if e == "on" then FeatureOn else FeatureOff
                 | ListVal (Key s [SymbolVal e]) <- syn, s == key @a @b
+                ]
+
+-- These two default to FeatureOn (absence means enabled, preserving the
+-- historical behavior): only an explicit `off` disables them.
+instance {-# OVERLAPPING #-} HasConf m
+  => HasCfgValue PeerMulticastKey FeatureSwitch m where
+  cfgValue = lastDef FeatureOn . val <$> getConf
+    where
+      val syn = [ if e == "off" then FeatureOff else FeatureOn
+                | ListVal (Key s [SymbolVal e]) <- syn, s == key @PeerMulticastKey @FeatureSwitch
+                ]
+
+instance {-# OVERLAPPING #-} HasConf m
+  => HasCfgValue PeerBootstrapKey FeatureSwitch m where
+  cfgValue = lastDef FeatureOn . val <$> getConf
+    where
+      val syn = [ if e == "off" then FeatureOff else FeatureOn
+                | ListVal (Key s [SymbolVal e]) <- syn, s == key @PeerBootstrapKey @FeatureSwitch
                 ]
 
 

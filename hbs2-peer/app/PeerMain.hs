@@ -765,6 +765,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   let traceConf       = runReader (cfgValue @PeerTraceKey)   syn
   let debugConf       = runReader (cfgValue @PeerDebugKey)   syn :: FeatureSwitch
   let trace1Conf      = runReader (cfgValue @PeerTrace1Key)  syn :: FeatureSwitch
+  let multicastOn     = runReader (cfgValue @PeerMulticastKey) syn == FeatureOn
+  let bootstrapOn     = runReader (cfgValue @PeerBootstrapKey) syn == FeatureOn
   let helpFetchKeys   = runReader (cfgValue @PeerProxyFetchKey) syn & toKeys
   let tcpListen       = runReader (cfgValue @PeerListenTCPKey) syn & fromMaybe ""
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
@@ -1163,10 +1165,11 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                                     doAddPeer p
 
 
-              void $ liftIO $ async $ withPeerM env do
-                pause @'Seconds 3
-                debug "sending first peer announce"
-                request localMulticast (PeerAnnounce @e pnonce)
+              when multicastOn $
+                void $ liftIO $ async $ withPeerM env do
+                  pause @'Seconds 3
+                  debug "sending first peer announce"
+                  request localMulticast (PeerAnnounce @e pnonce)
 
               let peerThread t mx = ContT $ withAsync $ liftIO $
                                       withPeerM env mx
@@ -1185,7 +1188,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 mcastProbe <- newSimpleProbe "PeerEnv_Announce"
                 addProbe mcastProbe
 
-                peerThread "multicastWorker" $ multicastWorker conf env mcastProbe
+                when multicastOn $
+                  void $ peerThread "multicastWorker" $ multicastWorker conf env mcastProbe
 
                 peerThread "byPassWorker" (byPassWorker byPass)
 
@@ -1207,7 +1211,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "knownPeersPingLoop" (knownPeersPingLoop @e conf (SomeBrains brains))
 
-                peerThread "bootstrapDnsLoop" (bootstrapDnsLoop @e conf)
+                when bootstrapOn $
+                  void $ peerThread "bootstrapDnsLoop" (bootstrapDnsLoop @e conf)
 
                 peerThread "pexLoop" (pexLoop @e brains tcp)
 

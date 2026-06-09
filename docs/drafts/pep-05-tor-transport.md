@@ -194,26 +194,34 @@ apparently happens automatically.
 Phased plan
 ===========
 
-**Phase 1: outbound Tor (1-3 days).** Changes in hbs2-core/hbs2-peer:
-- (A) the `PeerAddr` parser accepts `.onion` hosts + a `NetworkClass`
-  field.
-- (E) verification of the SOCKS5 path with onion hosts.
-- README/QUICKSTART: a "tor-outbound" recipe with `tcp.socks5`.
+**Phase 1: outbound Tor (1-3 days). DONE.** Changes in
+hbs2-core/hbs2-peer:
+- (A) the `PeerAddr` parser accepts `.onion` hosts (as a name-carrying
+  variant). The `NetworkClass` tag itself is deferred to Phase 3, where
+  it is needed (for the PEX policy); outbound dialing does not require it.
+- (E) SOCKS5 path with onion hosts, verified live against a real Tor
+  daemon.
+- A "tor-outbound" recipe with `tcp.socks5` (in `docs/multi-machine.md`,
+  "Approach 3").
 
 After this a peer operator can ship the config
 `tcp.socks5 = "127.0.0.1:9050"` and have
 `known-peer "tcp://xxx.onion:443"`; it all already works.
 
-**Phase 2: inbound Tor + listen hardening (2-5 days).**
-- (F) verify a TCP-only peer works correctly.
-- (G) a `peer-public-address` config key + removal of automatic
-  announces of the local address.
-- NixOS module: an option `enableTor = true` that applies
-  `services.tor.enable` + a HiddenService for hbs2-peer + listening on
-  127.0.0.1. This module lives next to
+**Phase 2: inbound Tor + listen hardening. DONE (except G).**
+- (F) onion-only / TCP-only operation: two config gates, `multicast off`
+  and `bootstrap off`, let a peer run without LAN discovery or the
+  hard-coded clearnet DNS bootstrap (both otherwise crash or leak on a
+  Tor-only host).
+- NixOS module: `services.hbs2-peer.enableTor = true` applies
+  `services.tor.enable` + `client.enable` + a v3 HiddenService for
+  hbs2-peer, binds to 127.0.0.1, and sets the onion-only knobs. See
   [`nix/nixos-module.nix`](nix/nixos-module.nix).
-- A document `docs/TOR_DEPLOYMENT.md` with an end-to-end recipe
-  (tor-only, NAT traversal without revealing the IP).
+- [`docs/TOR_DEPLOYMENT.md`](docs/TOR_DEPLOYMENT.md): end-to-end recipe.
+- (G) `peer-public-address` (advertising one's own onion) is **deferred
+  to Phase 3**: advertising an onion address safely needs the network-class
+  PEX policy first, otherwise the onion leaks to clearnet peers that must
+  not see it. Until then peers are wired with explicit `known-peer`.
 
 **Phase 3: PEX policy + capability handshake (1-2 weeks).**
 This is a protocol change, done carefully:
