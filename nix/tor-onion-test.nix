@@ -63,7 +63,13 @@ let
   peers = {
     alice = { host = "127.0.0.2"; tcp = 10361; udp = 17351; rpc = 13361; };
     bob   = { host = "127.0.0.3"; tcp = 10362; udp = 17352; rpc = 13362; };
+    carol = { host = "127.0.0.4"; tcp = 10363; udp = 17353; rpc = 13363; };
   };
+
+  # Topology for the onion-PEX test (PEP-05 C): alice knows only bob, carol
+  # knows only bob, bob knows both. alice must therefore discover carol's
+  # .onion via PEX from bob - which only happens because all three declare
+  # network-class "onion" (a clearnet peer would never be handed the onion).
 
   stateDir = name: "/var/lib/hbs2-onion-${name}";
   xdgDir   = name: "${stateDir name}/xdg";
@@ -105,6 +111,10 @@ in {
         hbs2-bob = {
           version = 3;
           map = [ { port = vport; target = { addr = peers.bob.host; port = peers.bob.tcp; }; } ];
+        };
+        hbs2-carol = {
+          version = 3;
+          map = [ { port = vport; target = { addr = peers.carol.host; port = peers.carol.tcp; }; } ];
         };
       };
     };
@@ -178,6 +188,7 @@ in {
         mkMerge [
           (mkRunService "alice" peers.alice)
           (mkRunService "bob"   peers.bob)
+          (mkRunService "carol" peers.carol)
           {
             # One-shot: create identities, wait for Tor to publish both onion
             # hostnames, then write each peer's config cross-wired to the
@@ -195,7 +206,7 @@ in {
               script = ''
                 set -eu
 
-                for name in alice bob; do
+                for name in alice bob carol; do
                   dir="/var/lib/hbs2-onion-$name"
                   mkdir -p "$dir/xdg/hbs2-peer" "$dir/storage"
                   # init creates $dir/default.key (and a config we ignore)
@@ -207,8 +218,8 @@ in {
                   rm -f "$dir/brains.db"
                 done
 
-                # wait until Tor has published both onion hostnames
-                for f in ${onionHostname "alice"} ${onionHostname "bob"}; do
+                # wait until Tor has published all three onion hostnames
+                for f in ${onionHostname "alice"} ${onionHostname "bob"} ${onionHostname "carol"}; do
                   for i in $(seq 1 60); do
                     [ -s "$f" ] && break
                     sleep 2
@@ -217,22 +228,31 @@ in {
 
                 ALICE_ONION="$(cat ${onionHostname "alice"})"
                 BOB_ONION="$(cat ${onionHostname "bob"})"
+                CAROL_ONION="$(cat ${onionHostname "carol"})"
 
-                # alice dials bob's onion, and vice versa
                 A_CFG=/var/lib/hbs2-onion-alice/xdg/hbs2-peer/config
                 B_CFG=/var/lib/hbs2-onion-bob/xdg/hbs2-peer/config
+                C_CFG=/var/lib/hbs2-onion-carol/xdg/hbs2-peer/config
 
+                # Topology: alice<->bob, carol<->bob, but NOT alice<->carol.
+                # alice must discover carol via PEX from bob (onion -> onion).
                 cp ${mkStaticConfig "alice" peers.alice} "$A_CFG"
                 echo "known-peer \"tcp://$BOB_ONION:${toString vport}\"" >> "$A_CFG"
 
                 cp ${mkStaticConfig "bob" peers.bob} "$B_CFG"
                 echo "known-peer \"tcp://$ALICE_ONION:${toString vport}\"" >> "$B_CFG"
+                echo "known-peer \"tcp://$CAROL_ONION:${toString vport}\"" >> "$B_CFG"
 
-                chmod 0644 "$A_CFG" "$B_CFG"
-                chown -R ${user}:${user} /var/lib/hbs2-onion-alice /var/lib/hbs2-onion-bob
+                cp ${mkStaticConfig "carol" peers.carol} "$C_CFG"
+                echo "known-peer \"tcp://$BOB_ONION:${toString vport}\"" >> "$C_CFG"
+
+                chmod 0644 "$A_CFG" "$B_CFG" "$C_CFG"
+                chown -R ${user}:${user} \
+                  /var/lib/hbs2-onion-alice /var/lib/hbs2-onion-bob /var/lib/hbs2-onion-carol
 
                 echo "alice onion: $ALICE_ONION:${toString vport}"
                 echo "bob   onion: $BOB_ONION:${toString vport}"
+                echo "carol onion: $CAROL_ONION:${toString vport}"
               '';
             };
           }
