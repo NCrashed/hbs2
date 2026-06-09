@@ -234,17 +234,23 @@ in {
                 B_CFG=/var/lib/hbs2-onion-bob/xdg/hbs2-peer/config
                 C_CFG=/var/lib/hbs2-onion-carol/xdg/hbs2-peer/config
 
-                # Topology: alice<->bob, carol<->bob, but NOT alice<->carol.
-                # alice must discover carol via PEX from bob (onion -> onion).
+                # Directional topology so peer identities stay tied to onion
+                # names (the dialer knows the onion; an inbound peer only shows
+                # up as the Tor exit 127.0.0.1, which is useless for PEX until
+                # peer-public-address lands). Only-dialer = onion-named session:
+                #   alice -> bob   (alice dials bob)
+                #   bob   -> carol (bob dials carol; carol stays passive)
+                # So bob holds carol as a real .onion peer and gossips it to
+                # alice, who has only bob in its own config. alice learning
+                # carol therefore proves onion -> onion PEX.
                 cp ${mkStaticConfig "alice" peers.alice} "$A_CFG"
                 echo "known-peer \"tcp://$BOB_ONION:${toString vport}\"" >> "$A_CFG"
 
                 cp ${mkStaticConfig "bob" peers.bob} "$B_CFG"
-                echo "known-peer \"tcp://$ALICE_ONION:${toString vport}\"" >> "$B_CFG"
                 echo "known-peer \"tcp://$CAROL_ONION:${toString vport}\"" >> "$B_CFG"
 
+                # carol is passive: no known-peer, only reached by bob
                 cp ${mkStaticConfig "carol" peers.carol} "$C_CFG"
-                echo "known-peer \"tcp://$BOB_ONION:${toString vport}\"" >> "$C_CFG"
 
                 chmod 0644 "$A_CFG" "$B_CFG" "$C_CFG"
                 chown -R ${user}:${user} \
