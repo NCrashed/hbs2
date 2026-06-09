@@ -67,15 +67,28 @@ those rules; the
 [`serialise` source](https://hackage.haskell.org/package/serialise)
 documents them.
 
-Only one protocol type ships with a hand-rolled `Serialise` instance:
+Two protocol types ship with a hand-rolled `Serialise` instance.
+
 `GroupKey 'Symm s` in
-[`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:195`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs#L195).
-It carries a forward-compatibility scheme: the encoder writes a
+[`hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs:195`](hbs2-core/lib/HBS2/Net/Auth/GroupKeySymm.hs#L195)
+carries a forward-compatibility scheme: the encoder writes a
 `GroupKeySymmV1` payload, then a version tag (currently `2`), then
 extension data (group-key id scheme, id, and timestamp). The decoder
 reads V1, checks for remaining bytes, then optionally decodes the
-extension. Other implementations must match this layout for symmetric
-group keys; everything else uses default Generic derivation.
+extension.
+
+`PeerData e` (the `PeerPong` handshake payload) in
+[`hbs2-peer/lib/HBS2/Peer/Proto/Peer.hs`](hbs2-peer/lib/HBS2/Peer/Proto/Peer.hs)
+uses the same trick to add `reachableVia :: Set NetworkClass` (PEP-05 PEX
+policy) without breaking older peers: the encoder writes the original
+two-field `PeerDataV1` payload (sign key, peer nonce) verbatim, then
+appends the `reachableVia` set as a list. A decoder reads the two fields,
+checks for remaining bytes, and decodes the set if present, otherwise
+defaults to `{Clearnet}`. Old peers reading new `PeerData` ignore the
+trailing bytes; new peers reading old `PeerData` get the `{Clearnet}`
+default. Other implementations must match this layout.
+
+Everything else uses default Generic derivation.
 
 ### Hashing
 

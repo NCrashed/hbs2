@@ -41,6 +41,7 @@ let
     tcp.socks5 "127.0.0.1:${toString cfg.torSocksPort}"
     multicast off
     bootstrap off
+    network-class "onion"
     ''}
     ${optionalString (!cfg.enableTor)
         (concatMapStringsSep "\n" (dns: ''bootstrap-dns "${dns}"'') cfg.bootstrapDns)}

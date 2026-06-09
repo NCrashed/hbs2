@@ -767,6 +767,11 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   let trace1Conf      = runReader (cfgValue @PeerTrace1Key)  syn :: FeatureSwitch
   let multicastOn     = runReader (cfgValue @PeerMulticastKey) syn == FeatureOn
   let bootstrapOn     = runReader (cfgValue @PeerBootstrapKey) syn == FeatureOn
+  -- how this node declares itself reachable, for the PEX policy (PEP-05)
+  let ownReachableVia = case runReader (cfgValue @PeerNetworkClassKey) syn of
+                          Just "onion"  -> Set.fromList [Onion]
+                          Just "bridge" -> Set.fromList [Clearnet, Onion]
+                          _             -> Set.fromList [Clearnet]
   let helpFetchKeys   = runReader (cfgValue @PeerProxyFetchKey) syn & toKeys
   let tcpListen       = runReader (cfgValue @PeerListenTCPKey) syn & fromMaybe ""
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
@@ -1057,7 +1062,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     tv <- lift $ fetch True def (PeerInfoKey p) (view peerRTTBuffer)
                     insertRTT rttNew tv
 
-              let hshakeAdapter = PeerHandshakeAdapter addNewRtt
+              let hshakeAdapter = PeerHandshakeAdapter addNewRtt ownReachableVia
 
               env <- ask
 

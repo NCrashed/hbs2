@@ -273,6 +273,21 @@ parseHostPort s = do
 instance Serialise L4Proto
 instance Serialise (PeerAddr L4Proto)
 
+-- | The network a peer address belongs to. Used by the PEX policy (PEP-05):
+--   a peer only forwards an address to neighbours that can actually reach it,
+--   so @.onion@ addresses never reach clearnet-only peers.
+data NetworkClass = Clearnet | Onion
+  deriving stock (Eq,Ord,Show,Generic)
+
+instance Serialise NetworkClass
+instance Hashable  NetworkClass
+
+-- | Classify an address: a @.onion@ host is 'Onion', everything else
+--   (IPv4/IPv6/DNS) is 'Clearnet'.
+classOf :: PeerAddr L4Proto -> NetworkClass
+classOf (L4AddressName _ h _) | ".onion" `Text.isSuffixOf` Text.toLower h = Onion
+classOf _ = Clearnet
+
 
 deserialiseCustom :: (Serialise a, MonadPlus m) => ByteString -> m a
 deserialiseCustom = either (const mzero) pure . deserialiseOrFail

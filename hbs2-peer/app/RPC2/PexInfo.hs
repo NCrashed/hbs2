@@ -13,6 +13,7 @@ import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.RPC.API.Peer
 
 import Codec.Serialise
+import Data.Set qualified as Set
 
 instance ( MonadIO m
          , HasRpcContext PeerAPI RPC2Context m
@@ -21,7 +22,8 @@ instance ( MonadIO m
 
   handleMethod _ = do
    co <- getRpcContext @PeerAPI
-   withPeerM (rpcPeerEnv co) getAllPex2Peers
+   -- local introspection: show every known peer regardless of class
+   withPeerM (rpcPeerEnv co) (getAllPex2Peers (Set.fromList [Clearnet, Onion]))
 
 
 

@@ -13,7 +13,11 @@ import HBS2.Prelude.Plated
 import HBS2.Net.Auth.Credentials
 
 import Data.Maybe
-import Codec.Serialise()
+import Codec.Serialise (Serialise)
+import Codec.Serialise qualified as Serialise
+import Codec.Serialise.Decoding qualified as Serialise
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Hashable
 import Lens.Micro.Platform
 import Type.Reflection (someTypeRep)
@@ -98,9 +102,10 @@ sendPing pip = do
   update pdd (PeerHandshakeKey (nonce,pip)) id
   request pip (PeerPing @e nonce)
 
-newtype PeerHandshakeAdapter e m =
+data PeerHandshakeAdapter e m =
   PeerHandshakeAdapter
-  { onPeerRTT :: (Peer e, Integer) -> m ()
+  { onPeerRTT       :: (Peer e, Integer) -> m ()
+  , ownReachableVia :: Set NetworkClass -- ^ classes this node declares itself reachable on (PEP-05)
   }
 
 
@@ -141,7 +146,7 @@ peerHandShakeProto adapter penv =
       own <- peerNonce @e
 
       -- отправить обратно вместе с публичным ключом
-      response (PeerPong @e nonce sign (PeerData (view peerSignPk creds) own))
+      response (PeerPong @e nonce sign (PeerData (view peerSignPk creds) own (ownReachableVia adapter)))
 
       -- да и пингануть того самим
 
@@ -224,13 +229,37 @@ instance Hashable (Peer e) => Hashable (SessionKey e (KnownPeer e))
 deriving instance Eq (Peer e) => Eq (SessionKey e (PeerHandshake e))
 instance Hashable (Peer e) => Hashable (SessionKey e (PeerHandshake e))
 
+-- | The original two-field PeerData layout. Kept so the new Serialise can
+--   write byte-identical V1 bytes (and decode them from old peers).
+data PeerDataV1 e = PeerDataV1 (PubKey 'Sign (Encryption e)) PeerNonce
+  deriving stock Generic
+
+instance ( Serialise (PubKey 'Sign (Encryption e))
+         , Serialise PeerNonce
+         ) => Serialise (PeerDataV1 e)
+
+-- | Backward-compatible Serialise for PeerData (PEP-05): write the V1 two-field
+--   struct verbatim, then append the reachableVia set. Old peers decode the two
+--   fields and ignore the trailing bytes; new peers decoding old data find none
+--   and default to {Clearnet}. Same trick as the GroupKey 'Symm instance.
 instance ( Serialise (PubKey 'Sign (Encryption e))
          , Serialise (PubKey 'Encrypt (Encryption e))
          , Serialise (Signature (Encryption e))
          , Serialise PeerNonce
          )
+  => Serialise (PeerData e) where
 
-  => Serialise (PeerData e)
+  encode (PeerData sk nonce rv) =
+       Serialise.encode (PeerDataV1 @e sk nonce)
+    <> Serialise.encode (Set.toAscList rv)
+
+  decode = do
+    PeerDataV1 sk nonce <- Serialise.decode @(PeerDataV1 e)
+    avail <- Serialise.peekAvailable
+    rv <- if avail == 0
+            then pure (Set.singleton Clearnet)
+            else Set.fromList <$> Serialise.decode
+    pure (PeerData sk nonce rv)
 
 instance ( Serialise (PubKey 'Sign (Encryption e))
          , Serialise (PubKey 'Encrypt (Encryption e))

@@ -229,17 +229,24 @@ After this a peer operator can ship the config
   PEX policy first, otherwise the onion leaks to clearnet peers that must
   not see it. Until then peers are wired with explicit `known-peer`.
 
-**Phase 3: PEX policy + capability handshake (1-2 weeks).**
-This is a protocol change, done carefully:
-- (B) extend the `PeerHandshake` payload with a `reachableVia` field,
-  with a fallback for old peers.
-- (C) implement the filter when building `PeerAnnounce` /
-  `PeerExchange`.
-- Serialisation (A): versioning of the `PeerAddr` Serialise.
-- Update the table in [`PROTOCOL.md`](PROTOCOL.md) ProtocolId (4 and
-  5/6) with a note on the payload version.
-- Isolation tests: tor-only A + clearnet-only B, verify that B does
-  not receive onion addresses through PEX from their shared bridge.
+**Phase 3: PEX policy + capability handshake. DONE (B + C).**
+- (B) `PeerData` (the `PeerPong` payload) carries `reachableVia ::
+  Set NetworkClass`, declared from the `network-class` config key
+  (`clearnet` default | `onion` | `bridge`). Backward-compatible
+  hand-rolled `Serialise`: the original two fields are written verbatim
+  and the set appended, so old peers ignore the trailing bytes and new
+  peers reading old data default to `{Clearnet}` (verified by round-trip).
+- (C) `getAllPex2Peers` forwards an address to a recipient only if
+  `classOf addr` is in the recipient's declared `reachableVia` (looked up
+  from its `KnownPeer` session; unknown/old -> `{Clearnet}`). This
+  replaces the Phase-2 blanket onion exclusion with the selective rule:
+  onion -> onion is allowed, clearnet never receives onion.
+- (A) No `PeerAddr` Serialise change was needed: the class is *derived*
+  from the address (`classOf`, `.onion` -> `Onion`), not stored on it, and
+  the Phase-1 name variant already serialises compatibly.
+- `PROTOCOL.md` updated with the hand-rolled `PeerData` versioning.
+- Still open: `peer-public-address` self-advertisement, and broader
+  isolation tests.
 
 **Phase 4: logging / debug audit (half a day).**
 - Walk through `debug $ ... pretty pip` in hbs2-peer.

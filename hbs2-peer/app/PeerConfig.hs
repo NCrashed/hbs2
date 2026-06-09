@@ -50,6 +50,7 @@ data PeerTcpSOCKS5
 data PeerDownloadThreadKey
 data PeerMulticastKey
 data PeerBootstrapKey
+data PeerNetworkClassKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -93,6 +94,11 @@ instance HasCfgKey PeerMulticastKey b where
 -- not phone clearnet seeds over UDP.
 instance HasCfgKey PeerBootstrapKey b where
   key = "bootstrap"
+
+-- How this node is reachable, declared in the handshake and used by the PEX
+-- policy (PEP-05): `clearnet` (default), `onion`, or `bridge` (both).
+instance HasCfgKey PeerNetworkClassKey (Maybe String) where
+  key = "network-class"
 
 
 

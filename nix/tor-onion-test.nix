@@ -127,6 +127,7 @@ in {
           listen-tcp "${p.host}:${toString p.tcp}"
           multicast off
           bootstrap off
+          network-class "onion"
           # No HTTP API for the test (default port is 5005 for every peer,
           # so two instances collide on bind and respawn-loop).
           http-port "off"

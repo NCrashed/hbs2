@@ -126,8 +126,13 @@ round-trip time of seconds (Tor circuit latency), not milliseconds.
   hand.
 - Traffic-correlation defenses (padding, timing obfuscation) are out of
   scope here.
-- Onion addresses are never gossiped via PEX, so a clearnet peer cannot
-  learn them from you. (An onion node reaching clearnet over Tor is fine;
-  a clearnet node learning onion addresses is not.) Automatic
-  onion-address advertisement and selective onion-to-onion PEX are a later
-  phase; until then, wire peers with `known-peer`.
+- A peer declares its network class in the handshake (`network-class
+  "clearnet" | "onion" | "bridge"`, default `clearnet`; `enableTor` sets
+  `onion`). PEX honours it: onion addresses are forwarded only to peers
+  that declared they are reachable on onion, so a clearnet peer never
+  learns onion addresses, while onion peers can discover each other via
+  PEX. (An onion node reaching clearnet over Tor is fine; a clearnet node
+  learning onion addresses is not.)
+- Automatic advertisement of your *own* onion address to neighbours
+  (`peer-public-address`) is still a later step; until then announce your
+  `.onion` out of band and peers add it with `known-peer`.
