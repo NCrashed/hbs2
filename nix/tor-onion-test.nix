@@ -108,15 +108,15 @@ in {
         # static part of the config; the cross-wired known-peer line is
         # appended at runtime once Tor has minted the other peer's onion name
         mkStaticConfig = name: p: pkgs.writeText "hbs2-onion-${name}.conf" ''
-          # Onion-only posture: loopback binds, no LAN multicast discovery,
-          # no clearnet DNS bootstrap. With multicast off the two peers can
+          # Onion-only posture: TCP-only (no UDP socket at all), no LAN
+          # multicast discovery, no clearnet DNS bootstrap. The two peers can
           # ONLY reach each other through their onion known-peer, so the
-          # session below is unambiguously over Tor (no udp/loopback
-          # shortcut). bootstrap off avoids the hard-coded bootstrap.hbs2.app
-          # UDP ping (which from a loopback socket fails EINVAL and, via
-          # peerThread -> GoAgainException, respawns the peer).
-          listen "127.0.0.1:${toString p.udp}"
-          # TCP stays on loopback: reachable only through the onion service.
+          # session below is unambiguously over Tor. `listen "off"` also
+          # avoids EINVAL when pinging any UDP peer left in brains.db (a send
+          # from a non-routable socket otherwise respawns the peer via
+          # peerThread -> GoAgainException).
+          listen "off"
+          # TCP on loopback: reachable only through the onion service.
           listen-tcp "127.0.0.1:${toString p.tcp}"
           multicast off
           bootstrap off
@@ -194,6 +194,9 @@ in {
                   if [ ! -f "$dir/default.key" ]; then
                     hbs2-peer init "$dir"
                   fi
+                  # start from a clean brains DB so no UDP peers learned in
+                  # earlier (multicast-on) runs linger and muddy the test
+                  rm -f "$dir/brains.db"
                 done
 
                 # wait until Tor has published both onion hostnames

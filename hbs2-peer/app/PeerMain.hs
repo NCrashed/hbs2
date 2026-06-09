@@ -782,7 +782,14 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   let useSocks5  = runReader (cfgValue @PeerTcpSOCKS5) syn
 
-  let listenSa = view listenOn opts <|> listenConf <|> Just "0.0.0.0:7351"
+  -- `listen "off"` disables UDP entirely (TCP-only / onion-only operation):
+  -- with no UDP messaging the dispatch proxy soft-drops UDP-addressed peers
+  -- instead of trying to send from a non-routable socket (which fails EINVAL
+  -- and, via peerThread -> GoAgainException, respawns the peer).
+  let listenSa = case view listenOn opts <|> listenConf of
+                   Just s | s == "off" -> Nothing
+                   Just s              -> Just s
+                   Nothing             -> Just "0.0.0.0:7351"
 
   credFile <- pure (view peerCredFile opts <|> keyConf) `orDie` "credentials not set"
 

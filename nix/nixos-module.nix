@@ -26,7 +26,9 @@ let
     else 0;
 
   configFile = pkgs.writeText "hbs2-peer.conf" ''
-    listen "${bindAddr}:${toString cfg.listenPort}"
+    ${if cfg.enableTor
+      then ''listen "off"''  # onion-only: TCP-only, no UDP socket at all
+      else ''listen "${bindAddr}:${toString cfg.listenPort}"''}
     ${optionalString (cfg.listenTcpPort != null) ''
     listen-tcp "${bindAddr}:${toString cfg.listenTcpPort}"
     ''}
