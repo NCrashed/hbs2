@@ -128,7 +128,8 @@ instance Messaging MessagingUDP L4Proto ByteString where
     -- atomically $ Q0.writeTQueue (inbox bus) (To whom, msg)
     mso <- readTVarIO (sock bus)
     for_ mso $ \so -> do
-      sendAllTo so (LBS.toStrict msg) (view sockAddr whom)
+      -- UDP peers always carry a SockAddr (never a host-name variant)
+      sendAllTo so (LBS.toStrict msg) (_sockAddr whom)
 
   receive bus _ = liftIO do
     -- so <- readTVarIO (sock bus)

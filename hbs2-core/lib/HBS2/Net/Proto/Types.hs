@@ -15,7 +15,9 @@ import Control.Applicative
 import Data.Digest.Murmur32
 import Data.Hashable
 import Data.Kind
+import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Word (Word16)
 import GHC.TypeLits
 import Lens.Micro.Platform
 import Network.Socket
@@ -170,21 +172,34 @@ instance HasPeer L4Proto where
     { _sockType :: L4Proto
     , _sockAddr :: SockAddr
     }
+    -- | A host-name peer (e.g. a @*.onion@ hidden service) that is never
+    --   resolved locally: the name is carried verbatim down to the SOCKS5
+    --   connect, where the proxy resolves it. @_sockType@ is shared with
+    --   'PeerL4' so the @sockType@ lens stays total.
+    | PeerL4Name
+    { _sockType :: L4Proto
+    , _sockHost :: Text
+    , _sockPort :: Word16
+    }
     deriving stock (Eq,Ord,Show,Generic)
 
 instance AddrPriority (Peer L4Proto) where
-  addrPriority (PeerL4 _ sa) = addrPriority sa
+  addrPriority (PeerL4 _ sa)    = addrPriority sa
+  addrPriority (PeerL4Name{})   = 2
 
 instance Hashable (Peer L4Proto) where
-  hashWithSalt salt p = case _sockAddr p of
-    SockAddrInet  pn h     -> hashWithSalt salt (4 :: Int, fromEnum (_sockType p), fromIntegral pn :: Integer, h)
-    SockAddrInet6 pn _ h _ -> hashWithSalt salt (6 :: Int, fromEnum (_sockType p), fromIntegral pn :: Integer, h)
-    SockAddrUnix s         -> hashWithSalt salt ("unix" :: String, s)
+  hashWithSalt salt p = case p of
+    PeerL4 _ (SockAddrInet  pn h)     -> hashWithSalt salt (4 :: Int, fromEnum (_sockType p), fromIntegral pn :: Integer, h)
+    PeerL4 _ (SockAddrInet6 pn _ h _) -> hashWithSalt salt (6 :: Int, fromEnum (_sockType p), fromIntegral pn :: Integer, h)
+    PeerL4 _ (SockAddrUnix s)         -> hashWithSalt salt ("unix" :: String, s)
+    PeerL4Name _ h pn                 -> hashWithSalt salt ("name" :: String, fromEnum (_sockType p), h, pn)
 
 -- FIXME: support-udp-prefix
 instance Pretty (Peer L4Proto) where
   pretty (PeerL4 UDP p) = pretty p
   pretty (PeerL4 TCP p) = "tcp://" <> pretty p
+  pretty (PeerL4Name TCP h p) = "tcp://" <> pretty h <> ":" <> pretty p
+  pretty (PeerL4Name UDP h p) = pretty h <> ":" <> pretty p
 
 instance FromSockAddr 'UDP (Peer L4Proto) where
   fromSockAddr = PeerL4 UDP
@@ -202,10 +217,16 @@ instance (MonadIO m) => IsPeerAddr L4Proto m where
 -- instance MonadIO m => IsPeerAddr L4Proto m where
   data instance PeerAddr L4Proto =
     L4Address L4Proto (IPAddrPort L4Proto)
+    -- | A host-name address (e.g. @*.onion@ or a DNS name) kept unresolved.
+    --   New constructor appended so that the derived 'Serialise' wire encoding
+    --   of the existing 'L4Address' (constructor index 0) is unchanged; old
+    --   peers keep reading clearnet addresses verbatim.
+    | L4AddressName L4Proto Text Word16
     deriving stock (Eq,Ord,Show,Generic)
 
   -- FIXME: backlog-fix-addr-conversion
   toPeerAddr (PeerL4 t p) = pure $ L4Address t (fromString $ show $ pretty p)
+  toPeerAddr (PeerL4Name t h p) = pure $ L4AddressName t h p
   --
 
   -- FIXME: ASAP-tcp-support
@@ -217,21 +238,37 @@ instance (MonadIO m) => IsPeerAddr L4Proto m where
     ai <- liftIO $ parseAddrTCP $ fromString (show (pretty iap))
     pure $ PeerL4 TCP $ addrAddress (head ai)
 
+  -- a host-name peer is never resolved here; the name is handed to the
+  -- SOCKS5 proxy at connect time
+  fromPeerAddr (L4AddressName t h p) = pure $ PeerL4Name t h p
+
 instance Hashable (PeerAddr L4Proto)
 
 instance Pretty (PeerAddr L4Proto) where
   pretty (L4Address UDP a) = pretty a
   pretty (L4Address TCP a) = "tcp://" <> pretty a
+  pretty (L4AddressName TCP h p) = "tcp://" <> pretty h <> ":" <> pretty p
+  pretty (L4AddressName UDP h p) = pretty h <> ":" <> pretty p
 
 instance IsString (PeerAddr L4Proto) where
   fromString s = fromMaybe (error "invalid address") (fromStringMay s)
 
 instance FromStringMaybe (PeerAddr L4Proto) where
-  fromStringMay s | Text.isPrefixOf "tcp://" txt = L4Address TCP <$> fromStringMay addr
+  fromStringMay s | Text.isPrefixOf "tcp://" txt = parseTCP
                   | otherwise                    = L4Address UDP <$> fromStringMay addr
     where
       txt = fromString s :: Text
       addr = Text.unpack $ fromMaybe txt (Text.stripPrefix "tcp://" txt <|> Text.stripPrefix "udp://" txt)
+      -- a numeric IP parses as 'L4Address'; anything else (a DNS name, a
+      -- @.onion@ hidden service) is kept as a name for the proxy to resolve
+      parseTCP = (L4Address TCP <$> fromStringMay addr)
+             <|> (uncurry (L4AddressName TCP) <$> parseHostPort addr)
+
+-- | Parse a @host:port@ pair, keeping the host as an unresolved name.
+parseHostPort :: String -> Maybe (Text, Word16)
+parseHostPort s = do
+  (h, p) <- getHostPort (Text.pack s)
+  pure (Text.pack h, fromIntegral p)
 
 instance Serialise L4Proto
 instance Serialise (PeerAddr L4Proto)

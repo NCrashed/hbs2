@@ -25,6 +25,7 @@ import HBS2.System.Logger.Simple
 
 import Control.Monad.Trans.Maybe
 import Data.Bits
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict (HashMap)
@@ -32,12 +33,17 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashPSQ (HashPSQ)
 import Data.HashPSQ qualified as HPSQ
 import Data.HashSet qualified as HS
+import Data.List (isSuffixOf)
 import Data.Maybe
+import Data.Text qualified as Text
 import Data.Word
 import Lens.Micro.Platform
+import Data.IP (toSockAddr)
 import Network.ByteOrder hiding (ByteString)
 import Network.Simple.TCP
 import Network.Socket hiding (listen,connect)
+import Network.Socks5 (socksConnect, defaultSocksConf)
+import Network.Socks5.Types (SocksAddress(..), SocksHostAddress(..))
 import System.Random hiding (next)
 import Control.Monad.Trans.Cont
 import Control.Exception
@@ -209,7 +215,8 @@ writeTBQueueDropSTM inQLen newInQ bs = do
 
 
 data TCPMessagingError =
-  TCPPeerReadTimeout
+    TCPPeerReadTimeout
+  | TCPOnionWithoutProxy String  -- ^ a .onion target was dialed without a SOCKS5 proxy configured
   deriving stock (Show,Typeable)
 
 instance Exception TCPMessagingError
@@ -220,6 +227,46 @@ tcpPeerKick MessagingTCP{..} p = do
   for_ whoever $ \so -> do
     debug $ "tcpPeerKick" <+> pretty p
     liftIO $ shutdown so ShutdownBoth
+
+-- | Open an outbound TCP connection to (host, port). When a SOCKS5 proxy is
+--   configured, dial through it and let the proxy resolve the host itself (so
+--   that hidden-service names like @*.onion@ work, since they have no local
+--   address). Without a proxy this is a plain TCP connect. The callback
+--   contract matches 'Network.Simple.TCP.connect': the socket is closed when
+--   the callback returns or throws.
+connectTCP :: MonadIO m
+           => Maybe (PeerAddr L4Proto)        -- ^ optional SOCKS5 proxy address
+           -> HostName                        -- ^ destination host (IP or hostname)
+           -> Word16                          -- ^ destination port
+           -> ((Socket, SockAddr) -> IO r)
+           -> m r
+
+connectTCP Nothing host port action
+  -- a .onion name has no clearnet route; fail loudly instead of letting the
+  -- resolver hang on NXDOMAIN
+  | ".onion" `isSuffixOf` host = liftIO $ throwIO (TCPOnionWithoutProxy host)
+  | otherwise                  = liftIO $ connect host (show port) action
+
+connectTCP (Just proxy) host port action = liftIO do
+  proxySA <- proxySockAddr proxy
+  let conf = defaultSocksConf proxySA
+  let dst  = SocksAddress (SocksAddrDomainName (BS8.pack host)) (fromIntegral port)
+  bracket
+    (socksConnect conf dst)
+    (\(so,_) -> close so)
+    -- the proxy address stands in for the (unknowable) remote SockAddr; it is
+    -- used only for debug output downstream
+    (\(so,_) -> action (so, proxySA))
+  where
+    -- a numeric proxy address is turned into a SockAddr purely; a host-name
+    -- proxy (e.g. "localhost:9050") is resolved locally - it is the operator's
+    -- own machine, not the anonymised target
+    proxySockAddr (L4Address _ (IPAddrPort (ip,p))) = pure (toSockAddr (ip, fromIntegral p))
+    proxySockAddr (L4AddressName _ h p) = do
+      let hints = defaultHints { addrSocketType = Stream }
+      getAddrInfo (Just hints) (Just (Text.unpack h)) (Just (show p)) >>= \case
+        (a:_) -> pure (addrAddress a)
+        []    -> ioError (userError ("cannot resolve SOCKS5 proxy host: " <> Text.unpack h))
 
 runMessagingTCP :: forall m . MonadIO m => MessagingTCP -> m ()
 runMessagingTCP env@MessagingTCP{..} = liftIO do
@@ -423,14 +470,16 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
           whoAddr <- toPeerAddr who
 
           liftIO $ newClientThread env $ do
-            let (L4Address _ (IPAddrPort (ip,port))) = whoAddr
-            connect (show ip) (show port) $ \(so, remoteAddr) -> do
+            let (host, port) = case whoAddr of
+                  L4Address _ (IPAddrPort (ip,p)) -> (show ip, p)
+                  L4AddressName _ h p             -> (Text.unpack h, p)
+            connectTCP _tcpSOCKS5 host port $ \(so, remoteAddr) -> do
 
               let ?env = env
 
               flip runContT pure $ callCC \exit -> do
 
-                debug $ "OPEN CLIENT CONNECTION" <+> pretty ip <+> pretty port <+> pretty remoteAddr
+                debug $ "OPEN CLIENT CONNECTION" <+> pretty host <+> pretty port <+> pretty remoteAddr
                 cookie <- handshake Client env so
                 let connId = connectionId cookie myCookie
 
@@ -444,7 +493,7 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
                 liftIO $ _tcpOnClientStarted whoAddr connId
 
                 when here do
-                  debug $ "CLIENT: ALREADY CONNECTED" <+> pretty cookie <+> pretty ip <+> pretty port
+                  debug $ "CLIENT: ALREADY CONNECTED" <+> pretty cookie <+> pretty host <+> pretty port
                   exit ()
 
                 atomically do

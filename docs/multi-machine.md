@@ -94,6 +94,30 @@ The compiled-in default is `bootstrap.hbs2.app`. The domain is
 reserved but the bootstrap node behind it is not deployed yet, so do
 not rely on it; use your own record or `known-peer` for now.
 
+### Approach 3: reaching a peer over Tor (outbound)
+
+When machine A is published as a Tor onion service, machine B can dial
+it without either side revealing its IP, and without any port
+forwarding on A. This covers the outbound direction (B reaching A's
+`.onion`); hosting your own peer as an onion service is a separate
+deployment step covered elsewhere.
+
+On **machine B** you need a running Tor daemon exposing a local SOCKS5
+port (the default is `127.0.0.1:9050`). Point hbs2-peer at it and add
+the onion peer in `~/.config/hbs2-peer/config`:
+```
+tcp.socks5 "127.0.0.1:9050"
+known-peer "tcp://<A-onion-address>.onion:<port>"
+```
+The `.onion` name is never resolved locally: it is handed to the Tor
+proxy verbatim, and Tor resolves and routes it. The same SOCKS5 proxy
+also covers any other `tcp://` peer you list, so you can mix onion and
+clearnet TCP peers.
+
+Restart the peer and confirm the link with `hbs2-peer peers`. If you
+list a `.onion` peer but do not set `tcp.socks5`, the dial fails
+immediately with a clear error instead of hanging on name resolution.
+
 ## Replicate the repository
 
 With the peers connected, clone the repository on **machine B**:

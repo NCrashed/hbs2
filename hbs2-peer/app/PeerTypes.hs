@@ -304,7 +304,8 @@ mkPeerMeta (PeerConfig syn) penv = do
     let mTcpPort :: Maybe Word16
         mTcpPort =
           (
-          fmap (\(L4Address _ (IPAddrPort (_, p))) -> p)
+          fmap (\case L4Address _ (IPAddrPort (_, p)) -> p
+                      L4AddressName _ _ p             -> p)
             . fromStringMay @(PeerAddr L4Proto)
           )
           =<< runReader (cfgValue @PeerListenTCPKey) syn
