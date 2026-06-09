@@ -116,7 +116,9 @@ fillPeerMeta mtcp probePeriod = do
 
                       -- 3) пробить, что есть tcp
                       forM_ (lookupDecode "listen-tcp" (unPeerMeta peerMeta)) \listenTCPPort -> lift do
-                          peerTCPAddrPort <- replacePort p listenTCPPort
+                       mTcpAddr <- replacePort p listenTCPPort
+                       -- skipped for name-carrying (e.g. .onion) peers
+                       forM_ mTcpAddr \peerTCPAddrPort -> do
                           candidate <- fromPeerAddr (L4Address TCP peerTCPAddrPort)
 
                           debug $ "** SENDING PING BASE ON META ** " <+> pretty candidate
@@ -137,10 +139,12 @@ fillPeerMeta mtcp probePeriod = do
                                   addPeers pl [p]
 
                       port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))
+                      -- skipped for name-carrying (e.g. .onion) peers
+                      ipp  <- MaybeT (replacePort p port)
 
                       lift do
 
-                          peerHttpApiAddr <- show . pretty <$> replacePort p port
+                          let peerHttpApiAddr = show (pretty ipp)
                           -- check peerHttpApiAddr
 
                           r :: Maybe () <- runMaybeT do
@@ -166,10 +170,17 @@ fillPeerMeta mtcp probePeriod = do
           _ -> pure ()
 
   where
-    replacePort :: Peer e -> Word16 -> PeerM e IO (IPAddrPort e)
+    -- Returns Nothing for a host-name (e.g. .onion) peer: its address is a
+    -- name, not an IP, so there is nothing to graft the advertised port onto
+    -- (and `read`-ing the name as an IP used to crash this thread). A name
+    -- peer is reached via its onion known-peer, not by reconstructing a
+    -- direct address from peer-meta.
+    replacePort :: Peer e -> Word16 -> PeerM e IO (Maybe (IPAddrPort e))
     replacePort peer port = do
-        IPAddrPort (ip,_port) <- fromString @(IPAddrPort e) . show . pretty <$> toPeerAddr peer
-        pure $ IPAddrPort (ip,port)
+        pa <- toPeerAddr peer
+        pure $ case fromStringMay @(IPAddrPort e) (show (pretty pa)) of
+                 Just (IPAddrPort (ip,_)) -> Just (IPAddrPort (ip, port))
+                 Nothing                  -> Nothing
 
     lookupDecode :: (Eq k, Read v) => k -> [(k, ByteString)] -> Maybe v
     lookupDecode k d =

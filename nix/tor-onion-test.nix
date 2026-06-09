@@ -54,9 +54,15 @@ let
   # onion virtual port both hidden services expose
   vport = 9999;
 
+  # Distinct loopback addresses so that the single-host setup cannot take a
+  # direct-TCP shortcut. An inbound onion connection arrives from the Tor
+  # exit as 127.0.0.1, and peer-meta reconstruction would dial
+  # 127.0.0.1:<listen-tcp>; putting each peer on its own 127.0.0.x means
+  # that reconstructed address points nowhere, so the only working path
+  # between the two is the onion service.
   peers = {
-    alice = { tcp = 10361; udp = 17351; rpc = 13361; };
-    bob   = { tcp = 10362; udp = 17352; rpc = 13362; };
+    alice = { host = "127.0.0.2"; tcp = 10361; udp = 17351; rpc = 13361; };
+    bob   = { host = "127.0.0.3"; tcp = 10362; udp = 17352; rpc = 13362; };
   };
 
   stateDir = name: "/var/lib/hbs2-onion-${name}";
@@ -94,11 +100,11 @@ in {
       relay.onionServices = {
         hbs2-alice = {
           version = 3;
-          map = [ { port = vport; target = { addr = "127.0.0.1"; port = peers.alice.tcp; }; } ];
+          map = [ { port = vport; target = { addr = peers.alice.host; port = peers.alice.tcp; }; } ];
         };
         hbs2-bob = {
           version = 3;
-          map = [ { port = vport; target = { addr = "127.0.0.1"; port = peers.bob.tcp; }; } ];
+          map = [ { port = vport; target = { addr = peers.bob.host; port = peers.bob.tcp; }; } ];
         };
       };
     };
@@ -116,8 +122,9 @@ in {
           # from a non-routable socket otherwise respawns the peer via
           # peerThread -> GoAgainException).
           listen "off"
-          # TCP on loopback: reachable only through the onion service.
-          listen-tcp "127.0.0.1:${toString p.tcp}"
+          # TCP on a per-peer loopback addr (see `peers` note): reachable
+          # only through the onion service.
+          listen-tcp "${p.host}:${toString p.tcp}"
           multicast off
           bootstrap off
           # No HTTP API for the test (default port is 5005 for every peer,
