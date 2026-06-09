@@ -151,7 +151,16 @@ getAllPex2Peers = do
     pl   <- getPeerLocator @e
     pips <- knownPeersForPEX @e pl
     -- FIXME: random-shuffle
-    forM pips toPeerAddr
+    addrs <- forM pips toPeerAddr
+    -- Never gossip name-carrying (e.g. .onion) addresses via PEX: a clearnet
+    -- peer must not learn onion addresses. Selective onion -> onion sharing is
+    -- the job of the network-class PEX policy (PEP-05 Phase 3); until then keep
+    -- onion out of PEX entirely (onion peers are wired with explicit
+    -- known-peer, so nothing that works today depends on gossiping them).
+    pure (filter (not . isNameAddr) addrs)
+  where
+    isNameAddr L4AddressName{} = True
+    isNameAddr _               = False
 
 newtype instance SessionKey e (PeerExchange e) =
   PeerExchangeKey (Nonce (PeerExchange e))

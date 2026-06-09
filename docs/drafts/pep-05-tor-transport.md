@@ -218,6 +218,12 @@ After this a peer operator can ship the config
   hbs2-peer, binds to 127.0.0.1, and sets the onion-only knobs. See
   [`nix/nixos-module.nix`](nix/nixos-module.nix).
 - [`docs/TOR_DEPLOYMENT.md`](docs/TOR_DEPLOYMENT.md): end-to-end recipe.
+- (partial C) conservative anti-leak guard: name-carrying (`.onion`)
+  addresses are now excluded from PEX entirely (`getAllPex2Peers`), so a
+  node never gossips an onion address to anyone, including clearnet peers.
+  An onion node reaching clearnet over Tor is fine; a clearnet node
+  learning onion addresses is not. The selective version (onion -> onion
+  sharing allowed, driven by the network-class policy) is Phase 3.
 - (G) `peer-public-address` (advertising one's own onion) is **deferred
   to Phase 3**: advertising an onion address safely needs the network-class
   PEX policy first, otherwise the onion leaks to clearnet peers that must

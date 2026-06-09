@@ -126,5 +126,8 @@ round-trip time of seconds (Tor circuit latency), not milliseconds.
   hand.
 - Traffic-correlation defenses (padding, timing obfuscation) are out of
   scope here.
-- Automatic onion-address advertisement and cross-class PEX policy are a
-  later phase; until then, wire peers with `known-peer`.
+- Onion addresses are never gossiped via PEX, so a clearnet peer cannot
+  learn them from you. (An onion node reaching clearnet over Tor is fine;
+  a clearnet node learning onion addresses is not.) Automatic
+  onion-address advertisement and selective onion-to-onion PEX are a later
+  phase; until then, wire peers with `known-peer`.
