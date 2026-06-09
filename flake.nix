@@ -75,8 +75,8 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       } {};
       suckless-conf = new.callHackageDirect {
         pkg = "suckless-conf";
-        ver = "0.1.2.11";
-        sha256 = "sha256-J5UJKxsZKEUF0ov77UJe1+WdJbSYxIEVL8ya2ai3as0=";
+        ver = "0.1.2.12";
+        sha256 = "sha256-ZKrN8cHLmUI/oYJjwct+NM911spq5Olz/T2Z1k5OyBk=";
       } {};
       wai-app-file-cgi = dontCoverage (dontCheck (jailbreakUnbreak pkgs old.wai-app-file-cgi));
       libyaml =
