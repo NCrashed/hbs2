@@ -1185,13 +1185,20 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                   debug "sending first peer announce"
                   request localMulticast (PeerAnnounce @e pnonce)
 
+              -- A worker that throws restarts ITSELF (with backoff) instead of
+              -- taking the whole peer down. Async cancellation (shutdown)
+              -- still propagates, and `U.tryAny` only catches synchronous
+              -- exceptions. The old behavior re-spawned the entire peer via
+              -- GoAgainException on any thread exception, so one bad address or
+              -- a transient send error would crash-loop the daemon. GoAgain is
+              -- kept for explicit restarts (RPC), not driven from here.
               let peerThread t mx = ContT $ withAsync $ liftIO $
-                                      withPeerM env mx
-                                       `U.withException` \e -> case fromException e of
-                                          Just (_ :: AsyncCancelled) -> pure ()
-                                          Nothing -> do
-                                            err $ red "Exception" <+> "in thread" <+> pretty t <+> viaShow e
-                                            liftIO $ throwTo myself GoAgainException
+                    fix \again -> U.tryAny (withPeerM env mx) >>= \case
+                      Right{} -> none
+                      Left e  -> do
+                        err $ red "thread" <+> pretty t <+> "crashed; restarting in 5s:" <+> viaShow e
+                        pause @'Seconds 5
+                        again
 
 
               let lwwRefProtoA = lwwRefProto (LWWRefProtoAdapter { lwwFetchBlock = download })
