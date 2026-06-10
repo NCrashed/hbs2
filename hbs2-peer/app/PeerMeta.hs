@@ -138,6 +138,17 @@ fillPeerMeta mtcp probePeriod = do
                                   -- добавить этого пира в pex
                                   addPeers pl [p]
 
+                      -- 3b) the peer announced its own public address (PEP-05 G,
+                      -- e.g. an .onion). Dial it directly: this is how an inbound
+                      -- onion peer becomes known by its real address instead of
+                      -- the Tor exit (127.0.0.1) the connection appears to come
+                      -- from. Only handed to us if we are reachable on its class.
+                      forM_ (lookupDecode "public-address" (unPeerMeta peerMeta)) \pubAddrStr -> lift do
+                        forM_ (fromStringMay @(PeerAddr L4Proto) pubAddrStr) \pa -> do
+                          candidate <- fromPeerAddr pa
+                          debug $ "** PUBLIC ADDRESS FROM META ** " <+> pretty candidate
+                          sendPing candidate
+
                       port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))
                       -- skipped for name-carrying (e.g. .onion) peers
                       ipp  <- MaybeT (replacePort p port)

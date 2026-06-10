@@ -133,6 +133,11 @@ round-trip time of seconds (Tor circuit latency), not milliseconds.
   learns onion addresses, while onion peers can discover each other via
   PEX. (An onion node reaching clearnet over Tor is fine; a clearnet node
   learning onion addresses is not.)
-- Automatic advertisement of your *own* onion address to neighbours
-  (`peer-public-address`) is still a later step; until then announce your
-  `.onion` out of band and peers add it with `known-peer`.
+- You can advertise your own onion to neighbours with
+  `peer-public-address "tcp://<hostname>.onion:<port>"` (repeatable; a
+  bridge can list both a clearnet and an onion address). It is disclosed
+  only to peers that declared they are reachable on that class, so an
+  onion address never reaches a clearnet peer. This lets a peer that
+  connected to you over Tor (and otherwise sees only the Tor exit) learn
+  your real onion, so it can redial you and gossip you via PEX. You still
+  need to seed the first link with `known-peer`.

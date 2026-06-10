@@ -243,14 +243,21 @@ in {
                 # So bob holds carol as a real .onion peer and gossips it to
                 # alice, who has only bob in its own config. alice learning
                 # carol therefore proves onion -> onion PEX.
+                # Each peer also advertises its own .onion via peer-public-address
+                # (PEP-05 G), so an inbound peer (seen as the Tor exit 127.0.0.1)
+                # becomes known by its real onion. It is disclosed only to
+                # onion-capable peers, so it never leaks to clearnet.
                 cp ${mkStaticConfig "alice" peers.alice} "$A_CFG"
                 echo "known-peer \"tcp://$BOB_ONION:${toString vport}\"" >> "$A_CFG"
+                echo "peer-public-address \"tcp://$ALICE_ONION:${toString vport}\"" >> "$A_CFG"
 
                 cp ${mkStaticConfig "bob" peers.bob} "$B_CFG"
                 echo "known-peer \"tcp://$CAROL_ONION:${toString vport}\"" >> "$B_CFG"
+                echo "peer-public-address \"tcp://$BOB_ONION:${toString vport}\"" >> "$B_CFG"
 
                 # carol is passive: no known-peer, only reached by bob
                 cp ${mkStaticConfig "carol" peers.carol} "$C_CFG"
+                echo "peer-public-address \"tcp://$CAROL_ONION:${toString vport}\"" >> "$C_CFG"
 
                 chmod 0644 "$A_CFG" "$B_CFG" "$C_CFG"
                 chown -R ${user}:${user} \

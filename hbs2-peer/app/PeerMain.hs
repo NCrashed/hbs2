@@ -971,7 +971,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   proxyThread <- liftIO $ async $ runDispatchProxy proxy
 
-  let peerMeta = mkPeerMeta conf penv
+  -- meta served over the local HTTP API: clearnet recipient, so no onion
+  -- public-address is disclosed
+  let peerMetaHttp = mkPeerMeta conf penv (Set.fromList [Clearnet])
 
   nbcache <- liftIO $ Cache.newCache (Just $ toTimeSpec ( 600 :: Timeout 'Seconds))
 
@@ -1205,7 +1207,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "byPassWorker" (byPassWorker byPass)
 
-                peerThread "httpWorker" (httpWorker conf peerMeta)
+                peerThread "httpWorker" (httpWorker conf peerMetaHttp)
 
                 metricsProbe <- newSimpleProbe "ghc.runtime"
                 addProbe metricsProbe
@@ -1265,7 +1267,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     , makeResponse peerExchangeProto
                     , makeResponse refLogUpdateProto
                     , makeResponse (refLogRequestProto reflogReqAdapter)
-                    , makeResponse (peerMetaProto peerMeta)
+                    , makeResponse (peerMetaProto (mkPeerMeta conf penv))
                     , makeResponse (refChanHeadProto False refChanAdapter)
                     , makeResponse (refChanUpdateProto False pc refChanAdapter)
                     , makeResponse (refChanRequestProto False refChanAdapter)

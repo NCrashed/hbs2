@@ -7,6 +7,7 @@ import HBS2.Hash
 import HBS2.Merkle
 import HBS2.Net.Proto
 import HBS2.Peer.Proto.Peer
+import HBS2.Data.Types.Peer (_peerReachableVia)
 import HBS2.Net.Proto.Sessions
 import HBS2.Prelude.Plated
 
@@ -20,6 +21,7 @@ import Data.ByteString ( ByteString )
 import Data.ByteString.Lazy qualified as LBS
 import Data.Functor
 import Data.Maybe
+import Data.Set (Set)
 import Data.Text.Encoding qualified as TE
 
 instance HasProtocol L4Proto (PeerMetaProto L4Proto) where
@@ -51,19 +53,22 @@ peerMetaProto :: forall e m proto  . ( MonadIO m
                                      , Pretty (Peer e)
                                      , proto ~ PeerMetaProto e
                                      )
-               => AnnMetaData
+               => (Set NetworkClass -> AnnMetaData)
+                  -- ^ build the meta given the recipient's reachable classes
                -> PeerMetaProto e
                -> m ()
 
-peerMetaProto peerMeta =
+peerMetaProto mkMeta =
   \case
     GetPeerMeta -> do
       p <- thatPeer @proto
-      auth <- find (KnownPeerKey p) id <&> isJust
-      when auth do
-        debug $ "PEER META: ANSWERING" <+> pretty p <+> viaShow peerMeta
+      -- only answer authenticated peers; the recipient's declared classes
+      -- gate which of our addresses we disclose (PEP-05 G)
+      find (KnownPeerKey p) id >>= mapM_ \pd -> do
+        let meta = mkMeta (_peerReachableVia pd)
+        debug $ "PEER META: ANSWERING" <+> pretty p <+> viaShow meta
         deferred @proto do
-          response (ThePeerMeta @e peerMeta)
+          response (ThePeerMeta @e meta)
 
     ThePeerMeta meta -> do
       that <- thatPeer @proto

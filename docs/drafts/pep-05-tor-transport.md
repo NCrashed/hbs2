@@ -224,10 +224,8 @@ After this a peer operator can ship the config
   An onion node reaching clearnet over Tor is fine; a clearnet node
   learning onion addresses is not. The selective version (onion -> onion
   sharing allowed, driven by the network-class policy) is Phase 3.
-- (G) `peer-public-address` (advertising one's own onion) is **deferred
-  to Phase 3**: advertising an onion address safely needs the network-class
-  PEX policy first, otherwise the onion leaks to clearnet peers that must
-  not see it. Until then peers are wired with explicit `known-peer`.
+- (G) `peer-public-address` was deferred until the network-class policy
+  existed; now DONE - see Phase 3 below.
 
 **Phase 3: PEX policy + capability handshake. DONE (B + C).**
 - (B) `PeerData` (the `PeerPong` payload) carries `reachableVia ::
@@ -245,8 +243,22 @@ After this a peer operator can ship the config
   from the address (`classOf`, `.onion` -> `Onion`), not stored on it, and
   the Phase-1 name variant already serialises compatibly.
 - `PROTOCOL.md` updated with the hand-rolled `PeerData` versioning.
-- Still open: `peer-public-address` self-advertisement, and broader
-  isolation tests.
+
+**(G) peer-public-address. DONE.**
+- A node advertises its own public address(es) via the `peer-public-address`
+  config key (repeatable; e.g. a bridge sets a clearnet and an onion one).
+- Disclosed through peer-meta, but class-gated: `mkPeerMeta` includes an
+  address only if its class is in the *recipient's* `reachableVia`, so an
+  onion address is handed only to onion-capable peers and never reaches a
+  clearnet peer (verified: a `{Clearnet}` recipient gets nothing, an
+  `{Onion}` recipient gets the onion). `peerMetaProto` now builds the meta
+  per requester from its handshake-declared classes.
+- The receiver (`fillPeerMeta`) dials the announced address directly. This
+  is how an inbound onion peer - which otherwise appears only as the Tor
+  exit `127.0.0.1` - becomes known by its real `.onion`, so it can be
+  redialed and gossiped via PEX.
+- Still open: broader isolation tests; and the RPC peer-introspection bug
+  found while testing (see docs/notes/rpc-peer-locator-divergence.md).
 
 **Phase 4: logging / debug audit (half a day).**
 - Walk through `debug $ ... pretty pip` in hbs2-peer.

@@ -51,6 +51,7 @@ data PeerDownloadThreadKey
 data PeerMulticastKey
 data PeerBootstrapKey
 data PeerNetworkClassKey
+data PeerPublicAddressKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -99,6 +100,14 @@ instance HasCfgKey PeerBootstrapKey b where
 -- policy (PEP-05): `clearnet` (default), `onion`, or `bridge` (both).
 instance HasCfgKey PeerNetworkClassKey (Maybe String) where
   key = "network-class"
+
+-- The node's own public address(es), advertised in peer-meta so neighbours
+-- can reach it even when the connection arrives via a relay/exit (PEP-05 G).
+-- An onion address is only handed to onion-capable peers (network-class
+-- policy), so it never leaks to clearnet. Repeatable; e.g. a bridge sets both
+-- a clearnet and an onion address.
+instance HasCfgKey PeerPublicAddressKey (Set String) where
+  key = "peer-public-address"
 
 
 
