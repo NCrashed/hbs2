@@ -765,6 +765,13 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   let traceConf       = runReader (cfgValue @PeerTraceKey)   syn
   let debugConf       = runReader (cfgValue @PeerDebugKey)   syn :: FeatureSwitch
   let trace1Conf      = runReader (cfgValue @PeerTrace1Key)  syn :: FeatureSwitch
+  let multicastOn     = runReader (cfgValue @PeerMulticastKey) syn == FeatureOn
+  let bootstrapOn     = runReader (cfgValue @PeerBootstrapKey) syn == FeatureOn
+  -- how this node declares itself reachable, for the PEX policy (PEP-05)
+  let ownReachableVia = case runReader (cfgValue @PeerNetworkClassKey) syn of
+                          Just "onion"  -> Set.fromList [Onion]
+                          Just "bridge" -> Set.fromList [Clearnet, Onion]
+                          _             -> Set.fromList [Clearnet]
   let helpFetchKeys   = runReader (cfgValue @PeerProxyFetchKey) syn & toKeys
   let tcpListen       = runReader (cfgValue @PeerListenTCPKey) syn & fromMaybe ""
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
@@ -780,7 +787,14 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   let useSocks5  = runReader (cfgValue @PeerTcpSOCKS5) syn
 
-  let listenSa = view listenOn opts <|> listenConf <|> Just "0.0.0.0:7351"
+  -- `listen "off"` disables UDP entirely (TCP-only / onion-only operation):
+  -- with no UDP messaging the dispatch proxy soft-drops UDP-addressed peers
+  -- instead of trying to send from a non-routable socket (which fails EINVAL
+  -- and, via peerThread -> GoAgainException, respawns the peer).
+  let listenSa = case view listenOn opts <|> listenConf of
+                   Just s | s == "off" -> Nothing
+                   Just s              -> Just s
+                   Nothing             -> Just "0.0.0.0:7351"
 
   credFile <- pure (view peerCredFile opts <|> keyConf) `orDie` "credentials not set"
 
@@ -957,7 +971,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   proxyThread <- liftIO $ async $ runDispatchProxy proxy
 
-  let peerMeta = mkPeerMeta conf penv
+  -- meta served over the local HTTP API: clearnet recipient, so no onion
+  -- public-address is disclosed
+  let peerMetaHttp = mkPeerMeta conf penv (Set.fromList [Clearnet])
 
   nbcache <- liftIO $ Cache.newCache (Just $ toTimeSpec ( 600 :: Timeout 'Seconds))
 
@@ -1048,7 +1064,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     tv <- lift $ fetch True def (PeerInfoKey p) (view peerRTTBuffer)
                     insertRTT rttNew tv
 
-              let hshakeAdapter = PeerHandshakeAdapter addNewRtt
+              let hshakeAdapter = PeerHandshakeAdapter addNewRtt ownReachableVia
 
               env <- ask
 
@@ -1163,10 +1179,11 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                                     doAddPeer p
 
 
-              void $ liftIO $ async $ withPeerM env do
-                pause @'Seconds 3
-                debug "sending first peer announce"
-                request localMulticast (PeerAnnounce @e pnonce)
+              when multicastOn $
+                void $ liftIO $ async $ withPeerM env do
+                  pause @'Seconds 3
+                  debug "sending first peer announce"
+                  request localMulticast (PeerAnnounce @e pnonce)
 
               let peerThread t mx = ContT $ withAsync $ liftIO $
                                       withPeerM env mx
@@ -1185,11 +1202,12 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 mcastProbe <- newSimpleProbe "PeerEnv_Announce"
                 addProbe mcastProbe
 
-                peerThread "multicastWorker" $ multicastWorker conf env mcastProbe
+                when multicastOn $
+                  void $ peerThread "multicastWorker" $ multicastWorker conf env mcastProbe
 
                 peerThread "byPassWorker" (byPassWorker byPass)
 
-                peerThread "httpWorker" (httpWorker conf peerMeta)
+                peerThread "httpWorker" (httpWorker conf peerMetaHttp)
 
                 metricsProbe <- newSimpleProbe "ghc.runtime"
                 addProbe metricsProbe
@@ -1207,7 +1225,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "knownPeersPingLoop" (knownPeersPingLoop @e conf (SomeBrains brains))
 
-                peerThread "bootstrapDnsLoop" (bootstrapDnsLoop @e conf)
+                when bootstrapOn $
+                  void $ peerThread "bootstrapDnsLoop" (bootstrapDnsLoop @e conf)
 
                 peerThread "pexLoop" (pexLoop @e brains tcp)
 
@@ -1248,7 +1267,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     , makeResponse peerExchangeProto
                     , makeResponse refLogUpdateProto
                     , makeResponse (refLogRequestProto reflogReqAdapter)
-                    , makeResponse (peerMetaProto peerMeta)
+                    , makeResponse (peerMetaProto (mkPeerMeta conf penv))
                     , makeResponse (refChanHeadProto False refChanAdapter)
                     , makeResponse (refChanUpdateProto False pc refChanAdapter)
                     , makeResponse (refChanRequestProto False refChanAdapter)

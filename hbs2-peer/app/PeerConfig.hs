@@ -48,6 +48,10 @@ data PeerTrace1Key
 data PeerProxyFetchKey
 data PeerTcpSOCKS5
 data PeerDownloadThreadKey
+data PeerMulticastKey
+data PeerBootstrapKey
+data PeerNetworkClassKey
+data PeerPublicAddressKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -79,6 +83,31 @@ instance HasCfgKey PeerTcpSOCKS5 (Maybe String) where
 
 instance HasCfgKey PeerDownloadThreadKey (Maybe Int) where
   key = "download-threads"
+
+-- Local UDP multicast peer discovery. On by default; `multicast off`
+-- disables it (needed for a clean onion-only / Tor deployment, where
+-- LAN discovery both leaks reachability and bypasses the onion transport).
+instance HasCfgKey PeerMulticastKey b where
+  key = "multicast"
+
+-- DNS bootstrap loop (always includes the hard-coded bootstrap.hbs2.app).
+-- On by default; `bootstrap off` disables it, so an onion-only peer does
+-- not phone clearnet seeds over UDP.
+instance HasCfgKey PeerBootstrapKey b where
+  key = "bootstrap"
+
+-- How this node is reachable, declared in the handshake and used by the PEX
+-- policy (PEP-05): `clearnet` (default), `onion`, or `bridge` (both).
+instance HasCfgKey PeerNetworkClassKey (Maybe String) where
+  key = "network-class"
+
+-- The node's own public address(es), advertised in peer-meta so neighbours
+-- can reach it even when the connection arrives via a relay/exit (PEP-05 G).
+-- An onion address is only handed to onion-capable peers (network-class
+-- policy), so it never leaks to clearnet. Repeatable; e.g. a bridge sets both
+-- a clearnet and an onion address.
+instance HasCfgKey PeerPublicAddressKey (Set String) where
+  key = "peer-public-address"
 
 
 
@@ -117,6 +146,24 @@ instance {-# OVERLAPPABLE #-} (HasConf m, HasCfgKey a b) => HasCfgValue a Featur
     where
       val syn = [ if e == "on" then FeatureOn else FeatureOff
                 | ListVal (Key s [SymbolVal e]) <- syn, s == key @a @b
+                ]
+
+-- These two default to FeatureOn (absence means enabled, preserving the
+-- historical behavior): only an explicit `off` disables them.
+instance {-# OVERLAPPING #-} HasConf m
+  => HasCfgValue PeerMulticastKey FeatureSwitch m where
+  cfgValue = lastDef FeatureOn . val <$> getConf
+    where
+      val syn = [ if e == "off" then FeatureOff else FeatureOn
+                | ListVal (Key s [SymbolVal e]) <- syn, s == key @PeerMulticastKey @FeatureSwitch
+                ]
+
+instance {-# OVERLAPPING #-} HasConf m
+  => HasCfgValue PeerBootstrapKey FeatureSwitch m where
+  cfgValue = lastDef FeatureOn . val <$> getConf
+    where
+      val syn = [ if e == "off" then FeatureOff else FeatureOn
+                | ListVal (Key s [SymbolVal e]) <- syn, s == key @PeerBootstrapKey @FeatureSwitch
                 ]
 
 

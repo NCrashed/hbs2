@@ -194,38 +194,71 @@ apparently happens automatically.
 Phased plan
 ===========
 
-**Phase 1: outbound Tor (1-3 days).** Changes in hbs2-core/hbs2-peer:
-- (A) the `PeerAddr` parser accepts `.onion` hosts + a `NetworkClass`
-  field.
-- (E) verification of the SOCKS5 path with onion hosts.
-- README/QUICKSTART: a "tor-outbound" recipe with `tcp.socks5`.
+**Phase 1: outbound Tor (1-3 days). DONE.** Changes in
+hbs2-core/hbs2-peer:
+- (A) the `PeerAddr` parser accepts `.onion` hosts (as a name-carrying
+  variant). The `NetworkClass` tag itself is deferred to Phase 3, where
+  it is needed (for the PEX policy); outbound dialing does not require it.
+- (E) SOCKS5 path with onion hosts, verified live against a real Tor
+  daemon.
+- A "tor-outbound" recipe with `tcp.socks5` (in `docs/multi-machine.md`,
+  "Approach 3").
 
 After this a peer operator can ship the config
 `tcp.socks5 = "127.0.0.1:9050"` and have
 `known-peer "tcp://xxx.onion:443"`; it all already works.
 
-**Phase 2: inbound Tor + listen hardening (2-5 days).**
-- (F) verify a TCP-only peer works correctly.
-- (G) a `peer-public-address` config key + removal of automatic
-  announces of the local address.
-- NixOS module: an option `enableTor = true` that applies
-  `services.tor.enable` + a HiddenService for hbs2-peer + listening on
-  127.0.0.1. This module lives next to
+**Phase 2: inbound Tor + listen hardening. DONE (except G).**
+- (F) onion-only / TCP-only operation: two config gates, `multicast off`
+  and `bootstrap off`, let a peer run without LAN discovery or the
+  hard-coded clearnet DNS bootstrap (both otherwise crash or leak on a
+  Tor-only host).
+- NixOS module: `services.hbs2-peer.enableTor = true` applies
+  `services.tor.enable` + `client.enable` + a v3 HiddenService for
+  hbs2-peer, binds to 127.0.0.1, and sets the onion-only knobs. See
   [`nix/nixos-module.nix`](nix/nixos-module.nix).
-- A document `docs/TOR_DEPLOYMENT.md` with an end-to-end recipe
-  (tor-only, NAT traversal without revealing the IP).
+- [`docs/TOR_DEPLOYMENT.md`](docs/TOR_DEPLOYMENT.md): end-to-end recipe.
+- (partial C) conservative anti-leak guard: name-carrying (`.onion`)
+  addresses are now excluded from PEX entirely (`getAllPex2Peers`), so a
+  node never gossips an onion address to anyone, including clearnet peers.
+  An onion node reaching clearnet over Tor is fine; a clearnet node
+  learning onion addresses is not. The selective version (onion -> onion
+  sharing allowed, driven by the network-class policy) is Phase 3.
+- (G) `peer-public-address` was deferred until the network-class policy
+  existed; now DONE - see Phase 3 below.
 
-**Phase 3: PEX policy + capability handshake (1-2 weeks).**
-This is a protocol change, done carefully:
-- (B) extend the `PeerHandshake` payload with a `reachableVia` field,
-  with a fallback for old peers.
-- (C) implement the filter when building `PeerAnnounce` /
-  `PeerExchange`.
-- Serialisation (A): versioning of the `PeerAddr` Serialise.
-- Update the table in [`PROTOCOL.md`](PROTOCOL.md) ProtocolId (4 and
-  5/6) with a note on the payload version.
-- Isolation tests: tor-only A + clearnet-only B, verify that B does
-  not receive onion addresses through PEX from their shared bridge.
+**Phase 3: PEX policy + capability handshake. DONE (B + C).**
+- (B) `PeerData` (the `PeerPong` payload) carries `reachableVia ::
+  Set NetworkClass`, declared from the `network-class` config key
+  (`clearnet` default | `onion` | `bridge`). Backward-compatible
+  hand-rolled `Serialise`: the original two fields are written verbatim
+  and the set appended, so old peers ignore the trailing bytes and new
+  peers reading old data default to `{Clearnet}` (verified by round-trip).
+- (C) `getAllPex2Peers` forwards an address to a recipient only if
+  `classOf addr` is in the recipient's declared `reachableVia` (looked up
+  from its `KnownPeer` session; unknown/old -> `{Clearnet}`). This
+  replaces the Phase-2 blanket onion exclusion with the selective rule:
+  onion -> onion is allowed, clearnet never receives onion.
+- (A) No `PeerAddr` Serialise change was needed: the class is *derived*
+  from the address (`classOf`, `.onion` -> `Onion`), not stored on it, and
+  the Phase-1 name variant already serialises compatibly.
+- `PROTOCOL.md` updated with the hand-rolled `PeerData` versioning.
+
+**(G) peer-public-address. DONE.**
+- A node advertises its own public address(es) via the `peer-public-address`
+  config key (repeatable; e.g. a bridge sets a clearnet and an onion one).
+- Disclosed through peer-meta, but class-gated: `mkPeerMeta` includes an
+  address only if its class is in the *recipient's* `reachableVia`, so an
+  onion address is handed only to onion-capable peers and never reaches a
+  clearnet peer (verified: a `{Clearnet}` recipient gets nothing, an
+  `{Onion}` recipient gets the onion). `peerMetaProto` now builds the meta
+  per requester from its handshake-declared classes.
+- The receiver (`fillPeerMeta`) dials the announced address directly. This
+  is how an inbound onion peer - which otherwise appears only as the Tor
+  exit `127.0.0.1` - becomes known by its real `.onion`, so it can be
+  redialed and gossiped via PEX.
+- Still open: broader isolation tests; and the RPC peer-introspection bug
+  found while testing (see docs/notes/rpc-peer-locator-divergence.md).
 
 **Phase 4: logging / debug audit (half a day).**
 - Walk through `debug $ ... pretty pip` in hbs2-peer.

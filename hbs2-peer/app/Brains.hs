@@ -106,8 +106,8 @@ instance ( Hashable (Peer e)
          , ForRefChans e
          ) => HasBrains e (BasicBrains e) where
 
-  onClientTCPConnected br pa@(L4Address proto _) ssid = do
-    debug $ "BRAINS: onClientTCPConnected" <+> pretty proto <+> pretty pa <+> pretty ssid
+  onClientTCPConnected br pa ssid = do
+    debug $ "BRAINS: onClientTCPConnected" <+> pretty pa <+> pretty ssid
     updateOP br $ insertClientTCP br pa ssid
     commitNow br False
 
@@ -408,6 +408,15 @@ insertClientTCP br pa@(L4Address TCP (IPAddrPort (h,p))) ssid  = do
     on conflict (peer) do update set ssid = excluded.ssid
   |] (show $ pretty pa, ssid, show (pretty h), p)
 
+-- a host-name (e.g. .onion) TCP peer: store the name in the ip column so the
+-- session round-trips like a clearnet one
+insertClientTCP br pa@(L4AddressName TCP h p) ssid  = do
+  let conn = view brainsDb br
+  void $ liftIO $ execute conn [qc|
+    insert into tcpclient (peer,ssid,ip,port) values (?,?,?,?)
+    on conflict (peer) do update set ssid = excluded.ssid
+  |] (show $ pretty pa, ssid, Text.unpack h, p)
+
 insertClientTCP _ _ _ = pure ()
 
 selectClientTCP :: BasicBrains L4Proto -> IO [(PeerAddr L4Proto, Word64)]
@@ -521,6 +530,15 @@ insertKnownPeer br peer@(L4Address _ (IPAddrPort (i,a))) = do
     DO NOTHING
   |] (show $ pretty peer, show (pretty i), a)
 
+insertKnownPeer br peer@(L4AddressName _ h a) = do
+  let conn = view brainsDb br
+  void $ liftIO $ execute conn [qc|
+    INSERT INTO knownpeer (peer,ip,port)
+    VALUES (?,?,?)
+    ON CONFLICT (peer)
+    DO NOTHING
+  |] (show $ pretty peer, Text.unpack h, a)
+
 
 deleteKnownPeers :: forall e . e ~ L4Proto
                  => BasicBrains e
@@ -577,6 +595,7 @@ updateTCPSessions br ssids = do
 
   where
     ip (a@(L4Address _ (IPAddrPort (i,p))), s) = (a,s,show $ pretty i,p)
+    ip (a@(L4AddressName _ h p), s)            = (a,s,Text.unpack h,p)
 
 newtype DBData a = DBData { fromDBData :: a }
 

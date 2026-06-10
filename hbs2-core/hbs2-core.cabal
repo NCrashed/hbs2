@@ -186,6 +186,7 @@ library
                     , saltine >=0.2.0.1
                     , serialise
                     , sockaddr
+                    , socks
                     , split
                     , stm
                     , stm-chans

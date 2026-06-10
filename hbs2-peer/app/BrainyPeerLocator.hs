@@ -47,7 +47,7 @@ instance (Ord (Peer L4Proto), Pretty (Peer L4Proto)) => PeerLocator L4Proto Brai
     excl <- liftIO $ readTVarIO e
 
     pips <- knownPeers @L4Proto l
-            <&> filter udpOnly
+            <&> filter shareable
             <&> Set.fromList
 
     tcp <- listTCPPexCandidates @L4Proto br
@@ -63,8 +63,14 @@ instance (Ord (Peer L4Proto), Pretty (Peer L4Proto)) => PeerLocator L4Proto Brai
     pure what
 
     where
-      udpOnly = \case
+      -- in-memory candidates worth gossiping: clearnet UDP peers, and
+      -- name-carrying (e.g. .onion) peers, which are stable dialable
+      -- addresses. Ephemeral inbound TCP peers (PeerL4 TCP, e.g. a Tor exit
+      -- at 127.0.0.1:<random>) are left out. The PEX network-class filter in
+      -- getAllPex2Peers then decides who may actually receive each address.
+      shareable = \case
         (PeerL4 UDP _) -> True
+        (PeerL4Name{}) -> True
         _              -> False
 
 

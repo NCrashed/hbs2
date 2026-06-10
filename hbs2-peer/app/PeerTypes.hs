@@ -295,8 +295,12 @@ getKnownPeers  = do
     maybe1 pd' (pure mempty) (const $ pure [p])
   pure $ mconcat r
 
-mkPeerMeta :: PeerConfig -> PeerEnv e -> AnnMetaData
-mkPeerMeta (PeerConfig syn) penv = do
+-- | Build the peer-meta announced to a neighbour. The neighbour's reachable
+--   network classes gate which of our own public addresses we disclose: an
+--   onion address is handed only to onion-capable peers, so a clearnet peer
+--   never learns it (PEP-05 G + the network-class policy).
+mkPeerMeta :: PeerConfig -> PeerEnv e -> Set NetworkClass -> AnnMetaData
+mkPeerMeta (PeerConfig syn) penv recipientClasses = do
 
     let mHttpPort :: Maybe Integer
         mHttpPort = coerce $ runReader (cfgValue @PeerHttpPortKey @PeerHttpPort) syn
@@ -304,13 +308,25 @@ mkPeerMeta (PeerConfig syn) penv = do
     let mTcpPort :: Maybe Word16
         mTcpPort =
           (
-          fmap (\(L4Address _ (IPAddrPort (_, p))) -> p)
+          fmap (\case L4Address _ (IPAddrPort (_, p)) -> p
+                      L4AddressName _ _ p             -> p)
             . fromStringMay @(PeerAddr L4Proto)
           )
           =<< runReader (cfgValue @PeerListenTCPKey) syn
+
+    -- our own public address(es); disclose the first one whose class the
+    -- recipient can actually reach
+    let mPubAddr :: Maybe String
+        mPubAddr = listToMaybe
+          [ a | a <- Set.toList (runReader (cfgValue @PeerPublicAddressKey) syn)
+              , Just pa <- [fromStringMay @(PeerAddr L4Proto) a]
+              , classOf pa `Set.member` recipientClasses
+          ]
+
     annMetaFromPeerMeta . PeerMeta $ W.execWriter do
       mHttpPort `forM` \p -> elem "http-port" (TE.encodeUtf8 . Text.pack . show $ p)
       mTcpPort `forM` \p -> elem "listen-tcp" (TE.encodeUtf8 . Text.pack . show $ p)
+      mPubAddr `forM` \a -> elem "public-address" (TE.encodeUtf8 . Text.pack . show $ a)
 
   where
     elem k = W.tell . L.singleton . (k ,)

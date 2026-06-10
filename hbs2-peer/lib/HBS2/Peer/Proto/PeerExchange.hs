@@ -4,8 +4,12 @@ module HBS2.Peer.Proto.PeerExchange where
 import HBS2.Prelude.Plated
 import HBS2.Net.Proto
 import HBS2.Peer.Proto.Peer
+import HBS2.Data.Types.Peer (PeerData(..))
 import HBS2.Net.PeerLocator
 import HBS2.Net.Proto.Sessions
+
+import Data.Set qualified as Set
+import Data.Set (Set)
 import HBS2.Events
 import HBS2.Clock
 import HBS2.Defaults
@@ -115,7 +119,13 @@ peerExchangeProto msg = do
           response (PeerExchangePeers @e n pa)
 
         PEX2 -> do
-          pa <- take defPexMaxPeers <$> getAllPex2Peers
+          -- PEP-05 PEX policy: forward an address to `that` only if `that`
+          -- declared (in its handshake) that it is reachable on the address's
+          -- network class. Unknown / old peers default to {Clearnet}, so they
+          -- never receive .onion addresses.
+          rv <- find (KnownPeerKey that) id
+                  <&> maybe (Set.singleton Clearnet) _peerReachableVia
+          pa <- take defPexMaxPeers <$> getAllPex2Peers rv
           response (PeerExchangePeers2 @e n pa)
 
 getAllPex1Peers :: forall e m .
@@ -146,12 +156,16 @@ getAllPex2Peers :: forall e m .
   , PexInfoContext e m
   , e ~ L4Proto
   )
-  => m [PeerAddr L4Proto]
-getAllPex2Peers = do
+  => Set NetworkClass    -- ^ network classes the recipient is reachable on
+  -> m [PeerAddr L4Proto]
+getAllPex2Peers recipientClasses = do
     pl   <- getPeerLocator @e
     pips <- knownPeersForPEX @e pl
     -- FIXME: random-shuffle
-    forM pips toPeerAddr
+    addrs <- forM pips toPeerAddr
+    -- forward an address only to a recipient that can reach its class, so a
+    -- clearnet peer never learns .onion addresses (PEP-05 PEX policy)
+    pure (filter (\a -> classOf a `Set.member` recipientClasses) addrs)
 
 newtype instance SessionKey e (PeerExchange e) =
   PeerExchangeKey (Nonce (PeerExchange e))
