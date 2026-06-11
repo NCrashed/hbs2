@@ -14,6 +14,7 @@ import HBS2.Peer.RPC.Client.Unix
 
 import Options.Applicative
 import Data.Kind
+import Data.Maybe (fromMaybe)
 import Lens.Micro.Platform
 import UnliftIO
 
@@ -34,13 +35,15 @@ withMyRPC :: forall (api :: [Type]) m . ( MonadUnliftIO m
 
 withMyRPC o m = do
   conf  <- peerConfigRead (view rpcOptConf o)
-  let soname = getRpcSocketName conf
+  -- -r/--rpc, when given, is the path to the peer's RPC unix socket and
+  -- overrides the config default; this is how you target a specific peer.
+  let soname = fromMaybe (getRpcSocketName conf) (view rpcOptAddr o)
   withRPC2 @api  @UNIX soname m
 
 withRPCMessaging :: MonadIO m => RPCOpt -> (MessagingUnix  -> m ()) -> m ()
 withRPCMessaging o action = do
   conf  <- peerConfigRead (view rpcOptConf o)
-  let soname = getRpcSocketName conf
+  let soname = fromMaybe (getRpcSocketName conf) (view rpcOptAddr o)
   client1 <- newMessagingUnix False 1.0 soname
   m1 <- liftIO $ async $ runMessagingUnix client1
   link m1
@@ -50,7 +53,7 @@ withRPCMessaging o action = do
 
 rpcOpt :: Parser String
 rpcOpt = strOption ( short 'r' <> long "rpc"
-                               <> help "addr:port" )
+                               <> help "path to the peer RPC unix socket (overrides config)" )
 
 -- FIXME: options-duped-with-peer-main
 confOpt :: Parser FilePath

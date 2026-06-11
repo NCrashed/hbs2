@@ -1,103 +1,78 @@
-# BUG: RPC peer introspection shows a different peer set than the live daemon
+# RESOLVED (not a daemon bug): RPC peer introspection appeared to diverge from the live daemon
 
-Status: open, not yet root-caused. Observability-only (does not affect protocol
-behavior). Pre-existing; surfaced while testing PEP-05 Phase 3 (onion PEX).
+Status: resolved 2026-06-10. Root cause was a diagnostic / test-environment
+artifact plus a dead CLI option, NOT a peer-locator split in the daemon. No
+protocol or observability defect exists in hbs2-peer. Surfaced while testing
+PEP-05 Phase 3 (onion PEX).
 
-## Summary
+## What looked like the bug
 
-`hbs2-peer peers`, `hbs2-peer pexinfo` and `hbs2-peer do peer-info` (all served
-over the RPC) report a peer set that diverges from the one the running daemon
-actually uses in its protocol threads. On a Tor onion-only node this is glaring:
-the RPC does not list the `.onion` peers the daemon is actively connected to,
-and instead lists "dead" clearnet UDP peers that cannot have a live session
-(UDP is disabled on such a node). An operator diagnosing an onion node with
-`hbs2-peer peers` therefore sees a misleading, stale picture.
+On the 3-peer onion harness, `hbs2-peer peers` / `pexinfo` / `do peer-info`
+(served over the RPC) reported a peer set that diverged from the one the running
+daemon used in its protocol threads: the RPC listed "dead" clearnet UDP peers
+and never listed the `.onion` peers the daemon was actively connected to, while
+the journal stat lines (`peerPingLoop`) showed the correct live onion set. The
+split was consistent across simultaneous samples, which ruled out timing.
 
-The actual protocol is unaffected: the PEX policy works (an onion node really
-does learn and dial other onion nodes via PEX). Only the RPC introspection is
-wrong.
+## Root cause
 
-## Impact
+The CLI was talking to a **different daemon** than the one whose journal we were
+reading. Two independent facts combined:
 
-- `hbs2-peer peers` / `pexinfo` / `peer-info` are untrustworthy for diagnosing
-  connectivity, especially on Tor/onion deployments.
-- `pexinfo` in particular misrepresents what the node would gossip.
-- No functional/security impact found: the real PEX handler operates on the
-  correct (live) locator.
+1. **`-r/--rpc` was a dead option.** `withMyRPC` / `withRPCMessaging` in
+   `hbs2-peer/app/CLI/Common.hs` resolved the RPC socket purely from
+   `getRpcSocketName conf` and never read `_rpcOptAddr`. So `hbs2-peer peers -r
+   127.0.0.1:13362` silently ignored the `-r` target.
 
-## Evidence (reproduced on the 3-peer onion harness, nix/tor-onion-test.nix)
+2. **`getRpcSocketName` only honors `rpc unix "<path>"`.** It pattern-matches
+   `ListVal (Key "rpc" [SymbolVal "unix", LitStrVal n])` and otherwise falls back
+   to the default `/tmp/hbs2-rpc.socket` (`PeerConfig.hs:253`,
+   `getRpcSocketNameM`). The harness used `rpc "127.0.0.1:<port>"` (an
+   `addr:port` literal, not the `unix` form), so every test peer's socket name
+   resolved to the default `/tmp/hbs2-rpc.socket` too.
 
-Same process (`hbs2-onion-bob`), same instant, compared the journal stat lines
-(emitted by `peerPingLoop`, which iterates `knownPeers pl`) against the RPC:
+On the dev box a production `services.hbs2-peer` instance runs with
+`PrivateTmp=false`, so it owns the host `/tmp/hbs2-rpc.socket`. The test peers
+ran with `PrivateTmp=true`, isolating their own `/tmp/hbs2-rpc.socket` inside
+their namespaces (unreachable from the host). Net effect: every `hbs2-peer ...`
+invocation from the host hit the **production peer** via `/tmp/hbs2-rpc.socket`,
+regardless of `-r`. The production peer's known set (its configured known-peer
+`tcp://81.88.219.217:3003`, plus its UDP peers) is exactly what the RPC showed.
 
-- Journal (`[notice] peer ... burst: ... seen ...`): clearnet TCP
-  `185.158.248.142:3003`, `81.88.219.217:3003`; the inbound onion peer
-  (`tcp://127.0.0.1:<rand>`, a Tor exit); and `tcp://<carol>.onion:9999`.
-- RPC `peers`/`pexinfo`/`peer-info`: clearnet UDP `81.88.219.217:7351`,
-  `185.158.248.142:7354`; clearnet TCP `185.158.248.142:3003`,
-  `81.88.219.217:3003`. No onion, no inbound peer.
+The journal we compared against came from the test peer (`hbs2-onion-bob`),
+which really was connected to carol over onion. Two different daemons, two
+different peer sets - not one daemon with two locators.
 
-Key points:
-- The split is consistent, not timing: 3/3 simultaneous samples had the onion
-  peer in the journal and absent from the RPC.
-- The RPC lists UDP peers (`:7351`/`:7354`) on a node where UDP is disabled
-  (`listen "off"`) - they cannot correspond to live sessions, i.e. the RPC
-  locator is stale/separate.
-- `medianPeerRTT` for the same peer (`185.158.248.142:3003`) differed between
-  journal (199 ms) and RPC (91 ms) - suggestive of separate PeerInfo state,
-  though this one could also be rolling-median timing.
+### Confirmation
 
-Conclusion: the RPC path and the protocol path observe **different peer-locator
-(and probably PeerInfo) state** at runtime.
+Debug instrumentation in the `peers` RPC handler wrote a file via a relative
+path (CWD = the answering process's WorkingDirectory). It landed in
+`/var/lib/hbs2-peer/` - the **production** peer's `storageDir`/WorkingDirectory -
+not the test peer's `/var/lib/hbs2-onion-bob`. That pinned the answering process
+as the production peer. (Instrumentation has since been reverted.)
 
-## What static analysis says (and why it is puzzling)
+## Fix
 
-By the code there is exactly one locator and one env:
-- `hbs2-peer/app/PeerMain.hs:873` - the only `newBrainyPeerLocator` (`pl`).
-- `hbs2-peer/app/PeerMain.hs:963` - the only `newPeerEnv pl ...` (`penv`);
-  `penv` is never rebound/shadowed.
-- Main protocol responders run in `withPeerM penv` and include
-  `peerExchangeProto` (PeerMain.hs:1259-1276).
-- `peerPingLoop` runs as a `peerThread`, i.e. `withPeerM penv` (the journal
-  stat report, `HBS2/app/PeerInfo.hs:184,206`).
-- RPC context sets `rpcPeerEnv = penv` (PeerMain.hs:1353); handlers do
-  `withPeerM (rpcPeerEnv co)` (e.g. `RPC2/Peers.hs`, `RPC2/PexInfo.hs`,
-  `RPC2.hs:241`).
-- `runPeerM` / `withPeerM` (`HBS2/Actors/Peer.hs:455,480`) use the passed env
-  as-is; they do not copy it. `newPeerEnv` stores the passed `pl` verbatim.
+1. **CLI `-r` now works** (`hbs2-peer/app/CLI/Common.hs`): `withMyRPC` and
+   `withRPCMessaging` use `fromMaybe (getRpcSocketName conf) (view rpcOptAddr o)`,
+   so `-r/--rpc <path>` overrides the config and targets a specific peer's RPC
+   unix socket. Help text changed from `addr:port` to "path to the peer RPC unix
+   socket (overrides config)" (the daemon exposes a unix-socket RPC, not TCP).
 
-So every path resolves `getPeerLocator` to `penv.envPeerLocator` (one TVar set),
-and reading it should yield identical results. The observed divergence is
-therefore a runtime fact not visible from the source - the next step has to be
-instrumentation, not more reading.
+2. **Harness gives each peer its own socket** (`nix/tor-onion-test.nix`): peers
+   now set `rpc unix "<stateDir>/rpc.socket"` instead of `rpc "127.0.0.1:<port>"`,
+   so the three never collide on `/tmp/hbs2-rpc.socket`. `PrivateTmp` is dropped
+   (no longer needed, and its removal makes each peer's RPC reachable from the
+   host). Query a specific peer with
+   `hbs2-peer peers -r /var/lib/hbs2-onion-bob/rpc.socket`.
 
-## Suggested investigation
+## Takeaways
 
-1. Tag env/locator identity. Add a unique id to `PeerEnv` (or print the
-   `StableName`/address of the locator's TVar) and log it in both
-   `peerPingLoop` (PeerInfo.hs:190, next to `debug "known peers"`) and an RPC
-   handler (RPC2.hs:241 `peer-info`). Rebuild, deploy once, compare: confirm
-   whether two distinct locator instances exist.
-2. If two instances: find where the second is created/captured. Candidates to
-   examine: the `hbs2-peer run` -> exec `start` wrapper (PeerMain.hs ~275);
-   how the `async`/`runContT` threads in `runPeerM` capture the env; whether the
-   RPC `runReaderT rpcctx` path somehow ends up with a different env than the
-   protocol loop despite `rpcPeerEnv = penv`.
-3. If one instance: the divergence is in the read path - inspect
-   `knownPeers` / `knownPeersForPEX` / `getKnownPeers` and the `Sessions`
-   cache (`_envSessions`) for a per-call snapshot or a second cache.
-
-## Reproduction
-
-`nix/tor-onion-test.nix` (3 onion peers: alice -> bob -> carol). Once bob holds
-a live onion session to carol (visible in `journalctl -u hbs2-onion-bob` as
-`peer tcp://<carol>.onion:9999 ... seen`), run `hbs2-peer pexinfo -r
-127.0.0.1:13362` and observe carol is absent.
-
-## Notes
-
-- Not introduced by the Tor work: `RpcPeers`/`getKnownPeers`/`pexinfo` predate
-  it. Onion peers merely made the divergence obvious (it was invisible while
-  every peer was a clearnet `PeerL4`).
-- Once fixed, `nix/tor-onion-test.nix` verification can switch from reading the
-  journal back to the RPC.
+- There is no peer-locator divergence in the daemon. The static analysis in the
+  original ticket was correct: one env, one locator, every path resolves the same
+  `getPeerLocator`. The "two states" were two processes.
+- When diagnosing a multi-peer-on-one-host setup, always target the intended
+  peer's socket explicitly with `-r <socket>`; otherwise the shared
+  `/tmp/hbs2-rpc.socket` wins.
+- The onion-harness verification can now use the RPC directly (per-peer `-r`),
+  not just journald - but journald remains a valid cross-check.

@@ -61,9 +61,9 @@ let
   # that reconstructed address points nowhere, so the only working path
   # between the two is the onion service.
   peers = {
-    alice = { host = "127.0.0.2"; tcp = 10361; udp = 17351; rpc = 13361; };
-    bob   = { host = "127.0.0.3"; tcp = 10362; udp = 17352; rpc = 13362; };
-    carol = { host = "127.0.0.4"; tcp = 10363; udp = 17353; rpc = 13363; };
+    alice = { host = "127.0.0.2"; tcp = 10361; udp = 17351; };
+    bob   = { host = "127.0.0.3"; tcp = 10362; udp = 17352; };
+    carol = { host = "127.0.0.4"; tcp = 10363; udp = 17353; };
   };
 
   # Topology for the onion-PEX test (PEP-05 C): alice knows only bob, carol
@@ -142,7 +142,10 @@ in {
           # so two instances collide on bind and respawn-loop).
           http-port "off"
           tcp.socks5 "127.0.0.1:9050"
-          rpc "127.0.0.1:${toString p.rpc}"
+          # Per-peer RPC unix socket inside the instance's own state dir, so
+          # the three peers never collide on the default /tmp/hbs2-rpc.socket
+          # and each is reachable via `hbs2-peer <cmd> -r ${stateDir name}/rpc.socket`.
+          rpc unix "${stateDir name}/rpc.socket"
           key "${stateDir name}/default.key"
           brains "${stateDir name}/brains.db"
           storage "${stateDir name}/storage"
@@ -174,12 +177,13 @@ in {
               Restart = "always";
               RestartSec = "10s";
               WorkingDirectory = stateDir name;
-              # each instance hardcodes /tmp/hbs2-rpc.socket; PrivateTmp keeps
-              # the two from colliding (we query via the TCP rpc port). No
+              # Each peer has its own `rpc unix` socket in its state dir (see
+              # config above), so there is no /tmp/hbs2-rpc.socket collision and
+              # PrivateTmp is unnecessary. Dropping it also makes each peer's RPC
+              # reachable from the host for `hbs2-peer ... -r <socket>`. No
               # ProtectSystem / RestrictAddressFamilies here: this is a
               # throwaway test peer, and the AF restriction broke the HTTP and
               # UDP/DNS workers ("Address family not supported by protocol").
-              PrivateTmp = true;
               NoNewPrivileges = true;
             };
           };

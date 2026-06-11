@@ -241,6 +241,7 @@ instance (e ~ L4Proto, MonadUnliftIO m, HasRpcContext PeerAPI RPC2Context m) => 
           liftIO $ withPeerM rpcPeerEnv do
             pl <- getPeerLocator @e
             pips <- knownPeers @e pl
+
             npi <- newPeerInfo
 
             r <- for pips $ \p -> do
