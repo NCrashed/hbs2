@@ -147,6 +147,15 @@ fillPeerMeta mtcp probePeriod = do
                         forM_ (fromStringMay @(PeerAddr L4Proto) pubAddrStr) \pa -> do
                           candidate <- fromPeerAddr pa
                           debug $ "** PUBLIC ADDRESS FROM META ** " <+> pretty candidate
+                          -- If we reached this peer over an inbound onion
+                          -- connection it appears as the Tor exit (127.0.0.1);
+                          -- a plain dial to its .onion would be dropped by the
+                          -- TCP cookie dedup. Re-point that existing connection
+                          -- at the advertised name first, so the ping below
+                          -- travels over it and the peer becomes known by its
+                          -- .onion instead of the loopback. No-op for ordinary
+                          -- (dialable) peers.
+                          forM_ mtcp \tcp -> tcpAdoptName tcp p candidate
                           sendPing candidate
 
                       port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))

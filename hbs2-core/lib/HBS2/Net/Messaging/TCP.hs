@@ -10,6 +10,7 @@ module HBS2.Net.Messaging.TCP
   , tcpCookie
   , tcpOnClientStarted
   , tcpPeerKick
+  , tcpAdoptName
   , messagingTCPSetProbe
   ) where
 
@@ -20,6 +21,7 @@ import HBS2.Net.Messaging
 import HBS2.Prelude.Plated
 
 import HBS2.Net.Messaging.Stream
+import HBS2.Net.Proto.Types (peerDialable)
 
 import HBS2.System.Logger.Simple
 
@@ -80,6 +82,13 @@ data MessagingTCP =
   , _tcpServerThreadsCount :: TVar Int
   , _tcpProbe              :: TVar AnyProbe
   , _tcpOnClientStarted    :: PeerAddr L4Proto -> Word64 -> IO () -- ^ Cient TCP connection succeed
+  -- | Maps a connection's socket-derived peer (e.g. the loopback Tor exit of
+  --   an inbound onion connection) to the routable name the peer advertised for
+  --   itself via peer-public-address. Sends to the name are routed over the
+  --   aliased connection and its received frames are re-tagged with the name,
+  --   so an inbound onion peer becomes known by its @.onion@ instead of
+  --   @127.0.0.1@. See 'tcpAdoptName'.
+  , _tcpPeerAlias          :: TVar (HashMap (Peer L4Proto) (Peer L4Proto))
   }
 
 makeLenses 'MessagingTCP
@@ -122,6 +131,7 @@ newMessagingTCP pa = liftIO do
     <*> newTVarIO 0
     <*> newTVarIO (AnyProbe ())
     <*> pure (\_ _ -> none) -- do nothing by default
+    <*> newTVarIO mempty    -- _tcpPeerAlias
 
 instance Messaging MessagingTCP L4Proto ByteString where
 
@@ -227,6 +237,31 @@ tcpPeerKick MessagingTCP{..} p = do
   for_ whoever $ \so -> do
     debug $ "tcpPeerKick" <+> pretty p
     liftIO $ shutdown so ShutdownBoth
+
+-- | Adopt the routable name a peer advertised for itself (e.g. its @.onion@,
+--   learned via peer-public-address) onto its existing connection. An inbound
+--   onion connection arrives from the local Tor exit as an ephemeral loopback
+--   peer (@127.0.0.1:\<port\>@); the symmetric outbound dial to its @.onion@ is
+--   dropped by the cookie dedup, so the name never gets its own socket. This
+--   re-points sends to the name at the existing (loopback) connection - same
+--   socket, same out-queue - and records an alias so that connection's received
+--   frames are re-tagged with the name. After this the peer can be pinged and
+--   becomes known by its @.onion@ instead of @127.0.0.1@.
+--
+--   No-op unless the current label is non-dialable (a loopback) and the
+--   advertised one is dialable, so it never disturbs ordinary clearnet peers.
+tcpAdoptName :: forall m . MonadIO m => MessagingTCP -> Peer L4Proto -> Peer L4Proto -> m ()
+tcpAdoptName MessagingTCP{..} lp name
+  | peerDialable lp || not (peerDialable name) = pure ()
+  | otherwise = liftIO do
+      now <- getTimeCoarse
+      atomically do
+        readTVar _tcpPeerConn     <&> HM.lookup lp >>= mapM_ (modifyTVar _tcpPeerConn . HM.insert name)
+        readTVar _tcpPeerSocket   <&> HM.lookup lp >>= mapM_ (modifyTVar _tcpPeerSocket . HM.insert name)
+        readTVar _tcpPeerToCookie <&> HM.lookup lp >>= mapM_ (modifyTVar _tcpPeerToCookie . HM.insert name)
+        readTVar _tcpSent <&> HPSQ.lookup lp >>= mapM_ (\(_,q) -> modifyTVar _tcpSent (HPSQ.insert name now q))
+        modifyTVar _tcpPeerAlias (HM.insert lp name)
+      debug $ "tcpAdoptName" <+> pretty lp <+> "->" <+> pretty name
 
 -- | Open an outbound TCP connection to (host, port). When a SOCKS5 proxy is
 --   configured, dial through it and let the proxy resolve the host itself (so
@@ -347,12 +382,16 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
         pure n
 
       -- FIXME: timeout-hardcode
+      readFrames :: forall n . MonadIO n => Socket -> Peer L4Proto -> TBQueue (Peer L4Proto, ByteString) -> n ()
       readFrames so peer queue = forever $ withTCPTimeout (TimeoutSec 67) do
         void $ readFromSocket so 4 <&> LBS.toStrict
         ssize <- readFromSocket so 4 <&> LBS.toStrict
         let size = word32 ssize & fromIntegral
         bs <- readFromSocket so size
-        atomically $ writeTBQueueDropSTM outMessageQLen queue (peer, bs)
+        -- re-tag the frame if this connection's peer has adopted a routable
+        -- name (see 'tcpAdoptName'); otherwise deliver under its own peer
+        canon <- readTVarIO _tcpPeerAlias <&> HM.findWithDefault peer peer
+        atomically $ writeTBQueueDropSTM outMessageQLen queue (canon, bs)
 
       runServer = flip runContT pure do
 
@@ -431,6 +470,15 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
                 atomically do
                   modifyTVar _tcpSent (HPSQ.delete newP)
                   modifyTVar _tcpPeerCookie (HM.update killCookie cookie)
+                  -- drop any routable-name alias adopted onto this connection
+                  -- (see 'tcpAdoptName') so its onion key does not leak
+                  alias <- readTVar _tcpPeerAlias <&> HM.lookup newP
+                  for_ alias $ \name -> do
+                    modifyTVar _tcpPeerConn     (HM.delete name)
+                    modifyTVar _tcpPeerSocket   (HM.delete name)
+                    modifyTVar _tcpPeerToCookie (HM.delete name)
+                    modifyTVar _tcpSent         (HPSQ.delete name)
+                  modifyTVar _tcpPeerAlias (HM.delete newP)
 
               void $ waitAnyCatchCancel [rd,wr]
 
