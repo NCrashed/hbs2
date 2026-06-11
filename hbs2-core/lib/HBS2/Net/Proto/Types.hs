@@ -288,6 +288,26 @@ classOf :: PeerAddr L4Proto -> NetworkClass
 classOf (L4AddressName _ h _) | ".onion" `Text.isSuffixOf` Text.toLower h = Onion
 classOf _ = Clearnet
 
+-- | Whether a peer address is a usable dial target. An inbound onion
+--   connection arrives from the local Tor exit as an ephemeral loopback
+--   @PeerL4@ (@127.0.0.1:\<random\>@) that cannot be dialed back, while the
+--   peer's routable identity is carried by a @PeerL4Name@ (its @.onion@).
+--   The peer-dedup logic uses this so that such a loopback address never
+--   evicts a routable entry for the same peer.
+peerDialable :: Peer L4Proto -> Bool
+peerDialable PeerL4Name{}  = True
+peerDialable (PeerL4 _ sa) = not (isLoopbackSockAddr sa)
+
+-- | True for IPv4 @127.0.0.0/8@, IPv6 @::1@, and unix-domain addresses.
+isLoopbackSockAddr :: SockAddr -> Bool
+isLoopbackSockAddr sa = case sa of
+  SockAddrInet _ ha       -> case hostAddressToTuple ha of
+                               (127,_,_,_) -> True
+                               _           -> False
+  SockAddrInet6 _ _ h6 _  -> hostAddress6ToTuple h6 == (0,0,0,0,0,0,0,1)
+  SockAddrUnix{}          -> True
+  _                       -> False
+
 
 deserialiseCustom :: (Serialise a, MonadPlus m) => ByteString -> m a
 deserialiseCustom = either (const mzero) pure . deserialiseOrFail

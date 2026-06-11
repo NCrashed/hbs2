@@ -1154,6 +1154,21 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                            | view sockType p0 /= view sockType p -> do
                               doAddPeer p
 
+                           -- An inbound onion connection arrives as an ephemeral
+                           -- loopback address (the Tor exit), which is not a dial
+                           -- target. Such an address must never evict the peer's
+                           -- routable .onion entry; conversely a routable address
+                           -- should always win over a non-routable one. Only when
+                           -- both are equally routable do we fall back to RTT.
+                           | peerDialable p && not (peerDialable p0) -> do
+                              debug $ "Routable address wins" <+> pretty p0 <+> pretty p
+                              expire (KnownPeerKey p0)
+                              delPeers pl [p0]
+                              doAddPeer p
+
+                           | not (peerDialable p) -> do
+                              debug $ "Keeping routable address" <+> pretty p0 <+> pretty p
+
                            | otherwise -> do
 
                               debug "Same peer, different address"
