@@ -141,3 +141,8 @@ round-trip time of seconds (Tor circuit latency), not milliseconds.
   connected to you over Tor (and otherwise sees only the Tor exit) learn
   your real onion, so it can redial you and gossip you via PEX. You still
   need to seed the first link with `known-peer`.
+- Default logs (INFO/NOTICE/WARN/ERROR) redact peer `.onion` addresses to a
+  short fingerprint (`<onion:NNNN>`), so journald output you might share does
+  not leak where your peers are. Running with `-d`/`--debug` (or `-t`) turns
+  on verbose logs that DO print full addresses - treat those as sensitive and
+  do not paste them into bug reports.

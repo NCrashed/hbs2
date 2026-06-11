@@ -260,12 +260,19 @@ After this a peer operator can ship the config
 - Still open: broader isolation tests; and the RPC peer-introspection bug
   found while testing (see docs/notes/rpc-peer-locator-divergence.md).
 
-**Phase 4: logging / debug audit (half a day).**
-- Walk through `debug $ ... pretty pip` in hbs2-peer.
-- Separate the "technical ID" (PeerNonce) from the "address". Log
-  addresses only under `--debug`, not in the `--trace`-default.
-- This is needed before any serious deployment, otherwise the operator
-  leaks via logs.
+**Phase 4: logging / debug audit (half a day). DONE 2026-06-11.**
+- Default-visible log levels are INFO/NOTICE/WARN/ERROR (DEBUG and TRACE are
+  off unless the operator passes `-d`/`-t`). The audit therefore targeted the
+  default levels: only two lines printed a peer address there - the per-peer
+  stat line (`peerPingLoop`, NOTICE, every 10s) and the "banned" line.
+- `prettyLogPeer` (hbs2-core `HBS2.Net.Proto.Types`) renders a peer for logs
+  with any `.onion` host replaced by a short one-way fingerprint
+  (`<onion:NNNN>`, a murmur32 of the host) that still distinguishes peers;
+  clearnet IPs / DNS names are public and shown verbatim. Both default-level
+  sites now use it, so an operator's default logs never carry a peer's
+  `.onion`.
+- Address-revealing `debug`/`trace` lines are left as-is: those levels are an
+  explicit operator opt-in for troubleshooting, not part of normal operation.
 
 Follow-ups (separate PEPs)
 --------------------------

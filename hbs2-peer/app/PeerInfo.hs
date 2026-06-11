@@ -203,7 +203,7 @@ peerPingLoop (PeerConfig syn) penv = do
         let rttMs = (/1e6) <$> rtt <&> (\x -> showGFloat (Just 2) x "") <&> (<> "ms")
         let ls = showGFloat (Just 2) l "" <> "s"
 
-        notice $ "peer" <+> pretty p <+> "burst:" <+> pretty burst
+        notice $ "peer" <+> prettyLogPeer p <+> "burst:" <+> pretty burst
                                      <+> "errors:" <+> pretty errors
                                      <+> "down:" <+> pretty down
                                      <+> "miss:" <+> pretty downMiss

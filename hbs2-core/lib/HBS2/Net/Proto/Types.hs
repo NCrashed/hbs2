@@ -298,6 +298,21 @@ peerDialable :: Peer L4Proto -> Bool
 peerDialable PeerL4Name{}  = True
 peerDialable (PeerL4 _ sa) = not (isLoopbackSockAddr sa)
 
+-- | Render a peer for operator-facing logs without disclosing a hidden-service
+--   location. A @.onion@ host is replaced by a short one-way fingerprint
+--   (@\<onion:NNNN\>@) that still distinguishes peers across log lines; clearnet
+--   IPs and DNS names are public and shown verbatim. Use this instead of
+--   'pretty' on default log levels (INFO/NOTICE/WARN/ERROR) so an operator does
+--   not leak their peers' @.onion@ addresses through their own logs
+--   (PEP-05 Phase 4). Debug/trace levels are an explicit operator opt-in and
+--   may still use 'pretty'.
+prettyLogPeer :: Peer L4Proto -> Doc ann
+prettyLogPeer (PeerL4Name proto h port)
+  | ".onion" `Text.isSuffixOf` Text.toLower h =
+      scheme <> "<onion:" <> pretty (asWord32 (hash32 (Text.unpack h))) <> ">:" <> pretty port
+  where scheme = case proto of { TCP -> "tcp://"; UDP -> "" }
+prettyLogPeer p = pretty p
+
 -- | True for IPv4 @127.0.0.0/8@, IPv6 @::1@, and unix-domain addresses.
 isLoopbackSockAddr :: SockAddr -> Bool
 isLoopbackSockAddr sa = case sa of

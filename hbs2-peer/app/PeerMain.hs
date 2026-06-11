@@ -1128,7 +1128,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     expire (KnownPeerKey p)
 
                    | banned -> do
-                       notice $ pretty p <+> "banned"
+                       notice $ prettyLogPeer p <+> "banned"
 
                    | otherwise -> do
 
