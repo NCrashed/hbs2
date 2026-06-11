@@ -1,3 +1,71 @@
+# 0.25.5.0  2026-06-11
+
+Adds Tor onion-service support (PEP-05): an hbs2 peer can run as a v3
+hidden service, dial other peers' `.onion` addresses over SOCKS5, and
+keep onion and clearnet address classes isolated so a clearnet peer
+never learns onion addresses. Plus follow-up robustness and
+observability fixes.
+
+## Features
+
+  - **Tor onion-service support (PEP-05).** A peer can operate
+    onion-only or as a bridge:
+      - Outbound dialing of `.onion` peers through a SOCKS5 proxy
+        (`tcp.socks5 "127.0.0.1:9050"` plus
+        `known-peer "tcp://<id>.onion:<port>"`); the hidden-service
+        name is handed to the proxy unresolved, so no name leaks to a
+        local resolver. DNS host names under `tcp://` now work too.
+      - TCP-only operation with local-discovery and bootstrap gated off
+        (`multicast off`, `bootstrap off`, `listen "off"`).
+      - **Network-class PEX policy.** A peer declares how it is
+        reachable in the handshake
+        (`network-class "clearnet" | "onion" | "bridge"`, default
+        `clearnet`); PEX forwards an address only to peers reachable on
+        that class, so a clearnet peer never learns onion addresses
+        while onion peers still discover each other. The `PeerData`
+        handshake payload gains a backward-compatible `reachableVia`
+        field, so old peers (defaulting to clearnet) do not partition.
+      - **`peer-public-address`.** A peer advertises its own public
+        address(es) to neighbours reachable on that class, so a peer
+        reached over Tor (which otherwise sees only the Tor exit) learns
+        its real `.onion` and can redial and gossip it.
+      - **NixOS `services.hbs2-peer.enableTor`.** Wires `services.tor`,
+        a v3 hidden service, the SOCKS proxy, and the onion-only config
+        in one option.
+
+## Fixes
+
+  - **Onion peers stay known by their `.onion`, not `127.0.0.1`.** An
+    inbound onion connection arrives from the local Tor exit as a
+    loopback address. Two issues left a peer stuck under that useless
+    address: the peer-dedup preferred a lower-RTT loopback over the
+    routable `.onion`, and the TCP cookie dedup dropped the symmetric
+    outbound `.onion` dial. The dedup now ranks by routability, and an
+    inbound connection is re-keyed onto the `.onion` the peer
+    advertises, so every peer in a meshed onion deployment knows its
+    neighbours by `.onion`.
+  - **Worker-thread supervision.** A failing worker thread is now
+    restarted in place instead of throwing `GoAgainException` and
+    respawning the whole peer, which previously turned a single bad
+    bootstrap or PEX address into a crash loop.
+  - **`hbs2-peer -r/--rpc` now selects the RPC socket.** The flag was
+    parsed but ignored, so every CLI call fell back to the default
+    `/tmp/hbs2-rpc.socket`; it now overrides the socket path, letting
+    you target a specific peer (e.g. several peers on one host).
+  - **`.onion` addresses redacted in default logs.** Default-level log
+    lines render a peer's `.onion` as a short one-way fingerprint
+    (`<onion:NNNN>`), so an operator's journald output does not leak
+    where their peers are. Verbose `-d`/`-t` logs still print full
+    addresses and should be treated as sensitive.
+
+## Docs
+
+  - New `docs/TOR_DEPLOYMENT.md` end-to-end recipe (NixOS, manual, and
+    outbound-only); `docs/multi-machine.md` gains a Tor-outbound
+    pointer; the PEP-05 draft is updated to reflect the implemented
+    design; `PROTOCOL.md` documents the hand-rolled `PeerData`
+    versioning.
+
 # 0.25.4.0  2026-06-08
 
 Feature and maintenance release. Adds an opt-in announce flag to the
