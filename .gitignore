@@ -23,3 +23,8 @@ docs/drafts/*
 !docs/drafts/pep-14-encrypted-keystore.md
 !docs/drafts/pep-15-hd-mnemonic-keys.md
 !docs/drafts/pep-17-hbs2-hub.md
+!docs/drafts/pep-18-collaboration-mailbox-letter.md
+!docs/drafts/pep-19-canonical-in-repo-metadata.md
+!docs/drafts/pep-20-pull-request-model.md
+!docs/drafts/pep-21-triage-moderation.md
+!docs/drafts/pep-22-hub-cli-and-render-contract.md
