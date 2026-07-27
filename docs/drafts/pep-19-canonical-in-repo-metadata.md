@@ -268,11 +268,21 @@ draft carried:
     letter; a third party reads them from public canon. The fold uses them
     as-is; there is no letter-to-canon translation.
 
-A reply may reference an event whose letter has not yet been folded: its
-event-id is still computable, so the reference resolves once both are in
-canon and dangles harmlessly otherwise. Acknowledgement (the owner replying
-to a letter's back-channel) is only needed for the human `number` and status,
-never for threading.
+A sender may write a reply before the letter it answers has been folded: the
+event-id is computable either way, so nothing stops them. Folding is the
+part that is ordered. The fold is a single ascending pass over `seq`, so a
+reply must carry a higher `seq` than the event it answers, and an event
+minted for a thread that is not in canon yet can never be admitted: it is
+dropped as dangling, and re-folding does not repair it, because the ordering
+is already fixed by the numbers on the two events.
+
+So the rule is on the folding side: a maintainer folds the opening letter
+before the replies to it, and the triage bridge refuses a reply whose thread
+it does not yet see rather than minting an event that is doomed. A reply
+arriving out of order is not lost, it simply waits in the mailbox until its
+thread exists. Acknowledgement (the owner replying to a letter's
+back-channel) is only needed for the human `number` and status, never for
+threading.
 
 
 On-disk tree layout
@@ -407,8 +417,10 @@ an admitted `open` is dropped with a warning (a dangling reference, which
 `hub verify` reports, PEP-22), so a comment on a rejected or never-folded open
 cannot create a phantom thread. And `redact` locates its target through the
 `byid` index of already-materialized events; a `redact` naming an unknown
-event-id is a no-op. Since the pass is `seq`-ordered and a `redact` targets a
-prior event, the target is always present when a valid `redact` runs.
+event-id is a no-op. The pass is `seq`-ordered, so the target is present
+whenever the `redact` was minted after it, which is the ordering the bridge
+enforces: it refuses to mint a `redact` for a target not yet in canon,
+because such an event would be admitted and then do nothing, silently.
 
 `revise` is author-authored but restricted to the author of record: the fold
 applies it only when its author box signer equals the opening event's author

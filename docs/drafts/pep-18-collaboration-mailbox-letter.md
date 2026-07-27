@@ -274,9 +274,12 @@ send time, before any acknowledgement. Consequences:
 Acknowledgement is still useful, but only for what the sender cannot compute:
 the human issue `number` and status. On accept the owner may send a reply to
 `reply-mailbox` carrying the assigned number; threading does not depend on it.
-A reply may reference an event whose letter has not yet been folded (its
-event-id is still computable); the reference resolves once both are in canon
-and dangles harmlessly otherwise.
+A reply may be written before the letter it answers has been folded, since
+the event-id is computable either way. Folding, though, is ordered: canon is
+read by a single ascending pass, so a reply must be folded after the event it
+answers, and the triage bridge refuses one whose thread it does not yet see
+rather than admitting an event that could never be read back (PEP-19). Such a
+reply is not rejected, it waits in the mailbox until its thread is folded.
 
 
 Attachments, and how they survive folding into public canon

@@ -23,6 +23,7 @@ module HBS2.Hub.Types
   , CanonContent(..)
   , Event(..)
   , authorTs
+  , withAuthorTs
   , authorThread
   , eventId
   , authorBoxId
@@ -134,6 +135,24 @@ authorTs = \case
   ARedact _ t         -> t
   ADelegate _ t       -> t
   ARevoke _ t         -> t
+
+-- | Replace the declared timestamp.
+--
+-- Used when the owner re-authors someone else's request: the content is
+-- theirs to restate, but the clock reading must be the owner's, or an event
+-- signed by the owner would carry a timestamp the owner never declared.
+withAuthorTs :: Word64 -> AuthorContent -> AuthorContent
+withAuthorTs t = \case
+  AOpen a b c d e f g _ -> AOpen a b c d e f g t
+  AComment a b c d _    -> AComment a b c d t
+  ARevise a b _         -> ARevise a b t
+  ASet a b c _          -> ASet a b c t
+  AClose a b _          -> AClose a b t
+  AReopen a b _         -> AReopen a b t
+  AMerge a b c _        -> AMerge a b c t
+  ARedact a _           -> ARedact a t
+  ADelegate a _         -> ADelegate a t
+  ARevoke a _           -> ARevoke a t
 
 -- | The thread a reply-class event targets. 'Nothing' for 'AOpen' (its own
 -- id is the thread) and for the repo-scope ops 'ARedact'/'ADelegate'/'ARevoke'.

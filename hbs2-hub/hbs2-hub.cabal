@@ -67,6 +67,7 @@ library
       HBS2.Hub.Types
       HBS2.Hub.Fold
       HBS2.Hub.Letter
+      HBS2.Hub.Bridge
       HBS2.Hub.Manifest
 
 test-suite spec
@@ -91,3 +92,4 @@ test-suite spec
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec
       HBS2.Hub.ManifestSpec
+      HBS2.Hub.BridgeSpec

@@ -136,6 +136,11 @@ data FoldResult = FoldResult
   { frThreads  :: HashMap ThreadId ThreadState
   , frRedacted :: HashSet EventId          -- ^ events a renderer must withhold
   , frDropped  :: [(EventId,DropReason)]   -- ^ deterministic order
+    -- | The largest @seq@ and @number@ actually admitted, 0 when none. A
+    -- publisher mints the next ones from these, so minting is a function of
+    -- canon rather than of any node-local counter.
+  , frMaxSeq    :: Word64
+  , frMaxNumber :: Word64
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -185,6 +190,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             -- Unresolvable events have no seq; order them after the rest,
             -- still deterministically among themselves by event-id.
             , sDropped  = [ (maxBound, eid, reason) | (eid,reason) <- pre ]
+            , sMaxSeq    = 0
+            , sMaxNumber = 0
             }
 
     -- Comments accumulate reversed (O(1) append) and are flipped here.
@@ -194,6 +201,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- Ordered by the whole triple: two drops sharing (seq, event-id) but
       -- differing in reason must not fall back on input order.
       , frDropped  = [ (e,d) | (_,e,d) <- sortOn id (sDropped s) ]
+      , frMaxSeq    = sMaxSeq s
+      , frMaxNumber = sMaxNumber s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
@@ -314,11 +323,19 @@ data St = S
   , sSeen     :: HashSet EventId
   , sRedacted :: HashSet EventId
   , sDropped  :: [(Word64,EventId,DropReason)]
+  , sMaxSeq    :: Word64
+  , sMaxNumber :: Word64
   }
 
--- Mark an event applied (dedup + the id every later redact resolves against).
+-- Mark an event applied (dedup + the id every later redact resolves
+-- against), and advance the high-water marks a publisher mints from. Only
+-- admitted events count: a dropped one must not consume a seq or a number.
 keep :: Resolved -> St -> St
-keep r s = s { sSeen = HS.insert (rId r) (sSeen s) }
+keep r s = s
+  { sSeen      = HS.insert (rId r) (sSeen s)
+  , sMaxSeq    = max (sMaxSeq s) (rSeq r)
+  , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
+  }
 
 dropE :: Resolved -> DropReason -> St -> St
 dropE r reason s = s { sDropped = (rSeq r, rId r, reason) : sDropped s }
