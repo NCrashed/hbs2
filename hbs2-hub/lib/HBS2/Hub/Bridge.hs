@@ -181,6 +181,10 @@ data TriageError =
     -- is the one case that would otherwise leave the module's promise
     -- incomplete.
   | CursorExhausted
+    -- | The content the owner signed names a different thread than the
+    -- request being honoured. Editing what was asked for is fine; moving it
+    -- elsewhere is not honouring it.
+  | ThreadMismatch
   deriving stock (Eq,Show)
 
 -- Refuse an author box canon already holds: the fold would drop the second
@@ -238,7 +242,7 @@ data Accepted = Accepted
 acceptLetter
   :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ canon (owner or maintainer) keypair
   -> (HubKey -> Bool)                   -- ^ may this inner author be folded? (PEP-21)
-  -> HubKey                             -- ^ the envelope (Mailbox message) signer
+  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
   -> RepoRef                            -- ^ the repo being folded into
   -> CanonView
   -> Word64                             -- ^ folded-at, the owner's clock
@@ -270,7 +274,7 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
     AComment thr _ _ _ _ -> known thr
 
     ARevise thr _ _ -> do
-      _ <- known thr
+      -- The case below handles a missing thread itself.
       case HM.lookup thr (cvThreads view) of
         -- Kind first: a revise on an issue is the wrong shape, not a
         -- question of who signed it.
@@ -300,7 +304,7 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
 honourRequest
   :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ canon keypair, which also authors
   -> (HubKey -> Bool)
-  -> HubKey                             -- ^ envelope signer
+  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
   -> RepoRef                            -- ^ the repo, for the authority check
   -> CanonView
   -> Word64                             -- ^ folded-at, and the owner's declared time
@@ -324,7 +328,7 @@ honourRequest canonKp allowed envelopeSigner repo view folded origin md = do
 honourWith
   :: (HubKey, PrivKey 'Sign HubScheme)
   -> (HubKey -> Bool)
-  -> HubKey                             -- ^ envelope signer
+  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
   -> RepoRef
   -> CanonView
   -> Word64                             -- ^ folded-at, and the owner's declared time
@@ -361,6 +365,13 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   case classify content0 of
     RequestOnly -> Right ()
     other       -> Left (NotAcceptable other)
+
+  -- Editing what a request asked for is the point of this function; moving
+  -- it to another thread is not, and would leave the event carrying an
+  -- origin that points at a letter about something else.
+  if authorThread content0 == authorThread asked
+    then Right ()
+    else Left ThreadMismatch
 
   thread <- case authorThread content0 of
     Just thr | HM.member thr (cvThreads view) -> Right thr

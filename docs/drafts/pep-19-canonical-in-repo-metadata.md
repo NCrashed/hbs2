@@ -222,7 +222,11 @@ signed boxes; the remaining clauses are the readable projection.
 ;; --- readable projection of the CANON box (regenerated, not trusted) ---
 (seq       <word64>)               ; globally monotonic order weight
 (number    <int>)                  ; on open only: human #N, owner-assigned
-(origin    <message-hash>)         ; Tier B letter this was folded from (absent if owner-native)
+(origin    <message-hash>)         ; the Tier B letter this event came from, if any.
+                                   ;   Present on a folded letter, and on an
+                                   ;   owner-authored event that honours a
+                                   ;   request (the letter is its provenance).
+                                   ;   Absent only when nothing prompted it.
 (folded-ts <word64>)               ; Unix epoch seconds, UTC, owner's clock at fold
 (canon-by  <sign-pubkey-b58>)      ; owner or delegated maintainer
 (part-secret <group-secret-b58>)   ; only on events referencing encrypted parts:
@@ -330,7 +334,19 @@ and its determinism trivial to guarantee.
 Deterministic materialization
 ============================
 
-The fold is a pure, total function of the event set. Ordering:
+The fold is consensus, and its rules are versioned. Determinism is not only
+"the same build folds the same log the same way": two clones running
+different builds must agree, or the same canon means different things to
+different readers. So any change to the admission rules, to the set of drop
+reasons, or to how state is derived from an admitted event is a format
+change, and MUST bump the `version` file in the meta tree (`hub-meta N`).
+A reader that meets a higher version reports it rather than folding, since
+its answer would differ from the publisher's.
+
+Adding an op is the same kind of change and follows the same rule. The
+version file exists for this; the obligation is what was missing.
+
+Ordering:
 
   - Primary key: `seq`, a globally monotonic integer the owner assigns at
     fold time. Because it is assigned by a single authority in the order

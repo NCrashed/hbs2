@@ -97,7 +97,7 @@ spec = do
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
           rec' = AckRecord (fst owner) tid (Just 7) "merged" (Just "cafe")
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      openAck (\_ _ -> True) (fst owner) got `shouldBe` Right rec'
+      openAck (\_ _ -> True) (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
       expectLeft NotALetter (openLetter got)
 
     it "refuses an ack whose envelope signer is not a maintainer" $ do
@@ -109,8 +109,8 @@ spec = do
           rec' = AckRecord (fst owner) tid (Just 7) "closed" Nothing
           isMaintainer _ k = k == fst owner
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      openAck isMaintainer (fst owner) got `shouldBe` Right rec'
-      expectLeft UntrustedAck (openAck isMaintainer (fst mallory) got)
+      openAck isMaintainer (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
+      expectLeft UntrustedAck (openAck isMaintainer (EnvelopeSigner (fst mallory)) got)
 
     it "rejects a tampered inner box" $ do
       alice <- kp
@@ -309,8 +309,8 @@ spec = do
           letter = makeLetter (fst mallory) (snd mallory) ac noReplyChannel
           allowed k = k /= fst mallory
       -- rewrapped under a fresh envelope key, the inner author is still banned
-      expectLeft AuthorDenied (openLetterAs allowed (fst relay) letter)
-      expectLeft AuthorDenied (openLetterAs allowed (fst mallory) letter)
+      expectLeft AuthorDenied (openLetterAs allowed (EnvelopeSigner (fst relay)) letter)
+      expectLeft AuthorDenied (openLetterAs allowed (EnvelopeSigner (fst mallory)) letter)
 
     it "honours the reply channel only from the inner author's own envelope" $ do
       alice <- kp
@@ -319,8 +319,8 @@ spec = do
       sig <- someHash
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           letter = makeLetter (fst alice) (snd alice) ac (ReplyTo (fst alice) sig)
-      (_,_,_,mine) <- expectRight (openLetterAs (const True) (fst alice) letter)
-      (_,_,_,relayed) <- expectRight (openLetterAs (const True) (fst relay) letter)
+      (_,_,_,mine) <- expectRight (openLetterAs (const True) (EnvelopeSigner (fst alice)) letter)
+      (_,_,_,relayed) <- expectRight (openLetterAs (const True) (EnvelopeSigner (fst relay)) letter)
       mine `shouldBe` ReplyTo (fst alice) sig
       -- a rewrapper could have substituted their own, so it is not honoured
       relayed `shouldBe` NoReply

@@ -26,6 +26,7 @@ module HBS2.Hub.Letter
   , AckRecord(..)
   , LetterError(..)
   , Disposition(..)
+  , EnvelopeSigner(..)
   , hubMsgVersion
   , noReplyChannel
   , makeLetter
@@ -60,6 +61,15 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32,Word64)
 import GHC.Generics (Generic)
+
+-- | Who signed the Mailbox envelope a letter arrived in.
+--
+-- A newtype rather than a bare key because the functions that take one also
+-- take a 'RepoRef', and both are the same underlying type: swapped by
+-- accident, the envelope check would run against the wrong key and the
+-- reply channel would be silently dropped instead of honoured.
+newtype EnvelopeSigner = EnvelopeSigner { fromEnvelopeSigner :: HubKey }
+  deriving stock (Eq,Show)
 
 -- | Schema version of the payload envelope: the @(hub-msg N)@ of PEP-18.
 --
@@ -276,10 +286,10 @@ openLetter md
 --     inner author, because a rewrapper can substitute their own.
 openLetterAs
   :: (HubKey -> Bool)   -- ^ may this inner author be folded? (not deny-listed)
-  -> HubKey             -- ^ the envelope (Mailbox message) signer
+  -> EnvelopeSigner     -- ^ who signed the Mailbox envelope
   -> MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
-openLetterAs allowed envelopeSigner md = do
+openLetterAs allowed (EnvelopeSigner envelopeSigner) md = do
   (box, author, ac, rc) <- openLetter md
   if not (allowed author)
     then Left AuthorDenied
@@ -293,10 +303,10 @@ openLetterAs allowed envelopeSigner md = do
 -- cannot be asked to decide that before reading it.
 openAck
   :: (RepoRef -> HubKey -> Bool)  -- ^ is this key a maintainer of that repo?
-  -> HubKey                       -- ^ the envelope (Mailbox message) signer
+  -> EnvelopeSigner               -- ^ who signed the Mailbox envelope
   -> MessageData
   -> Either LetterError AckRecord
-openAck isMaintainer envelopeSigner md
+openAck isMaintainer (EnvelopeSigner envelopeSigner) md
   | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
   | otherwise = case mdBody md of
       Letter{} -> Left NotAnAck
