@@ -24,7 +24,6 @@ module HBS2.Hub.Fold
 
 import HBS2.Hub.Types
 
-import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Data.Types.Refs (HashRef)
 
 import Data.ByteString (ByteString)
@@ -56,8 +55,10 @@ data DropReason =
   | BadCanonSig       -- ^ canon box failed to verify (rule 2)
     -- | A box whose signature is good but whose content this reader cannot
     -- decode: canon is newer than this build. Distinct from a bad signature,
-    -- which is an accusation of forgery.
-  | Undecodable
+    -- which is an accusation of forgery, and split by box like the signature
+    -- failures are, since which side is from the future is the useful part.
+  | UndecodableAuthor
+  | UndecodableCanon
   | IdMismatch        -- ^ canon box blesses a different event-id (rule 2)
   | WrongTarget       -- ^ open event authored for a different repo (cross-repo replay)
   | DupId             -- ^ event-id already seen (rewrap/replay, PEP-18/PEP-19)
@@ -141,8 +142,8 @@ data FoldResult = FoldResult
 -- this event's id.
 resolve :: Event -> Either DropReason Resolved
 resolve e = do
-  (akey, ac) <- box BadAuthorSig (evAuthorBox e)
-  (ckey, cc) <- box BadCanonSig  (evCanonBox e)
+  (akey, ac) <- box BadAuthorSig UndecodableAuthor (evAuthorBox e)
+  (ckey, cc) <- box BadCanonSig  UndecodableCanon  (evCanonBox e)
   let eid = eventId e
   if ccEventId cc /= eid
     then Left IdMismatch
@@ -150,9 +151,9 @@ resolve e = do
                         , rAuthorKey = akey, rCanonKey = ckey
                         , rContent = ac, rCanon = cc }
   where
-    box badSig b = case unboxChecked b of
+    box badSig undecodable b = case unboxChecked b of
       Left BoxBadSig      -> Left badSig
-      Left BoxUndecodable -> Left Undecodable
+      Left BoxUndecodable -> Left undecodable
       Right ok            -> Right ok
 
 -- | The whole fold: resolve, then materialize.

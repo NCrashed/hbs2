@@ -9,6 +9,8 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
+import Data.ByteString (ByteString)
+import HBS2.Data.Types.Refs (HashRef)
 import Data.Text (Text)
 import Data.Word (Word64)
 import Test.Hspec
@@ -30,9 +32,28 @@ canon sq num = canonAt sq num sq
 coords :: PRCoords
 coords = PRCoords Nothing "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
 
--- A comparable projection of the fold: (thread-id, title, status, #comments).
-summary :: FoldResult -> [(EventId, (Text, Maybe Text, Int))]
+-- Everything a fold produces for a thread, so a determinism check compares
+-- the whole state rather than a convenient corner of it. ThreadState has no
+-- Eq (comments and PR state are records), hence the explicit tuple.
+type Summary =
+  ( EventId, HubKind, Maybe Word64, HubKey, Word64, Word64
+  , [(Text,Text)], [Text], Maybe Text, Maybe HashRef, Maybe ByteString, Maybe HashRef
+  , [(EventId,HubKey,Word64,Maybe Text,Maybe HashRef)]
+  , Maybe (PRCoords, Maybe ByteString, Maybe (Text,Text)) )
+
+summary :: FoldResult -> [Summary]
 summary fr =
+  sortOn (\(i,_,_,_,_,_,_,_,_,_,_,_,_,_) -> i)
+    [ ( tsId t, tsKind t, tsNumber t, tsAuthor t, tsCreated t, tsUpdated t
+      , sortOn fst (HM.toList (tsAttrs t))
+      , tsLabelsRequested t, tsBody t, tsBodyPart t, tsPartSecret t, tsOrigin t
+      , [ (cId c, cAuthor c, cFoldedTs c, cBody c, cBodyPart c) | c <- tsComments t ]
+      , fmap (\p -> (psCoords p, psPartSecret p, psMerge p)) (tsPR t) )
+    | t <- HM.elems (frThreads fr) ]
+
+-- The narrow view a few assertions read directly.
+titles :: FoldResult -> [(EventId, (Text, Maybe Text, Int))]
+titles fr =
   sortOn fst
     [ (tsId t, (tsTitle t, HM.lookup "status" (tsAttrs t), length (tsComments t)))
     | t <- HM.elems (frThreads fr) ]
@@ -72,7 +93,7 @@ spec = do
           fwd = foldEvents repo [eOpen, eCmt, eSet]
           rev = foldEvents repo [eSet, eCmt, eOpen]
       summary fwd `shouldBe` summary rev
-      summary fwd `shouldBe` [(tid, ("hello", Just "closed", 1))]
+      titles fwd `shouldBe` [(tid, ("hello", Just "closed", 1))]
 
     it "reports drops in a deterministic order too" $ do
       owner <- kp
@@ -168,7 +189,7 @@ spec = do
                          (canon 1 (Just 1))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
-      reasons fr `shouldBe` [Undecodable]
+      reasons fr `shouldBe` [UndecodableAuthor]
 
     it "rejects a tampered author box" $ do
       owner <- kp
@@ -336,7 +357,7 @@ spec = do
           tid = eventId eOpen
           eClose = mkEvent owner owner (AClose tid Nothing 3) (canon 3 Nothing)
           fr = foldEvents repo [eSelf, eOpen, eClose]
-      summary fr `shouldBe` [(tid, ("still works", Just "closed", 0))]
+      titles fr `shouldBe` [(tid, ("still works", Just "closed", 0))]
       reasons fr `shouldBe` []
 
   describe "PEP-20 pull requests" $ do

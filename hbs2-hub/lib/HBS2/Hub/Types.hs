@@ -31,6 +31,7 @@ module HBS2.Hub.Types
   , mkEvent
   , BoxError(..)
   , unboxChecked
+  , decodeStrict
   ) where
 
 import HBS2.Prelude.Plated
@@ -39,7 +40,9 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 
-import Codec.Serialise (Serialise(..),serialise,deserialiseOrFail)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.Serialise (Serialise(..),serialise)
+import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.Word (Word64)
@@ -203,10 +206,19 @@ unboxChecked
   -> Either BoxError (HubKey, p)
 unboxChecked (SignedBox pk bs sig)
   | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
-  | otherwise =
-      case deserialiseOrFail (LBS.fromStrict bs) of
-        Left _  -> Left BoxUndecodable
-        Right p -> Right (pk, p)
+  | otherwise = maybe (Left BoxUndecodable) (Right . (pk,)) (decodeStrict bs)
+
+-- | Decode CBOR requiring the whole input to be consumed.
+--
+-- The usual 'deserialiseOrFail' stops at the end of a valid value and
+-- ignores what follows. Every decode in the hub goes through this instead,
+-- so there is one decoding rule rather than a strict path for some bytes and
+-- a lenient one for others.
+decodeStrict :: Serialise a => ByteString -> Maybe a
+decodeStrict bs =
+  case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
+    Right (rest, a) | LBS.null rest -> Just a
+    _ -> Nothing
 
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme

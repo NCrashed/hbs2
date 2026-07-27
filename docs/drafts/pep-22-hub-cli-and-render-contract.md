@@ -250,6 +250,15 @@ projection of admitted state. Redacted items render as withheld, not removed
 (PEP-19). All of this is a pure function of canon, so every clone shows the
 same thing.
 
+Issue numbers are the other canon-box field taken on trust. The fold applies
+`number` as the owner signed it and checks neither uniqueness nor
+monotonicity, which is harmless while a single owner mints them but not once
+delegation is in real use: two maintainers folding concurrently can mint the
+same number, and nothing in the fold notices. `hub verify` reports duplicate
+and non-monotonic numbers, naming the canon keys involved. Making the fold
+reject them would be worse, since a clone would then silently show fewer
+threads than canon contains.
+
 `hub verify` also flags what the fold accepts but cannot police. The
 canon-box `folded-ts` is load-bearing (the render contract's times come from
 it, precisely because the author's declared timestamp is attacker-chosen),
@@ -306,7 +315,7 @@ Must be built:
   - `hub verify` as the audit tool that re-runs the fold's checks and reports
     dropped events (the contract itself carries only provenance keys, no
     verified flags, since only admitted events materialize), plus the
-    `folded-ts` monotonicity check described above.
+    `folded-ts` and issue-number checks described above.
 
 
 Rejected alternatives

@@ -52,9 +52,7 @@ import HBS2.Prelude.Plated (Pretty(..))
 
 import Data.Config.Suckless.Syntax
 
-import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.Serialise (Serialise(..),serialise)
-import Codec.Serialise qualified as CBOR
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (fromMaybe)
@@ -230,14 +228,11 @@ parsePayload bs = do
     then Left (UnsupportedVersion v)
     else MessageData v <$> strictDecode body
 
--- | Decode a value, requiring the whole input to be consumed.
--- 'deserialiseOrFail' stops at the end of a valid value and ignores whatever
--- follows, which would let anyone append bytes to a letter that still parses.
+-- | Decode requiring the whole input consumed, so appended bytes cannot ride
+-- along on a letter that still parses. One rule for every decode in the hub
+-- ('decodeStrict').
 strictDecode :: Serialise a => ByteString -> Either LetterError a
-strictDecode bs =
-  case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
-    Right (rest, a) | LBS.null rest -> Right a
-    _ -> Left MalformedPayload
+strictDecode = maybe (Left MalformedPayload) Right . decodeStrict
 
 -- | Verify and open a letter: recover the author key, the content it signed,
 -- and the back-channel. The inner box is returned too, because the triage
