@@ -14,6 +14,7 @@ build-type:         Simple
 common shared-properties
   ghc-options:
         -Wall
+        -Wunused-packages
         -fno-warn-type-defaults
         -O2
 
@@ -52,17 +53,15 @@ common shared-properties
         hbs2-core
       , suckless-conf
       , serialise
-      , cborg
       , bytestring
-      , containers
       , unordered-containers
-      , hashable
       , text
 
 library
     import:           shared-properties
     hs-source-dirs:   lib
     build-depends:    base
+                    , cborg
     exposed-modules:
       HBS2.Hub.Types
       HBS2.Hub.Fold

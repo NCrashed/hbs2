@@ -587,10 +587,34 @@ the two-tier idea recurses: the RefChan is the multi-writer ordering log,
 This is where signing and publishing must not be conflated (PEP-21). A
 delegated maintainer can sign canon events, but only the reflog-key holder can
 push `refs/hbs2/meta`; the RefChan is the channel that carries a delegate's
-signed events to that publisher. Because there is exactly one publisher,
-`seq`/`number` uniqueness is automatic. PEP-21 specifies the signing-versus-
-publishing capability split and the routing. A repo names the consensus
-channel with the optional manifest clause from PEP-17:
+signed events to that publisher. PEP-21 specifies the signing-versus-
+publishing capability split and the routing.
+
+Who stamps `seq`, precisely. `seq` and `number` live inside the canon box, so
+whoever signs that box chooses them, and a delegated maintainer signs canon
+boxes. Uniqueness is therefore a property of the deployment, not of the
+format: it holds while one publisher does the stamping, and two maintainers
+stamping concurrently can pick the same values. The fold stays deterministic
+regardless, because the total order is `(seq, event-id)` and the tie-break
+settles it, but the result is not what either maintainer intended, so
+`hub verify` reports duplicate and non-monotonic `seq`/`number` (PEP-22).
+
+Making this structural rather than conventional would mean splitting the
+event in two: a delegate signs only the author box and proposes it, and the
+publisher, holding the reflog key, is the sole signer of canon boxes. That is
+the cleaner model and costs a type, but it also makes every delegate's action
+a round trip through the publisher, which is only worth it for a repo that
+actually runs several maintainers. Left as an option; until then the rule is
+one publisher per repo, checked by audit rather than enforced by the types.
+
+Note the related case: `seq` is minted as the maximum admitted plus one, so
+an event that was minted and then dropped by the fold leaves its `seq` free
+to be reused, and canon can end up with two events sharing one. Determinism
+is unaffected for the same reason, and the bridge avoids minting doomed
+events in the first place, but the audit reports it if it happens.
+
+A repo names the consensus channel with the optional manifest clause from
+PEP-17:
 
 ```
 (refchan <refchan-key-b58>)

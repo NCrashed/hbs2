@@ -126,6 +126,26 @@ spec = do
     it "rejects garbage bytes" $
       expectLeft MalformedPayload (parsePayload "not cbor at all")
 
+    it "rejects an older version as unsupported, not as v1" $ do
+      alice <- kp
+      owner <- kp
+      -- Version 0 is not "close enough to 1": an unknown lower version is no
+      -- more decodable here than an unknown higher one, and guessing is how
+      -- a reader ends up interpreting bytes it does not understand.
+      let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
+          old = MessageData 0 (mdBody (makeLetter (fst alice) (snd alice) ac noReplyChannel))
+      expectLeft (UnsupportedVersion 0) (parsePayload (letterPayload old))
+
+    it "checks the version even when a MessageData is built directly" $ do
+      alice <- kp
+      owner <- kp
+      -- The constructor is exported, so a value can reach the open path
+      -- without passing parsePayload.
+      let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
+          future = MessageData (hubMsgVersion + 1)
+                     (mdBody (makeLetter (fst alice) (snd alice) ac noReplyChannel))
+      expectLeft (UnsupportedVersion (hubMsgVersion + 1)) (openLetter future)
+
     it "rejects valid cbor with trailing garbage" $ do
       alice <- kp
       owner <- kp

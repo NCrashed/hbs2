@@ -62,6 +62,8 @@ type RepoRef = PubKey 'Sign HubScheme
 type EventId  = HashRef
 type ThreadId = EventId
 
+-- | WIRE FORMAT, APPEND ONLY: reachable from 'AuthorContent', so its
+-- encoding is part of what an event-id hashes. See the note there.
 data HubKind = HubIssue | HubPR
   deriving stock (Eq,Show,Generic)
 
@@ -70,6 +72,10 @@ instance Serialise HubKind
 -- | Pull-request coordinates (PEP-20). On the delta path 'prSource' is
 -- absent and 'prBundle' carries the git bundle; on the fork-pointer path
 -- the reverse. 'prSourceTip'/'prBase' are always present and signed.
+--
+-- WIRE FORMAT, APPEND ONLY: reachable from 'AuthorContent', so adding or
+-- reordering a field here rewrites every event-id that mentions a PR and
+-- invalidates its signature, exactly as it would in 'AuthorContent' itself.
 data PRCoords = PRCoords
   { prSource    :: Maybe Text     -- ^ hbs23://<fork-key>, fork-pointer path only
   , prSourceRef :: Text
@@ -171,6 +177,10 @@ authorThread = \case
 
 -- | What the owner assigns at fold time (PEP-19 canon box). The signer of
 -- the canon box is @canon-by@ and is recovered on unbox, not stored here.
+--
+-- WIRE FORMAT, APPEND ONLY: not hashed into any event-id, but it is what
+-- the canon box signs, so a changed encoding invalidates every canon
+-- signature ever made.
 data CanonContent = CanonContent
   { ccEventId    :: EventId          -- ^ the author box hash this blesses
   , ccSeq        :: Word64           -- ^ globally monotonic order weight

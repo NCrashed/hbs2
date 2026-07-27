@@ -68,6 +68,11 @@ data DropReason =
   | BadRevise         -- ^ revise not from the author of record
   | BadKind           -- ^ kind and payload disagree, or a PR-only op on an issue
   | UnknownRedact     -- ^ redact target never admitted (no-op)
+    -- | A canon box whose stamped values are not usable: a @number@ on
+    -- anything but an @open@, or a @seq@/@number@ at the very top of the
+    -- range, which would leave the next mint with nowhere to go. A wrong or
+    -- hostile maintainer could otherwise poison the cursor permanently.
+  | BadStamp
   deriving stock (Eq,Ord,Show)
 
 data Comment = Comment
@@ -150,6 +155,11 @@ data FoldResult = FoldResult
     -- a writer needs (PEP-19 puts thread events under @threads/@ and the
     -- rest under @repo/@).
   , frAdmitted  :: HashMap EventId (Maybe ThreadId)
+    -- | The authorized canon keys as of the end of the log: the owner plus
+    -- everyone delegated and not since revoked. A folder needs this to know
+    -- whether its own key may still bless anything, which nothing else in
+    -- the result reveals.
+  , frMaintainers :: HashSet HubKey
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -213,6 +223,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frMaxSeq    = sMaxSeq s
       , frMaxNumber = sMaxNumber s
       , frAdmitted  = sSeen s
+      , frMaintainers = sMaint s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
@@ -220,7 +231,24 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     go [] s = s
     go (r:rest) s
       | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
-      | otherwise = go rest (apply r s)
+      | not (sane r)                = go rest (dropE r BadStamp s)
+      | otherwise                   = go rest (apply r s)
+
+    -- The stamped values must be usable. A number belongs to an open and
+    -- nothing else, and neither counter may sit at the top of its range: the
+    -- next mint takes the maximum plus one, so admitting maxBound would wrap
+    -- the cursor to zero and send every later event to the front of the
+    -- order. Cheap to check here, and it keeps one bad canon box from
+    -- poisoning the repo permanently.
+    sane r = numberOK && seqOK && numberSmallEnough
+      where
+        cc = rCanon r
+        numberOK = case (rContent r, ccNumber cc) of
+          (AOpen{}, _)      -> True
+          (_, Nothing)      -> True
+          (_, Just _)       -> False
+        seqOK = ccSeq cc /= maxBound
+        numberSmallEnough = maybe True (/= maxBound) (ccNumber cc)
 
     apply r s = case rContent r of
 

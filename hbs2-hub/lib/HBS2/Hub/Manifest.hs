@@ -124,11 +124,14 @@ sigilsFor :: HubKey -> [Syntax c] -> [HashRef]
 sigilsFor k = map msSigil . filter ((== k) . msMailbox) . sigils
 
 -- | Emit @(mailbox <key> <role> [<tier>])@.
+--
+-- The role and tier are printed as strings, matching what the parser
+-- accepts: a symbol would not survive a tier containing a space.
 mailboxClause :: HubMailbox -> Syntax C
 mailboxClause (HubMailbox k role tier) =
   mkForm "mailbox" $
-    [ mkSym (show (pretty (AsBase58 k))), mkSym (Text.unpack role) ]
-    <> maybe [] (\t -> [mkSym (Text.unpack t)]) tier
+    [ mkSym (show (pretty (AsBase58 k))), mkStr (Text.unpack role) ]
+    <> maybe [] (\t -> [mkStr (Text.unpack t)]) tier
 
 -- | Emit @(mailbox-sigil <mailbox-key> <hashref>)@.
 mailboxSigilClause :: MailboxSigil -> Syntax C

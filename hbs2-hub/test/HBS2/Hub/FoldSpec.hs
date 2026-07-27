@@ -191,6 +191,37 @@ spec = do
           fr = foldEvents repo [ev]
       reasons fr `shouldBe` [UndecodableAuthor]
 
+    it "refuses a number on anything but an open" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                          (canon 1 (Just 1))
+          tid = eventId eOpen
+          -- a comment stamped with a number: nothing mints these, but a
+          -- wrong or hostile maintainer could, and it would raise the
+          -- number high-water mark for everyone.
+          eCmt = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 2)
+                         (canon 2 (Just 99))
+          fr = foldEvents repo [eOpen, eCmt]
+      reasons fr `shouldBe` [BadStamp]
+      frMaxNumber fr `shouldBe` 1
+
+    it "refuses a seq or number at the top of the range" $ do
+      owner <- kp
+      alice <- kp
+      -- The next mint is the maximum plus one, so admitting maxBound would
+      -- wrap the cursor to zero and poison the repo permanently.
+      let repo = fst owner
+          eMax = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon maxBound (Just 1))
+          eNum = mkEvent alice owner (AOpen repo HubIssue "u" [] Nothing Nothing Nothing 1)
+                         (canon 1 (Just maxBound))
+          fr = foldEvents repo [eMax, eNum]
+      reasons fr `shouldBe` [BadStamp, BadStamp]
+      HM.null (frThreads fr) `shouldBe` True
+      frMaxSeq fr `shouldBe` 0
+
     it "rejects a tampered author box" $ do
       owner <- kp
       alice <- kp

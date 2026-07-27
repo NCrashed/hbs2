@@ -49,6 +49,23 @@ spec = do
       -- A stranger naming no tier must still find somewhere to submit.
       fmap mbKey (mailboxByTier Nothing syn) `shouldBe` Just public
 
+    it "falls back to the first hub mailbox when there is no public tier" $ do
+      a <- kp
+      b <- kp
+      let syn = [ mailboxClause (HubMailbox a hubRole (Just "known"))
+                , mailboxClause (HubMailbox b hubRole (Just "trusted"))
+                ]
+      -- Neither untiered nor public: a default submitter still needs an
+      -- address, so the first declared inbox is it.
+      fmap mbKey (mailboxByTier Nothing syn) `shouldBe` Just a
+
+    it "keeps a tier containing a space intact" $ do
+      k <- kp
+      let emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "known good"))))
+      case parseTop emitted of
+        Left e    -> expectationFailure (show e)
+        Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole (Just "known good")]
+
     it "accepts string literals as well as symbols" $ do
       k <- kp
       let b58 = show (pretty (AsBase58 k))

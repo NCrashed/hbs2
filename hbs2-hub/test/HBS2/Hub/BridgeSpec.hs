@@ -190,7 +190,7 @@ spec = do
           -- the requester declares an absurd time; the owner must not adopt it
           req = makeLetter (fst alice) (snd alice)
                   (AClose tid (Just "please") maxBound) noReplyChannel
-      aClose <- expectRight (honourRequest owner anyone (fst alice) (acView aOpen) 500 origin req)
+      aClose <- expectRight (honourRequest owner anyone (fst alice) repo (acView aOpen) 500 origin req)
       let fr = foldEvents repo [acEvent aOpen, acEvent aClose]
           t = threadOf fr tid
       HM.lookup "status" (tsAttrs t) `shouldBe` Just "closed"
@@ -205,7 +205,7 @@ spec = do
       origin <- someHash
       thr <- someHash
       let req = makeLetter (fst alice) (snd alice) (AClose thr Nothing 1) noReplyChannel
-      expectErr UnknownThread (honourRequest owner anyone (fst alice) emptyView 1 origin req)
+      expectErr UnknownThread (honourRequest owner anyone (fst alice) (fst owner) emptyView 1 origin req)
 
     it "rejects a letter authored for another repo" $ do
       alice <- kp
@@ -265,7 +265,7 @@ spec = do
     it "refuses an owner redact whose target is not in canon yet" $ do
       owner <- kp
       ghost <- someHash
-      expectErr UnknownThread (ownerEvent owner (fst owner) emptyView 1 Nothing (ARedact ghost 1))
+      expectErr UnknownTarget (ownerEvent owner (fst owner) emptyView 1 Nothing (ARedact ghost 1))
 
     it "can redact an event that left no visible trace" $ do
       alice <- kp
@@ -313,16 +313,143 @@ spec = do
       expectErr AlreadyInCanon
         (acceptLetter owner anyone (fst alice) repo rebuilt 3 origin Nothing rev)
 
-    it "refuses delegate and revoke from anyone but the owner key" $ do
+    it "refuses to fold under a revoked maintainer key" $ do
       owner <- kp
       bob <- kp
-      -- Only the LWWRef owner may delegate (PEP-19 rule 5); a delegate
-      -- signing one would be dropped, so the bridge refuses it.
+      alice <- kp
+      origin <- someHash
+      -- A revoked maintainer can still sign; the fold just will not admit
+      -- what they signed. Minting would consume a triaged letter and leave
+      -- a useless event, and once retention prunes the mailbox copy the
+      -- submission is gone.
+      let repo = fst owner
+          letter n = makeLetter (fst alice) (snd alice)
+                       (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
+      aDel <- expectRight (ownerEvent owner repo emptyView 1 Nothing (ADelegate (fst bob) 1))
+      -- while delegated, bob may fold
+      aOk <- expectRight
+        (acceptLetter bob anyone (fst alice) repo (acView aDel) 2 origin Nothing (letter "ok"))
+      aRev <- expectRight (ownerEvent owner repo (acView aOk) 3 Nothing (ARevoke (fst bob) 3))
+      -- the view is rebuilt from canon, fully up to date, and bob is out
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aDel, aOk, aRev]))
+      expectErr UnauthorizedForRepo
+        (acceptLetter bob anyone (fst alice) repo rebuilt 4 origin Nothing (letter "after"))
+      expectErr UnauthorizedForRepo
+        (ownerEvent bob repo rebuilt 4 Nothing (ASet (scopeOf aOk) "status" "closed" 4))
+      -- and the owner still can
+      _ <- expectRight (ownerEvent owner repo rebuilt 4 Nothing
+                          (ASet (scopeOf aOk) "status" "closed" 4))
+      pure ()
+
+    it "lets a live delegate fold letters and owner events" $ do
+      owner <- kp
+      bob <- kp
+      alice <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aDel <- expectRight (ownerEvent owner repo emptyView 1 Nothing (ADelegate (fst bob) 1))
+      aOpen <- expectRight
+        (acceptLetter bob anyone (fst alice) repo (acView aDel) 2 origin Nothing letter)
+      aSet <- expectRight
+        (ownerEvent bob repo (acView aOpen) 3 Nothing (ASet (scopeOf aOpen) "status" "closed" 3))
+      -- and canon takes all of it
+      let fr = foldEvents repo (map acEvent [aDel, aOpen, aSet])
+      frDropped fr `shouldBe` []
+      HM.lookup "status" (tsAttrs (threadOf fr (scopeOf aOpen))) `shouldBe` Just "closed"
+
+    it "refuses delegate and revoke from a delegate, not just from a stranger" $ do
+      owner <- kp
+      bob <- kp
+      carol <- kp
+      -- bob is a real maintainer here, so this exercises the root-of-trust
+      -- guard rather than the general authority check.
+      aDel <- expectRight (ownerEvent owner (fst owner) emptyView 1 Nothing (ADelegate (fst bob) 1))
+      authorizedCanon (fst owner) (acView aDel) (fst bob) `shouldBe` True
+      expectErr UnauthorizedForRepo
+        (ownerEvent bob (fst owner) (acView aDel) 2 Nothing (ADelegate (fst carol) 2))
+      expectErr UnauthorizedForRepo
+        (ownerEvent bob (fst owner) (acView aDel) 2 Nothing (ARevoke (fst bob) 2))
+      -- the owner still may
+      acc <- expectRight
+        (ownerEvent owner (fst owner) (acView aDel) 2 Nothing (ADelegate (fst carol) 2))
+      acScope acc `shouldBe` RepoScope
+
+    it "refuses a stranger's delegate too" $ do
+      owner <- kp
+      bob <- kp
       expectErr UnauthorizedForRepo
         (ownerEvent bob (fst owner) emptyView 1 Nothing (ADelegate (fst bob) 1))
-      acc <- expectRight
+
+    it "puts a redact of a repo-scope event under repo scope" $ do
+      owner <- kp
+      bob <- kp
+      aDel <- expectRight
         (ownerEvent owner (fst owner) emptyView 1 Nothing (ADelegate (fst bob) 1))
-      acScope acc `shouldBe` RepoScope
+      aRed <- expectRight
+        (ownerEvent owner (fst owner) (acView aDel) 2 Nothing
+           (ARedact (eventId (acEvent aDel)) 2))
+      acScope aRed `shouldBe` RepoScope
+
+    it "reports an unknown redact target as such, not as an unknown thread" $ do
+      owner <- kp
+      ghost <- someHash
+      expectErr UnknownTarget
+        (ownerEvent owner (fst owner) emptyView 1 Nothing (ARedact ghost 1))
+
+    it "reports a revise on an issue thread as bad content" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- The author is right; the thread is the wrong kind, and the fold
+      -- would say BadKind, so the bridge must not blame the author.
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
+      let rev = makeLetter (fst alice) (snd alice)
+                  (ARevise (scopeOf aOpen) coords 2) noReplyChannel
+      expectErr BadContent
+        (acceptLetter owner anyone (fst alice) repo (acView aOpen) 2 origin Nothing rev)
+
+    it "reports seq, author and content for the writer" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          content = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 7
+          letter = makeLetter (fst alice) (snd alice) content noReplyChannel
+      acc <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
+      -- everything the tree writer needs, without unboxing anything again
+      acSeq acc `shouldBe` 1
+      acAuthor acc `shouldBe` fst alice
+      acContent acc `shouldBe` content
+
+    it "signs what triage decided, not what the requester wrote" $ do
+      mallory <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst mallory) (snd mallory)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter owner anyone (fst mallory) repo emptyView 1 origin Nothing letter)
+      let tid = scopeOf aOpen
+          -- a request to set an attribute of the requester's choosing
+          req = makeLetter (fst mallory) (snd mallory)
+                  (ASet tid "assignee" "mallory" 2) noReplyChannel
+          -- triage agrees to something else entirely
+          edited = ASet tid "labels" "wontfix" 2
+      acc <- expectRight
+        (honourWith owner anyone (fst mallory) repo (acView aOpen) 5 origin edited req)
+      acContent acc `shouldBe` withAuthorTs 5 edited
+      let fr = foldEvents repo [acEvent aOpen, acEvent acc]
+          t = threadOf fr tid
+      HM.lookup "labels" (tsAttrs t) `shouldBe` Just "wontfix"
+      HM.lookup "assignee" (tsAttrs t) `shouldBe` Nothing
 
     it "refuses a pr-only owner op on an issue thread" $ do
       alice <- kp
@@ -348,10 +475,10 @@ spec = do
         (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
       let req = makeLetter (fst alice) (snd alice)
                   (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
-      aClose <- expectRight (honourRequest owner anyone (fst alice) (acView aOpen) 9 origin req)
+      aClose <- expectRight (honourRequest owner anyone (fst alice) repo (acView aOpen) 9 origin req)
       -- same request, same clock: identical bytes, identical id
       expectErr AlreadyInCanon
-        (honourRequest owner anyone (fst alice) (acView aClose) 9 origin req)
+        (honourRequest owner anyone (fst alice) repo (acView aClose) 9 origin req)
 
     it "publishes the group secret only when something is encrypted" $ do
       alice <- kp

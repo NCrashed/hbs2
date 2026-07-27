@@ -174,13 +174,18 @@ Inline body text must therefore stay small; above a soft limit (on the order
 of tens of KiB) the body must move to a `body-part` attachment (a chunked
 encrypted tree) and the inline body left empty.
 
-Interop rule. A reader ignores clauses it does not know, so adding a field to
-an existing op stays compatible. An unknown `op` is a different matter and
-cannot be ignored: the letter content is one CBOR sum, so an unrecognized
-constructor fails the decode of the whole record and there is nothing left to
-skip. Adding an op is therefore a schema change and MUST bump `(hub-msg N)`,
-which the envelope carries outside the signed content precisely so an older
-reader can report "newer schema" instead of failing blind.
+Interop rule. Ignoring the unknown is a property of the S-expression
+projection, not of the wire format, and only the projection gets that
+freedom: a renderer skips clauses it does not recognize.
+
+The signed content is a single CBOR sum, so nothing in it can be skipped. An
+unknown constructor fails the decode of the whole record, and an extra field
+on a known constructor does the same, since the decoder expects a fixed
+arity. Both are therefore schema changes and MUST bump `(hub-msg N)`, which
+the envelope carries outside the signed content precisely so an older reader
+can report "newer schema" instead of failing blind. In practice a new field
+means a new constructor appended to the sum, because changing an existing one
+rewrites every event-id that used it and invalidates its signature.
 
 A reader that meets a correctly signed letter it cannot decode must not treat
 it as a forgery: verification and decoding are separate steps, and the two

@@ -223,8 +223,12 @@ parsePayload :: ByteString -> Either LetterError MessageData
 parsePayload bs = do
   Envelope v body <- strictDecode bs
   -- Version first: a newer schema is reported as such even when its body is
-  -- something this reader cannot decode at all.
-  if v > hubMsgVersion
+  -- something this reader cannot decode at all. Any version other than the
+  -- one this build speaks is unsupported, including a lower one: an older
+  -- schema is no more decodable here than a newer one, and treating an
+  -- unknown small number as "close enough to v1" is how a reader ends up
+  -- interpreting bytes it does not understand.
+  if v /= hubMsgVersion
     then Left (UnsupportedVersion v)
     else MessageData v <$> strictDecode body
 
@@ -244,13 +248,17 @@ strictDecode = maybe (Left MalformedPayload) Right . decodeStrict
 openLetter
   :: MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
-openLetter md = case mdBody md of
-  Ack _ -> Left NotALetter
-  Letter box rc ->
-    case unboxChecked box of
-      Left BoxBadSig      -> Left BadInnerSig
-      Left BoxUndecodable -> Left UndecodableContent
-      Right (pk , ac)     -> Right (box, pk, ac, rc)
+openLetter md
+  -- The constructor is exported, so a MessageData can reach here without
+  -- passing parsePayload; check the version rather than trust that it did.
+  | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
+  | otherwise = case mdBody md of
+      Ack _ -> Left NotALetter
+      Letter box rc ->
+        case unboxChecked box of
+          Left BoxBadSig      -> Left BadInnerSig
+          Left BoxUndecodable -> Left UndecodableContent
+          Right (pk , ac)     -> Right (box, pk, ac, rc)
 
 -- | Triage-side open, applying the two policy rules the peer layer cannot
 -- (PEP-18 "Replay, rewrap, and deduplication"):
@@ -281,11 +289,13 @@ openAck
   -> HubKey                       -- ^ the envelope (Mailbox message) signer
   -> MessageData
   -> Either LetterError AckRecord
-openAck isMaintainer envelopeSigner md = case mdBody md of
-  Letter{} -> Left NotAnAck
-  Ack a
-    | isMaintainer (akTarget a) envelopeSigner -> Right a
-    | otherwise                                -> Left UntrustedAck
+openAck isMaintainer envelopeSigner md
+  | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
+  | otherwise = case mdBody md of
+      Letter{} -> Left NotAnAck
+      Ack a
+        | isMaintainer (akTarget a) envelopeSigner -> Right a
+        | otherwise                                -> Left UntrustedAck
 
 -- | The readable S-expression projection of a letter (PEP-18). It is
 -- regenerated from the decoded content and never signed or parsed back: the

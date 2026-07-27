@@ -24,6 +24,20 @@
 --
 -- Everything here is pure: minting is a function of the current canon plus
 -- the letter, so two folders given the same inputs mint the same events.
+--
+-- The property the module owes its caller is that it never mints an event
+-- the fold will drop, and that holds by enumeration over 'DropReason':
+--
+--   * @BadAuthorSig@, @BadCanonSig@, @UndecodableAuthor@,
+--     @UndecodableCanon@, @IdMismatch@: impossible for boxes minted here.
+--   * @WrongTarget@, @BadKind@, @BadThread@, @UnknownRedact@, @DupId@,
+--     @BadRevise@, @UnauthorizedDelegate@: refused by the gate, on both the
+--     letter path and the owner-native one.
+--   * @UnauthorizedCanon@: refused by checking this folder's own key against
+--     the maintainer set canon reports, which is why 'CanonView' carries it.
+--
+-- Anything that weakens one of those checks weakens the property, so the
+-- view must come from the fold ('viewOf') rather than be reconstructed.
 module HBS2.Hub.Bridge
   ( CanonCursor(..)
   , EventScope(..)
@@ -34,8 +48,10 @@ module HBS2.Hub.Bridge
   , emptyView
   , initialCursor
   , cursorFrom
+  , authorizedCanon
   , acceptLetter
   , honourRequest
+  , honourWith
   , ownerEvent
   ) where
 
@@ -50,6 +66,8 @@ import HBS2.Net.Auth.Credentials
 import Data.ByteString (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HS
 import Data.Maybe (isJust,isNothing)
 import Data.Word (Word64)
 
@@ -85,11 +103,21 @@ data CanonView = CanonView
     -- a resent revise would not be caught as a duplicate. That divergence
     -- only appears after a restart, when the view is rebuilt from canon.
   , cvEvents  :: HashMap EventId (Maybe ThreadId)
+    -- | The canon keys still authorized at the end of the log. A folder must
+    -- check its OWN key against this: a maintainer whose delegation has been
+    -- revoked can still sign, but the fold will not admit what they sign, so
+    -- minting would consume a triaged letter and produce nothing.
+  , cvMaintainers :: HashSet HubKey
   }
 
--- | The view of an empty repo.
+-- | The view of an empty repo. The owner key needs no entry: it is the root
+-- of trust and is authorized by definition ('authorizedCanon').
 emptyView :: CanonView
-emptyView = CanonView initialCursor HM.empty HM.empty
+emptyView = CanonView initialCursor HM.empty HM.empty HS.empty
+
+-- | May this key bless events for this repo right now?
+authorizedCanon :: RepoRef -> CanonView -> HubKey -> Bool
+authorizedCanon repo view k = k == repo || HS.member k (cvMaintainers view)
 
 initialCursor :: CanonCursor
 initialCursor = CanonCursor 1 1
@@ -100,6 +128,7 @@ viewOf fr = CanonView
   { cvCursor  = cursorFrom fr
   , cvThreads = fmap (\t -> (tsKind t, tsAuthor t)) (frThreads fr)
   , cvEvents  = frAdmitted fr
+  , cvMaintainers = frMaintainers fr
   }
 
 -- | The next seq and number to mint, given folded canon.
@@ -128,9 +157,14 @@ data TriageError =
     -- carrying them, or a PR-only op on an issue thread. The fold would drop
     -- it, so it is refused before minting.
   | BadContent
-    -- | An owner-native op this key may not author for this repo: only the
-    -- LWWRef owner key may delegate or revoke (PEP-19 rule 5).
+    -- | This key may not bless events for this repo: either it was never a
+    -- maintainer, its delegation has been revoked, or it is not the owner
+    -- key and the op is delegate/revoke (PEP-19 rule 5).
   | UnauthorizedForRepo
+    -- | A redact naming an event that is not in canon. Distinct from
+    -- 'UnknownThread': the target is an event, and the fold reports this
+    -- case separately too.
+  | UnknownTarget
   deriving stock (Eq,Show)
 
 -- Refuse an author box canon already holds: the fold would drop the second
@@ -139,6 +173,12 @@ seenAlready :: CanonView -> EventId -> Either TriageError ()
 seenAlready view eid
   | HM.member eid (cvEvents view) = Left AlreadyInCanon
   | otherwise                     = Right ()
+
+-- Refuse to mint under a key canon will not accept as a blesser.
+requireCanon :: RepoRef -> CanonView -> HubKey -> Either TriageError ()
+requireCanon repo view k
+  | authorizedCanon repo view k = Right ()
+  | otherwise                   = Left UnauthorizedForRepo
 
 -- | What accepting a letter produced.
 data Accepted = Accepted
@@ -149,6 +189,14 @@ data Accepted = Accepted
     -- revoke belong to no thread at all.
   , acScope  :: EventScope
   , acNumber :: Maybe Word64     -- ^ minted here, on an open
+    -- | The seq stamped on this event. The writer names the file by it, and
+    -- deriving it back out of the cursor is both awkward and easy to get
+    -- wrong by one.
+  , acSeq    :: Word64
+    -- | Who authored the box, and what it says. Both are known here, and
+    -- recovering them downstream would mean verifying the signature again.
+  , acAuthor  :: HubKey
+  , acContent :: AuthorContent
     -- | The sender's back-channel, already vetted: present only when the
     -- envelope signer was the inner author. Returned so the caller can
     -- notify without opening the letter a second time.
@@ -177,7 +225,11 @@ acceptLetter
   -> Maybe ByteString                   -- ^ the message's group secret, if any
   -> MessageData
   -> Either TriageError Accepted
-acceptLetter canonKp allowed envelopeSigner repo view folded origin secret md = do
+acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin secret md = do
+  -- Our own authority first: a revoked maintainer can still sign, but the
+  -- fold will not admit it, so minting would burn a triaged letter.
+  requireCanon repo view canonPk
+
   (box, author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
 
@@ -199,19 +251,19 @@ acceptLetter canonKp allowed envelopeSigner repo view folded origin secret md = 
     ARevise thr _ _ -> do
       _ <- known thr
       case HM.lookup thr (cvThreads view) of
-        Just (HubPR, recorded) | recorded == author -> Right thr
-        _                                           -> Left NotAuthorOfRecord
+        -- Kind first: a revise on an issue is the wrong shape, not a
+        -- question of who signed it.
+        Just (HubIssue, _) -> Left BadContent
+        Just (HubPR, recorded)
+          | recorded == author -> Right thr
+          | otherwise          -> Left NotAuthorOfRecord
+        Nothing -> Left UnknownThread
 
-    other -> Left (NotAcceptable (classify other))
+    -- classify has already restricted this to the three ops above.
+    _ -> Left BadContent
 
-  let (ev, view') = mint canonKp view folded (Just origin) secret content box
-                      (ThreadScope thread)
-  Right Accepted { acEvent  = ev
-                 , acView   = view'
-                 , acScope  = ThreadScope thread
-                 , acNumber = mintedNumber content (cvCursor view)
-                 , acReply  = reply
-                 }
+  Right (accepted canonKp view folded (Just origin) secret content box author
+           (ThreadScope thread) reply)
   where
     known thr
       | HM.member thr (cvThreads view) = Right thr
@@ -228,15 +280,49 @@ honourRequest
   :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ canon keypair, which also authors
   -> (HubKey -> Bool)
   -> HubKey                             -- ^ envelope signer
+  -> RepoRef                            -- ^ the repo, for the authority check
   -> CanonView
   -> Word64                             -- ^ folded-at, and the owner's declared time
   -> HashRef                            -- ^ origin: the requesting message
   -> MessageData
   -> Either TriageError Accepted
-honourRequest canonKp@(pk,sk) allowed envelopeSigner view folded origin md = do
-  (_box, _author, content0, reply) <-
+honourRequest canonKp allowed envelopeSigner repo view folded origin md = do
+  (_box, _author, content0, _reply) <-
+    either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
+  honourWith canonKp allowed envelopeSigner repo view folded origin content0 md
+
+-- | Honour a request, but sign content the maintainer has looked at and
+-- possibly edited.
+--
+-- 'honourRequest' signs the requester's content verbatim, which means an
+-- arbitrary attribute name and value chosen by a stranger goes into canon
+-- under the owner's signature. Triage should normally decide what it is
+-- agreeing to, so this takes the content explicitly; the letter is still
+-- required, for its provenance and to check that what it asked for was a
+-- request in the first place.
+honourWith
+  :: (HubKey, PrivKey 'Sign HubScheme)
+  -> (HubKey -> Bool)
+  -> HubKey                             -- ^ envelope signer
+  -> RepoRef
+  -> CanonView
+  -> Word64                             -- ^ folded-at, and the owner's declared time
+  -> HashRef                            -- ^ origin: the requesting message
+  -> AuthorContent                      -- ^ what the owner actually signs
+  -> MessageData                        -- ^ the request being honoured
+  -> Either TriageError Accepted
+honourWith canonKp@(pk,sk) allowed envelopeSigner repo view folded origin content0 md = do
+  requireCanon repo view pk
+
+  (_box, _author, asked, reply) <-
     either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
 
+  case classify asked of
+    RequestOnly -> Right ()
+    other       -> Left (NotAcceptable other)
+
+  -- What the owner signs must still be a request-shaped op on a thread that
+  -- exists, whether or not it is exactly what was asked for.
   case classify content0 of
     RequestOnly -> Right ()
     other       -> Left (NotAcceptable other)
@@ -253,10 +339,8 @@ honourRequest canonKp@(pk,sk) allowed envelopeSigner view folded origin md = do
       box = signAuthor pk sk content
   seenAlready view (authorBoxId box)
 
-  let (ev, view') = mint canonKp view folded (Just origin) Nothing content box
-                      (ThreadScope thread)
-  Right Accepted { acEvent = ev, acView = view', acScope = ThreadScope thread
-                 , acNumber = Nothing, acReply = reply }
+  Right (accepted canonKp view folded (Just origin) Nothing content box pk
+           (ThreadScope thread) reply)
 
 -- | An owner-native event: the owner is both author and canon (PEP-19).
 -- Used for status changes, merges, redactions and delegation, none of which
@@ -274,6 +358,8 @@ ownerEvent
   -> AuthorContent
   -> Either TriageError Accepted
 ownerEvent kp@(pk,sk) repo view folded secret content = do
+  requireCanon repo view pk
+
   let box = signAuthor pk sk content
       eid = authorBoxId box
 
@@ -283,7 +369,7 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
     -- A redact belongs with the thread of the event it hides, so it lands
     -- beside it in the tree rather than under an id of its own.
     ARedact target _ -> case HM.lookup target (cvEvents view) of
-      Nothing        -> Left UnknownThread
+      Nothing         -> Left UnknownTarget
       Just (Just thr) -> Right (ThreadScope thr)
       Just Nothing    -> Right RepoScope
 
@@ -310,9 +396,7 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
                | prOnly content && kind /= HubPR -> Left BadContent
                | otherwise                       -> Right (ThreadScope thr)
 
-  let (ev, view') = mint kp view folded Nothing secret content box scope
-  Right Accepted { acEvent = ev, acView = view', acScope = scope
-                 , acNumber = mintedNumber content (cvCursor view), acReply = NoReply }
+  Right (accepted kp view folded Nothing secret content box pk scope NoReply)
   where
     prOnly = \case
       ARevise{} -> True
@@ -324,8 +408,14 @@ mintedNumber :: AuthorContent -> CanonCursor -> Maybe Word64
 mintedNumber AOpen{} cur = Just (ccrNextNumber cur)
 mintedNumber _ _ = Nothing
 
--- Stamp a canon box onto an author box and advance the view.
-mint
+-- Stamp a canon box onto an author box, advance the view, and report
+-- everything the caller and the writer downstream will need.
+--
+-- The author is passed in rather than recovered from the box: both callers
+-- already know it (one verified the letter, the other just signed it), and
+-- unboxing again would be a fourth signature check per letter with a silent
+-- fallback on failure, in the one place that decides who may revise a thread.
+accepted
   :: (HubKey, PrivKey 'Sign HubScheme)
   -> CanonView
   -> Word64
@@ -333,9 +423,20 @@ mint
   -> Maybe ByteString
   -> AuthorContent
   -> SignedBox AuthorContent HubScheme
+  -> HubKey                            -- ^ the author box's signer
   -> EventScope
-  -> (Event, CanonView)
-mint (pk,sk) view folded origin secret content box scope = (Event box canonBox, view')
+  -> ReplyChannel
+  -> Accepted
+accepted (pk,sk) view folded origin secret content box authorOf scope reply =
+  Accepted { acEvent = Event box canonBox
+           , acView = view'
+           , acScope = scope
+           , acNumber = mintedNumber content cur
+           , acSeq = ccrNextSeq cur
+           , acAuthor = authorOf
+           , acContent = content
+           , acReply = reply
+           }
   where
     cur = cvCursor view
     eid = authorBoxId box
@@ -357,12 +458,6 @@ mint (pk,sk) view folded origin secret content box scope = (Event box canonBox, 
       , ccPartSecret = secret'
       }
 
-    -- The author of record is whoever signed the opening box: for a folded
-    -- letter that is the contributor, for an owner-native open the owner.
-    authorOf = case unboxChecked box of
-      Right (k,_) -> k
-      Left _      -> pk
-
     view' = view
       { cvCursor = CanonCursor
           { ccrNextSeq    = ccrNextSeq cur + 1
@@ -372,6 +467,12 @@ mint (pk,sk) view folded origin secret content box scope = (Event box canonBox, 
           AOpen _ kind _ _ _ _ _ _ -> HM.insert eid (kind, authorOf) (cvThreads view)
           _                        -> cvThreads view
       , cvEvents = HM.insert eid (scopeThread scope) (cvEvents view)
+        -- Delegation takes effect for the next accept, exactly as it will
+        -- when the view is later rebuilt from canon.
+      , cvMaintainers = case content of
+          ADelegate k _ -> HS.insert k (cvMaintainers view)
+          ARevoke k _   -> HS.delete k (cvMaintainers view)
+          _             -> cvMaintainers view
       }
 
     scopeThread = \case
