@@ -26,6 +26,7 @@
 -- the letter, so two folders given the same inputs mint the same events.
 module HBS2.Hub.Bridge
   ( CanonCursor(..)
+  , EventScope(..)
   , CanonView(..)
   , Accepted(..)
   , TriageError(..)
@@ -49,8 +50,6 @@ import HBS2.Net.Auth.Credentials
 import Data.ByteString (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
-import Data.HashSet (HashSet)
-import Data.HashSet qualified as HS
 import Data.Maybe (isJust,isNothing)
 import Data.Word (Word64)
 
@@ -66,6 +65,12 @@ data CanonCursor = CanonCursor
   }
   deriving stock (Eq,Show)
 
+-- | Where an event lives in the canon tree (PEP-19 layout).
+data EventScope =
+    ThreadScope ThreadId  -- ^ under @threads/<thread-id>/@
+  | RepoScope             -- ^ under @repo/@: delegate and revoke
+  deriving stock (Eq,Show)
+
 -- | As much of canon as the bridge needs to decide before minting: what to
 -- stamp, which threads a reply may name, and which events already exist.
 data CanonView = CanonView
@@ -73,12 +78,18 @@ data CanonView = CanonView
     -- | Thread id to (kind, author of record). The author is needed because
     -- only they may revise a PR; the kind, because revise is PR-only.
   , cvThreads :: HashMap ThreadId (HubKind, HubKey)
-  , cvEvents  :: HashSet EventId
+    -- | Every admitted event and the thread it belongs to, taken straight
+    -- from the fold. Reconstructing it from the materialized threads would
+    -- silently omit every event that leaves no visible trace (a @set@, a
+    -- @merge@, a note-less @close@), so a redact of one would be refused and
+    -- a resent revise would not be caught as a duplicate. That divergence
+    -- only appears after a restart, when the view is rebuilt from canon.
+  , cvEvents  :: HashMap EventId (Maybe ThreadId)
   }
 
 -- | The view of an empty repo.
 emptyView :: CanonView
-emptyView = CanonView initialCursor HM.empty HS.empty
+emptyView = CanonView initialCursor HM.empty HM.empty
 
 initialCursor :: CanonCursor
 initialCursor = CanonCursor 1 1
@@ -88,8 +99,7 @@ viewOf :: FoldResult -> CanonView
 viewOf fr = CanonView
   { cvCursor  = cursorFrom fr
   , cvThreads = fmap (\t -> (tsKind t, tsAuthor t)) (frThreads fr)
-  , cvEvents  = HS.fromList
-      (HM.keys (frThreads fr) <> concatMap (map cId . tsComments) (HM.elems (frThreads fr)))
+  , cvEvents  = frAdmitted fr
   }
 
 -- | The next seq and number to mint, given folded canon.
@@ -114,16 +124,30 @@ data TriageError =
     -- | A revise from someone other than the thread's author of record, or
     -- on a thread that is not a PR.
   | NotAuthorOfRecord
-    -- | Kind and payload disagree: a PR without coordinates, or an issue
-    -- carrying them. The fold would drop it, so it is refused before minting.
+    -- | Kind and payload disagree: a PR without coordinates, an issue
+    -- carrying them, or a PR-only op on an issue thread. The fold would drop
+    -- it, so it is refused before minting.
   | BadContent
+    -- | An owner-native op this key may not author for this repo: only the
+    -- LWWRef owner key may delegate or revoke (PEP-19 rule 5).
+  | UnauthorizedForRepo
   deriving stock (Eq,Show)
+
+-- Refuse an author box canon already holds: the fold would drop the second
+-- copy as a duplicate.
+seenAlready :: CanonView -> EventId -> Either TriageError ()
+seenAlready view eid
+  | HM.member eid (cvEvents view) = Left AlreadyInCanon
+  | otherwise                     = Right ()
 
 -- | What accepting a letter produced.
 data Accepted = Accepted
   { acEvent  :: Event
   , acView   :: CanonView        -- ^ canon plus this event, for the next accept
-  , acThread :: ThreadId         -- ^ the thread this event belongs to
+    -- | Where the event belongs in the tree. A redact goes with the thread
+    -- of the event it hides, not under an id of its own, and delegate and
+    -- revoke belong to no thread at all.
+  , acScope  :: EventScope
   , acNumber :: Maybe Word64     -- ^ minted here, on an open
     -- | The sender's back-channel, already vetted: present only when the
     -- envelope signer was the inner author. Returned so the caller can
@@ -161,9 +185,7 @@ acceptLetter canonKp allowed envelopeSigner repo view folded origin secret md = 
     FoldsToCanon -> Right ()
     other        -> Left (NotAcceptable other)
 
-  if HS.member (authorBoxId box) (cvEvents view)
-    then Left AlreadyInCanon
-    else Right ()
+  seenAlready view (authorBoxId box)
 
   thread <- case content of
     AOpen target kind _ _ _ _ coords _
@@ -183,9 +205,10 @@ acceptLetter canonKp allowed envelopeSigner repo view folded origin secret md = 
     other -> Left (NotAcceptable (classify other))
 
   let (ev, view') = mint canonKp view folded (Just origin) secret content box
+                      (ThreadScope thread)
   Right Accepted { acEvent  = ev
                  , acView   = view'
-                 , acThread = thread
+                 , acScope  = ThreadScope thread
                  , acNumber = mintedNumber content (cvCursor view)
                  , acReply  = reply
                  }
@@ -224,10 +247,15 @@ honourRequest canonKp@(pk,sk) allowed envelopeSigner view folded origin md = do
     Nothing -> Left BadContent
 
   -- Re-author: a new box signed by the owner, carrying the owner's clock.
+  -- Honouring the same request twice at the same clock produces the same
+  -- bytes and so the same id, which the fold would drop as a duplicate.
   let content = withAuthorTs folded content0
       box = signAuthor pk sk content
-      (ev, view') = mint canonKp view folded (Just origin) Nothing content box
-  Right Accepted { acEvent = ev, acView = view', acThread = thread
+  seenAlready view (authorBoxId box)
+
+  let (ev, view') = mint canonKp view folded (Just origin) Nothing content box
+                      (ThreadScope thread)
+  Right Accepted { acEvent = ev, acView = view', acScope = ThreadScope thread
                  , acNumber = Nothing, acReply = reply }
 
 -- | An owner-native event: the owner is both author and canon (PEP-19).
@@ -239,31 +267,57 @@ honourRequest canonKp@(pk,sk) allowed envelopeSigner view folded origin md = do
 -- silent no-op, and a thread op on an unknown thread would be dropped.
 ownerEvent
   :: (HubKey, PrivKey 'Sign HubScheme)
+  -> RepoRef                            -- ^ the repo, and its root of trust
   -> CanonView
   -> Word64                             -- ^ folded-at
   -> Maybe ByteString                   -- ^ part secret, if the event has one
   -> AuthorContent
   -> Either TriageError Accepted
-ownerEvent kp@(pk,sk) view folded secret content = do
+ownerEvent kp@(pk,sk) repo view folded secret content = do
   let box = signAuthor pk sk content
       eid = authorBoxId box
 
-  thread <- case content of
-    ARedact target _
-      | HS.member target (cvEvents view) -> Right target
-      | otherwise                        -> Left UnknownThread
-    -- Repo-scope events belong to no thread; the id stands for itself.
-    ADelegate{} -> Right eid
-    ARevoke{}   -> Right eid
-    AOpen{}     -> Right eid
-    _ -> case authorThread content of
-           Just thr | HM.member thr (cvThreads view) -> Right thr
-                    | otherwise                      -> Left UnknownThread
-           Nothing -> Left BadContent
+  seenAlready view eid
 
-  let (ev, view') = mint kp view folded Nothing secret content box
-  Right Accepted { acEvent = ev, acView = view', acThread = thread
+  scope <- case content of
+    -- A redact belongs with the thread of the event it hides, so it lands
+    -- beside it in the tree rather than under an id of its own.
+    ARedact target _ -> case HM.lookup target (cvEvents view) of
+      Nothing        -> Left UnknownThread
+      Just (Just thr) -> Right (ThreadScope thr)
+      Just Nothing    -> Right RepoScope
+
+    -- Only the owner key may delegate (PEP-19 rule 5): a delegate signing
+    -- one would be dropped, so refuse before minting.
+    ADelegate{} | pk /= repo -> Left UnauthorizedForRepo
+                | otherwise  -> Right RepoScope
+    ARevoke{}   | pk /= repo -> Left UnauthorizedForRepo
+                | otherwise  -> Right RepoScope
+
+    AOpen target kind _ _ _ _ coords _
+      | target /= repo                    -> Left WrongRepo
+      | kind == HubPR && isNothing coords -> Left BadContent
+      | kind == HubIssue && isJust coords -> Left BadContent
+      | otherwise                         -> Right (ThreadScope eid)
+
+    -- The remaining ops are thread ops; the fold checks kind for the PR-only
+    -- ones, so the bridge checks it too rather than minting a doomed event.
+    _ -> case authorThread content of
+           Nothing -> Left BadContent
+           Just thr -> case HM.lookup thr (cvThreads view) of
+             Nothing -> Left UnknownThread
+             Just (kind,_)
+               | prOnly content && kind /= HubPR -> Left BadContent
+               | otherwise                       -> Right (ThreadScope thr)
+
+  let (ev, view') = mint kp view folded Nothing secret content box scope
+  Right Accepted { acEvent = ev, acView = view', acScope = scope
                  , acNumber = mintedNumber content (cvCursor view), acReply = NoReply }
+  where
+    prOnly = \case
+      ARevise{} -> True
+      AMerge{}  -> True
+      _         -> False
 
 -- The number this content mints, if any: only a thread has one.
 mintedNumber :: AuthorContent -> CanonCursor -> Maybe Word64
@@ -279,8 +333,9 @@ mint
   -> Maybe ByteString
   -> AuthorContent
   -> SignedBox AuthorContent HubScheme
+  -> EventScope
   -> (Event, CanonView)
-mint (pk,sk) view folded origin secret content box = (Event box canonBox, view')
+mint (pk,sk) view folded origin secret content box scope = (Event box canonBox, view')
   where
     cur = cvCursor view
     eid = authorBoxId box
@@ -316,8 +371,12 @@ mint (pk,sk) view folded origin secret content box = (Event box canonBox, view')
       , cvThreads = case content of
           AOpen _ kind _ _ _ _ _ _ -> HM.insert eid (kind, authorOf) (cvThreads view)
           _                        -> cvThreads view
-      , cvEvents = HS.insert eid (cvEvents view)
+      , cvEvents = HM.insert eid (scopeThread scope) (cvEvents view)
       }
+
+    scopeThread = \case
+      ThreadScope thr -> Just thr
+      RepoScope       -> Nothing
 
 -- Does this content point at an encrypted tree that a reader will need the
 -- group secret for?

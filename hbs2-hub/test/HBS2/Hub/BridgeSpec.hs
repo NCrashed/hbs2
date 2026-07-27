@@ -38,6 +38,12 @@ expectErr want = \case
 coords :: PRCoords
 coords = PRCoords Nothing "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
 
+-- The thread an accepted event landed in.
+scopeOf :: Accepted -> ThreadId
+scopeOf a = case acScope a of
+  ThreadScope t -> t
+  RepoScope     -> error "expected a thread scope"
+
 -- Everyone is allowed unless a test says otherwise.
 anyone :: HubKey -> Bool
 anyone = const True
@@ -79,14 +85,14 @@ spec = do
       a1 <- expectRight (acceptLetter owner anyone env repo emptyView 1 origin Nothing (open "a"))
       a2 <- expectRight (acceptLetter owner anyone env repo (acView a1) 2 origin Nothing (open "b"))
       let reply = makeLetter (fst alice) (snd alice)
-                    (AComment (acThread a1) Nothing (Just "hi") Nothing 3) noReplyChannel
+                    (AComment (scopeOf a1) Nothing (Just "hi") Nothing 3) noReplyChannel
       a3 <- expectRight (acceptLetter owner anyone env repo (acView a2) 3 origin Nothing reply)
       cvCursor (acView a3) `shouldBe` CanonCursor 4 3
       acNumber a3 `shouldBe` Nothing
       let fr = foldEvents repo (map acEvent [a1,a2,a3])
-      tsNumber (threadOf fr (acThread a1)) `shouldBe` Just 1
-      tsNumber (threadOf fr (acThread a2)) `shouldBe` Just 2
-      length (tsComments (threadOf fr (acThread a1))) `shouldBe` 1
+      tsNumber (threadOf fr (scopeOf a1)) `shouldBe` Just 1
+      tsNumber (threadOf fr (scopeOf a2)) `shouldBe` Just 2
+      length (tsComments (threadOf fr (scopeOf a1))) `shouldBe` 1
 
     it "refuses a reply whose thread is not in canon yet" $ do
       alice <- kp
@@ -180,7 +186,7 @@ spec = do
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
         (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
-      let tid = acThread aOpen
+      let tid = scopeOf aOpen
           -- the requester declares an absurd time; the owner must not adopt it
           req = makeLetter (fst alice) (snd alice)
                   (AClose tid (Just "please") maxBound) noReplyChannel
@@ -239,7 +245,7 @@ spec = do
       aPR <- expectRight
         (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing pr)
       let evil = makeLetter (fst mallory) (snd mallory)
-                   (ARevise (acThread aPR) coords { prSourceTip = "dead" } 2) noReplyChannel
+                   (ARevise (scopeOf aPR) coords { prSourceTip = "dead" } 2) noReplyChannel
       expectErr NotAuthorOfRecord
         (acceptLetter owner anyone (fst mallory) repo (acView aPR) 2 origin Nothing evil)
 
@@ -259,7 +265,93 @@ spec = do
     it "refuses an owner redact whose target is not in canon yet" $ do
       owner <- kp
       ghost <- someHash
-      expectErr UnknownThread (ownerEvent owner emptyView 1 Nothing (ARedact ghost 1))
+      expectErr UnknownThread (ownerEvent owner (fst owner) emptyView 1 Nothing (ARedact ghost 1))
+
+    it "can redact an event that left no visible trace" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- A set leaves nothing in the materialized thread beyond its effect,
+      -- so a view rebuilt from threads alone would not know it exists and
+      -- would refuse to redact it. The fold reports admitted events, so it
+      -- does. This only diverges after a restart, which is why the view is
+      -- taken from the fold rather than reconstructed.
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
+      aSet <- expectRight
+        (ownerEvent owner repo (acView aOpen) 2 Nothing (ASet (scopeOf aOpen) "labels" "bug" 2))
+      -- rebuild the view the way a restarted folder would
+      let fr = foldEvents repo (map acEvent [aOpen, aSet])
+          rebuilt = viewOf fr
+      aRedact <- expectRight
+        (ownerEvent owner repo rebuilt 3 Nothing (ARedact (eventId (acEvent aSet)) 3))
+      -- and it lands with the thread it belongs to, not under its target's id
+      acScope aRedact `shouldBe` ThreadScope (scopeOf aOpen)
+      let fr' = foldEvents repo (map acEvent [aOpen, aSet, aRedact])
+      frDropped fr' `shouldBe` []
+
+    it "catches a resent revise after a restart" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- A revise leaves no trace of its own event-id in the thread, so a
+      -- reconstructed view would mint it twice and the fold would drop the
+      -- second as a duplicate.
+      let repo = fst owner
+          pr = makeLetter (fst alice) (snd alice)
+                 (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
+      aPR <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing pr)
+      let rev = makeLetter (fst alice) (snd alice)
+                  (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2) noReplyChannel
+      aRev <- expectRight
+        (acceptLetter owner anyone (fst alice) repo (acView aPR) 2 origin Nothing rev)
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aPR, aRev]))
+      expectErr AlreadyInCanon
+        (acceptLetter owner anyone (fst alice) repo rebuilt 3 origin Nothing rev)
+
+    it "refuses delegate and revoke from anyone but the owner key" $ do
+      owner <- kp
+      bob <- kp
+      -- Only the LWWRef owner may delegate (PEP-19 rule 5); a delegate
+      -- signing one would be dropped, so the bridge refuses it.
+      expectErr UnauthorizedForRepo
+        (ownerEvent bob (fst owner) emptyView 1 Nothing (ADelegate (fst bob) 1))
+      acc <- expectRight
+        (ownerEvent owner (fst owner) emptyView 1 Nothing (ADelegate (fst bob) 1))
+      acScope acc `shouldBe` RepoScope
+
+    it "refuses a pr-only owner op on an issue thread" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
+      expectErr BadContent
+        (ownerEvent owner repo (acView aOpen) 2 Nothing
+           (AMerge (scopeOf aOpen) "cafe" "refs/heads/master" 2))
+
+    it "refuses honouring the same request twice" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter owner anyone (fst alice) repo emptyView 1 origin Nothing letter)
+      let req = makeLetter (fst alice) (snd alice)
+                  (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
+      aClose <- expectRight (honourRequest owner anyone (fst alice) (acView aOpen) 9 origin req)
+      -- same request, same clock: identical bytes, identical id
+      expectErr AlreadyInCanon
+        (honourRequest owner anyone (fst alice) (acView aClose) 9 origin req)
 
     it "publishes the group secret only when something is encrypted" $ do
       alice <- kp
@@ -275,8 +367,8 @@ spec = do
       a1 <- expectRight (acceptLetter owner anyone env repo emptyView 1 origin (Just "S") plain)
       a2 <- expectRight (acceptLetter owner anyone env repo emptyView 1 origin (Just "S") withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
-      tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (acThread a1)) `shouldBe` Nothing
-      tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (acThread a2)) `shouldBe` Just "S"
+      tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
+      tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just "S"
 
     it "carries the secret for a pr bundle" $ do
       alice <- kp
@@ -290,7 +382,7 @@ spec = do
                  noReplyChannel
       acc <- expectRight
         (acceptLetter owner anyone (fst alice) repo emptyView 1 origin (Just "S") pr)
-      let t = threadOf (foldEvents repo [acEvent acc]) (acThread acc)
+      let t = threadOf (foldEvents repo [acEvent acc]) (scopeOf acc)
       fmap psPartSecret (tsPR t) `shouldBe` Just (Just "S")
 
     it "derives the next cursor from canon, not from a local counter" $ do
@@ -319,13 +411,13 @@ spec = do
                       (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
       a1 <- expectRight (acceptLetter owner anyone env repo emptyView 1 origin Nothing opening)
       let cmt = makeLetter (fst alice) (snd alice)
-                  (AComment (acThread a1) Nothing (Just "hi") Nothing 2) noReplyChannel
+                  (AComment (scopeOf a1) Nothing (Just "hi") Nothing 2) noReplyChannel
       a2 <- expectRight (acceptLetter owner anyone env repo (acView a1) 2 origin Nothing cmt)
       let rev = makeLetter (fst alice) (snd alice)
-                  (ARevise (acThread a1) coords { prSourceTip = "cccc" } 3) noReplyChannel
+                  (ARevise (scopeOf a1) coords { prSourceTip = "cccc" } 3) noReplyChannel
       a3 <- expectRight (acceptLetter owner anyone env repo (acView a2) 3 origin Nothing rev)
-      a4 <- expectRight (ownerEvent owner (acView a3) 4 Nothing
-                          (AMerge (acThread a1) "cafe" "refs/heads/master" 4))
+      a4 <- expectRight (ownerEvent owner repo (acView a3) 4 Nothing
+                          (AMerge (scopeOf a1) "cafe" "refs/heads/master" 4))
       let fr = foldEvents repo (map acEvent [a1,a2,a3,a4])
       frDropped fr `shouldBe` []
-      HM.lookup "status" (tsAttrs (threadOf fr (acThread a1))) `shouldBe` Just "merged"
+      HM.lookup "status" (tsAttrs (threadOf fr (scopeOf a1))) `shouldBe` Just "merged"

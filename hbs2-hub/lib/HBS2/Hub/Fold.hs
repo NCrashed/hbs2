@@ -141,6 +141,15 @@ data FoldResult = FoldResult
     -- canon rather than of any node-local counter.
   , frMaxSeq    :: Word64
   , frMaxNumber :: Word64
+    -- | Every admitted event, mapped to the thread it belongs to, or
+    -- 'Nothing' for the repo-scope ones (@delegate@/@revoke@).
+    --
+    -- The fold knows this exactly; reconstructing it from 'frThreads' would
+    -- miss every event that leaves no visible trace (a @set@, a @merge@, a
+    -- note-less @close@), which is enough to break both dedup and the layout
+    -- a writer needs (PEP-19 puts thread events under @threads/@ and the
+    -- rest under @repo/@).
+  , frAdmitted  :: HashMap EventId (Maybe ThreadId)
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -185,7 +194,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 
     st0 = S { sMaint    = HS.singleton owner
             , sThreads  = HM.empty
-            , sSeen     = HS.empty
+            , sSeen     = HM.empty
             , sRedacted = HS.empty
             -- Unresolvable events have no seq; order them after the rest,
             -- still deterministically among themselves by event-id.
@@ -203,34 +212,35 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frDropped  = [ (e,d) | (_,e,d) <- sortOn id (sDropped s) ]
       , frMaxSeq    = sMaxSeq s
       , frMaxNumber = sMaxNumber s
+      , frAdmitted  = sSeen s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
 
     go [] s = s
     go (r:rest) s
-      | HS.member (rId r) (sSeen s) = go rest (dropE r DupId s)
+      | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
       | otherwise = go rest (apply r s)
 
     apply r s = case rContent r of
 
       ADelegate k _
-        | ownerOnly r -> keep r s { sMaint = HS.insert k (sMaint s) }
+        | ownerOnly r -> keep repoScope r s { sMaint = HS.insert k (sMaint s) }
         | otherwise   -> dropE r UnauthorizedDelegate s
 
       -- Revoking the owner key is a no-op: it is the root of trust and
       -- cannot be delegated away, so it cannot be withdrawn either.
       ARevoke k _
         | not (ownerOnly r) -> dropE r UnauthorizedDelegate s
-        | k == owner        -> keep r s
-        | otherwise         -> keep r s { sMaint = HS.delete k (sMaint s) }
+        | k == owner        -> keep repoScope r s
+        | otherwise         -> keep repoScope r s { sMaint = HS.delete k (sMaint s) }
 
       -- Owner-authored (PEP-19 rule 4): BOTH boxes must be an authorized
       -- key. Checking only the canon box would let anyone author a redact
       -- and hide any event in the repo as soon as it got blessed.
       ARedact target _
         | not (ownerAuthored r s)    -> dropE r UnauthorizedCanon s
-        | HS.member target (sSeen s) -> keep r s { sRedacted = HS.insert target (sRedacted s) }
+        | HM.member target (sSeen s) -> keep (threadOfEvent target s) r s { sRedacted = HS.insert target (sRedacted s) }
         | otherwise                  -> dropE r UnknownRedact s
 
       AOpen target kind title labels body bodypart mpr ts
@@ -261,7 +271,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       , tsPartSecret = ccPartSecret (rCanon r)
                       , tsOrigin = ccOrigin (rCanon r)
                       }
-            in keep r s { sThreads = HM.insert (rId r) t (sThreads s) }
+            in keep (Just (rId r)) r s { sThreads = HM.insert (rId r) t (sThreads s) }
 
       AComment thr _replyto body bodypart ts -> onThread r thr s $ \t ->
         touch r t { tsComments = mkComment r ts body bodypart : tsComments t }
@@ -314,13 +324,13 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
           Nothing -> dropE r BadThread s
           Just t  -> case f t of
                        Left reason -> dropE r reason s
-                       Right t'    -> keep r s { sThreads = HM.insert thr t' (sThreads s) }
+                       Right t'    -> keep (Just thr) r s { sThreads = HM.insert thr t' (sThreads s) }
 
 -- Internal accumulator.
 data St = S
   { sMaint    :: HashSet HubKey
   , sThreads  :: HashMap ThreadId ThreadState
-  , sSeen     :: HashSet EventId
+  , sSeen     :: HashMap EventId (Maybe ThreadId)
   , sRedacted :: HashSet EventId
   , sDropped  :: [(Word64,EventId,DropReason)]
   , sMaxSeq    :: Word64
@@ -328,14 +338,23 @@ data St = S
   }
 
 -- Mark an event applied (dedup + the id every later redact resolves
--- against), and advance the high-water marks a publisher mints from. Only
--- admitted events count: a dropped one must not consume a seq or a number.
-keep :: Resolved -> St -> St
-keep r s = s
-  { sSeen      = HS.insert (rId r) (sSeen s)
+-- against), record which thread it belongs to, and advance the high-water
+-- marks a publisher mints from. Only admitted events count: a dropped one
+-- must not consume a seq or a number.
+keep :: Maybe ThreadId -> Resolved -> St -> St
+keep scope r s = s
+  { sSeen      = HM.insert (rId r) scope (sSeen s)
   , sMaxSeq    = max (sMaxSeq s) (rSeq r)
   , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
   }
+
+-- Events that belong to no thread.
+repoScope :: Maybe ThreadId
+repoScope = Nothing
+
+-- Which thread an already-admitted event belongs to, for a redact naming it.
+threadOfEvent :: EventId -> St -> Maybe ThreadId
+threadOfEvent eid s = fromMaybe Nothing (HM.lookup eid (sSeen s))
 
 dropE :: Resolved -> DropReason -> St -> St
 dropE r reason s = s { sDropped = (rSeq r, rId r, reason) : sDropped s }
