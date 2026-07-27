@@ -122,10 +122,19 @@ PEP-19 owner-native event (`set`, `merge`, `redact`, `delegate`, `revoke`) is th
 owner-only ops. So fold and renderers handle a single type rather than a sum
 of two. `HubLetter` is the name for the Tier-B-authored subset.
 
+Where the version lives. `(hub-msg N)` is a field of the payload envelope,
+NOT of the signed content, and the projection below shows it for readability
+only. The reason is the event-id: it is the hash of the author box, so
+anything inside that box is frozen for good and a version bump there would
+rewrite every existing id. The envelope bytes are never hashed, so the
+version is cheap to carry and to bump there, and it lets an old reader answer
+"newer schema" instead of "malformed". Canon does not need it in the box
+either: PEP-19 versions canon at the event-file and tree level.
+
 `HubLetter` fields (projection):
 
 ```
-(hub-msg  1)                       ; schema version
+(hub-msg  1)                       ; schema version, carried by the envelope
 (kind     issue)                   ; issue | pr
 (op       open)                    ; open | comment | revise | close | reopen | label
 (target   <repo-lwwref-b58>)       ; which repository; also blocks cross-repo replay
@@ -299,9 +308,13 @@ Trust tiers (optional). A repo may declare more than one mailbox clause, each
 with a distinct key and an optional `<tier>` tag (for example a low-friction
 `known` inbox and an open `public` inbox), each governed by its own policy
 (PEP-21 sizes the tiers: allow-list without PoW for `known`, PoW plus rate
-limits for `public`). A submitter picks a tier: default to the open/public
-mailbox; a contributor the maintainer has allow-listed selects their tier by
-name. With a single mailbox the tag is omitted and there is nothing to choose.
+limits for `public`). A contributor the maintainer has allow-listed selects
+their tier by name. A submitter naming no tier resolves in this order: the
+untiered mailbox, then one tagged `public`, then the first hub mailbox
+declared. The fallback matters because a repo may declare only `known` and
+`public` and no untiered inbox, which would otherwise leave a default
+submitter with nothing to address. With a single mailbox the tag is omitted
+and there is nothing to choose.
 
 Multi-maintainer note. Within one mailbox, if several maintainers must read
 it, the group secret is sealed to each of their encryption keys. A

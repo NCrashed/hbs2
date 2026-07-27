@@ -53,7 +53,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "hello" Nothing Nothing Nothing 100)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "hello" [] Nothing Nothing Nothing 100)
                           (canon 1 (Just 1))
           tid   = eventId eOpen
           eCmt  = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 200)
@@ -70,9 +70,9 @@ spec = do
       alice <- kp
       let repo = fst owner
           other = fst alice           -- a different repo key
-          bad1 = mkEvent alice owner (AOpen other HubIssue "x" Nothing Nothing Nothing 1)
+          bad1 = mkEvent alice owner (AOpen other HubIssue "x" [] Nothing Nothing Nothing 1)
                          (canon 1 (Just 1))
-          bad2 = mkEvent alice owner (AOpen other HubIssue "y" Nothing Nothing Nothing 2)
+          bad2 = mkEvent alice owner (AOpen other HubIssue "y" [] Nothing Nothing Nothing 2)
                          (canon 2 (Just 2))
           a = frDropped (foldEvents repo [bad1, bad2])
           b = frDropped (foldEvents repo [bad2, bad1])
@@ -85,7 +85,7 @@ spec = do
       -- maxBound bucket; that bucket must still be ordered by event-id.
       let repo = fst owner
           mk n = mkEvent alice owner
-                   (AOpen repo HubIssue n Nothing Nothing Nothing 1) (canon 1 (Just 1))
+                   (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) (canon 1 (Just 1))
           forged1 = Event (evAuthorBox (mk "a1")) (evCanonBox (mk "a2"))  -- IdMismatch
           forged2 = Event (evAuthorBox (mk "b1")) (evCanonBox (mk "b2"))  -- IdMismatch
           x = frDropped (foldEvents repo [forged1, forged2])
@@ -98,7 +98,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           -- a real, well-formed open that we deliberately never fold
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           orphan = eventId eOpen
           eCmt = mkEvent alice owner (AComment orphan Nothing (Just "orphan") Nothing 2)
@@ -111,7 +111,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           tid = eventId eOpen
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "oops, a secret") Nothing 2)
@@ -133,7 +133,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          e = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          e = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                       (canon 1 (Just 1))
           SignedBox pk bs sig = evAuthorBox e
           tampered = e { evAuthorBox = SignedBox pk (bs <> "x") sig }
@@ -145,7 +145,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          e = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          e = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                       (canon 1 (Just 1))
           SignedBox pk bs sig = evCanonBox e
           tampered = e { evCanonBox = SignedBox pk (bs <> "x") sig }
@@ -160,7 +160,7 @@ spec = do
       -- Alice's author box, signed for repo Y, lifted verbatim into repo X
       -- and blessed by X's owner. It must not become a thread in X.
       let stolen = mkEvent alice ownerX
-                     (AOpen (fst ownerY) HubIssue "authored elsewhere" Nothing Nothing Nothing 1)
+                     (AOpen (fst ownerY) HubIssue "authored elsewhere" [] Nothing Nothing Nothing 1)
                      (canon 1 (Just 1))
           fr = foldEvents (fst ownerX) [stolen]
       HM.null (frThreads fr) `shouldBe` True
@@ -170,7 +170,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           tid   = eventId eOpen
           ac    = AComment tid Nothing (Just "once") Nothing 2
@@ -187,7 +187,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           tid   = eventId eOpen
           -- two DIFFERENT sets of the same attribute at the SAME seq
@@ -201,7 +201,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "old" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "old" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           tid   = eventId eOpen
           eSet  = mkEvent owner owner (ASet tid "title" "new" 2) (canon 2 Nothing)
@@ -214,7 +214,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                           (canonAt 1 (Just 1) 1000)
           tid   = eventId eOpen
           -- a comment claiming to be from the far future
@@ -232,9 +232,9 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          real = mkEvent alice owner (AOpen repo HubIssue "a" Nothing Nothing Nothing 1)
+          real = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
                          (canon 1 (Just 1))
-          other = mkEvent alice owner (AOpen repo HubIssue "b" Nothing Nothing Nothing 2)
+          other = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 2))
           -- graft: real author box, canon box that blesses the other id
           forged = Event (evAuthorBox real) (evCanonBox other)
@@ -252,11 +252,11 @@ spec = do
       erin  <- kp     -- dave illegally tries to bless erin's open
       let repo = fst owner
           eDelBob = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
-          eOpenC  = mkEvent carol bob (AOpen repo HubIssue "ok" Nothing Nothing Nothing 100)
+          eOpenC  = mkEvent carol bob (AOpen repo HubIssue "ok" [] Nothing Nothing Nothing 100)
                             (canon 2 (Just 1))
           tidC    = eventId eOpenC
           eDelDave = mkEvent bob bob (ADelegate (fst dave) 3) (canon 3 Nothing)
-          eOpenE  = mkEvent erin dave (AOpen repo HubIssue "bad" Nothing Nothing Nothing 400)
+          eOpenE  = mkEvent erin dave (AOpen repo HubIssue "bad" [] Nothing Nothing Nothing 400)
                             (canon 4 (Just 2))
           tidE    = eventId eOpenE
           fr = foldEvents repo [eDelBob, eOpenC, eDelDave, eOpenE]
@@ -272,12 +272,12 @@ spec = do
       let repo = fst owner
           eDel  = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
           -- bob blesses this while authorized: must survive the later revoke
-          eOk   = mkEvent alice bob (AOpen repo HubIssue "before" Nothing Nothing Nothing 2)
+          eOk   = mkEvent alice bob (AOpen repo HubIssue "before" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 1))
           tidOk = eventId eOk
           eRev  = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
           -- after the revoke bob may no longer bless
-          eBad  = mkEvent alice bob (AOpen repo HubIssue "after" Nothing Nothing Nothing 4)
+          eBad  = mkEvent alice bob (AOpen repo HubIssue "after" [] Nothing Nothing Nothing 4)
                           (canon 4 (Just 2))
           tidBad = eventId eBad
           fr = foldEvents repo [eDel, eOk, eRev, eBad]
@@ -290,7 +290,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           eSelf = mkEvent owner owner (ARevoke (fst owner) 1) (canon 1 Nothing)
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "still works" Nothing Nothing Nothing 2)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "still works" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 1))
           tid = eventId eOpen
           eClose = mkEvent owner owner (AClose tid Nothing 3) (canon 3 Nothing)
@@ -306,7 +306,7 @@ spec = do
       mallory <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner
-                    (AOpen repo HubPR "pr" Nothing Nothing (Just coords) 1)
+                    (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1)
                     (canon 1 (Just 1))
           tid = eventId eOpen
           good = coords { prSourceTip = "cccc" }
@@ -322,7 +322,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubIssue "an issue" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           tid = eventId eOpen
           eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon 2 Nothing)
@@ -336,7 +336,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eOpen = mkEvent alice owner (AOpen repo HubPR "no coords" Nothing Nothing Nothing 1)
+          eOpen = mkEvent alice owner (AOpen repo HubPR "no coords" [] Nothing Nothing Nothing 1)
                           (canon 1 (Just 1))
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
@@ -349,7 +349,7 @@ spec = do
       -- would silently drop the coordinates, so reject it instead.
       let repo = fst owner
           eOpen = mkEvent alice owner
-                    (AOpen repo HubIssue "issue with coords" Nothing Nothing (Just coords) 1)
+                    (AOpen repo HubIssue "issue with coords" [] Nothing Nothing (Just coords) 1)
                     (canon 1 (Just 1))
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True

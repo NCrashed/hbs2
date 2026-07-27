@@ -25,6 +25,7 @@ module HBS2.Hub.Types
   , authorTs
   , authorThread
   , eventId
+  , authorBoxId
   , signAuthor
   , signCanon
   , mkEvent
@@ -85,8 +86,13 @@ instance Serialise PRCoords
 -- invalidates every signature ever made. Add new constructors at the END,
 -- and new fields only as a new constructor.
 data AuthorContent =
-    -- | target, kind, title, body?, body-part?, pr-coords?, ts
-    AOpen RepoRef HubKind Text (Maybe Text) (Maybe HashRef) (Maybe PRCoords) Word64
+    -- | target, kind, title, requested labels, body?, body-part?, pr-coords?, ts
+    --
+    -- The labels are what the author /asks/ for. They are advisory: the fold
+    -- does not apply them, because a stranger must not label their own
+    -- submission (PEP-18). They travel in the signed content so triage can
+    -- see the request and the owner can honour it with an owner-signed set.
+    AOpen RepoRef HubKind Text [Text] (Maybe Text) (Maybe HashRef) (Maybe PRCoords) Word64
     -- | thread, reply-to?, body?, body-part?, ts
   | AComment ThreadId (Maybe EventId) (Maybe Text) (Maybe HashRef) Word64
     -- | thread, new coords, ts  (PR only, author-of-record)
@@ -112,7 +118,7 @@ instance Serialise AuthorContent
 -- | The author-declared timestamp (Unix epoch seconds, UTC; advisory).
 authorTs :: AuthorContent -> Word64
 authorTs = \case
-  AOpen _ _ _ _ _ _ t -> t
+  AOpen _ _ _ _ _ _ _ t -> t
   AComment _ _ _ _ t  -> t
   ARevise _ _ t       -> t
   ASet _ _ _ t        -> t
@@ -165,10 +171,16 @@ instance Serialise Event
 instance Show Event where
   show = show . eventId
 
+-- | The event-id of an author box: the hbs2 content hash of its serialised
+-- bytes. Anyone holding the box can compute it, which is what lets a Tier B
+-- sender know the canonical thread-id at send time (PEP-18 threading).
+authorBoxId :: SignedBox AuthorContent HubScheme -> EventId
+authorBoxId = HashRef . hashObject . serialise
+
 -- | The event-id: the hbs2 content hash of the serialised author box.
 -- Stable before seq/number exist and computable by the author.
 eventId :: Event -> EventId
-eventId = HashRef . hashObject . serialise . evAuthorBox
+eventId = authorBoxId . evAuthorBox
 
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme

@@ -25,7 +25,9 @@ module HBS2.Hub.Fold
 import HBS2.Hub.Types
 
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
+import HBS2.Data.Types.Refs (HashRef)
 
+import Data.ByteString (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
@@ -64,11 +66,13 @@ data DropReason =
   deriving stock (Eq,Ord,Show)
 
 data Comment = Comment
-  { cId       :: EventId
-  , cAuthor   :: HubKey
-  , cAuthorTs :: Word64   -- ^ declared by the author; advisory, may be anything
-  , cFoldedTs :: Word64   -- ^ owner clock at fold; trusted
-  , cBody     :: Maybe Text
+  { cId         :: EventId
+  , cAuthor     :: HubKey
+  , cAuthorTs   :: Word64   -- ^ declared by the author; advisory, may be anything
+  , cFoldedTs   :: Word64   -- ^ owner clock at fold; trusted
+  , cBody       :: Maybe Text
+  , cBodyPart   :: Maybe HashRef     -- ^ large body shipped as an encrypted tree
+  , cPartSecret :: Maybe ByteString  -- ^ group secret the owner published for it
   }
   deriving stock (Eq,Show)
 
@@ -96,6 +100,18 @@ data ThreadState = ThreadState
   , tsAttrs    :: HashMap Text Text
   , tsComments :: [Comment]        -- ^ in seq order
   , tsPR       :: Maybe PRState
+    -- | Labels the author asked for on open. Deliberately NOT merged into
+    -- 'tsAttrs': applying them would let a stranger label their own
+    -- submission. Triage shows them; the owner honours one with a signed set.
+  , tsLabelsRequested :: [Text]
+  , tsBody       :: Maybe Text
+    -- | Body shipped as an encrypted tree, with the group secret the owner
+    -- published at fold so any clone can fetch and decrypt it (PEP-18/19
+    -- "Attachments in public canon").
+  , tsBodyPart   :: Maybe HashRef
+  , tsPartSecret :: Maybe ByteString
+    -- | The Tier B letter this was folded from, for provenance.
+  , tsOrigin     :: Maybe HashRef
   }
 
 -- | The thread title, an LWW attribute like any other.
@@ -188,7 +204,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         | HS.member target (sSeen s) -> keep r s { sRedacted = HS.insert target (sRedacted s) }
         | otherwise                  -> dropE r UnknownRedact s
 
-      AOpen target kind title _ _ mpr ts
+      AOpen target kind title labels body bodypart mpr ts
         -- The repo binding: an author box is signed for one repo, so it
         -- cannot be lifted out of another repo's canon and replayed here.
         | target /= owner    -> dropE r WrongTarget s
@@ -208,12 +224,16 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       , tsAttrs = HM.fromList [("status","open"),("title",title)]
                       , tsComments = []
                       , tsPR = if kind == HubPR then fmap (`PRState` Nothing) mpr else Nothing
+                      , tsLabelsRequested = labels
+                      , tsBody = body
+                      , tsBodyPart = bodypart
+                      , tsPartSecret = ccPartSecret (rCanon r)
+                      , tsOrigin = ccOrigin (rCanon r)
                       }
             in keep r s { sThreads = HM.insert (rId r) t (sThreads s) }
 
-      AComment thr _replyto body _bodypart ts -> onThread r thr s $ \t ->
-        touch r t { tsComments = Comment (rId r) (rAuthorKey r) ts (foldedTs r) body
-                                 : tsComments t }
+      AComment thr _replyto body bodypart ts -> onThread r thr s $ \t ->
+        touch r t { tsComments = mkComment r ts body bodypart : tsComments t }
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
         if tsKind t /= HubPR then Left BadKind
@@ -283,5 +303,18 @@ dropE r reason s = s { sDropped = (rSeq r, rId r, reason) : sDropped s }
 addNote :: Maybe Text -> Resolved -> Word64 -> ThreadState -> ThreadState
 addNote Nothing _ _ t = t
 addNote note@(Just _) r ts t =
-  t { tsComments = Comment (rId r) (rAuthorKey r) ts (ccFoldedTs (rCanon r)) note
-                   : tsComments t }
+  t { tsComments = mkComment r ts note Nothing : tsComments t }
+
+-- | Build a comment, carrying the attachment hashref and the group secret
+-- the owner published for it, so a reader has everything needed to fetch
+-- and decrypt the body without going back to the mailbox.
+mkComment :: Resolved -> Word64 -> Maybe Text -> Maybe HashRef -> Comment
+mkComment r ts body bodypart = Comment
+  { cId = rId r
+  , cAuthor = rAuthorKey r
+  , cAuthorTs = ts
+  , cFoldedTs = ccFoldedTs (rCanon r)
+  , cBody = body
+  , cBodyPart = bodypart
+  , cPartSecret = ccPartSecret (rCanon r)
+  }

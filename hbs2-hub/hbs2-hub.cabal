@@ -50,7 +50,9 @@ common shared-properties
 
   build-depends:
         hbs2-core
+      , suckless-conf
       , serialise
+      , cborg
       , bytestring
       , containers
       , unordered-containers
@@ -64,6 +66,8 @@ library
     exposed-modules:
       HBS2.Hub.Types
       HBS2.Hub.Fold
+      HBS2.Hub.Letter
+      HBS2.Hub.Manifest
 
 test-suite spec
   import:          shared-properties
@@ -79,8 +83,11 @@ test-suite spec
   build-depends:   base
                  , hbs2-hub
                  , hbs2-core
+                 , suckless-conf
                  , hspec
                  , unordered-containers
                  , text
   other-modules:
       HBS2.Hub.FoldSpec
+      HBS2.Hub.LetterSpec
+      HBS2.Hub.ManifestSpec

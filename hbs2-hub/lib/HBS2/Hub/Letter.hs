@@ -1,0 +1,353 @@
+-- | The Tier B letter (PEP-18).
+--
+-- A letter rides the Mailbox protocol: the Mailbox 'Message' is a
+-- @SignedBox MessageContent@ whose body is encrypted to the maintainers.
+-- That outer signature covers ciphertext and binds the recipient set, so it
+-- is transport only. What this module defines is the /plaintext/ that goes
+-- into @messageData@: a versioned envelope around either
+--
+--   * a 'Letter': a 'SignedBox' over 'AuthorContent' (the durable, publicly
+--     verifiable authorship proof) plus a transport-only 'ReplyChannel'
+--     discarded at fold; or
+--   * an 'Ack': a courtesy notification from the owner back to a
+--     contributor, which carries no inner box and never becomes canon.
+--
+-- The inner box is the PEP-19 author box verbatim: the triage bridge stores
+-- it unchanged, so its 'authorBoxId' is the canonical event-id, and a sender
+-- can compute the thread-id at send time without any handshake.
+--
+-- Encryption, signing of the envelope, and the parts (attachments) are the
+-- Mailbox layer's job; this module only produces and consumes the payload
+-- bytes, which keeps it network-free and testable.
+module HBS2.Hub.Letter
+  ( MessageData(..)
+  , MessageBody(..)
+  , ReplyChannel(..)
+  , AckRecord(..)
+  , LetterError(..)
+  , Disposition(..)
+  , hubMsgVersion
+  , noReplyChannel
+  , makeLetter
+  , makeAck
+  , letterPayload
+  , parsePayload
+  , openLetter
+  , openLetterAs
+  , openAck
+  , letterEventId
+  , letterThreadId
+  , classify
+  , letterSyntax
+  ) where
+
+import HBS2.Hub.Types
+
+import HBS2.Base58 (AsBase58(..))
+import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Data.Types.SignedBox
+import HBS2.Net.Auth.Credentials
+import HBS2.Prelude.Plated (Pretty(..))
+
+import Data.Config.Suckless.Syntax
+
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.Serialise (Serialise(..),serialise)
+import Codec.Serialise qualified as CBOR
+import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as LBS
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import Data.Text qualified as Text
+import Data.Word (Word32,Word64)
+import GHC.Generics (Generic)
+
+-- | Schema version of the payload envelope: the @(hub-msg N)@ of PEP-18.
+--
+-- It lives here, not in 'AuthorContent', on purpose. An event-id is the hash
+-- of the author box, so anything inside it is frozen forever; the envelope
+-- bytes are not hashed, so a version field here stays cheap to bump and lets
+-- an old reader answer "newer schema" instead of "malformed". Canon carries
+-- its own version at the file and tree level (PEP-19).
+hubMsgVersion :: Word32
+hubMsgVersion = 1
+
+-- | Where the owner should send acknowledgements and status updates.
+--
+-- This lives OUTSIDE the inner box on purpose: the inner box is published
+-- into public canon verbatim, and a contributor's personal mailbox key must
+-- not end up in every clone forever. Its authenticity comes from the outer
+-- Mailbox signature over the envelope.
+--
+-- Entirely optional: a drive-by contributor who hosts no mailbox uses
+-- 'noReplyChannel' and simply forgoes notifications. Threading never depends
+-- on it, because the canonical thread-id is sender-computable.
+--
+-- A mailbox key alone is useless (a sign key is not an encryption key), so
+-- the type pairs it with the sigil rather than allowing the invalid
+-- half-specified state.
+data ReplyChannel =
+    NoReply
+  | ReplyTo HubKey HashRef   -- ^ mailbox key + a sigil resolving its encryption key
+  deriving stock (Eq,Show,Generic)
+
+instance Serialise ReplyChannel
+
+noReplyChannel :: ReplyChannel
+noReplyChannel = NoReply
+
+-- | A courtesy notification from the owner to a contributor: the number and
+-- status the contributor could not compute themselves. Not canon, carries no
+-- inner box, never folded. Trust comes from checking the envelope signer
+-- against the repo's maintainer set ('openAck'); the authoritative status is
+-- always in canon.
+data AckRecord = AckRecord
+  { akTarget      :: RepoRef
+  , akThread      :: ThreadId
+  , akNumber      :: Maybe Word64
+  , akStatus      :: Text
+  , akMergeCommit :: Maybe Text   -- ^ on a merged PR
+  }
+  deriving stock (Eq,Show,Generic)
+
+instance Serialise AckRecord
+
+data MessageBody =
+    Letter (SignedBox AuthorContent HubScheme) ReplyChannel
+  | Ack AckRecord
+  deriving stock (Generic)
+
+instance Serialise MessageBody
+
+-- | The plaintext of @messageData@: a version plus the body.
+data MessageData = MessageData
+  { mdVersion :: Word32
+  , mdBody    :: MessageBody
+  }
+  deriving stock (Generic)
+
+instance Serialise MessageData
+
+data LetterError =
+    MalformedPayload      -- ^ bytes are not a MessageData
+  | UnsupportedVersion Word32  -- ^ a newer schema than this reader knows
+  | BadInnerSig           -- ^ the inner box does not verify
+  | NotALetter            -- ^ an Ack where a Letter was expected
+  | NotAnAck              -- ^ a Letter where an Ack was expected
+  | AuthorDenied          -- ^ the inner author is deny-listed (triage, PEP-21)
+  | UntrustedAck          -- ^ the ack's envelope signer is not a maintainer
+  deriving stock (Eq,Show)
+
+-- | What a letter's op can become once the owner triages it (PEP-18/PEP-19).
+data Disposition =
+    FoldsToCanon   -- ^ open/comment/revise: becomes canon as the sender's own
+  | RequestOnly    -- ^ close/reopen/label(set): a request the owner may honour
+  | OwnerNative    -- ^ merge/redact/delegate/revoke: never arrives as a letter
+  deriving stock (Eq,Show)
+
+-- | Classify by op. The fold enforces the same split by key (a stranger's
+-- 'RequestOnly' event is dropped unless an authorized key authored it); this
+-- is the sender/triage-side view of it.
+classify :: AuthorContent -> Disposition
+classify = \case
+  AOpen{}     -> FoldsToCanon
+  AComment{}  -> FoldsToCanon
+  ARevise{}   -> FoldsToCanon
+  AClose{}    -> RequestOnly
+  AReopen{}   -> RequestOnly
+  ASet{}      -> RequestOnly
+  AMerge{}    -> OwnerNative
+  ARedact{}   -> OwnerNative
+  ADelegate{} -> OwnerNative
+  ARevoke{}   -> OwnerNative
+
+-- | Build a letter: sign the content into the inner box, attach the
+-- transport-only back-channel.
+makeLetter
+  :: HubKey -> PrivKey 'Sign HubScheme
+  -> AuthorContent
+  -> ReplyChannel
+  -> MessageData
+makeLetter pk sk ac rc = MessageData hubMsgVersion (Letter (signAuthor pk sk ac) rc)
+
+makeAck :: AckRecord -> MessageData
+makeAck = MessageData hubMsgVersion . Ack
+
+-- | The event-id this letter will have in canon: the hash of its inner box,
+-- computable by the sender before delivery.
+letterEventId :: MessageData -> Maybe EventId
+letterEventId md = case mdBody md of
+  Letter box _ -> Just (authorBoxId box)
+  Ack _        -> Nothing
+
+-- | The canonical thread this letter belongs to.
+--
+-- For an @open@ that is the letter's own event-id (the thread root); for a
+-- reply it is the thread named inside the signed content, which is NOT the
+-- reply's own id. Getting this wrong would break correlation against an
+-- 'AckRecord', whose 'akThread' is always the thread.
+letterThreadId :: MessageData -> Maybe ThreadId
+letterThreadId md = case mdBody md of
+  Ack a -> Just (akThread a)
+  Letter box _ -> do
+    (_, ac) <- unboxSignedBox0 box
+    pure (fromMaybe (authorBoxId box) (authorThread ac))
+
+-- | Serialise to the bytes that go into @messageData@ before encryption.
+letterPayload :: MessageData -> ByteString
+letterPayload = LBS.toStrict . serialise
+
+-- | Parse the decrypted @messageData@ bytes, rejecting a schema this reader
+-- does not know rather than reporting it as malformed.
+--
+-- The whole input must be consumed: 'deserialiseOrFail' happily stops at the
+-- end of a valid value and ignores whatever follows, which would let anyone
+-- append bytes to a letter that still parses.
+parsePayload :: ByteString -> Either LetterError MessageData
+parsePayload bs =
+  case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
+    Left _ -> Left MalformedPayload
+    Right (rest, md)
+      | not (LBS.null rest)          -> Left MalformedPayload
+      | mdVersion md > hubMsgVersion -> Left (UnsupportedVersion (mdVersion md))
+      | otherwise                    -> Right md
+
+-- | Verify and open a letter: recover the author key, the content it signed,
+-- and the back-channel. The inner box is returned too, because the triage
+-- bridge must store it verbatim as the canon author box (re-signing would
+-- change the event-id and destroy the authorship proof).
+--
+-- This is the plain form, with no policy applied; triage should prefer
+-- 'openLetterAs'.
+openLetter
+  :: MessageData
+  -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
+openLetter md = case mdBody md of
+  Ack _ -> Left NotALetter
+  Letter box rc ->
+    case unboxSignedBox0 box of
+      Nothing        -> Left BadInnerSig
+      Just (pk , ac) -> Right (box, pk, ac, rc)
+
+-- | Triage-side open, applying the two policy rules the peer layer cannot
+-- (PEP-18 "Replay, rewrap, and deduplication"):
+--
+--   * the deny-list is checked against the INNER author, since a banned
+--     author's box can be rewrapped under a fresh envelope key; and
+--   * the reply channel is honoured only when the envelope signer is the
+--     inner author, because a rewrapper can substitute their own.
+openLetterAs
+  :: (HubKey -> Bool)   -- ^ may this inner author be folded? (not deny-listed)
+  -> HubKey             -- ^ the envelope (Mailbox message) signer
+  -> MessageData
+  -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
+openLetterAs allowed envelopeSigner md = do
+  (box, author, ac, rc) <- openLetter md
+  if not (allowed author)
+    then Left AuthorDenied
+    else pure (box, author, ac, if envelopeSigner == author then rc else NoReply)
+
+-- | Open an ack. It carries no inner box, so the only trust available is the
+-- envelope signer being a current maintainer of the repo; the authoritative
+-- status is in canon regardless.
+openAck
+  :: (HubKey -> Bool)   -- ^ is this key a maintainer of the target repo?
+  -> HubKey             -- ^ the envelope (Mailbox message) signer
+  -> MessageData
+  -> Either LetterError AckRecord
+openAck isMaintainer envelopeSigner md = case mdBody md of
+  Letter{} -> Left NotAnAck
+  Ack a
+    | isMaintainer envelopeSigner -> Right a
+    | otherwise                   -> Left UntrustedAck
+
+-- | The readable S-expression projection of a letter (PEP-18). It is
+-- regenerated from the decoded content and never signed or parsed back: the
+-- authoritative form is the binary inner box. Used by @hub show@ and for
+-- debugging.
+letterSyntax :: AuthorContent -> [Syntax C]
+letterSyntax ac =
+  [ mkForm "hub-msg" [mkInt hubMsgVersion] ] <> body ac
+  where
+    b58 :: HubKey -> Syntax C
+    b58 x = mkSym @C (show (pretty (AsBase58 x)))
+
+    href :: HashRef -> Syntax C
+    href h = mkSym @C (show (pretty h))
+
+    txt :: Text -> Syntax C
+    txt t = mkStr @C (Text.unpack t)
+
+    tsym :: Text -> Syntax C
+    tsym t = mkSym @C (Text.unpack t)
+
+    kindOf :: HubKind -> Syntax C
+    kindOf = \case
+      HubIssue -> mkSym @C "issue"
+      HubPR    -> mkSym @C "pr"
+
+    op :: String -> Syntax C
+    op o = mkForm "op" [mkSym @C o]
+
+    labelsOf :: [Text] -> [Syntax C]
+    labelsOf ls = [ mkForm "labels" (fmap tsym ls) | not (null ls) ]
+
+    bodyOf :: Maybe Text -> [Syntax C]
+    bodyOf mb = [ mkForm "body" [txt t] | Just t <- [mb] ]
+
+    partOf :: Maybe HashRef -> [Syntax C]
+    partOf mp = [ mkForm "body-part" [href h] | Just h <- [mp] ]
+
+    coordsOf :: PRCoords -> [Syntax C]
+    coordsOf c =
+      [ mkForm "source" [txt src] | Just src <- [prSource c] ]
+      <> [ mkForm "source-ref" [txt (prSourceRef c)]
+         , mkForm "source-tip" [txt (prSourceTip c)]
+         , mkForm "onto"       [txt (prOnto c)]
+         , mkForm "base"       [txt (prBase c)]
+         ]
+      <> [ mkForm "bundle-part" [href h] | Just h <- [prBundle c] ]
+
+    body :: AuthorContent -> [Syntax C]
+    body = \case
+      AOpen target kind title labels mb mp mpr ts ->
+        [ mkForm "kind" [kindOf kind], op "open"
+        , mkForm "target" [b58 target]
+        , mkForm "title" [txt title]
+        , mkForm "created" [mkInt ts]
+        ] <> labelsOf labels <> bodyOf mb <> partOf mp <> maybe [] coordsOf mpr
+
+      AComment thr mrep mb mp ts ->
+        [ op "comment", mkForm "thread" [href thr], mkForm "created" [mkInt ts] ]
+        <> [ mkForm "reply-to" [href e] | Just e <- [mrep] ]
+        <> bodyOf mb <> partOf mp
+
+      ARevise thr c ts ->
+        [ op "revise", mkForm "thread" [href thr], mkForm "created" [mkInt ts] ]
+        <> coordsOf c
+
+      ASet thr k v ts ->
+        [ op "set", mkForm "thread" [href thr]
+        , mkForm "set" [tsym k, txt v], mkForm "created" [mkInt ts] ]
+
+      AClose thr mb ts ->
+        [ op "close", mkForm "thread" [href thr], mkForm "created" [mkInt ts] ]
+        <> bodyOf mb
+
+      AReopen thr mb ts ->
+        [ op "reopen", mkForm "thread" [href thr], mkForm "created" [mkInt ts] ]
+        <> bodyOf mb
+
+      AMerge thr mc into ts ->
+        [ op "merge", mkForm "thread" [href thr]
+        , mkForm "merge-commit" [txt mc], mkForm "merged-into" [txt into]
+        , mkForm "created" [mkInt ts] ]
+
+      ARedact target ts ->
+        [ op "redact", mkForm "redacts" [href target], mkForm "created" [mkInt ts] ]
+
+      ADelegate k ts ->
+        [ op "delegate", mkForm "delegate" [b58 k], mkForm "created" [mkInt ts] ]
+
+      ARevoke k ts ->
+        [ op "revoke", mkForm "revoke" [b58 k], mkForm "created" [mkInt ts] ]
