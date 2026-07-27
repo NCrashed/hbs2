@@ -250,6 +250,19 @@ projection of admitted state. Redacted items render as withheld, not removed
 (PEP-19). All of this is a pure function of canon, so every clone shows the
 same thing.
 
+`hub verify` also flags what the fold accepts but cannot police. The
+canon-box `folded-ts` is load-bearing (the render contract's times come from
+it, precisely because the author's declared timestamp is attacker-chosen),
+yet it is asserted by whoever signs the canon box. A delegated maintainer,
+who is by construction trusted less than the owner (PEP-21 rule 5), can set
+`folded-ts` to an absurd value and pin a thread to the top of every
+recency-sorted view, and no later event can undo it. The fold does not reject
+this, because `folded-ts` carries no ordering authority (`seq` does) and a
+strict rule would break legitimate clock skew. Instead `hub verify` reports
+`folded-ts` that is non-monotonic with respect to `seq`, or implausibly far
+from its neighbours, naming the canon key that signed it. Detection at audit
+time, not silent acceptance and not a hard fold rule.
+
 
 Reuse of fixme-new
 ================
@@ -292,7 +305,8 @@ Must be built:
     plus a minimal HTML/CSS renderer of the contract.
   - `hub verify` as the audit tool that re-runs the fold's checks and reports
     dropped events (the contract itself carries only provenance keys, no
-    verified flags, since only admitted events materialize).
+    verified flags, since only admitted events materialize), plus the
+    `folded-ts` monotonicity check described above.
 
 
 Rejected alternatives

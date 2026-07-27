@@ -4,6 +4,7 @@ packages:
   hbs2-cli/hbs2-cli.cabal
   hbs2-core/hbs2-core.cabal
   hbs2-git3/hbs2-git3.cabal
+  hbs2-hub/hbs2-hub.cabal
   hbs2-keyman/hbs2-keyman/hbs2-keyman.cabal
   hbs2-keyman/hbs2-keyman-direct-lib/hbs2-keyman-direct-lib.cabal
   hbs2-log-structured/hbs2-log-structured.cabal

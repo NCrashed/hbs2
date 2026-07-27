@@ -80,7 +80,9 @@ jobs:
       - name: Build
         run: cabal build all --enable-tests
 
-      # Test run is intentionally not enabled yet. The test suite is
-      # legacy code that has not been audited for the current API and
-      # runtime environment. Enable cabal test all here once the suite
-      # is reviewed.
+      # Suites are enabled one package at a time. `cabal test all` stays
+      # off because the legacy suites have not been audited for the
+      # current API and runtime environment; add a package here once its
+      # suite is reviewed.
+      - name: Test (reviewed suites)
+        run: cabal test hbs2-hub

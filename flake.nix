@@ -37,6 +37,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       "hbs2-cli"
       "hbs2-sync"
       "hbs2-log-structured"
+      "hbs2-hub"
       ];
 
     miscellaneous =
