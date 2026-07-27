@@ -40,6 +40,7 @@ module HBS2.Hub.Letter
   , letterThreadId
   , classify
   , letterSyntax
+  , ackSyntax
   , Envelope(..)
   ) where
 
@@ -322,6 +323,38 @@ openAck isMaintainer (EnvelopeSigner envelopeSigner) md
         | isMaintainer (akTarget a) envelopeSigner -> Right a
         | otherwise                                -> Left UntrustedAck
 
+-- Shared by both projections below.
+b58 :: HubKey -> Syntax C
+b58 x = mkSym @C (show (pretty (AsBase58 x)))
+
+href :: HashRef -> Syntax C
+href h = mkSym @C (show (pretty h))
+
+txt :: Text -> Syntax C
+txt t = mkStr @C (Text.unpack t)
+
+tsym :: Text -> Syntax C
+tsym t = mkSym @C (Text.unpack t)
+
+-- | The readable S-expression projection of an acknowledgement (PEP-18
+-- "Acknowledgement letter"). Pinned because it is what a contributor's
+-- tooling reads (@hub updates@, PEP-22), and it has no @op@: an ack asserts
+-- nothing the contributor authored.
+--
+-- Display only, like 'letterSyntax': the wire form is the CBOR 'AckRecord'.
+ackSyntax :: AckRecord -> [Syntax C]
+ackSyntax a =
+  [ mkForm "hub-msg" [mkInt hubMsgVersion]
+  , mkForm "kind"   [mkSym @C "ack"]
+  , mkForm "target" [b58 (akTarget a)]
+  , mkForm "thread" [href (akThread a)]
+  ]
+  <> [ mkForm "number" [mkInt n] | Just n <- [akNumber a] ]
+  -- A string, not a symbol: the status is an LWW attribute the owner sets,
+  -- so it is whatever text they signed, not a fixed vocabulary.
+  <> [ mkForm "status" [txt (akStatus a)] ]
+  <> [ mkForm "merge-commit" [txt c] | Just c <- [akMergeCommit a] ]
+
 -- | The readable S-expression projection of a letter (PEP-18). It is
 -- regenerated from the decoded content and never signed or parsed back: the
 -- authoritative form is the binary inner box. Used by @hub show@ and for
@@ -330,18 +363,6 @@ letterSyntax :: AuthorContent -> [Syntax C]
 letterSyntax ac =
   [ mkForm "hub-msg" [mkInt hubMsgVersion] ] <> body ac
   where
-    b58 :: HubKey -> Syntax C
-    b58 x = mkSym @C (show (pretty (AsBase58 x)))
-
-    href :: HashRef -> Syntax C
-    href h = mkSym @C (show (pretty h))
-
-    txt :: Text -> Syntax C
-    txt t = mkStr @C (Text.unpack t)
-
-    tsym :: Text -> Syntax C
-    tsym t = mkSym @C (Text.unpack t)
-
     kindOf :: HubKind -> Syntax C
     kindOf = \case
       HubIssue -> mkSym @C "issue"

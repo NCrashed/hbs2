@@ -1,3 +1,45 @@
+# Unreleased
+
+## Packages
+
+  - **`hbs2-hub` (new).** The core of the decentralized forge specified
+    by PEP-17: issues and pull requests carried by the repository
+    itself, with ingress from anyone through the Mailbox protocol. This
+    is the network-free half, library and tests only, with no CLI yet.
+      - **Canon (PEP-19).** One shared signed content record for both
+        trust tiers, wrapped in two independent boxes: an author box
+        (who said it, kept verbatim from the contributor's letter) and a
+        canon box (which maintainer blessed it, and where it sits in the
+        order). An event-id is the hash of the author box, so a sender
+        computes the canonical thread-id before delivery. Threads are
+        the deterministic fold of the event log ordered by
+        `(seq, event-id)`, with every rejected event reported and a
+        reason attached.
+      - **Letters (PEP-18).** The Tier B payload: a versioned envelope
+        whose version is checked before the body is decoded, an inner
+        signature over the plaintext that survives into canon, a
+        transport-only reply channel honoured only from its own author's
+        envelope, and the acknowledgement record. A correctly signed
+        letter this build cannot decode is reported as a newer schema,
+        not as a forgery.
+      - **Triage bridge.** The only path from a letter to canon, written
+        as a gate: it refuses anything the fold would drop, so a
+        maintainer's decision is never spent on an event that cannot be
+        admitted. Property-tested against the fold over random triage
+        sequences.
+      - **Manifest clauses.** `(mailbox <key> hub [<tier>])` and
+        `(mailbox-sigil <mailbox-key> <hashref>)`, so a fresh clone can
+        find where to submit and how to encrypt to it with no live
+        lookup.
+
+## Documentation
+
+  - **PEP-17 forge specification.** An umbrella draft plus five
+    sub-proposals under `docs/drafts/`: the letter format (PEP-18),
+    canonical in-repo metadata (PEP-19), the pull-request model
+    (PEP-20), triage and moderation (PEP-21), and the CLI and render
+    contract (PEP-22).
+
 # 0.25.5.0  2026-06-11
 
 Adds Tor onion-service support (PEP-05): an hbs2 peer can run as a v3

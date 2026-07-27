@@ -7,6 +7,7 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Prelude.Plated (pretty)
 
 import Data.Config.Suckless
+import Data.List (isInfixOf)
 import Test.Hspec
 
 kp :: IO HubKey
@@ -58,6 +59,16 @@ spec = do
       -- Neither untiered nor public: a default submitter still needs an
       -- address, so the first declared inbox is it.
       fmap mbKey (mailboxByTier Nothing syn) `shouldBe` Just a
+
+    it "writes the role and tier bare, as the spec does" $ do
+      -- PEP-18 shows (mailbox KEY hub known); the parser takes a string too,
+      -- but an emitter that always quoted would not match its own examples.
+      k <- kp
+      let emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "known"))))
+      emitted `shouldSatisfy` isInfixOf "hub known"
+      -- ...and a value that could not be read back as a symbol is quoted.
+      let quoted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "2 tiers"))))
+      quoted `shouldSatisfy` isInfixOf "\"2 tiers\""
 
     it "keeps a tier containing a space intact" $ do
       k <- kp

@@ -439,6 +439,16 @@ it was signed; a later `revoke` never retroactively invalidates events the key
 signed while authorized. This is why compaction must never drop a
 `delegate`/`revoke` event (see Retention).
 
+A revocation also cannot be undone by replaying the `delegate` that preceded
+it. Moving the old event later in the log means writing it again, and its
+event-id is the hash of its author box, which the `seq` is not part of: the
+replayed event has the id it always had, the fold has already seen that id,
+and it is dropped as a duplicate. Reviving the key needs a fresh `delegate`
+signed by the owner, which is the intended path. Note what this property rests
+on: keeping `seq` out of the author box (see Event schema). Were the ordering
+folded into the signed content, the same delegation at a new position would be
+a new event, and revocation would only hold as long as nobody kept a copy.
+
 Two safety rules the pass encodes. A reply-class event whose `thread` is not
 an admitted `open` is dropped with a warning (a dangling reference, which
 `hub verify` reports, PEP-22), so a comment on a rejected or never-folded open
@@ -540,6 +550,16 @@ making attachments git-native blobs (a self-contained clone) is a later
 option, not required here. Owner-native events with no attachments carry no
 `part-secret`.
 
+This is a refusal, not a best effort. A folder that cannot supply the secret
+must decline to mint rather than write the event without it, and the letter
+stays in the mailbox to be retried. The reason it cannot be repaired later is
+the same one that rules out re-encrypting: the reference is inside a signed
+author box, so a follow-up event cannot amend it, and once the Mailbox message
+has been deleted (PEP-21 retention) the secret does not exist anywhere. The
+cost of getting this wrong is therefore permanent and silent: canon looks
+complete, the fold admits the event, and every clone sees an attachment that
+will never open.
+
 
 Folding Tier B letters into Tier A
 ================================
@@ -634,6 +654,18 @@ stamping concurrently can pick the same values. The fold stays deterministic
 regardless, because the total order is `(seq, event-id)` and the tie-break
 settles it, but the result is not what either maintainer intended, so
 `hub verify` reports duplicate and non-monotonic `seq`/`number` (PEP-22).
+
+A known bound on the same weakness. The fold refuses a `seq` or `number` of
+`maxBound`, since the next mint is the maximum plus one and would wrap. It
+does not, and cannot without a new admission rule, refuse a stamp that is
+merely absurd: a maintainer who signs `number = maxBound - 1` leaves the
+counter one mint from the end, and from then on every `open` is refused
+because there is no number left to assign. Closing this needs a rule about
+what a stamp may be relative to the ones before it, which is an admission
+rule and therefore consensus: it cannot be added to a repo that already has
+canon without bumping `hub-meta` (see Deterministic materialization). Until
+someone needs it, the exposure is one hostile or broken maintainer, who can
+already do worse, and `hub verify` names them.
 
 Making this structural rather than conventional would mean splitting the
 event in two: a delegate signs only the author box and proposes it, and the

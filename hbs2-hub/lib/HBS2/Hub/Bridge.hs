@@ -235,6 +235,15 @@ data TriageError =
   | AlreadyHonoured
     -- | The view describes a different repository than the context.
   | ViewRepoMismatch
+    -- | The content references an encrypted part and the caller supplied no
+    -- group secret to unlock it. The letter is fine; the caller has to pass
+    -- the secret its Mailbox message came with, so this is a retry.
+    --
+    -- Minting anyway would put a signed reference to bytes nobody can read
+    -- into canon, permanently: the part cannot be re-encrypted (a new hash
+    -- would break the author signature) and once the message is deleted from
+    -- the mailbox the secret is gone (PEP-19 "Attachments in public canon").
+  | MissingPartSecret
   deriving stock (Eq,Show)
 
 -- | What the caller should do with a letter the bridge refused.
@@ -310,6 +319,8 @@ outcome = \case
   ThreadMismatch    -> Discard
   AlreadyHonoured   -> Discard
   ViewRepoMismatch  -> Discard
+  -- The letter is intact and the caller can supply what is missing.
+  MissingPartSecret -> Retry
   -- Not "not ready yet" but "never again": retrying would spin forever.
   CursorExhausted   -> Discard
 
@@ -319,6 +330,23 @@ seenAlready :: CanonView -> EventId -> Either TriageError ()
 seenAlready view eid
   | HM.member eid (cvEvents view) = Left AlreadyInCanon
   | otherwise                     = Right ()
+
+-- Refuse a letter whose message has already been folded. 'seenAlready' does
+-- not cover this: honouring a request re-authors it under the owner's clock,
+-- so the same letter honoured twice yields two different event-ids, and only
+-- the origin ties them back to one message.
+honouredAlready :: CanonView -> HashRef -> Either TriageError ()
+honouredAlready view origin
+  | HS.member origin (cvOrigins view) = Left AlreadyHonoured
+  | otherwise                         = Right ()
+
+-- Refuse to publish a reference to encrypted bytes together with no way to
+-- read them. PEP-19 requires the owner to publish the group secret in the
+-- canon box whenever the event names an encrypted part.
+requirePartSecret :: Maybe ByteString -> AuthorContent -> Either TriageError ()
+requirePartSecret secret content
+  | referencesPart content, isNothing secret = Left MissingPartSecret
+  | otherwise                                = Right ()
 
 -- Refuse to mint a number the cursor cannot produce. Only an open mints
 -- one, so only an open is checked.
@@ -411,6 +439,11 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
   (box, author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
 
+  -- Before anything that asks a human: a triage loop re-reading the mailbox
+  -- after a restart must not raise a decision on a letter whose request was
+  -- already honoured, only to have 'honourRequest' refuse it afterwards.
+  honouredAlready view origin
+
   -- A request needs its thread to exist before it is worth a maintainer's
   -- attention: otherwise a close naming an unfolded thread would raise a
   -- decision that 'honourRequest' then refuses, while a comment naming the
@@ -452,6 +485,11 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
 
     -- classify has already restricted this to the three ops above.
     _ -> Left BadContent
+
+  -- Last, because everything above is about the letter and this one is about
+  -- the caller: a shape error should be reported as such rather than as a
+  -- missing key.
+  requirePartSecret secret content
 
   Right (accepted canonKp repo view folded (Just origin) secret content box author
            (ThreadScope thread) reply)
@@ -527,7 +565,7 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   -- origin can tell that this very letter was honoured before. Without it a
   -- triage loop that restarts and re-reads the mailbox closes the thread
   -- twice and duplicates the note.
-  if HS.member origin (cvOrigins view) then Left AlreadyHonoured else Right ()
+  honouredAlready view origin
 
   case classify asked of
     RequestOnly -> Right ()
@@ -560,6 +598,8 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
       box = signAuthor pk sk content
   seenAlready view (authorBoxId box)
 
+  -- No requirePartSecret: 'classify' has established that this is a
+  -- close, reopen or set, none of which can reference a part.
   Right (accepted canonKp repo view folded (Just origin) Nothing content box pk
            (ThreadScope thread) reply)
 
@@ -624,6 +664,8 @@ ownerEvent ctx view folded secret content = do
                -- drops, burning a seq and losing the action silently.
                | not (coordsOK content)               -> Left BadContent
                | otherwise                            -> Right (ThreadScope thr)
+
+  requirePartSecret secret content
 
   Right (accepted kp repo view folded Nothing secret content box pk scope NoReply)
   where

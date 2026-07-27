@@ -79,6 +79,17 @@ data DropReason =
 data Comment = Comment
   { cId         :: EventId
   , cAuthor     :: HubKey
+    -- | Which authorized key blessed THIS comment. Per-comment rather than
+    -- per-thread because under a delegation the events of one thread are
+    -- blessed by different keys, and PEP-22 requires the provenance of each
+    -- item separately.
+  , cCanonBy    :: HubKey
+    -- | What the author said they were replying to, carried through
+    -- unvalidated: the target may be an event the owner chose not to fold,
+    -- or one in another thread. PEP-19 admits the comment either way and
+    -- PEP-22 says the renderer falls back to a flat reply. Dropping it here
+    -- would lose a field the author signed and the event-id covers.
+  , cReplyTo    :: Maybe EventId
   , cAuthorTs   :: Word64   -- ^ author-declared, epoch ms; advisory, may be anything
   , cFoldedTs   :: Word64   -- ^ owner clock at fold, epoch ms; trusted
   , cBody       :: Maybe Text
@@ -112,6 +123,10 @@ data ThreadState = ThreadState
   , tsKind     :: HubKind
   , tsNumber   :: Maybe Word64
   , tsAuthor   :: HubKey
+    -- | Which authorized key blessed the OPEN event. Later events on the
+    -- thread may be blessed by other keys under a delegation; each comment
+    -- carries its own ('cCanonBy').
+  , tsCanonBy  :: HubKey
   , tsAuthorTs :: Word64           -- ^ author-declared creation, epoch ms (advisory)
   , tsCreated  :: Word64           -- ^ folded-at of the open event, epoch ms (trusted)
   , tsUpdated  :: Word64           -- ^ folded-at of the latest event, epoch ms (trusted)
@@ -138,6 +153,15 @@ data ThreadState = ThreadState
 tsTitle :: ThreadState -> Text
 tsTitle = fromMaybe "" . HM.lookup "title" . tsAttrs
 
+-- | Everything a reader needs from one fold.
+--
+-- The fold itself is deterministic: it is a single pass over events sorted by
+-- @(seq, event-id)@. The CONTAINERS are not an order, though. A HashMap and a
+-- HashSet iterate in whatever order the hash of the keys gives, which is
+-- stable for a build but is not something to render from. Anything
+-- user-visible has to impose its own order, by @number@ for threads and by
+-- @seq@ for events (PEP-22); 'frDropped' is a list because @hub verify@
+-- prints it and therefore does need a fixed order.
 data FoldResult = FoldResult
   { frThreads  :: HashMap ThreadId ThreadState
   , frRedacted :: HashSet EventId          -- ^ events a renderer must withhold
@@ -256,8 +280,15 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- nothing else, and neither counter may sit at the top of its range: the
     -- next mint takes the maximum plus one, so admitting maxBound would wrap
     -- the cursor to zero and send every later event to the front of the
-    -- order. Cheap to check here, and it keeps one bad canon box from
-    -- poisoning the repo permanently.
+    -- order.
+    --
+    -- This is the top of the range only, not a monotonicity rule: a
+    -- maintainer who stamps maxBound-1 still strands the cursor one mint
+    -- later, at which point every open is refused as 'CursorExhausted'.
+    -- Closing that needs an admission rule about what a stamp may be
+    -- relative to the ones before it, which is consensus and cannot be
+    -- introduced without bumping @hub-meta@ (PEP-19). Recorded there as a
+    -- known bound rather than fixed here.
     sane r = numberOK && seqOK && numberSmallEnough
       where
         cc = rCanon r
@@ -286,7 +317,16 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- and hide any event in the repo as soon as it got blessed.
       ARedact target _
         | not (ownerAuthored r s)    -> dropE r UnauthorizedCanon s
-        | HM.member target (sSeen s) -> keep (threadOfEvent target s) r s { sRedacted = HS.insert target (sRedacted s) }
+        -- Moderating a thread changes it, so its clock moves with it:
+        -- otherwise a thread whose comment was just withdrawn looks
+        -- untouched since before the redaction.
+        | HM.member target (sSeen s) ->
+            keep (threadOfEvent target s) r s
+              { sRedacted = HS.insert target (sRedacted s)
+              , sThreads  = maybe (sThreads s)
+                              (\thr -> HM.adjust (touch r) thr (sThreads s))
+                              (threadOfEvent target s)
+              }
         | otherwise                  -> dropE r UnknownRedact s
 
       AOpen target kind title labels body bodypart mpr ts
@@ -305,6 +345,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       { tsId = rId r, tsKind = kind
                       , tsNumber = ccNumber (rCanon r)
                       , tsAuthor = rAuthorKey r
+                      , tsCanonBy = rCanonKey r
                       , tsAuthorTs = ts
                       , tsCreated = foldedTs r, tsUpdated = foldedTs r
                       , tsAttrs = HM.fromList [("status","open"),("title",title)]
@@ -320,8 +361,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       }
             in keep (Just (rId r)) r s { sThreads = HM.insert (rId r) t (sThreads s) }
 
-      AComment thr _replyto body bodypart ts -> onThread r thr s $ \t ->
-        touch r t { tsComments = mkComment r ts body bodypart : tsComments t }
+      AComment thr replyto body bodypart ts -> onThread r thr s $ \t ->
+        touch r t { tsComments = mkComment r replyto ts body bodypart : tsComments t }
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
         if tsKind t /= HubPR then Left BadKind
@@ -426,15 +467,19 @@ dropE r reason s = s { sDropped = (rSeq r, rId r, reason) : sDropped s }
 addNote :: Maybe Text -> Resolved -> Word64 -> ThreadState -> ThreadState
 addNote Nothing _ _ t = t
 addNote note@(Just _) r ts t =
-  t { tsComments = mkComment r ts note Nothing : tsComments t }
+  -- A note on a close or reopen answers the thread as a whole, not one
+  -- event in it, so it carries no reply-to.
+  t { tsComments = mkComment r Nothing ts note Nothing : tsComments t }
 
 -- | Build a comment, carrying the attachment hashref and the group secret
 -- the owner published for it, so a reader has everything needed to fetch
 -- and decrypt the body without going back to the mailbox.
-mkComment :: Resolved -> Word64 -> Maybe Text -> Maybe HashRef -> Comment
-mkComment r ts body bodypart = Comment
+mkComment :: Resolved -> Maybe EventId -> Word64 -> Maybe Text -> Maybe HashRef -> Comment
+mkComment r replyto ts body bodypart = Comment
   { cId = rId r
   , cAuthor = rAuthorKey r
+  , cCanonBy = rCanonKey r
+  , cReplyTo = replyto
   , cAuthorTs = ts
   , cFoldedTs = ccFoldedTs (rCanon r)
   , cBody = body

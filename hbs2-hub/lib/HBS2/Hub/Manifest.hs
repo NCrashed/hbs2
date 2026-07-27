@@ -44,6 +44,7 @@ import Data.Config.Suckless.Syntax
 
 import Data.Maybe (isNothing)
 import Data.Text (Text)
+import Data.Char (isAlpha,isAlphaNum)
 import Data.Text qualified as Text
 
 -- | A collaboration mailbox declared by the repo.
@@ -124,14 +125,25 @@ sigilsFor :: HubKey -> [Syntax c] -> [HashRef]
 sigilsFor k = map msSigil . filter ((== k) . msMailbox) . sigils
 
 -- | Emit @(mailbox <key> <role> [<tier>])@.
---
--- The role and tier are printed as strings, matching what the parser
--- accepts: a symbol would not survive a tier containing a space.
 mailboxClause :: HubMailbox -> Syntax C
 mailboxClause (HubMailbox k role tier) =
   mkForm "mailbox" $
-    [ mkSym (show (pretty (AsBase58 k))), mkStr (Text.unpack role) ]
-    <> maybe [] (\t -> [mkStr (Text.unpack t)]) tier
+    [ mkSym (show (pretty (AsBase58 k))), atom role ]
+    <> maybe [] (\t -> [atom t]) tier
+
+-- | A symbol where one reads back as itself, a string otherwise.
+--
+-- The parser takes either ('stringLike' accepts a 'SymbolVal'), so this is
+-- about the emitted form matching PEP-18's examples, which write the role and
+-- tier bare. The leading-letter rule is what keeps the round trip honest: a
+-- value starting with a digit would lex back as a number, and one containing
+-- a space would lex back as two atoms.
+atom :: Text -> Syntax C
+atom t = case Text.uncons t of
+  Just (c,rest) | isAlpha c, Text.all plain rest -> mkSym (Text.unpack t)
+  _                                              -> mkStr (Text.unpack t)
+  where
+    plain ch = isAlphaNum ch || ch `elem` ("-_.:/" :: String)
 
 -- | Emit @(mailbox-sigil <mailbox-key> <hashref>)@.
 mailboxSigilClause :: MailboxSigil -> Syntax C

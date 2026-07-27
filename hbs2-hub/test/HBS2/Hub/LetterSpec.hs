@@ -196,6 +196,27 @@ spec = do
         Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
         Right _ -> pure ()
 
+    it "projects an acknowledgement the way PEP-18 pins it" $ do
+      owner <- kp
+      thr <- someHash
+      -- A contributor's tooling reads these ('hub updates', PEP-22), so the
+      -- shape is part of the interop surface, not a debugging convenience.
+      let ack = AckRecord (fst owner) thr (Just 7) "merged" (Just "cafe")
+          rendered = fmap (show . pretty) (ackSyntax ack)
+          whole = unwords rendered
+      whole `shouldSatisfy` isInfixOf "(kind ack)"
+      whole `shouldSatisfy` isInfixOf "(number 7)"
+      whole `shouldSatisfy` isInfixOf "(merge-commit \"cafe\")"
+      -- No op: an ack asserts nothing the contributor authored.
+      whole `shouldSatisfy` (not . isInfixOf "(op ")
+      case parseTop whole of
+        Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
+        Right _ -> pure ()
+      -- The optional halves are simply absent, not rendered empty.
+      let bare = unwords (fmap (show . pretty) (ackSyntax (AckRecord (fst owner) thr Nothing "open" Nothing)))
+      bare `shouldSatisfy` (not . isInfixOf "number")
+      bare `shouldSatisfy` (not . isInfixOf "merge-commit")
+
     it "classifies letter ops by what they may become" $ do
       owner <- kp
       alice <- kp

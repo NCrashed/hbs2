@@ -71,6 +71,12 @@ threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads 
 -- what an op added by a newer schema looks like from here. SignedBox is
 -- phantom in its payload type, so signing another type and reinterpreting
 -- reproduces it exactly.
+-- A hash no event in the fixture has.
+someHash :: IO HashRef
+someHash = do
+  (pk,sk) <- kp
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+
 futureBox :: KP -> SignedBox AuthorContent HubScheme
 futureBox (pk,sk) =
   case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
@@ -198,6 +204,64 @@ spec = do
           k `shouldBe` fst alice
           why `shouldBe` Undecodable
         other -> expectationFailure ("unexpected: " <> show other)
+
+    it "records which key blessed each event, not just the thread" $ do
+      owner <- kp
+      bob <- kp
+      alice <- kp
+      -- Under a delegation the events of one thread are blessed by different
+      -- keys, so the provenance PEP-22 renders is per item, not per thread.
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
+                          (canon 2 (Just 1))
+          tid = eventId eOpen
+          eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
+                         (canon 3 Nothing)
+          fr = foldEvents repo [eDel, eOpen, eCmt]
+          t = threadOf fr tid
+      frDropped fr `shouldBe` []
+      tsCanonBy t `shouldBe` fst owner
+      map cCanonBy (tsComments t) `shouldBe` [fst bob]
+
+    it "keeps the reply-to the author signed, without validating it" $ do
+      owner <- kp
+      alice <- kp
+      ghost <- someHash
+      -- PEP-19 admits the comment whatever reply-to says: the target may be a
+      -- letter the owner chose not to fold. PEP-22 then renders it flat. What
+      -- must not happen is the field going missing, since the author signed it
+      -- and the event-id covers it.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                          (canon 1 (Just 1))
+          tid = eventId eOpen
+          eC1 = mkEvent alice owner (AComment tid Nothing (Just "first") Nothing 2)
+                        (canon 2 Nothing)
+          eC2 = mkEvent alice owner (AComment tid (Just (eventId eC1)) (Just "answer") Nothing 3)
+                        (canon 3 Nothing)
+          eC3 = mkEvent alice owner (AComment tid (Just ghost) (Just "dangling") Nothing 4)
+                        (canon 4 Nothing)
+          fr = foldEvents repo [eOpen, eC1, eC2, eC3]
+      frDropped fr `shouldBe` []
+      map cReplyTo (tsComments (threadOf fr tid))
+        `shouldBe` [Nothing, Just (eventId eC1), Just ghost]
+
+    it "moves the thread clock when a comment is redacted" $ do
+      owner <- kp
+      alice <- kp
+      -- Moderation changes the thread, so a renderer sorting by tsUpdated
+      -- must not show it as untouched since before the redaction.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                          (canon 1 (Just 1))
+          tid = eventId eOpen
+          eCmt = mkEvent alice owner (AComment tid Nothing (Just "spam") Nothing 2)
+                         (canon 2 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId eCmt) 3) (canonAt 3 Nothing 9000)
+          fr = foldEvents repo [eOpen, eCmt, eRed]
+      frDropped fr `shouldBe` []
+      tsUpdated (threadOf fr tid) `shouldBe` 9000
 
     it "refuses a number on anything but an open" $ do
       owner <- kp

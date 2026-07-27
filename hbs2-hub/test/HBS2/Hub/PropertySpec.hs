@@ -28,6 +28,10 @@ type KP = (HubKey, PrivKey 'Sign HubScheme)
 -- step, because an op with no step is an op the property does not cover.
 data Step =
     StepOpen Word64 HubKind
+    -- | A maintainer files it themselves, with no letter behind it. The only
+    -- other op that mints a number, and one an all-letters generator never
+    -- reaches.
+  | StepOwnerOpen Word64 HubKind
   | StepComment Int Word64      -- ^ index into the threads opened so far
   | StepClose Int Word64        -- ^ a request, so always refused as such
   | StepHonour Int Word64       -- ^ honour the request letter made by StepClose
@@ -44,6 +48,7 @@ data Step =
 instance Arbitrary Step where
   arbitrary = frequency
     [ (3, StepOpen <$> genTs <*> elements [HubIssue,HubPR])
+    , (2, StepOwnerOpen <$> genTs <*> elements [HubIssue,HubPR])
     , (3, StepComment <$> genIx <*> genTs)
     , (1, StepClose <$> genIx <*> genTs)
     , (2, StepHonour <$> genIx <*> genTs)
@@ -64,6 +69,8 @@ instance Arbitrary Step where
   shrink = \case
     StepOpen ts k       -> [StepOpen ts' k | ts' <- shrinkTs ts]
                         <> [StepOpen ts HubIssue | k /= HubIssue]
+    StepOwnerOpen ts k  -> [StepOwnerOpen ts' k | ts' <- shrinkTs ts]
+                        <> [StepOwnerOpen ts HubIssue | k /= HubIssue]
     StepComment i ts    -> both StepComment i ts
     StepClose i ts      -> both StepClose i ts
     StepHonour i ts     -> both StepHonour i ts
@@ -109,7 +116,7 @@ instance Arbitrary Script where
 -- | What a run minted, for coverage. The invariants cannot see this: a run
 -- that only ever refuses satisfies all of them.
 data Tag =
-    TOpen | TComment | TRevise | TMerge | TRedact | TSet | THonour
+    TOpen | TOwnerOpen | TComment | TRevise | TMerge | TRedact | TSet | THonour
   | TDelegate | TRevoke
   | TByDelegate      -- ^ the second key minted an event
   | TRevokedRefused  -- ^ ...and was refused after its delegation was withdrawn
@@ -183,6 +190,7 @@ spec =
         monitor (classify (TStaleDiscarded `elem` rTags r) "discarded a stale mint")
         monitor (classify (TMerge `elem` rTags r) "merged a PR")
         monitor (cover 5 (TRevise `elem` rTags r) "revised a PR")
+        monitor (cover 5 (TOwnerOpen `elem` rTags r) "opened a thread as the owner")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
@@ -235,6 +243,13 @@ step cast st = \case
     let content = AOpen repo kind "t" [] Nothing Nothing
                     (if kind == HubPR then Just (coords True) else Nothing) ts
     in accept TOpen ts (letterOf content)
+
+  -- The other half of the number path, and the one that puts an
+  -- owner-authored thread in front of the letter ops: a revise on one is
+  -- refused, since the owner is its author of record.
+  StepOwnerOpen ts kind ->
+    mint TOwnerOpen (AOpen repo kind "mine" [] Nothing Nothing
+                       (if kind == HubPR then Just (coords True) else Nothing) ts) ts
 
   StepComment i ts -> withThread i $ \thr ->
     accept TComment ts (letterOf (AComment thr Nothing (Just "c") Nothing ts))
