@@ -163,7 +163,7 @@ data LetterError =
     -- | The inner box is correctly signed but carries content this reader
     -- cannot decode, typically an op added by a newer schema. Distinct from
     -- 'BadInnerSig' so triage does not report a newer sender as a forger.
-  | UndecodableContent
+  | UndecodableContent HubKey UndecodableWhy
   | NotALetter            -- ^ an Ack where a Letter was expected
   | NotAnAck              -- ^ a Letter where an Ack was expected
   | AuthorDenied          -- ^ the inner author is deny-listed (triage, PEP-21)
@@ -274,7 +274,7 @@ openLetter md
       Letter box rc ->
         case unboxChecked box of
           Left BoxBadSig      -> Left BadInnerSig
-          Left BoxUndecodable -> Left UndecodableContent
+          Left (BoxUndecodable k why) -> Left (UndecodableContent k why)
           Right (pk , ac)     -> Right (box, pk, ac, rc)
 
 -- | Triage-side open, applying the two policy rules the peer layer cannot

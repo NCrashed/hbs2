@@ -190,11 +190,13 @@ Shape (JSON projection of a thread):
 }
 ```
 
-A renderer must tolerate a `reply-to` that names no event it can see.
-Nothing validates it: the fold does not require the referenced event to
-exist, and it may be one that was dropped, redacted, or removed by
-compaction. Render such a comment flat rather than failing or inventing a
-parent.
+A renderer must tolerate a `reply-to` that names no event it can see, or one
+that belongs to another thread. Nothing validates it, deliberately: the
+reference may point at a letter the owner chose not to fold, and rejecting
+such a comment at the bridge would strand a legitimate submission for good.
+Render it flat rather than failing or inventing a parent, and leave the
+reporting to `hub verify`, which lists dangling and cross-thread references
+along with the dropped events.
 
 Provenance is per item, not per thread: `canon_by` sits on the opening event
 and on each comment, because under delegation (PEP-21) different events on one

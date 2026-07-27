@@ -309,9 +309,16 @@ winning `set`) and deferred the policy here.
 
   - The "superseded" predicate. A `set` event for `(thread, attribute)` is
     superseded iff a higher-`seq` `set` (or `close`/`reopen` for the status
-    attribute) exists for the same `(thread, attribute)` and the older event
-    carries no body. Only such events are droppable; everything else is
-    retained (PEP-19).
+    attribute) exists for the same `(thread, attribute)`, the older event
+    carries no body, AND no retained `redact` names it. Only such events are
+    droppable; everything else is retained (PEP-19).
+
+    The redact clause is not optional. Compaction keeps every `redact` but
+    would otherwise drop the `set` one of them hides, leaving the `redact`
+    pointing at nothing: the fold then treats it as an unknown target and
+    drops it, so the highest admitted `seq` can fall and the bridge reuses a
+    `seq` already spent. Reuse is tolerated (PEP-19) and the audit reports
+    it, but compaction should not manufacture it.
   - Delegation events are never droppable. `delegate`/`revoke` must survive
     compaction untouched (they are not `set`-class). Admission of every
     historical event depends on the maintainer set as of its `seq`, which is

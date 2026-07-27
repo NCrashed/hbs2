@@ -58,8 +58,8 @@ data DropReason =
     -- decode: canon is newer than this build. Distinct from a bad signature,
     -- which is an accusation of forgery, and split by box like the signature
     -- failures are, since which side is from the future is the useful part.
-  | UndecodableAuthor
-  | UndecodableCanon
+  | UndecodableAuthor HubKey UndecodableWhy
+  | UndecodableCanon HubKey UndecodableWhy
   | IdMismatch        -- ^ canon box blesses a different event-id (rule 2)
   | WrongTarget       -- ^ open event authored for a different repo (cross-repo replay)
   | DupId             -- ^ event-id already seen (rewrap/replay, PEP-18/PEP-19)
@@ -161,6 +161,15 @@ data FoldResult = FoldResult
     -- whether its own key may still bless anything, which nothing else in
     -- the result reveals.
   , frMaintainers :: HashSet HubKey
+    -- | Every Tier B letter already folded, by message hash.
+    --
+    -- Without this a triage loop cannot tell, after a restart, that a letter
+    -- it is re-reading from the mailbox was already honoured: the accepted
+    -- path is safe because the author box is stored verbatim and its id is
+    -- stable, but an honoured request is re-authored, so its id depends on
+    -- the clock and a second honour mints a second event. Canon records the
+    -- provenance either way; this is the fold handing it back.
+  , frOrigins :: HashSet HashRef
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -178,7 +187,7 @@ resolve e = do
   where
     box badSig undecodable b = case unboxChecked b of
       Left BoxBadSig      -> Left badSig
-      Left BoxUndecodable -> Left undecodable
+      Left (BoxUndecodable k why) -> Left (undecodable k why)
       Right ok            -> Right ok
 
 -- | The whole fold: resolve, then materialize.
@@ -212,6 +221,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             , sDropped  = [ (maxBound, eid, reason) | (eid,reason) <- pre ]
             , sMaxSeq    = 0
             , sMaxNumber = 0
+            , sOrigins   = HS.empty
             }
 
     -- Comments accumulate reversed (O(1) append) and are flipped here.
@@ -225,6 +235,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frMaxNumber = sMaxNumber s
       , frAdmitted  = sSeen s
       , frMaintainers = sMaint s
+      , frOrigins   = sOrigins s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
@@ -366,6 +377,7 @@ data St = S
   , sDropped  :: [(Word64,EventId,DropReason)]
   , sMaxSeq    :: Word64
   , sMaxNumber :: Word64
+  , sOrigins   :: HashSet HashRef
   }
 
 -- Mark an event applied (dedup + the id every later redact resolves
@@ -377,6 +389,7 @@ keep scope r s = s
   { sSeen      = HM.insert (rId r) scope (sSeen s)
   , sMaxSeq    = max (sMaxSeq s) (rSeq r)
   , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
+  , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
   }
 
 -- | Can the proposed change actually be obtained?

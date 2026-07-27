@@ -33,6 +33,8 @@ module HBS2.Hub.Types
   , BoxError(..)
   , unboxChecked
   , decodeStrict
+  , decodeChecked
+  , UndecodableWhy(..)
   , encodeLabels
   , decodeLabels
   , validLabel
@@ -256,9 +258,21 @@ validLabel l = not (Text.null l) && not (Text.isInfixOf "," l)
 
 -- | Why a signed box could not be opened.
 data BoxError =
-    BoxBadSig       -- ^ the signature does not verify: a forgery claim
-  | BoxUndecodable  -- ^ signature fine, content unknown to this reader
+    BoxBadSig  -- ^ the signature does not verify: a forgery claim
+    -- | Signature fine, content this reader cannot decode. Carries the
+    -- signer, because a reader that cannot name the key can neither
+    -- attribute the event ( verify@) nor apply a deny-list to it, and
+    -- an undecodable letter is retried rather than discarded.
+  | BoxUndecodable HubKey UndecodableWhy
   deriving stock (Eq,Show)
+
+-- | Why content would not decode. A newer schema and a tampered payload
+-- look alike unless the two are told apart: trailing bytes are never
+-- something an honest newer sender produces.
+data UndecodableWhy =
+    NewerSchema  -- ^ decode failed outright
+  | TrailingData -- ^ decoded, but bytes were left over
+  deriving stock (Eq,Ord,Show)
 
 -- | Open a signed box, keeping the two failure modes apart.
 --
@@ -272,7 +286,9 @@ unboxChecked
   -> Either BoxError (HubKey, p)
 unboxChecked (SignedBox pk bs sig)
   | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
-  | otherwise = maybe (Left BoxUndecodable) (Right . (pk,)) (decodeStrict bs)
+  | otherwise = case decodeChecked bs of
+      Left why -> Left (BoxUndecodable pk why)
+      Right p  -> Right (pk, p)
 
 -- | Decode CBOR requiring the whole input to be consumed.
 --
@@ -281,10 +297,15 @@ unboxChecked (SignedBox pk bs sig)
 -- so there is one decoding rule rather than a strict path for some bytes and
 -- a lenient one for others.
 decodeStrict :: Serialise a => ByteString -> Maybe a
-decodeStrict bs =
+decodeStrict = either (const Nothing) Just . decodeChecked
+
+-- | As 'decodeStrict', but says which way it failed.
+decodeChecked :: Serialise a => ByteString -> Either UndecodableWhy a
+decodeChecked bs =
   case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
-    Right (rest, a) | LBS.null rest -> Just a
-    _ -> Nothing
+    Right (rest, a) | LBS.null rest -> Right a
+                    | otherwise     -> Left TrailingData
+    Left _ -> Left NewerSchema
 
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme

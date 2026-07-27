@@ -191,7 +191,13 @@ spec = do
                          (canon 1 (Just 1))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
-      reasons fr `shouldBe` [UndecodableAuthor]
+      map fst (frDropped fr) `shouldBe` [eventId ev]
+      case map snd (frDropped fr) of
+        [UndecodableAuthor k why] -> do
+          -- the reader can still name whose event it could not read
+          k `shouldBe` fst alice
+          why `shouldBe` NewerSchema
+        other -> expectationFailure ("unexpected: " <> show other)
 
     it "refuses a number on anything but an open" $ do
       owner <- kp

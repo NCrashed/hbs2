@@ -49,6 +49,7 @@ module HBS2.Hub.Bridge
   , TriageCtx(..)
   , ThreadFacts(..)
   , Outcome(..)
+  , Pending(..)
   , outcome
   , EventScope(..)
   , CanonView(..)
@@ -139,6 +140,13 @@ data CanonView = CanonView
     -- revoked can still sign, but the fold will not admit what they sign, so
     -- minting would consume a triaged letter and produce nothing.
   , cvMaintainers :: HashSet HubKey
+    -- | Letters already folded, so a triage loop re-reading the mailbox
+    -- after a restart does not honour the same request twice.
+  , cvOrigins :: HashSet HashRef
+    -- | The repo this view describes. Kept here rather than passed
+    -- alongside, because a view of another repo is otherwise
+    -- indistinguishable: RepoRef and HubKey are the same type.
+  , cvRepo :: RepoRef
   }
   deriving stock (Eq,Show)
 
@@ -149,7 +157,7 @@ data CanonView = CanonView
 -- 'viewOf' from the same canon. Any divergence between the two is a bug: the
 -- accumulated view is a cache of what the fold would say.
 emptyView :: RepoRef -> CanonView
-emptyView repo = CanonView initialCursor HM.empty HM.empty (HS.singleton repo)
+emptyView repo = CanonView initialCursor HM.empty HM.empty (HS.singleton repo) HS.empty repo
 
 -- | May this key bless events for this repo right now?
 --
@@ -163,12 +171,14 @@ initialCursor :: CanonCursor
 initialCursor = CanonCursor 1 1
 
 -- | Derive the view from folded canon.
-viewOf :: FoldResult -> CanonView
-viewOf fr = CanonView
+viewOf :: RepoRef -> FoldResult -> CanonView
+viewOf repo fr = CanonView
   { cvCursor  = cursorFrom fr
   , cvThreads = fmap (\t -> ThreadFacts (tsKind t) (tsAuthor t) (tsNumber t)) (frThreads fr)
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
+  , cvOrigins = frOrigins fr
+  , cvRepo = repo
   }
 
 -- | The next seq and number to mint, given folded canon.
@@ -182,6 +192,9 @@ data TriageError =
     -- into canon: a request the owner must re-author ('honourRequest'), or
     -- an owner-native op that should never have arrived as a letter.
   | NotAcceptable Disposition
+    -- | A request the owner may honour: carries what was asked, so the
+    -- caller does not reopen the letter to find out.
+  | Requested Pending
     -- | The letter was authored for a different repository.
   | WrongRepo
     -- | A reply naming a thread that is not in canon yet, or an owner event
@@ -214,6 +227,12 @@ data TriageError =
     -- request being honoured. Editing what was asked for is fine; moving it
     -- elsewhere is not honouring it.
   | ThreadMismatch
+    -- | This letter has already been folded into canon. Distinct from
+    -- 'AlreadyInCanon', which is about the event: a re-authored request
+    -- gets a fresh id each time, so only the origin catches it.
+  | AlreadyHonoured
+    -- | The view describes a different repository than the context.
+  | ViewRepoMismatch
   deriving stock (Eq,Show)
 
 -- | What the caller should do with a letter the bridge refused.
@@ -228,6 +247,18 @@ data Outcome =
   | Discard   -- ^ the letter can never become canon here
   deriving stock (Eq,Show)
 
+-- | A request the maintainer has to rule on, already opened.
+--
+-- Carried out of the refusal so a triage UI can show what is being asked
+-- and by whom without opening the letter, and verifying its signature,
+-- a third time.
+data Pending = Pending
+  { pdAuthor  :: HubKey
+  , pdContent :: AuthorContent
+  , pdReply   :: ReplyChannel
+  }
+  deriving stock (Eq,Show)
+
 outcome :: TriageError -> Outcome
 outcome = \case
   -- Order, not validity: fold the thread's opening letter and come back.
@@ -239,10 +270,13 @@ outcome = \case
   -- would strand a perfectly good submission that an upgrade could fold, and
   -- letters already sitting in mailboxes are exactly the ones this happens
   -- to (see 'hubMsgVersion').
-  BadLetter (UnsupportedVersion _) -> Retry
-  BadLetter UndecodableContent     -> Retry
+  BadLetter (UnsupportedVersion _)              -> Retry
+  BadLetter (UndecodableContent _ NewerSchema)  -> Retry
+  -- Trailing bytes are not what an honest newer sender produces, so this
+  -- one is tampering rather than a version gap.
+  BadLetter (UndecodableContent _ TrailingData) -> Discard
   -- A request is a normal triage outcome, not a failure.
-  NotAcceptable RequestOnly -> Decide
+  Requested _ -> Decide
   -- Everything else is about the letter itself and will not improve.
   NotAcceptable _   -> Discard
   BadLetter _       -> Discard
@@ -251,6 +285,8 @@ outcome = \case
   NotAuthorOfRecord -> Discard
   BadContent        -> Discard
   ThreadMismatch    -> Discard
+  AlreadyHonoured   -> Discard
+  ViewRepoMismatch  -> Discard
   -- Not "not ready yet" but "never again": retrying would spin forever.
   CursorExhausted   -> Discard
 
@@ -273,6 +309,7 @@ requireStamp view content
 -- seq the fold would reject.
 requireCanon :: RepoRef -> CanonView -> HubKey -> Either TriageError ()
 requireCanon repo view k
+  | cvRepo view /= repo               = Left ViewRepoMismatch
   | not (authorizedCanon repo view k) = Left UnauthorizedForRepo
   | ccrNextSeq cur == maxBound        = Left CursorExhausted
   | otherwise                         = Right ()
@@ -308,7 +345,17 @@ data Accepted = Accepted
     -- notify without opening the letter a second time.
   , acReply  :: ReplyChannel
   }
-  deriving stock (Show)
+
+-- Deliberately partial: the reply channel is transport-only and PEP-18
+-- keeps it out of public canon, so it must not reach a log through a
+-- derived Show either, and the body can be large.
+instance Show Accepted where
+  show a = "Accepted {event = " <> show (eventId (acEvent a))
+        <> ", scope = " <> show (acScope a)
+        <> ", seq = " <> show (acSeq a)
+        <> ", number = " <> show (acNumber a)
+        <> ", author = " <> show (acAuthor a)
+        <> "}"
 
 -- | Accept a letter into canon.
 --
@@ -343,6 +390,7 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
 
   case classify content of
     FoldsToCanon -> Right ()
+    RequestOnly  -> Left (Requested (Pending author content reply))
     other        -> Left (NotAcceptable other)
 
   requireStamp view content
@@ -445,6 +493,12 @@ honourOpened
 honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   requireCanon repo view pk
 
+  -- A re-authored request gets a fresh id from the clock, so only the
+  -- origin can tell that this very letter was honoured before. Without it a
+  -- triage loop that restarts and re-reads the mailbox closes the thread
+  -- twice and duplicates the note.
+  if HS.member origin (cvOrigins view) then Left AlreadyHonoured else Right ()
+
   case classify asked of
     RequestOnly -> Right ()
     other       -> Left (NotAcceptable other)
@@ -470,6 +524,8 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   -- Re-author: a new box signed by the owner, carrying the owner's clock.
   -- Honouring the same request twice at the same clock produces the same
   -- bytes and so the same id, which the fold would drop as a duplicate.
+  -- No requireStamp here: a RequestOnly op never mints a number, which
+  -- 'classify' above has already established.
   let content = withAuthorTs folded content0
       box = signAuthor pk sk content
   seenAlready view (authorBoxId box)
@@ -532,10 +588,19 @@ ownerEvent ctx view folded secret content = do
              Nothing -> Left UnknownThread
              Just tf
                | prOnly content && tfKind tf /= HubPR -> Left BadContent
-               | otherwise                       -> Right (ThreadScope thr)
+               -- The fold checks the coordinates of a revise as well, and it
+               -- lets a maintainer author one, so this path is reachable:
+               -- without the check a maintainer mints an event the fold then
+               -- drops, burning a seq and losing the action silently.
+               | not (coordsOK content)               -> Left BadContent
+               | otherwise                            -> Right (ThreadScope thr)
 
   Right (accepted kp repo view folded Nothing secret content box pk scope NoReply)
   where
+    coordsOK = \case
+      ARevise _ c _ -> reachableCoords c
+      _             -> True
+
     prOnly = \case
       ARevise{} -> True
       AMerge{}  -> True
@@ -617,6 +682,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
           ADelegate k _           -> HS.insert k (cvMaintainers view)
           ARevoke k _ | k /= repo -> HS.delete k (cvMaintainers view)
           _                       -> cvMaintainers view
+      , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
       }
 
     scopeThread = \case
