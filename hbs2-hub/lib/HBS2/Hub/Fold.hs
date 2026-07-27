@@ -20,6 +20,7 @@ module HBS2.Hub.Fold
   , resolve
   , materialize
   , foldEvents
+  , reachableCoords
   ) where
 
 import HBS2.Hub.Types
@@ -78,8 +79,8 @@ data DropReason =
 data Comment = Comment
   { cId         :: EventId
   , cAuthor     :: HubKey
-  , cAuthorTs   :: Word64   -- ^ declared by the author; advisory, may be anything
-  , cFoldedTs   :: Word64   -- ^ owner clock at fold; trusted
+  , cAuthorTs   :: Word64   -- ^ author-declared, epoch ms; advisory, may be anything
+  , cFoldedTs   :: Word64   -- ^ owner clock at fold, epoch ms; trusted
   , cBody       :: Maybe Text
   , cBodyPart   :: Maybe HashRef     -- ^ large body shipped as an encrypted tree
   , cPartSecret :: Maybe ByteString  -- ^ group secret the owner published for it
@@ -111,9 +112,9 @@ data ThreadState = ThreadState
   , tsKind     :: HubKind
   , tsNumber   :: Maybe Word64
   , tsAuthor   :: HubKey
-  , tsAuthorTs :: Word64           -- ^ author-declared creation time (advisory)
-  , tsCreated  :: Word64           -- ^ folded-at time of the open event (trusted)
-  , tsUpdated  :: Word64           -- ^ folded-at time of the latest event (trusted)
+  , tsAuthorTs :: Word64           -- ^ author-declared creation, epoch ms (advisory)
+  , tsCreated  :: Word64           -- ^ folded-at of the open event, epoch ms (trusted)
+  , tsUpdated  :: Word64           -- ^ folded-at of the latest event, epoch ms (trusted)
   , tsAttrs    :: HashMap Text Text
   , tsComments :: [Comment]        -- ^ in seq order
   , tsPR       :: Maybe PRState

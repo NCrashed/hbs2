@@ -190,6 +190,12 @@ Shape (JSON projection of a thread):
 }
 ```
 
+A renderer must tolerate a `reply-to` that names no event it can see.
+Nothing validates it: the fold does not require the referenced event to
+exist, and it may be one that was dropped, redacted, or removed by
+compaction. Render such a comment flat rather than failing or inventing a
+parent.
+
 Provenance is per item, not per thread: `canon_by` sits on the opening event
 and on each comment, because under delegation (PEP-21) different events on one
 thread may be blessed by different maintainer keys, so a single thread-level

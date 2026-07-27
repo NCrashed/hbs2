@@ -437,6 +437,20 @@ spec = do
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadKind]
 
+    it "encodes a label set to the same bytes whatever the order" $ do
+      -- An attribute value is one string, so the same labels in a different
+      -- order would otherwise be different bytes and a different event-id:
+      -- two maintainers agreeing would mint two events.
+      encodeLabels ["ui","bug"] `shouldBe` encodeLabels ["bug","ui"]
+      encodeLabels ["bug","ui"] `shouldBe` "bug,ui"
+      encodeLabels ["bug","bug"] `shouldBe` "bug"
+      encodeLabels [" bug "] `shouldBe` "bug"
+      decodeLabels (encodeLabels ["bug","ui"]) `shouldBe` ["bug","ui"]
+      decodeLabels "" `shouldBe` []
+      -- A comma cannot survive the round trip, so it is not representable.
+      validLabel "needs,triage" `shouldBe` False
+      encodeLabels ["ok","needs,triage"] `shouldBe` "ok"
+
     it "refuses a pr whose change cannot be fetched at all" $ do
       owner <- kp
       alice <- kp

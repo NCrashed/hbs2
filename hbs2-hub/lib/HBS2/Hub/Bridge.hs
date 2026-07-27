@@ -46,6 +46,7 @@
 -- nothing currently reads the field that diverged.
 module HBS2.Hub.Bridge
   ( CanonCursor(..)
+  , TriageCtx(..)
   , ThreadFacts(..)
   , Outcome(..)
   , outcome
@@ -91,6 +92,17 @@ data CanonCursor = CanonCursor
   , ccrNextNumber :: Word64
   }
   deriving stock (Eq,Show)
+
+-- | What stays fixed while triaging a batch: who is folding, for which
+-- repo, and which authors are allowed. Separated from the per-letter
+-- arguments because those three are the same for every letter in a run,
+-- and a positional list long enough to hide a swap is how the wrong key
+-- ends up in the wrong slot.
+data TriageCtx = TriageCtx
+  { tcCanon   :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ the folding key
+  , tcAllowed :: HubKey -> Bool  -- ^ may this inner author be folded? (PEP-21)
+  , tcRepo    :: RepoRef
+  }
 
 -- | What the bridge remembers about a thread already in canon.
 data ThreadFacts = ThreadFacts
@@ -223,7 +235,12 @@ outcome = \case
   UnknownTarget   -> Retry
   -- Our own key, not the letter's: another folder may be able to.
   UnauthorizedForRepo -> Retry
-  CursorExhausted -> Retry
+  -- The letter is from a newer schema than this build speaks. Discarding it
+  -- would strand a perfectly good submission that an upgrade could fold, and
+  -- letters already sitting in mailboxes are exactly the ones this happens
+  -- to (see 'hubMsgVersion').
+  BadLetter (UnsupportedVersion _) -> Retry
+  BadLetter UndecodableContent     -> Retry
   -- A request is a normal triage outcome, not a failure.
   NotAcceptable RequestOnly -> Decide
   -- Everything else is about the letter itself and will not improve.
@@ -234,10 +251,8 @@ outcome = \case
   NotAuthorOfRecord -> Discard
   BadContent        -> Discard
   ThreadMismatch    -> Discard
-
--- Both halves of a PR must not be missing at once: see reachableCoords.
-reachable :: PRCoords -> Bool
-reachable c = isJust (prBundle c) || isJust (prSource c)
+  -- Not "not ready yet" but "never again": retrying would spin forever.
+  CursorExhausted   -> Discard
 
 -- Refuse an author box canon already holds: the fold would drop the second
 -- copy as a duplicate.
@@ -307,17 +322,18 @@ data Accepted = Accepted
 -- when the letter actually references an attachment, so canon does not carry
 -- secrets for messages with nothing encrypted in them.
 acceptLetter
-  :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ canon (owner or maintainer) keypair
-  -> (HubKey -> Bool)                   -- ^ may this inner author be folded? (PEP-21)
-  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
-  -> RepoRef                            -- ^ the repo being folded into
+  :: TriageCtx
+  -> EnvelopeSigner                     -- ^ who signed the Mailbox envelope
   -> CanonView
-  -> Word64                             -- ^ folded-at, the owner's clock
+  -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
   -> HashRef                            -- ^ origin: hash of the Mailbox message
   -> Maybe ByteString                   -- ^ the message's group secret, if any
   -> MessageData
   -> Either TriageError Accepted
-acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin secret md = do
+acceptLetter ctx envelopeSigner view folded origin secret md = do
+  let canonKp@(canonPk,_) = tcCanon ctx
+      allowed = tcAllowed ctx
+      repo = tcRepo ctx
   -- Our own authority first: a revoked maintainer can still sign, but the
   -- fold will not admit it, so minting would burn a triaged letter.
   requireCanon repo view canonPk
@@ -337,25 +353,24 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
       | target /= repo                    -> Left WrongRepo
       | kind == HubPR && isNothing coords -> Left BadContent
       | kind == HubIssue && isJust coords -> Left BadContent
-      | maybe False (not . reachable) coords -> Left BadContent
+      | maybe False (not . reachableCoords) coords -> Left BadContent
       | otherwise                         -> Right (authorBoxId box)
 
     AComment thr _ _ _ _ -> known thr
 
-    ARevise thr coords _ -> do
-      -- The case below handles a missing thread itself.
+    ARevise thr coords _ ->
       case HM.lookup thr (cvThreads view) of
-        -- Kind first: a revise on an issue is the wrong shape, not a
-        -- question of who signed it.
-        Just tf | tfKind tf /= HubPR -> Left BadContent
+        Nothing -> Left UnknownThread
         Just tf
-          | not (reachable coords) -> Left BadContent
-          | tfAuthor tf == author  -> Right thr
+          -- Kind and payload first: those are about the shape of the
+          -- request, not about who signed it.
+          | tfKind tf /= HubPR           -> Left BadContent
+          | not (reachableCoords coords) -> Left BadContent
+          | tfAuthor tf == author        -> Right thr
           -- Stricter than the fold on purpose: the fold also lets a
           -- maintainer revise, but a maintainer doing that through the
           -- letter path would be acting as someone else.
-          | otherwise              -> Left NotAuthorOfRecord
-        Nothing -> Left UnknownThread
+          | otherwise                    -> Left NotAuthorOfRecord
 
     -- classify has already restricted this to the three ops above.
     _ -> Left BadContent
@@ -380,19 +395,17 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
 -- themselves. The declared timestamp becomes the owner's, since the owner is
 -- the one declaring it now; the letter's provenance is kept as the origin.
 honourRequest
-  :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ canon keypair, which also authors
-  -> (HubKey -> Bool)
-  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
-  -> RepoRef                            -- ^ the repo, for the authority check
+  :: TriageCtx
+  -> EnvelopeSigner                     -- ^ who signed the Mailbox envelope
   -> CanonView
-  -> Word64                             -- ^ folded-at, and the owner's declared time
+  -> Word64                             -- ^ folded-at and declared time: epoch MILLISECONDS
   -> HashRef                            -- ^ origin: the requesting message
   -> MessageData
   -> Either TriageError Accepted
-honourRequest canonKp allowed envelopeSigner repo view folded origin md = do
+honourRequest ctx envelopeSigner view folded origin md = do
   (_box, _author, content, reply) <-
-    either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
-  honourOpened canonKp repo view folded origin content content reply
+    either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
+  honourOpened (tcCanon ctx) (tcRepo ctx) view folded origin content content reply
 
 -- | Honour a request, but sign content the maintainer has looked at and
 -- possibly edited.
@@ -404,20 +417,18 @@ honourRequest canonKp allowed envelopeSigner repo view folded origin md = do
 -- required, for its provenance and to check that what it asked for was a
 -- request in the first place.
 honourWith
-  :: (HubKey, PrivKey 'Sign HubScheme)
-  -> (HubKey -> Bool)
-  -> EnvelopeSigner                      -- ^ who signed the Mailbox envelope
-  -> RepoRef
+  :: TriageCtx
+  -> EnvelopeSigner                     -- ^ who signed the Mailbox envelope
   -> CanonView
-  -> Word64                             -- ^ folded-at, and the owner's declared time
+  -> Word64                             -- ^ folded-at and declared time: epoch MILLISECONDS
   -> HashRef                            -- ^ origin: the requesting message
   -> AuthorContent                      -- ^ what the owner actually signs
   -> MessageData                        -- ^ the request being honoured
   -> Either TriageError Accepted
-honourWith canonKp allowed envelopeSigner repo view folded origin content0 md = do
+honourWith ctx envelopeSigner view folded origin content0 md = do
   (_box, _author, asked, reply) <-
-    either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
-  honourOpened canonKp repo view folded origin asked content0 reply
+    either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
+  honourOpened (tcCanon ctx) (tcRepo ctx) view folded origin asked content0 reply
 
 -- The shared body, taking the letter already opened: 'honourRequest' would
 -- otherwise verify the same signature twice.
@@ -474,14 +485,15 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
 -- refused rather than minted, because the fold treats such a redact as a
 -- silent no-op, and a thread op on an unknown thread would be dropped.
 ownerEvent
-  :: (HubKey, PrivKey 'Sign HubScheme)
-  -> RepoRef                            -- ^ the repo, and its root of trust
+  :: TriageCtx
   -> CanonView
-  -> Word64                             -- ^ folded-at
+  -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
   -> Maybe ByteString                   -- ^ part secret, if the event has one
   -> AuthorContent
   -> Either TriageError Accepted
-ownerEvent kp@(pk,sk) repo view folded secret content = do
+ownerEvent ctx view folded secret content = do
+  let kp@(pk,sk) = tcCanon ctx
+      repo = tcRepo ctx
   requireCanon repo view pk
 
   let box = signAuthor pk sk content
@@ -509,7 +521,7 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
       | target /= repo                    -> Left WrongRepo
       | kind == HubPR && isNothing coords -> Left BadContent
       | kind == HubIssue && isJust coords -> Left BadContent
-      | maybe False (not . reachable) coords -> Left BadContent
+      | maybe False (not . reachableCoords) coords -> Left BadContent
       | otherwise                         -> Right (ThreadScope eid)
 
     -- The remaining ops are thread ops; the fold checks kind for the PR-only

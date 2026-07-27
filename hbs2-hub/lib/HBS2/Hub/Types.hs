@@ -33,6 +33,9 @@ module HBS2.Hub.Types
   , BoxError(..)
   , unboxChecked
   , decodeStrict
+  , encodeLabels
+  , decodeLabels
+  , validLabel
   ) where
 
 import HBS2.Prelude.Plated
@@ -46,6 +49,8 @@ import Codec.Serialise (Serialise(..),serialise)
 import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
+import Data.List (nub,sort)
+import Data.Text qualified as Text
 import Data.Word (Word64)
 
 -- | The whole hub is fixed to the basic scheme, like hbs2-git3.
@@ -194,7 +199,7 @@ data CanonContent = CanonContent
   , ccSeq        :: Word64           -- ^ globally monotonic order weight
   , ccNumber     :: Maybe Word64     -- ^ human #N, on open only
   , ccOrigin     :: Maybe HashRef    -- ^ Tier B letter hash (absent if owner-native)
-  , ccFoldedTs   :: Word64           -- ^ owner clock at fold
+  , ccFoldedTs   :: Word64           -- ^ owner clock at fold, Unix epoch milliseconds
   , ccPartSecret :: Maybe ByteString -- ^ group secret, on events with encrypted parts
   }
   deriving stock (Eq,Show,Generic)
@@ -224,6 +229,30 @@ authorBoxId = HashRef . hashObject . serialise
 -- Stable before seq/number exist and computable by the author.
 eventId :: Event -> EventId
 eventId = authorBoxId . evAuthorBox
+
+-- | Encode a multi-valued attribute (labels, assignees) for 'ASet'.
+--
+-- Attribute values are one string, so a set of labels needs a canonical
+-- rendering: sorted, deduplicated, comma-separated, no spaces. Without it
+-- the same labels in a different order are different bytes and therefore a
+-- different event-id, and two maintainers agreeing on the same labels would
+-- mint two different events (PEP-19).
+--
+-- A label containing a comma is not representable and is dropped, since
+-- keeping it would split into two labels on the way back.
+encodeLabels :: [Text] -> Text
+encodeLabels = Text.intercalate "," . nub . sort . filter validLabel . fmap Text.strip
+
+-- | Read back what 'encodeLabels' wrote.
+decodeLabels :: Text -> [Text]
+decodeLabels t
+  | Text.null t = []
+  | otherwise   = Text.splitOn "," t
+
+-- | A label is representable if it survives the round trip: no comma, not
+-- empty.
+validLabel :: Text -> Bool
+validLabel l = not (Text.null l) && not (Text.isInfixOf "," l)
 
 -- | Why a signed box could not be opened.
 data BoxError =
