@@ -75,6 +75,9 @@ import GHC.Generics (Generic)
 -- cannot cover is a v2 change INSIDE the inner box, which is signed content
 -- this reader must hand to the fold verbatim; that is what the append-only
 -- rule on 'AuthorContent' is for.
+-- When a v2 appears this becomes a set of versions this build can decode,
+-- not a single number: letters already sitting in mailboxes are v1, and a
+-- v2 build that refuses them would strand them.
 hubMsgVersion :: Word32
 hubMsgVersion = 1
 
@@ -195,9 +198,11 @@ makeAck = MessageData hubMsgVersion . Ack
 -- | The event-id this letter will have in canon: the hash of its inner box,
 -- computable by the sender before delivery.
 letterEventId :: MessageData -> Maybe EventId
-letterEventId md = case mdBody md of
-  Letter box _ -> Just (authorBoxId box)
-  Ack _        -> Nothing
+letterEventId md
+  | mdVersion md /= hubMsgVersion = Nothing
+  | otherwise = case mdBody md of
+      Letter box _ -> Just (authorBoxId box)
+      Ack _        -> Nothing
 
 -- | The canonical thread this letter belongs to.
 --
@@ -206,11 +211,13 @@ letterEventId md = case mdBody md of
 -- reply's own id. Getting this wrong would break correlation against an
 -- 'AckRecord', whose 'akThread' is always the thread.
 letterThreadId :: MessageData -> Maybe ThreadId
-letterThreadId md = case mdBody md of
-  Ack a -> Just (akThread a)
-  Letter box _ -> do
-    (_, ac) <- either (const Nothing) Just (unboxChecked box)
-    pure (fromMaybe (authorBoxId box) (authorThread ac))
+letterThreadId md
+  | mdVersion md /= hubMsgVersion = Nothing
+  | otherwise = case mdBody md of
+      Ack a -> Just (akThread a)
+      Letter box _ -> do
+        (_, ac) <- either (const Nothing) Just (unboxChecked box)
+        pure (fromMaybe (authorBoxId box) (authorThread ac))
 
 -- | Serialise to the bytes that go into @messageData@ before encryption.
 letterPayload :: MessageData -> ByteString
