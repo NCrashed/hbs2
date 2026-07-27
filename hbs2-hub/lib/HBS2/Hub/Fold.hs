@@ -170,6 +170,11 @@ data FoldResult = FoldResult
     -- the clock and a second honour mints a second event. Canon records the
     -- provenance either way; this is the fold handing it back.
   , frOrigins :: HashSet HashRef
+    -- | The repo this canon belongs to: the owner key the fold was given.
+    --
+    -- Recorded so a caller cannot end up with a view built for one repo and
+    -- a fold of another. It is the same key that seeds the maintainer set.
+  , frOwner :: HubKey
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -236,6 +241,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frAdmitted  = sSeen s
       , frMaintainers = sMaint s
       , frOrigins   = sOrigins s
+      , frOwner     = owner
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }

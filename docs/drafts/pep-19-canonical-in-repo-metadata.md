@@ -545,7 +545,16 @@ Folding Tier B letters into Tier A
 ================================
 
 This is the bridge that produces canon. When the owner accepts a PEP-18
-letter, the hub maps it to one or more events, preserving authorship. A
+letter, the hub maps it to exactly one event, preserving authorship. One
+letter, at most one event: the letter's message hash is recorded as the
+event's `origin`, and a folder skips a letter whose hash already appears as
+an origin in canon (that is how a triage loop re-reading a mailbox after a
+restart avoids folding the same letter twice). A letter that produced two
+events would make that check ambiguous, since only one of the two could
+carry the origin. Honouring a request (`close`, `reopen`, `label`) is the
+same rule: the owner-authored event that results carries the requesting
+letter's hash as its origin, and a second honour of the same letter is
+refused. A
 PEP-18 letter carries a nested inner `SignedBox` over its plaintext payload
 (distinct from the Mailbox transport signature, which covers the encrypted
 envelope); that inner box is what the owner extracts on decrypt and stores as

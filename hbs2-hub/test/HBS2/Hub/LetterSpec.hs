@@ -24,6 +24,14 @@ kp = do
   c <- newCredentials @'HBS2Basic
   pure (_peerSignPk c, _peerSignSk c)
 
+-- A correctly signed author box whose content this build cannot decode: the
+-- sender speaks a newer schema. Reporting a bad signature for one of these
+-- would accuse an honest sender of forgery.
+futureBox :: KP -> SignedBox AuthorContent HubScheme
+futureBox (pk,sk) =
+  case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
+    SignedBox p b s -> SignedBox p b s
+
 canon :: Word64 -> Maybe Word64 -> EventId -> CanonContent
 canon sq num eid = CanonContent eid sq num Nothing sq Nothing
 
@@ -313,6 +321,20 @@ spec = do
       -- rewrapped under a fresh envelope key, the inner author is still banned
       expectLeft AuthorDenied (openLetterAs allowed (EnvelopeSigner (fst relay)) letter)
       expectLeft AuthorDenied (openLetterAs allowed (EnvelopeSigner (fst mallory)) letter)
+
+    it "applies the deny-list to a letter it cannot decode either" $ do
+      mallory <- kp
+      let md = MessageData hubMsgVersion (Letter (futureBox mallory) noReplyChannel)
+          allowed k = k /= fst mallory
+      -- The signature checks out, so the author is known; only the content is
+      -- from a schema this build does not speak. For an honest newer sender
+      -- that is a retry, which is what an unfiltered open reports.
+      expectLeft (UndecodableContent (fst mallory) Undecodable)
+        (openLetterAs (const True) (EnvelopeSigner (fst mallory)) md)
+      -- For a banned one it would be a retry forever: the key is known and
+      -- the ban is the only thing that could ever stop it, so the ban has to
+      -- reach this case too.
+      expectLeft AuthorDenied (openLetterAs allowed (EnvelopeSigner (fst mallory)) md)
 
     it "honours the reply channel only from the inner author's own envelope" $ do
       alice <- kp

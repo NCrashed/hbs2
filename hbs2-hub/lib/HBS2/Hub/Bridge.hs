@@ -161,24 +161,26 @@ emptyView repo = CanonView initialCursor HM.empty HM.empty (HS.singleton repo) H
 
 -- | May this key bless events for this repo right now?
 --
--- The owner check is belt and braces: a view from 'viewOf' or 'emptyView'
--- always has the owner in the set, so it only matters for a view assembled
--- by hand.
-authorizedCanon :: RepoRef -> CanonView -> HubKey -> Bool
-authorizedCanon repo view k = k == repo || HS.member k (cvMaintainers view)
+-- The repo comes from the view, which knows it: taking it separately would
+-- be a second source of truth that could disagree.
+authorizedCanon :: CanonView -> HubKey -> Bool
+authorizedCanon view k = k == cvRepo view || HS.member k (cvMaintainers view)
 
 initialCursor :: CanonCursor
 initialCursor = CanonCursor 1 1
 
 -- | Derive the view from folded canon.
-viewOf :: RepoRef -> FoldResult -> CanonView
-viewOf repo fr = CanonView
+--
+-- The repo comes from the fold itself, so there is one place to get it
+-- wrong rather than two.
+viewOf :: FoldResult -> CanonView
+viewOf fr = CanonView
   { cvCursor  = cursorFrom fr
   , cvThreads = fmap (\t -> ThreadFacts (tsKind t) (tsAuthor t) (tsNumber t)) (frThreads fr)
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
   , cvOrigins = frOrigins fr
-  , cvRepo = repo
+  , cvRepo = frOwner fr
   }
 
 -- | The next seq and number to mint, given folded canon.
@@ -257,7 +259,25 @@ data Pending = Pending
   , pdContent :: AuthorContent
   , pdReply   :: ReplyChannel
   }
-  deriving stock (Eq,Show)
+  deriving stock (Eq)
+
+-- Deliberately partial, for the same reason 'Accepted' is: this sits inside
+-- 'TriageError', which callers log, and a derived instance would print the
+-- body and the reply channel that PEP-18 keeps out of public canon.
+instance Show Pending where
+  show p = "Pending {author = " <> show (pdAuthor p)
+        <> ", op = " <> opName (pdContent p)
+        <> ", thread = " <> show (authorThread (pdContent p))
+        <> ", reply = " <> haveReply (pdReply p)
+        <> "}"
+    where
+      haveReply NoReply = "none"
+      haveReply ReplyTo{} = "present"
+      opName = \case
+        AOpen{} -> "open"; AComment{} -> "comment"; ARevise{} -> "revise"
+        ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
+        AMerge{} -> "merge"; ARedact{} -> "redact"
+        ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
 
 outcome :: TriageError -> Outcome
 outcome = \case
@@ -271,13 +291,16 @@ outcome = \case
   -- letters already sitting in mailboxes are exactly the ones this happens
   -- to (see 'hubMsgVersion').
   BadLetter (UnsupportedVersion _)              -> Retry
-  BadLetter (UndecodableContent _ NewerSchema)  -> Retry
+  BadLetter (UndecodableContent _ Undecodable)  -> Retry
   -- Trailing bytes are not what an honest newer sender produces, so this
   -- one is tampering rather than a version gap.
   BadLetter (UndecodableContent _ TrailingData) -> Discard
   -- A request is a normal triage outcome, not a failure.
   Requested _ -> Decide
   -- Everything else is about the letter itself and will not improve.
+  -- Note that .NotAcceptable RequestOnly. is unreachable through
+  -- .acceptLetter., which raises .Requested. for those ops before it can be
+  -- built; the mapping is here because the type admits it.
   NotAcceptable _   -> Discard
   BadLetter _       -> Discard
   WrongRepo         -> Discard
@@ -310,7 +333,7 @@ requireStamp view content
 requireCanon :: RepoRef -> CanonView -> HubKey -> Either TriageError ()
 requireCanon repo view k
   | cvRepo view /= repo               = Left ViewRepoMismatch
-  | not (authorizedCanon repo view k) = Left UnauthorizedForRepo
+  | not (authorizedCanon view k)      = Left UnauthorizedForRepo
   | ccrNextSeq cur == maxBound        = Left CursorExhausted
   | otherwise                         = Right ()
   where
@@ -388,10 +411,17 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
   (box, author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
 
+  -- A request needs its thread to exist before it is worth a maintainer's
+  -- attention: otherwise a close naming an unfolded thread would raise a
+  -- decision that 'honourRequest' then refuses, while a comment naming the
+  -- same thread correctly waits in the mailbox.
   case classify content of
     FoldsToCanon -> Right ()
-    RequestOnly  -> Left (Requested (Pending author content reply))
-    other        -> Left (NotAcceptable other)
+    RequestOnly
+      | maybe True (`HM.member` cvThreads view) (authorThread content)
+                  -> Left (Requested (Pending author content reply))
+      | otherwise -> Left UnknownThread
+    other         -> Left (NotAcceptable other)
 
   requireStamp view content
   seenAlready view (authorBoxId box)

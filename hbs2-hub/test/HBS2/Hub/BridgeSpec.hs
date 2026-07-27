@@ -184,12 +184,30 @@ spec = do
       alice <- kp
       owner <- kp
       origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+      origin2 <- someHash
+      let req = makeLetter (fst alice) (snd alice) (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
+      p <- expectRequested
+             (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 Nothing req)
+      pdAuthor p `shouldBe` fst alice
+
+    -- A request whose thread is not in canon is early, exactly as a comment
+    -- naming the same thread would be: raising it as a decision would produce
+    -- a request that 'honourRequest' refuses.
+    it "treats a request naming an unknown thread as early, not as a decision" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
       thr <- someHash
       let repo = fst owner
           req = makeLetter (fst alice) (snd alice) (AClose thr Nothing 1) noReplyChannel
-      p <- expectRequested
-             (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing req)
-      pdAuthor p `shouldBe` fst alice
+          got = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing req
+      expectErr UnknownThread got
+      either outcome (const Decide) got `shouldBe` Retry
 
     it "honours a request by re-authoring it under the owner key and clock" $ do
       alice <- kp
@@ -300,7 +318,7 @@ spec = do
         (ownerEvent (ctxOf owner) (acView aOpen) 2 Nothing (ASet (scopeOf aOpen) "labels" "bug" 2))
       -- rebuild the view the way a restarted folder would
       let fr = foldEvents repo (map acEvent [aOpen, aSet])
-          rebuilt = viewOf repo fr
+          rebuilt = viewOf fr
       aRedact <- expectRight
         (ownerEvent (ctxOf owner) rebuilt 3 Nothing (ARedact (eventId (acEvent aSet)) 3))
       -- and it lands with the thread it belongs to, not under its target's id
@@ -324,7 +342,7 @@ spec = do
                   (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2) noReplyChannel
       aRev <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aPR) 2 origin Nothing rev)
-      let rebuilt = viewOf repo (foldEvents repo (map acEvent [aPR, aRev]))
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aPR, aRev]))
       expectErr AlreadyInCanon
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) rebuilt 3 origin Nothing rev)
 
@@ -346,7 +364,7 @@ spec = do
         (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin Nothing (letter "ok"))
       aRev <- expectRight (ownerEvent (ctxOf owner) (acView aOk) 3 Nothing (ARevoke (fst bob) 3))
       -- the view is rebuilt from canon, fully up to date, and bob is out
-      let rebuilt = viewOf repo (foldEvents repo (map acEvent [aDel, aOk, aRev]))
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aDel, aOk, aRev]))
       expectErr UnauthorizedForRepo
         (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) rebuilt 4 origin Nothing (letter "after"))
       expectErr UnauthorizedForRepo
@@ -381,7 +399,7 @@ spec = do
       -- bob is a real maintainer here, so this exercises the root-of-trust
       -- guard rather than the general authority check.
       aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
-      authorizedCanon (fst owner) (acView aDel) (fst bob) `shouldBe` True
+      authorizedCanon (acView aDel) (fst bob) `shouldBe` True
       expectErr UnauthorizedForRepo
         (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 Nothing (ADelegate (fst carol) 2))
       expectErr UnauthorizedForRepo
@@ -575,11 +593,18 @@ spec = do
       -- Treating every refusal alike either loses letters or retries spam
       -- forever. PEP-18: an early reply waits in the mailbox, it is not
       -- rejected.
+      alice <- kp
+      thr <- someHash
       outcome UnknownThread `shouldBe` Retry
       outcome UnknownTarget `shouldBe` Retry
       outcome UnauthorizedForRepo `shouldBe` Retry
-      
+      -- A request is not a failure: the caller is meant to rule on it.
+      outcome (Requested (Pending (fst alice) (AClose thr Nothing 1) NoReply))
+        `shouldBe` Decide
       outcome (NotAcceptable OwnerNative) `shouldBe` Discard
+      -- Unreachable through 'acceptLetter', which turns a RequestOnly op into
+      -- 'Requested' before it can get here, but the mapping has to be total.
+      outcome (NotAcceptable RequestOnly) `shouldBe` Discard
       outcome WrongRepo `shouldBe` Discard
       outcome (BadLetter AuthorDenied) `shouldBe` Discard
       outcome AlreadyInCanon `shouldBe` Discard
@@ -587,7 +612,9 @@ spec = do
       -- Discarding it would strand a submission an upgrade could fold, which
       -- is exactly what happens to letters already sitting in mailboxes.
       outcome (BadLetter (UnsupportedVersion 2)) `shouldBe` Retry
-      
+      outcome (BadLetter (UndecodableContent (fst alice) Undecodable)) `shouldBe` Retry
+      -- Trailing bytes are not what an honest newer sender produces.
+      outcome (BadLetter (UndecodableContent (fst alice) TrailingData)) `shouldBe` Discard
       -- ...but a cursor at the end of its range never becomes ready.
       outcome CursorExhausted `shouldBe` Discard
 
@@ -676,7 +703,7 @@ spec = do
       let evs = map acEvent [a1,a2,a3,a4,a5,a6,a7,a8]
           fr = foldEvents repo evs
       frDropped fr `shouldBe` []
-      acView a8 `shouldBe` viewOf repo fr
+      acView a8 `shouldBe` viewOf fr
 
     it "admits everything it mints" $ do
       alice <- kp

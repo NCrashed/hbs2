@@ -289,11 +289,19 @@ openLetterAs
   -> EnvelopeSigner     -- ^ who signed the Mailbox envelope
   -> MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
-openLetterAs allowed (EnvelopeSigner envelopeSigner) md = do
-  (box, author, ac, rc) <- openLetter md
-  if not (allowed author)
-    then Left AuthorDenied
-    else pure (box, author, ac, if envelopeSigner == author then rc else NoReply)
+openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
+  case openLetter md of
+    -- The deny-list has to reach the undecodable case too. Such a letter is
+    -- retried rather than discarded, so without this a banned author whose
+    -- content this build cannot read is retried forever with no way out: the
+    -- key is known, and the ban is the only mechanism that would stop it.
+    Left (UndecodableContent k why)
+      | not (allowed k) -> Left AuthorDenied
+      | otherwise       -> Left (UndecodableContent k why)
+    Left e -> Left e
+    Right (box, author, ac, rc)
+      | not (allowed author) -> Left AuthorDenied
+      | otherwise -> pure (box, author, ac, if envelopeSigner == author then rc else NoReply)
 
 -- | Open an ack. It carries no inner box, so the only trust available is the
 -- envelope signer being a current maintainer of the repo; the authoritative

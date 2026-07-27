@@ -196,7 +196,7 @@ spec = do
         [UndecodableAuthor k why] -> do
           -- the reader can still name whose event it could not read
           k `shouldBe` fst alice
-          why `shouldBe` NewerSchema
+          why `shouldBe` Undecodable
         other -> expectationFailure ("unexpected: " <> show other)
 
     it "refuses a number on anything but an open" $ do

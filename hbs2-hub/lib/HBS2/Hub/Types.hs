@@ -261,7 +261,7 @@ data BoxError =
     BoxBadSig  -- ^ the signature does not verify: a forgery claim
     -- | Signature fine, content this reader cannot decode. Carries the
     -- signer, because a reader that cannot name the key can neither
-    -- attribute the event ( verify@) nor apply a deny-list to it, and
+    -- attribute the event (@hub verify@) nor apply a deny-list to it, and
     -- an undecodable letter is retried rather than discarded.
   | BoxUndecodable HubKey UndecodableWhy
   deriving stock (Eq,Show)
@@ -270,7 +270,7 @@ data BoxError =
 -- look alike unless the two are told apart: trailing bytes are never
 -- something an honest newer sender produces.
 data UndecodableWhy =
-    NewerSchema  -- ^ decode failed outright
+    Undecodable  -- ^ decode failed outright: a newer op, or plain garbage
   | TrailingData -- ^ decoded, but bytes were left over
   deriving stock (Eq,Ord,Show)
 
@@ -305,7 +305,7 @@ decodeChecked bs =
   case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
     Right (rest, a) | LBS.null rest -> Right a
                     | otherwise     -> Left TrailingData
-    Left _ -> Left NewerSchema
+    Left _ -> Left Undecodable
 
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme
