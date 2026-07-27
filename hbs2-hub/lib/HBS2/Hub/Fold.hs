@@ -54,6 +54,10 @@ data Resolved = Resolved
 data DropReason =
     BadAuthorSig      -- ^ author box failed to verify (rule 1)
   | BadCanonSig       -- ^ canon box failed to verify (rule 2)
+    -- | A box whose signature is good but whose content this reader cannot
+    -- decode: canon is newer than this build. Distinct from a bad signature,
+    -- which is an accusation of forgery.
+  | Undecodable
   | IdMismatch        -- ^ canon box blesses a different event-id (rule 2)
   | WrongTarget       -- ^ open event authored for a different repo (cross-repo replay)
   | DupId             -- ^ event-id already seen (rewrap/replay, PEP-18/PEP-19)
@@ -137,8 +141,8 @@ data FoldResult = FoldResult
 -- this event's id.
 resolve :: Event -> Either DropReason Resolved
 resolve e = do
-  (akey, ac) <- note BadAuthorSig $ unboxSignedBox0 (evAuthorBox e)
-  (ckey, cc) <- note BadCanonSig  $ unboxSignedBox0 (evCanonBox e)
+  (akey, ac) <- box BadAuthorSig (evAuthorBox e)
+  (ckey, cc) <- box BadCanonSig  (evCanonBox e)
   let eid = eventId e
   if ccEventId cc /= eid
     then Left IdMismatch
@@ -146,7 +150,10 @@ resolve e = do
                         , rAuthorKey = akey, rCanonKey = ckey
                         , rContent = ac, rCanon = cc }
   where
-    note reason = maybe (Left reason) Right
+    box badSig b = case unboxChecked b of
+      Left BoxBadSig      -> Left badSig
+      Left BoxUndecodable -> Left Undecodable
+      Right ok            -> Right ok
 
 -- | The whole fold: resolve, then materialize.
 --
@@ -208,8 +215,11 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         | k == owner        -> keep r s
         | otherwise         -> keep r s { sMaint = HS.delete k (sMaint s) }
 
+      -- Owner-authored (PEP-19 rule 4): BOTH boxes must be an authorized
+      -- key. Checking only the canon box would let anyone author a redact
+      -- and hide any event in the repo as soon as it got blessed.
       ARedact target _
-        | not (canonOK r s)          -> dropE r UnauthorizedCanon s
+        | not (ownerAuthored r s)    -> dropE r UnauthorizedCanon s
         | HS.member target (sSeen s) -> keep r s { sRedacted = HS.insert target (sRedacted s) }
         | otherwise                  -> dropE r UnknownRedact s
 

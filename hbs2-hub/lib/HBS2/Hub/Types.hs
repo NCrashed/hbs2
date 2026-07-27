@@ -29,6 +29,8 @@ module HBS2.Hub.Types
   , signAuthor
   , signCanon
   , mkEvent
+  , BoxError(..)
+  , unboxChecked
   ) where
 
 import HBS2.Prelude.Plated
@@ -37,7 +39,8 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 
-import Codec.Serialise (Serialise(..),serialise)
+import Codec.Serialise (Serialise(..),serialise,deserialiseOrFail)
+import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.Word (Word64)
 
@@ -181,6 +184,29 @@ authorBoxId = HashRef . hashObject . serialise
 -- Stable before seq/number exist and computable by the author.
 eventId :: Event -> EventId
 eventId = authorBoxId . evAuthorBox
+
+-- | Why a signed box could not be opened.
+data BoxError =
+    BoxBadSig       -- ^ the signature does not verify: a forgery claim
+  | BoxUndecodable  -- ^ signature fine, content unknown to this reader
+  deriving stock (Eq,Show)
+
+-- | Open a signed box, keeping the two failure modes apart.
+--
+-- 'unboxSignedBox0' collapses them into 'Nothing', which would make a
+-- correctly signed message carrying a newer op look like a forgery. That
+-- matters for diagnostics (@hub verify@) and for triage, so verification and
+-- decoding are done in separate steps here.
+unboxChecked
+  :: Serialise p
+  => SignedBox p HubScheme
+  -> Either BoxError (HubKey, p)
+unboxChecked (SignedBox pk bs sig)
+  | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
+  | otherwise =
+      case deserialiseOrFail (LBS.fromStrict bs) of
+        Left _  -> Left BoxUndecodable
+        Right p -> Right (pk, p)
 
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme

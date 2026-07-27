@@ -44,6 +44,15 @@ reasons = map snd . frDropped
 threadOf :: FoldResult -> ThreadId -> ThreadState
 threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads fr))
 
+-- A correctly signed box whose content this build cannot decode, which is
+-- what an op added by a newer schema looks like from here. SignedBox is
+-- phantom in its payload type, so signing another type and reinterpreting
+-- reproduces it exactly.
+futureBox :: KP -> SignedBox AuthorContent HubScheme
+futureBox (pk,sk) =
+  case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
+    SignedBox p b s -> SignedBox p b s
+
 spec :: Spec
 spec = do
 
@@ -128,6 +137,38 @@ spec = do
       -- the event itself stays in canon; only rendering is withheld
       map cId (tsComments t) `shouldBe` [cid]
       reasons fr `shouldBe` [UnknownRedact]
+
+    it "refuses a redact authored by anyone but a maintainer" $ do
+      owner <- kp
+      alice <- kp
+      -- redact is owner-authored (PEP-19 rule 4): checking only the canon
+      -- box would let a stranger author a redact and hide any event as soon
+      -- as a triage bridge blessed the letter it arrived in.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                          (canon 1 (Just 1))
+          tid = eventId eOpen
+          eCmt = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 2)
+                         (canon 2 Nothing)
+          cid = eventId eCmt
+          -- authored by alice, blessed by the owner
+          eRed = mkEvent alice owner (ARedact cid 3) (canon 3 Nothing)
+          fr = foldEvents repo [eOpen, eCmt, eRed]
+      HS.member cid (frRedacted fr) `shouldBe` False
+      reasons fr `shouldBe` [UnauthorizedCanon]
+
+    it "tells an undecodable box apart from a forged one" $ do
+      owner <- kp
+      alice <- kp
+      -- A correctly signed box whose content this build cannot decode: canon
+      -- is newer than the reader. Reporting BadAuthorSig would accuse a
+      -- newer, honest sender of forgery.
+      let repo = fst owner
+          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon 1 (Just 1))
+          ev = Event (futureBox alice) (evCanonBox real)
+          fr = foldEvents repo [ev]
+      reasons fr `shouldBe` [Undecodable]
 
     it "rejects a tampered author box" $ do
       owner <- kp

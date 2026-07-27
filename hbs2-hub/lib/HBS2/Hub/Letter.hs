@@ -148,7 +148,11 @@ instance Serialise Envelope
 data LetterError =
     MalformedPayload      -- ^ bytes are not a MessageData
   | UnsupportedVersion Word32  -- ^ a newer schema than this reader knows
-  | BadInnerSig           -- ^ the inner box does not verify
+  | BadInnerSig           -- ^ the inner box does not verify: a forgery claim
+    -- | The inner box is correctly signed but carries content this reader
+    -- cannot decode, typically an op added by a newer schema. Distinct from
+    -- 'BadInnerSig' so triage does not report a newer sender as a forger.
+  | UndecodableContent
   | NotALetter            -- ^ an Ack where a Letter was expected
   | NotAnAck              -- ^ a Letter where an Ack was expected
   | AuthorDenied          -- ^ the inner author is deny-listed (triage, PEP-21)
@@ -207,7 +211,7 @@ letterThreadId :: MessageData -> Maybe ThreadId
 letterThreadId md = case mdBody md of
   Ack a -> Just (akThread a)
   Letter box _ -> do
-    (_, ac) <- unboxSignedBox0 box
+    (_, ac) <- either (const Nothing) Just (unboxChecked box)
     pure (fromMaybe (authorBoxId box) (authorThread ac))
 
 -- | Serialise to the bytes that go into @messageData@ before encryption.
@@ -248,9 +252,10 @@ openLetter
 openLetter md = case mdBody md of
   Ack _ -> Left NotALetter
   Letter box rc ->
-    case unboxSignedBox0 box of
-      Nothing        -> Left BadInnerSig
-      Just (pk , ac) -> Right (box, pk, ac, rc)
+    case unboxChecked box of
+      Left BoxBadSig      -> Left BadInnerSig
+      Left BoxUndecodable -> Left UndecodableContent
+      Right (pk , ac)     -> Right (box, pk, ac, rc)
 
 -- | Triage-side open, applying the two policy rules the peer layer cannot
 -- (PEP-18 "Replay, rewrap, and deduplication"):
@@ -273,16 +278,19 @@ openLetterAs allowed envelopeSigner md = do
 -- | Open an ack. It carries no inner box, so the only trust available is the
 -- envelope signer being a current maintainer of the repo; the authoritative
 -- status is in canon regardless.
+-- The predicate takes the repo as well as the key: which maintainer set
+-- applies is only known once the ack says what it is about, and the caller
+-- cannot be asked to decide that before reading it.
 openAck
-  :: (HubKey -> Bool)   -- ^ is this key a maintainer of the target repo?
-  -> HubKey             -- ^ the envelope (Mailbox message) signer
+  :: (RepoRef -> HubKey -> Bool)  -- ^ is this key a maintainer of that repo?
+  -> HubKey                       -- ^ the envelope (Mailbox message) signer
   -> MessageData
   -> Either LetterError AckRecord
 openAck isMaintainer envelopeSigner md = case mdBody md of
   Letter{} -> Left NotAnAck
   Ack a
-    | isMaintainer envelopeSigner -> Right a
-    | otherwise                   -> Left UntrustedAck
+    | isMaintainer (akTarget a) envelopeSigner -> Right a
+    | otherwise                                -> Left UntrustedAck
 
 -- | The readable S-expression projection of a letter (PEP-18). It is
 -- regenerated from the decoded content and never signed or parsed back: the

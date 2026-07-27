@@ -97,7 +97,7 @@ spec = do
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
           rec' = AckRecord (fst owner) tid (Just 7) "merged" (Just "cafe")
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      openAck (const True) (fst owner) got `shouldBe` Right rec'
+      openAck (\_ _ -> True) (fst owner) got `shouldBe` Right rec'
       expectLeft NotALetter (openLetter got)
 
     it "refuses an ack whose envelope signer is not a maintainer" $ do
@@ -107,7 +107,7 @@ spec = do
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
           rec' = AckRecord (fst owner) tid (Just 7) "closed" Nothing
-          isMaintainer = (== fst owner)
+          isMaintainer _ k = k == fst owner
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
       openAck isMaintainer (fst owner) got `shouldBe` Right rec'
       expectLeft UntrustedAck (openAck isMaintainer (fst mallory) got)
@@ -153,7 +153,6 @@ spec = do
       expectLeft (UnsupportedVersion (hubMsgVersion + 1)) (parsePayload v2)
 
     it "projects a letter to readable s-expressions" $ do
-      alice <- kp
       owner <- kp
       let ac = AOpen (fst owner) HubIssue "a title" ["needs triage"] (Just "b") Nothing Nothing 5
           rendered = show (pretty (mkList @C (letterSyntax ac)))

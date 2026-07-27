@@ -174,9 +174,18 @@ Inline body text must therefore stay small; above a soft limit (on the order
 of tens of KiB) the body must move to a `body-part` attachment (a chunked
 encrypted tree) and the inline body left empty.
 
-Interop rule: a reader ignores unknown clauses and unknown `op` values rather
-than rejecting the letter (forward compatibility); an incompatible change
-bumps `(hub-msg N)`.
+Interop rule. A reader ignores clauses it does not know, so adding a field to
+an existing op stays compatible. An unknown `op` is a different matter and
+cannot be ignored: the letter content is one CBOR sum, so an unrecognized
+constructor fails the decode of the whole record and there is nothing left to
+skip. Adding an op is therefore a schema change and MUST bump `(hub-msg N)`,
+which the envelope carries outside the signed content precisely so an older
+reader can report "newer schema" instead of failing blind.
+
+A reader that meets a correctly signed letter it cannot decode must not treat
+it as a forgery: verification and decoding are separate steps, and the two
+outcomes are reported apart, or an honest newer sender looks like an
+attacker.
 
 Acknowledgement letter (kind = ack). The back-channel needs a pinned format or
 it is not interoperable. When the owner accepts, closes, or merges, they send

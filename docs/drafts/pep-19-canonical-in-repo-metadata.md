@@ -622,6 +622,12 @@ from the rendered view while keeping the thread coherent. Because the target
 event is untouched, its author box signature keeps verifying; there is no
 "signature over hidden content" problem, since nothing is actually removed.
 
+Attachments are the sharpest case. A redacted event keeps its `part-secret`
+in canon, so the encrypted tree it points at stays decryptable by everyone
+who has cloned the repo. Hiding the body in the renderer does nothing to the
+attachment, which is the same rotate-do-not-redact rule stated for inline
+secrets, only more so.
+
 True erasure is bounded by the storage layer, not granted by ref control.
 Erasing content means rewriting the `refs/hbs2/meta` lineage to a version
 that never contained the file. But hbs2 storage is content-addressed and
