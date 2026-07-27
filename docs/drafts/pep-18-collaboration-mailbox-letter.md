@@ -143,7 +143,7 @@ either: PEP-19 versions canon at the event-file and tree level.
                                    ;   thread-id is globally unique, so a
                                    ;   reply aimed elsewhere finds no thread
                                    ;   here and is dropped as dangling.
-(created  <word64>)                ; sender clock, Unix epoch seconds UTC
+(created  <word64>)                ; sender clock, Unix epoch milliseconds UTC
                                    ;   folds to the PEP-19 event author-ts (same field)
 
 ;; threading / identity (see Threading below)

@@ -30,7 +30,9 @@ canon :: Word64 -> Maybe Word64 -> EventId -> CanonContent
 canon sq num = canonAt sq num sq
 
 coords :: PRCoords
-coords = PRCoords Nothing "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+-- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
+-- change, so a coords with neither is refused (reachableCoords).
+coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
 
 -- Everything a fold produces for a thread, so a determinism check compares
 -- the whole state rather than a convenient corner of it. ThreadState has no
@@ -434,6 +436,35 @@ spec = do
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadKind]
+
+    it "refuses a pr whose change cannot be fetched at all" $ do
+      owner <- kp
+      alice <- kp
+      -- PEP-20 ships the diff either as a bundle or as a fork to pull; with
+      -- neither, canon would carry a review request with nothing to review.
+      let repo = fst owner
+          nowhere = coords { prSource = Nothing, prBundle = Nothing }
+          eOpen = mkEvent alice owner
+                    (AOpen repo HubPR "unfetchable" [] Nothing Nothing (Just nowhere) 1)
+                    (canon 1 (Just 1))
+          fr = foldEvents repo [eOpen]
+      HM.null (frThreads fr) `shouldBe` True
+      reasons fr `shouldBe` [BadKind]
+
+    it "refuses a revise that removes the last way to fetch" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          eOpen = mkEvent alice owner
+                    (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1)
+                    (canon 1 (Just 1))
+          tid = eventId eOpen
+          nowhere = coords { prSource = Nothing, prBundle = Nothing }
+          eRev = mkEvent alice owner (ARevise tid nowhere 2) (canon 2 Nothing)
+          fr = foldEvents repo [eOpen, eRev]
+      reasons fr `shouldBe` [BadKind]
+      -- the original coordinates survive
+      fmap (prSource . psCoords) (tsPR (threadOf fr tid)) `shouldBe` Just (Just "hbs23://fork")
 
     it "rejects an issue open carrying pr coordinates" $ do
       owner <- kp

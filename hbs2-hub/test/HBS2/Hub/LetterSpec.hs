@@ -56,7 +56,9 @@ someHash = do
   pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
 
 coords :: PRCoords
-coords = PRCoords Nothing "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+-- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
+-- change, so a coords with neither is refused (reachableCoords).
+coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
 
 spec :: Spec
 spec = do

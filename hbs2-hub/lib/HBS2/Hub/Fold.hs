@@ -281,6 +281,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         -- would silently materialize less than the author box says.
         | kind == HubPR && isNothing mpr -> dropE r BadKind s
         | kind == HubIssue && isJust mpr -> dropE r BadKind s
+        | maybe False (not . reachableCoords) mpr -> dropE r BadKind s
         | otherwise ->
             let t = ThreadState
                       { tsId = rId r, tsKind = kind
@@ -306,6 +307,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
         if tsKind t /= HubPR then Left BadKind
+        else if not (reachableCoords coords) then Left BadKind
         else if rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s)
           -- The new coordinates come with the secret for their own bundle.
           then Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
@@ -375,6 +377,19 @@ keep scope r s = s
   , sMaxSeq    = max (sMaxSeq s) (rSeq r)
   , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
   }
+
+-- | Can the proposed change actually be obtained?
+--
+-- PEP-20 offers two ways to ship a diff, a bundle attached to the letter or
+-- a fork to pull from, and the coordinates say which by leaving the other
+-- absent. With neither, canon would carry a PR nobody can fetch, which is
+-- worse than refusing it: a maintainer would see a review request with
+-- nothing to review and no way to ask for the missing half.
+--
+-- This is an admission rule, so it is consensus (see the versioning rule in
+-- PEP-19): it cannot be relaxed once a repo has canon written under it.
+reachableCoords :: PRCoords -> Bool
+reachableCoords c = isJust (prBundle c) || isJust (prSource c)
 
 -- Events that belong to no thread.
 repoScope :: Maybe ThreadId

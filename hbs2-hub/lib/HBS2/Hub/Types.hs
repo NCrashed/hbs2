@@ -128,7 +128,15 @@ data AuthorContent =
 
 instance Serialise AuthorContent
 
--- | The author-declared timestamp (Unix epoch seconds, UTC; advisory).
+-- | The author-declared timestamp: Unix epoch MILLISECONDS, UTC, advisory.
+--
+-- Milliseconds rather than seconds because this field is inside the signed
+-- content, so two owner-authored events with otherwise identical bytes in
+-- the same tick collapse to one event-id and the second is refused as a
+-- duplicate. A close, reopen and close in the same second is an ordinary
+-- triage sequence; in the same millisecond it is not. The collision is not
+-- eliminated, only priced out of reach of a human at a keyboard: a caller
+-- minting owner events in a tight loop must still vary something.
 authorTs :: AuthorContent -> Word64
 authorTs = \case
   AOpen _ _ _ _ _ _ _ t -> t

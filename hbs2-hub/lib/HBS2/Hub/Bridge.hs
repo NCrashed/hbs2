@@ -46,6 +46,9 @@
 -- nothing currently reads the field that diverged.
 module HBS2.Hub.Bridge
   ( CanonCursor(..)
+  , ThreadFacts(..)
+  , Outcome(..)
+  , outcome
   , EventScope(..)
   , CanonView(..)
   , Accepted(..)
@@ -89,6 +92,14 @@ data CanonCursor = CanonCursor
   }
   deriving stock (Eq,Show)
 
+-- | What the bridge remembers about a thread already in canon.
+data ThreadFacts = ThreadFacts
+  { tfKind   :: HubKind
+  , tfAuthor :: HubKey       -- ^ author of record: only they may revise
+  , tfNumber :: Maybe Word64 -- ^ the human number, for acknowledging a reply
+  }
+  deriving stock (Eq,Show)
+
 -- | Where an event lives in the canon tree (PEP-19 layout).
 data EventScope =
     ThreadScope ThreadId  -- ^ under @threads/<thread-id>/@
@@ -99,9 +110,11 @@ data EventScope =
 -- stamp, which threads a reply may name, and which events already exist.
 data CanonView = CanonView
   { cvCursor  :: CanonCursor
-    -- | Thread id to (kind, author of record). The author is needed because
-    -- only they may revise a PR; the kind, because revise is PR-only.
-  , cvThreads :: HashMap ThreadId (HubKind, HubKey)
+    -- | What the bridge needs to know about each thread: the kind (revise is
+    -- PR-only), the author of record (only they may revise), and the number
+    -- (an ack for a reply reports the thread's number, which the sender
+    -- cannot compute and 'acNumber' only carries on an open).
+  , cvThreads :: HashMap ThreadId ThreadFacts
     -- | Every admitted event and the thread it belongs to, taken straight
     -- from the fold. Reconstructing it from the materialized threads would
     -- silently omit every event that leaves no visible trace (a @set@, a
@@ -127,6 +140,10 @@ emptyView :: RepoRef -> CanonView
 emptyView repo = CanonView initialCursor HM.empty HM.empty (HS.singleton repo)
 
 -- | May this key bless events for this repo right now?
+--
+-- The owner check is belt and braces: a view from 'viewOf' or 'emptyView'
+-- always has the owner in the set, so it only matters for a view assembled
+-- by hand.
 authorizedCanon :: RepoRef -> CanonView -> HubKey -> Bool
 authorizedCanon repo view k = k == repo || HS.member k (cvMaintainers view)
 
@@ -137,7 +154,7 @@ initialCursor = CanonCursor 1 1
 viewOf :: FoldResult -> CanonView
 viewOf fr = CanonView
   { cvCursor  = cursorFrom fr
-  , cvThreads = fmap (\t -> (tsKind t, tsAuthor t)) (frThreads fr)
+  , cvThreads = fmap (\t -> ThreadFacts (tsKind t) (tsAuthor t) (tsNumber t)) (frThreads fr)
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
   }
@@ -187,6 +204,41 @@ data TriageError =
   | ThreadMismatch
   deriving stock (Eq,Show)
 
+-- | What the caller should do with a letter the bridge refused.
+--
+-- Treating every 'Left' the same way is wrong in both directions: retrying
+-- spam forever, or discarding a letter that only arrived out of order. PEP-18
+-- is explicit that an early reply is not rejected, it waits in the mailbox
+-- until its thread is folded.
+data Outcome =
+    Retry     -- ^ nothing is wrong with the letter; the repo is not ready yet
+  | Decide    -- ^ a valid request the maintainer must act on ('honourWith')
+  | Discard   -- ^ the letter can never become canon here
+  deriving stock (Eq,Show)
+
+outcome :: TriageError -> Outcome
+outcome = \case
+  -- Order, not validity: fold the thread's opening letter and come back.
+  UnknownThread   -> Retry
+  UnknownTarget   -> Retry
+  -- Our own key, not the letter's: another folder may be able to.
+  UnauthorizedForRepo -> Retry
+  CursorExhausted -> Retry
+  -- A request is a normal triage outcome, not a failure.
+  NotAcceptable RequestOnly -> Decide
+  -- Everything else is about the letter itself and will not improve.
+  NotAcceptable _   -> Discard
+  BadLetter _       -> Discard
+  WrongRepo         -> Discard
+  AlreadyInCanon    -> Discard
+  NotAuthorOfRecord -> Discard
+  BadContent        -> Discard
+  ThreadMismatch    -> Discard
+
+-- Both halves of a PR must not be missing at once: see reachableCoords.
+reachable :: PRCoords -> Bool
+reachable c = isJust (prBundle c) || isJust (prSource c)
+
 -- Refuse an author box canon already holds: the fold would drop the second
 -- copy as a duplicate.
 seenAlready :: CanonView -> EventId -> Either TriageError ()
@@ -194,13 +246,20 @@ seenAlready view eid
   | HM.member eid (cvEvents view) = Left AlreadyInCanon
   | otherwise                     = Right ()
 
+-- Refuse to mint a number the cursor cannot produce. Only an open mints
+-- one, so only an open is checked.
+requireStamp :: CanonView -> AuthorContent -> Either TriageError ()
+requireStamp view content
+  | isJust (mintedNumber content (cvCursor view))
+  , ccrNextNumber (cvCursor view) == maxBound = Left CursorExhausted
+  | otherwise = Right ()
+
 -- Refuse to mint under a key canon will not accept as a blesser, or with a
--- stamp the fold would reject.
+-- seq the fold would reject.
 requireCanon :: RepoRef -> CanonView -> HubKey -> Either TriageError ()
 requireCanon repo view k
   | not (authorizedCanon repo view k) = Left UnauthorizedForRepo
   | ccrNextSeq cur == maxBound        = Left CursorExhausted
-  | ccrNextNumber cur == maxBound     = Left CursorExhausted
   | otherwise                         = Right ()
   where
     cur = cvCursor view
@@ -208,7 +267,14 @@ requireCanon repo view k
 -- | What accepting a letter produced.
 data Accepted = Accepted
   { acEvent  :: Event
-  , acView   :: CanonView        -- ^ canon plus this event, for the next accept
+    -- | Canon plus this event, for the next accept.
+    --
+    -- Carry it forward ONLY once the event is durably written. The view is a
+    -- cache of canon, so advancing it for an event that never reaches the
+    -- tree makes it disagree with a rebuild: a burnt @seq@ is harmless, but
+    -- a burnt @number@ leaves a gap in the issue numbering that no later
+    -- fold can explain. On a failed write, keep the view that was passed in.
+  , acView   :: CanonView
     -- | Where the event belongs in the tree. A redact goes with the thread
     -- of the event it hides, not under an id of its own, and delegate and
     -- revoke belong to no thread at all.
@@ -227,6 +293,7 @@ data Accepted = Accepted
     -- notify without opening the letter a second time.
   , acReply  :: ReplyChannel
   }
+  deriving stock (Show)
 
 -- | Accept a letter into canon.
 --
@@ -262,6 +329,7 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
     FoldsToCanon -> Right ()
     other        -> Left (NotAcceptable other)
 
+  requireStamp view content
   seenAlready view (authorBoxId box)
 
   thread <- case content of
@@ -269,19 +337,24 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
       | target /= repo                    -> Left WrongRepo
       | kind == HubPR && isNothing coords -> Left BadContent
       | kind == HubIssue && isJust coords -> Left BadContent
+      | maybe False (not . reachable) coords -> Left BadContent
       | otherwise                         -> Right (authorBoxId box)
 
     AComment thr _ _ _ _ -> known thr
 
-    ARevise thr _ _ -> do
+    ARevise thr coords _ -> do
       -- The case below handles a missing thread itself.
       case HM.lookup thr (cvThreads view) of
         -- Kind first: a revise on an issue is the wrong shape, not a
         -- question of who signed it.
-        Just (HubIssue, _) -> Left BadContent
-        Just (HubPR, recorded)
-          | recorded == author -> Right thr
-          | otherwise          -> Left NotAuthorOfRecord
+        Just tf | tfKind tf /= HubPR -> Left BadContent
+        Just tf
+          | not (reachable coords) -> Left BadContent
+          | tfAuthor tf == author  -> Right thr
+          -- Stricter than the fold on purpose: the fold also lets a
+          -- maintainer revise, but a maintainer doing that through the
+          -- letter path would be acting as someone else.
+          | otherwise              -> Left NotAuthorOfRecord
         Nothing -> Left UnknownThread
 
     -- classify has already restricted this to the three ops above.
@@ -294,7 +367,12 @@ acceptLetter canonKp@(canonPk,_) allowed envelopeSigner repo view folded origin 
       | HM.member thr (cvThreads view) = Right thr
       | otherwise                      = Left UnknownThread
 
--- | Honour a request a letter made, by re-authoring it under the canon key.
+-- | Honour a request VERBATIM, re-authoring exactly what the letter asked
+-- for under the canon key.
+--
+-- The attribute name and value are the requester's, so the owner signs a
+-- stranger's choice of both. Prefer 'honourWith', which signs what triage
+-- decided; this exists for the case where the request is agreed to as sent.
 --
 -- A stranger's @close@/@reopen@/@label@ letter cannot become canon as
 -- theirs: the fold would drop it, because those ops are owner-authored. What
@@ -409,6 +487,7 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
   let box = signAuthor pk sk content
       eid = authorBoxId box
 
+  requireStamp view content
   seenAlready view eid
 
   scope <- case content of
@@ -430,6 +509,7 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
       | target /= repo                    -> Left WrongRepo
       | kind == HubPR && isNothing coords -> Left BadContent
       | kind == HubIssue && isJust coords -> Left BadContent
+      | maybe False (not . reachable) coords -> Left BadContent
       | otherwise                         -> Right (ThreadScope eid)
 
     -- The remaining ops are thread ops; the fold checks kind for the PR-only
@@ -438,8 +518,8 @@ ownerEvent kp@(pk,sk) repo view folded secret content = do
            Nothing -> Left BadContent
            Just thr -> case HM.lookup thr (cvThreads view) of
              Nothing -> Left UnknownThread
-             Just (kind,_)
-               | prOnly content && kind /= HubPR -> Left BadContent
+             Just tf
+               | prOnly content && tfKind tf /= HubPR -> Left BadContent
                | otherwise                       -> Right (ThreadScope thr)
 
   Right (accepted kp repo view folded Nothing secret content box pk scope NoReply)
@@ -511,7 +591,8 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
           , ccrNextNumber = if opensThread then ccrNextNumber cur + 1 else ccrNextNumber cur
           }
       , cvThreads = case content of
-          AOpen _ kind _ _ _ _ _ _ -> HM.insert eid (kind, authorOf) (cvThreads view)
+          AOpen _ kind _ _ _ _ _ _ ->
+            HM.insert eid (ThreadFacts kind authorOf (mintedNumber content cur)) (cvThreads view)
           _                        -> cvThreads view
       , cvEvents = HM.insert eid (scopeThread scope) (cvEvents view)
         -- Delegation takes effect for the next accept, exactly as it will

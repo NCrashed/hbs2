@@ -109,7 +109,10 @@ threads with comments and to the two-tier trust split.
 
 There is no fixed open/close/label schema baked into storage. Structured
 fields (status, labels, assignee, title, milestone, number) are attributes
-set by `set` events under last-writer-wins by a monotonic weight; free-form
+set by `set` events under last-writer-wins by a monotonic weight, with
+multi-valued ones (labels, assignees) encoded as a comma-separated list in
+sorted order with no spaces, so that the same set of labels always produces
+the same bytes and therefore the same event-id; free-form
 discussion is carried by `comment` events that accumulate in order. New
 field kinds are added by convention without a storage migration.
 
@@ -181,6 +184,14 @@ event file is a readable projection of the decoded boxes; it is regenerated,
 never trusted over the boxes, and if a projected clause disagrees with the
 box the box wins.
 
+The signature scheme must be deterministic. The event-id hashes the whole
+author box, signature included, so a randomized scheme would give the same
+content a different id on every signing, and two properties would go with
+it: a sender could no longer compute the thread-id before delivery (PEP-18),
+and dedup by event-id would stop recognizing a resent letter. Ed25519 is
+deterministic, which is why this works today; any replacement (PEP-13) must
+be too, or the id has to move to hashing the signed payload alone.
+
 Author box payload type. The author box wraps one shared content record used
 by both tiers (recommended): a Tier B `HubLetter` (PEP-18) is the subset a
 non-owner may author (ops `open`/`comment` and the request ops), and an
@@ -207,7 +218,7 @@ signed boxes; the remaining clauses are the readable projection.
 
 ;; --- readable projection of the AUTHOR box (regenerated, not trusted) ---
 (author    <sign-pubkey-b58>)
-(author-ts <word64>)               ; Unix epoch seconds, UTC; = a folded letter's `created`
+(author-ts <word64>)               ; Unix epoch milliseconds, UTC; = a letter's `created`
 (kind      issue)                  ; on open: issue | pr
 (title     "...")                  ; on open
 (thread    <thread-id>)            ; replies only, absent on open; the canonical
@@ -227,7 +238,7 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   owner-authored event that honours a
                                    ;   request (the letter is its provenance).
                                    ;   Absent only when nothing prompted it.
-(folded-ts <word64>)               ; Unix epoch seconds, UTC, owner's clock at fold
+(folded-ts <word64>)               ; Unix epoch milliseconds, UTC, owner's clock at fold
 (canon-by  <sign-pubkey-b58>)      ; owner or delegated maintainer
 (part-secret <group-secret-b58>)   ; only on events referencing encrypted parts:
                                    ;   the message group secret, so canon readers decrypt them

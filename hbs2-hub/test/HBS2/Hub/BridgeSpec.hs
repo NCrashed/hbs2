@@ -36,7 +36,9 @@ expectErr want = \case
   Right _  -> expectationFailure ("expected " <> show want)
 
 coords :: PRCoords
-coords = PRCoords Nothing "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+-- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
+-- change, so a coords with neither is refused (reachableCoords).
+coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
 
 -- The thread an accepted event landed in.
 scopeOf :: Accepted -> ThreadId
@@ -549,6 +551,37 @@ spec = do
         (honourWith owner anyone env repo (acView aB) 3 origin
            (AClose (scopeOf aA) (Just "agreed") 3) req)
       pure ()
+
+    it "tells the caller what to do with a refusal" $ do
+      -- Treating every refusal alike either loses letters or retries spam
+      -- forever. PEP-18: an early reply waits in the mailbox, it is not
+      -- rejected.
+      outcome UnknownThread `shouldBe` Retry
+      outcome UnknownTarget `shouldBe` Retry
+      outcome UnauthorizedForRepo `shouldBe` Retry
+      outcome (NotAcceptable RequestOnly) `shouldBe` Decide
+      outcome (NotAcceptable OwnerNative) `shouldBe` Discard
+      outcome WrongRepo `shouldBe` Discard
+      outcome (BadLetter AuthorDenied) `shouldBe` Discard
+      outcome AlreadyInCanon `shouldBe` Discard
+
+    it "remembers a thread's number, so a reply can be acknowledged" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- acNumber only carries on an open, but an ack for a comment reports
+      -- the thread's number, which the sender cannot compute.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight (acceptLetter owner anyone env repo (emptyView repo) 1 origin Nothing letter)
+      let reply = makeLetter (fst alice) (snd alice)
+                    (AComment (scopeOf aOpen) Nothing (Just "hi") Nothing 2) noReplyChannel
+      aCmt <- expectRight (acceptLetter owner anyone env repo (acView aOpen) 2 origin Nothing reply)
+      acNumber aCmt `shouldBe` Nothing
+      fmap tfNumber (HM.lookup (scopeOf aOpen) (cvThreads (acView aCmt)))
+        `shouldBe` Just (Just 1)
 
     it "keeps the accumulated view equal to the rebuilt one" $ do
       alice <- kp
