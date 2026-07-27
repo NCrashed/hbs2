@@ -73,11 +73,18 @@ data Comment = Comment
   , cBody       :: Maybe Text
   , cBodyPart   :: Maybe HashRef     -- ^ large body shipped as an encrypted tree
   , cPartSecret :: Maybe ByteString  -- ^ group secret the owner published for it
+  , cOrigin     :: Maybe HashRef     -- ^ the Tier B letter this was folded from
   }
   deriving stock (Eq,Show)
 
 data PRState = PRState
   { psCoords :: PRCoords
+    -- | The group secret for THIS revision's bundle, taken from the canon
+    -- box of the event that supplied 'psCoords'. It must travel with the
+    -- coordinates: every Mailbox message has its own per-message group key,
+    -- so a later revise ships a new bundle under a new secret, and keeping
+    -- the opening event's secret here would hand a reader the wrong key.
+  , psPartSecret :: Maybe ByteString
   , psMerge  :: Maybe (Text,Text)  -- ^ (merge-commit, merged-into)
   }
   deriving stock (Eq,Show)
@@ -107,7 +114,9 @@ data ThreadState = ThreadState
   , tsBody       :: Maybe Text
     -- | Body shipped as an encrypted tree, with the group secret the owner
     -- published at fold so any clone can fetch and decrypt it (PEP-18/19
-    -- "Attachments in public canon").
+    -- "Attachments in public canon"). This pair belongs to the OPENING
+    -- event only; a comment carries its own, and a PR bundle's secret
+    -- lives in 'PRState', because each message has its own group key.
   , tsBodyPart   :: Maybe HashRef
   , tsPartSecret :: Maybe ByteString
     -- | The Tier B letter this was folded from, for provenance.
@@ -223,7 +232,9 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       , tsCreated = foldedTs r, tsUpdated = foldedTs r
                       , tsAttrs = HM.fromList [("status","open"),("title",title)]
                       , tsComments = []
-                      , tsPR = if kind == HubPR then fmap (`PRState` Nothing) mpr else Nothing
+                      , tsPR = if kind == HubPR
+                                 then fmap (\c -> PRState c (ccPartSecret (rCanon r)) Nothing) mpr
+                                 else Nothing
                       , tsLabelsRequested = labels
                       , tsBody = body
                       , tsBodyPart = bodypart
@@ -238,7 +249,9 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
         if tsKind t /= HubPR then Left BadKind
         else if rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s)
-          then Right (touch r t { tsPR = Just (PRState coords (tsPR t >>= psMerge)) })
+          -- The new coordinates come with the secret for their own bundle.
+          then Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
+                                                      (tsPR t >>= psMerge)) })
           else Left BadRevise
 
       ASet thr k v _ts -> onOwnerThread r thr s $ \t ->
@@ -317,4 +330,5 @@ mkComment r ts body bodypart = Comment
   , cBody = body
   , cBodyPart = bodypart
   , cPartSecret = ccPartSecret (rCanon r)
+  , cOrigin = ccOrigin (rCanon r)
   }

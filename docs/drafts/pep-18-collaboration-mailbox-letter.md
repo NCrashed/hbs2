@@ -137,7 +137,12 @@ either: PEP-19 versions canon at the event-file and tree level.
 (hub-msg  1)                       ; schema version, carried by the envelope
 (kind     issue)                   ; issue | pr
 (op       open)                    ; open | comment | revise | close | reopen | label
-(target   <repo-lwwref-b58>)       ; which repository; also blocks cross-repo replay
+(target   <repo-lwwref-b58>)       ; on open only: which repository, which is
+                                   ;   what blocks cross-repo replay. A reply
+                                   ;   needs none: it names a thread, and a
+                                   ;   thread-id is globally unique, so a
+                                   ;   reply aimed elsewhere finds no thread
+                                   ;   here and is dropped as dangling.
 (created  <word64>)                ; sender clock, Unix epoch seconds UTC
                                    ;   folds to the PEP-19 event author-ts (same field)
 
@@ -218,9 +223,23 @@ box signature, but a sign key is not an encryption key, so the owner needs
 the sigil to reply privately.
 
 Because `ReplyChannel` is authenticated only by the outer transport signature,
-a rewrapper (see Replay) can substitute their own back-channel. The owner
-treats it as "where the sender of this envelope wants replies"; triage may
-prefer to honor it only when the envelope signer equals the inner author.
+a rewrapper (see Replay) can substitute their own back-channel. Resolved in
+favour of strictness: triage honours the channel only when the envelope
+signer equals the inner author, and otherwise treats the letter as having
+none. Honouring it unconditionally would let a rewrapper redirect a
+contributor's notifications to themselves, which is worse than the
+contributor simply not getting notified.
+
+The cost is that a store-and-forward relay (an open question below) cannot
+carry the back-channel on someone's behalf: relayed letters arrive with no
+usable reply address, so their authors read status from public canon
+instead. If relaying is adopted, this rule is what has to be revisited, for
+example by having the original sender's envelope travel intact inside the
+relayed one.
+
+Both halves are mandatory together. A mailbox key with no sigil leaves the
+owner unable to encrypt anything back, so the pair is either fully present
+or absent; there is no half-specified state.
 
 
 Threading and identity
@@ -536,7 +555,10 @@ Open questions
   the envelope). Now confined to the transport part, not canon.
 - Delivery assurance: a submission depends on gossip reaching the hosting
   peer; whether the hub should offer a store-and-forward relay for offline
-  maintainers (touches MailboxRelay type) is left open.
+  maintainers (touches MailboxRelay type) is left open. Note the back-channel
+  rule above already constrains the answer: a relay rewraps, so relayed
+  letters lose their reply address unless the original envelope is preserved
+  inside the relayed one.
 - Making attachments git-native blobs in the meta tree (self-contained clone)
   versus the current fetch-over-hbs2-plus-published-secret path.
 - Populating `messageSchema` and defining the schema-descriptor tree format

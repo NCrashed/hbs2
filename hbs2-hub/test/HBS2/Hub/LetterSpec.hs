@@ -6,8 +6,13 @@ import HBS2.Hub.Fold
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.SignedBox
 import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Prelude.Plated (pretty)
 
+import Data.Config.Suckless
 import Data.HashMap.Strict qualified as HM
+import Codec.Serialise (serialise)
+import Data.ByteString.Lazy qualified as LBS
+import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
 import Test.Hspec
@@ -29,6 +34,9 @@ threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads 
 -- bytes), so assert on Either by hand rather than via shouldSatisfy.
 expectRight :: Either LetterError a -> IO a
 expectRight = either (\e -> error ("unexpected error: " <> show e)) pure
+
+expectJust :: Maybe a -> a
+expectJust = fromMaybe (error "expected Just")
 
 expectLeft :: LetterError -> Either LetterError a -> Expectation
 expectLeft want = \case
@@ -134,6 +142,31 @@ spec = do
       expectLeft (UnsupportedVersion (hubMsgVersion + 1))
                  (parsePayload (letterPayload future))
 
+    it "reports the version even when the body is undecodable" $ do
+      -- The case the version exists for: a v2 sender uses a body shape this
+      -- reader has never seen. Decoding body-first would report "malformed"
+      -- and lose the one piece of information that explains why.
+      let futureBody = LBS.toStrict (serialise (42 :: Word64))  -- not a MessageBody
+          v1 = LBS.toStrict (serialise (Envelope hubMsgVersion futureBody))
+          v2 = LBS.toStrict (serialise (Envelope (hubMsgVersion + 1) futureBody))
+      expectLeft MalformedPayload (parsePayload v1)
+      expectLeft (UnsupportedVersion (hubMsgVersion + 1)) (parsePayload v2)
+
+    it "projects a letter to readable s-expressions" $ do
+      alice <- kp
+      owner <- kp
+      let ac = AOpen (fst owner) HubIssue "a title" ["needs triage"] (Just "b") Nothing Nothing 5
+          rendered = show (pretty (mkList @C (letterSyntax ac)))
+      -- The projection is regenerated for humans, never signed or parsed
+      -- back, but it must at least be well formed and carry the content.
+      rendered `shouldSatisfy` (("hub-msg" `isInfixOf`) )
+      rendered `shouldSatisfy` (("a title" `isInfixOf`) )
+      -- a label with a space must not become a broken symbol
+      rendered `shouldSatisfy` (("\"needs triage\"" `isInfixOf`) )
+      case parseTop (unwords (fmap (show . pretty) (letterSyntax ac))) of
+        Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
+        Right _ -> pure ()
+
     it "classifies letter ops by what they may become" $ do
       owner <- kp
       alice <- kp
@@ -193,7 +226,7 @@ spec = do
       owner <- kp
       let ac = AOpen (fst owner) HubIssue "thread" [] Nothing Nothing Nothing 1
           opening = makeLetter (fst alice) (snd alice) ac noReplyChannel
-          Just tid = letterThreadId opening
+          tid = expectJust (letterThreadId opening)
           reply = makeLetter (fst alice) (snd alice)
                     (AComment tid Nothing (Just "reply") Nothing 2) noReplyChannel
       -- On an open the two coincide; on a reply they must not, or an
@@ -201,6 +234,53 @@ spec = do
       letterEventId opening `shouldBe` Just tid
       letterThreadId reply `shouldBe` Just tid
       letterEventId reply `shouldNotBe` Just tid
+
+    it "materializes what a letter carried: labels, body, attachment, origin" $ do
+      alice <- kp
+      owner <- kp
+      part  <- someHash
+      origin <- someHash
+      let ac = AOpen (fst owner) HubIssue "with attachments" ["bug","needs triage"]
+                     (Just "inline") (Just part) Nothing 7
+          letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
+      (box, _, _, _) <- expectRight (openLetter letter)
+      let cc eid = CanonContent eid 1 (Just 1) (Just origin) 100 (Just "sekret")
+          ev = Event box (signCanon (fst owner) (snd owner) (cc (authorBoxId box)))
+          fr = foldEvents (fst owner) [ev]
+          t = threadOf fr (eventId ev)
+      -- Requested labels are visible to triage but NOT applied: a stranger
+      -- must not label their own submission.
+      tsLabelsRequested t `shouldBe` ["bug","needs triage"]
+      HM.lookup "labels" (tsAttrs t) `shouldBe` Nothing
+      -- The attachment and the secret to decrypt it travel together.
+      tsBody t `shouldBe` Just "inline"
+      tsBodyPart t `shouldBe` Just part
+      tsPartSecret t `shouldBe` Just "sekret"
+      tsOrigin t `shouldBe` Just origin
+
+    it "gives a revised bundle its own secret, not the opening one" $ do
+      alice <- kp
+      owner <- kp
+      b1 <- someHash
+      b2 <- someHash
+      let coords1 = coords { prBundle = Just b1 }
+          coords2 = coords { prSourceTip = "cccc", prBundle = Just b2 }
+          acOpen = AOpen (fst owner) HubPR "pr" [] Nothing Nothing (Just coords1) 1
+          acRev  = ARevise (expectJust (letterEventId
+                     (makeLetter (fst alice) (snd alice) acOpen noReplyChannel))) coords2 2
+          lOpen = makeLetter (fst alice) (snd alice) acOpen noReplyChannel
+          lRev  = makeLetter (fst alice) (snd alice) acRev noReplyChannel
+      (obox,_,_,_) <- expectRight (openLetter lOpen)
+      (rbox,_,_,_) <- expectRight (openLetter lRev)
+      -- Each message has its own per-message group key, so each bundle has
+      -- its own secret; carrying the opening one forward would hand a
+      -- reader the wrong key for the new bundle.
+      let mk s sq box = Event box (signCanon (fst owner) (snd owner)
+                          (CanonContent (authorBoxId box) sq Nothing Nothing sq (Just s)))
+          fr = foldEvents (fst owner) [mk "S1" 1 obox, mk "S2" 2 rbox]
+          t = threadOf fr (eventId (mk "S1" 1 obox))
+      fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just b2)
+      fmap psPartSecret (tsPR t) `shouldBe` Just (Just "S2")
 
     it "drops a deny-listed inner author, however the envelope was signed" $ do
       mallory <- kp
@@ -232,7 +312,7 @@ spec = do
       owner <- kp
       let ac = AOpen (fst owner) HubIssue "thread" [] Nothing Nothing Nothing 1
           opening = makeLetter (fst alice) (snd alice) ac noReplyChannel
-          Just tid = letterThreadId opening
+          tid = expectJust (letterThreadId opening)
           -- bob read the thread-id from public canon and replies to it
           reply = makeLetter (fst bob) (snd bob)
                     (AComment tid Nothing (Just "me too") Nothing 2) noReplyChannel

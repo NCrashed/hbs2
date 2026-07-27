@@ -39,6 +39,7 @@ module HBS2.Hub.Letter
   , letterThreadId
   , classify
   , letterSyntax
+  , Envelope(..)
   ) where
 
 import HBS2.Hub.Types
@@ -69,6 +70,13 @@ import GHC.Generics (Generic)
 -- bytes are not hashed, so a version field here stays cheap to bump and lets
 -- an old reader answer "newer schema" instead of "malformed". Canon carries
 -- its own version at the file and tree level (PEP-19).
+--
+-- The guarantee covers the whole payload, because the body is carried as
+-- opaque bytes and decoded only after the version is checked: a v2 letter
+-- gets 'UnsupportedVersion' even if its body shape is unknown here. What it
+-- cannot cover is a v2 change INSIDE the inner box, which is signed content
+-- this reader must hand to the fold verbatim; that is what the append-only
+-- rule on 'AuthorContent' is for.
 hubMsgVersion :: Word32
 hubMsgVersion = 1
 
@@ -120,13 +128,22 @@ data MessageBody =
 instance Serialise MessageBody
 
 -- | The plaintext of @messageData@: a version plus the body.
+--
+-- On the wire this is two layers: an 'Envelope' carrying the version and the
+-- body as opaque bytes, decoded in a second step. Encoding the body inline
+-- would make the version useless in exactly the case it exists for, because
+-- a single decode fails on an unknown body constructor before it ever reads
+-- the version, and the reader reports "malformed" instead of "newer schema".
 data MessageData = MessageData
   { mdVersion :: Word32
   , mdBody    :: MessageBody
   }
+
+-- | The wire form: version plus not-yet-decoded body.
+data Envelope = Envelope Word32 ByteString
   deriving stock (Generic)
 
-instance Serialise MessageData
+instance Serialise Envelope
 
 data LetterError =
     MalformedPayload      -- ^ bytes are not a MessageData
@@ -195,22 +212,28 @@ letterThreadId md = case mdBody md of
 
 -- | Serialise to the bytes that go into @messageData@ before encryption.
 letterPayload :: MessageData -> ByteString
-letterPayload = LBS.toStrict . serialise
+letterPayload (MessageData v b) =
+  LBS.toStrict (serialise (Envelope v (LBS.toStrict (serialise b))))
 
 -- | Parse the decrypted @messageData@ bytes, rejecting a schema this reader
 -- does not know rather than reporting it as malformed.
---
--- The whole input must be consumed: 'deserialiseOrFail' happily stops at the
--- end of a valid value and ignores whatever follows, which would let anyone
--- append bytes to a letter that still parses.
 parsePayload :: ByteString -> Either LetterError MessageData
-parsePayload bs =
+parsePayload bs = do
+  Envelope v body <- strictDecode bs
+  -- Version first: a newer schema is reported as such even when its body is
+  -- something this reader cannot decode at all.
+  if v > hubMsgVersion
+    then Left (UnsupportedVersion v)
+    else MessageData v <$> strictDecode body
+
+-- | Decode a value, requiring the whole input to be consumed.
+-- 'deserialiseOrFail' stops at the end of a valid value and ignores whatever
+-- follows, which would let anyone append bytes to a letter that still parses.
+strictDecode :: Serialise a => ByteString -> Either LetterError a
+strictDecode bs =
   case deserialiseFromBytes CBOR.decode (LBS.fromStrict bs) of
-    Left _ -> Left MalformedPayload
-    Right (rest, md)
-      | not (LBS.null rest)          -> Left MalformedPayload
-      | mdVersion md > hubMsgVersion -> Left (UnsupportedVersion (mdVersion md))
-      | otherwise                    -> Right md
+    Right (rest, a) | LBS.null rest -> Right a
+    _ -> Left MalformedPayload
 
 -- | Verify and open a letter: recover the author key, the content it signed,
 -- and the back-channel. The inner box is returned too, because the triage
@@ -289,8 +312,9 @@ letterSyntax ac =
     op :: String -> Syntax C
     op o = mkForm "op" [mkSym @C o]
 
+    -- Strings, not symbols: a label may contain a space.
     labelsOf :: [Text] -> [Syntax C]
-    labelsOf ls = [ mkForm "labels" (fmap tsym ls) | not (null ls) ]
+    labelsOf ls = [ mkForm "labels" (fmap txt ls) | not (null ls) ]
 
     bodyOf :: Maybe Text -> [Syntax C]
     bodyOf mb = [ mkForm "body" [txt t] | Just t <- [mb] ]
