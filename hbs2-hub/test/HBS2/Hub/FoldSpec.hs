@@ -67,16 +67,16 @@ reasons = map snd . frDropped
 threadOf :: FoldResult -> ThreadId -> ThreadState
 threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads fr))
 
--- A correctly signed box whose content this build cannot decode, which is
--- what an op added by a newer schema looks like from here. SignedBox is
--- phantom in its payload type, so signing another type and reinterpreting
--- reproduces it exactly.
 -- A hash no event in the fixture has.
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- kp
   pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
 
+-- A correctly signed box whose content this build cannot decode, which is
+-- what an op added by a newer schema looks like from here. SignedBox is
+-- phantom in its payload type, so signing another type and reinterpreting
+-- reproduces it exactly.
 futureBox :: KP -> SignedBox AuthorContent HubScheme
 futureBox (pk,sk) =
   case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
@@ -185,6 +185,28 @@ spec = do
           fr = foldEvents repo [eOpen, eCmt, eRed]
       HS.member cid (frRedacted fr) `shouldBe` False
       reasons fr `shouldBe` [UnauthorizedCanon]
+
+    it "orders two blessings of one author box by content, not by input" $ do
+      owner <- kp
+      alice <- kp
+      -- The same author box blessed twice at the same seq is ONE event, and
+      -- the loser is dropped as a duplicate. Which copy wins decides the
+      -- number the thread gets, and therefore the next number a folder mints
+      -- ('cursorFrom'), and neither seq nor event-id can see the difference:
+      -- all of it lives in the canon box.
+      let repo = fst owner
+          ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
+          e1 = mkEvent alice owner ac (canonAt 1 (Just 1) 1111)
+          e2 = mkEvent alice owner ac (canonAt 1 (Just 7) 2222)
+          tid = eventId e1
+          shown fr = ( fmap tsNumber (HM.lookup tid (frThreads fr))
+                     , fmap tsCreated (HM.lookup tid (frThreads fr))
+                     , frMaxNumber fr
+                     , map snd (frDropped fr)
+                     )
+      eventId e2 `shouldBe` tid
+      shown (foldEvents repo [e1,e2]) `shouldBe` shown (foldEvents repo [e2,e1])
+      reasons (foldEvents repo [e1,e2]) `shouldBe` [DupId]
 
     it "tells an undecodable box apart from a forged one" $ do
       owner <- kp

@@ -365,9 +365,26 @@ Ordering:
     commit-chain packaging is irrelevant to the result.
 
   - Tie-break: `event-id` (content hash), lexical. This guarantees a total
-    order even in the degenerate case of a duplicated `seq`, so the fold is
-    deterministic regardless of enumeration order or how commits batched
-    the events.
+    order even in the degenerate case of a duplicated `seq`.
+
+  - Last tie-break: the content hash of the canon box, lexical. Two events
+    that agree on `seq` and `event-id` are the same author box blessed twice,
+    which is one event: the first in the order is admitted and the second is
+    dropped as a duplicate. Which one is first therefore decides whose `seq`,
+    `number` and folded-at the thread gets, and the first two keys cannot see
+    any of that, since all of it lives in the canon box. Without this third
+    key the result would depend on the order the events were enumerated, and
+    two folders reading one tree could disagree about the next `number` to
+    mint.
+
+    A canon written as specified cannot contain such a pair, because the file
+    name is `%020d(seq)-<event-id>` and both copies are the same path. The
+    rule is here because the fold is defined over a set of events, not over a
+    tree that is assumed well formed, and `hub verify` (PEP-22) has to reach
+    a verdict on canon somebody else wrote.
+
+With all three keys the fold is deterministic regardless of enumeration order
+or how commits batched the events.
 
 Admission. An event enters the fold only if all of the following hold; any
 failure drops the event and is surfaced as a warning, never silently

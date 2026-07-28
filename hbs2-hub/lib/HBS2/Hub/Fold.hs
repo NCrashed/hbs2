@@ -45,6 +45,11 @@ data Resolved = Resolved
   , rSeq       :: Word64
   , rAuthorKey :: HubKey        -- ^ author box signer
   , rCanonKey  :: HubKey        -- ^ canon box signer (canon-by)
+    -- | Hash of the canon box, the third and last sort key. Nothing refers to
+    -- it; it is here so that two copies of one author box blessed at the same
+    -- @seq@ are ordered by their content rather than by the order they were
+    -- read (PEP-19 "Ordering").
+  , rCanonId   :: HashRef
   , rContent   :: AuthorContent
   , rCanon     :: CanonContent
   }
@@ -212,6 +217,7 @@ resolve e = do
     then Left IdMismatch
     else Right Resolved { rId = eid, rSeq = ccSeq cc
                         , rAuthorKey = akey, rCanonKey = ckey
+                        , rCanonId = canonBoxId (evCanonBox e)
                         , rContent = ac, rCanon = cc }
   where
     box badSig undecodable b = case unboxChecked b of
@@ -232,14 +238,27 @@ foldEvents owner es = materializeWith owner resolved unresolved
       Left reason -> ((eventId e, reason):bad, oks)
 
 -- | The pure, seq-ordered fold over resolved events (PEP-19 admission rules
--- 3-5 + the fold body). Deterministic: total order by (seq, event-id).
+-- 3-5 + the fold body). Deterministic: total order by
+-- (seq, event-id, canon-box hash).
 materialize :: HubKey -> [Resolved] -> FoldResult
 materialize owner rs = materializeWith owner rs []
 
 materializeWith :: HubKey -> [Resolved] -> [(EventId,DropReason)] -> FoldResult
 materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
   where
-    key r = (rSeq r, rId r)
+    -- The third key is what makes this independent of the input order rather
+    -- than merely stable. Two copies of one author box at the same seq are one
+    -- event ('DupId' drops the loser), and they differ only in their canon
+    -- box, which the first two keys do not look at: without this, whichever
+    -- copy the caller happened to list first supplied the number, and two
+    -- folders reading the same tree in different orders would report a
+    -- different frMaxNumber and so mint different numbers next.
+    --
+    -- A well-formed canon cannot contain such a pair (the file name is
+    -- %020d(seq)-<event-id>, so both copies are the same path), but the fold
+    -- is a public function over a list, and 'hub verify' exists to read canon
+    -- somebody else wrote.
+    key r = (rSeq r, rId r, rCanonId r)
 
     st0 = S { sMaint    = HS.singleton owner
             , sThreads  = HM.empty

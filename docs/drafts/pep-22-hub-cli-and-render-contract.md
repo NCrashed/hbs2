@@ -280,6 +280,15 @@ strict rule would break legitimate clock skew. Instead `hub verify` reports
 from its neighbours, naming the canon key that signed it. Detection at audit
 time, not silent acceptance and not a hard fold rule.
 
+The same applies to an event that names an encrypted `body-part` or
+`bundle-part` and carries no `part-secret`. The fold admits it, because the
+reference is inside a signed author box and there is nothing wrong with the
+event; what is missing is the key, and no later event can supply it (PEP-19
+"Attachments in public canon"). A folder written to this spec refuses to mint
+such an event, so this only appears in canon somebody else published, which is
+exactly what `hub verify` is for. It reports the event and the thread, so a
+reader knows the attachment will never open rather than retrying forever.
+
 
 Reuse of fixme-new
 ================

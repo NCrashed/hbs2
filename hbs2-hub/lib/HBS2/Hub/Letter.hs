@@ -36,6 +36,7 @@ module HBS2.Hub.Letter
   , openLetter
   , openLetterAs
   , openAck
+  , openAckFor
   , letterEventId
   , letterThreadId
   , classify
@@ -169,6 +170,9 @@ data LetterError =
   | NotAnAck              -- ^ a Letter where an Ack was expected
   | AuthorDenied          -- ^ the inner author is deny-listed (triage, PEP-21)
   | UntrustedAck          -- ^ the ack's envelope signer is not a maintainer
+    -- | The ack is signed by a maintainer of the repo it names, but that
+    -- (repo, thread) pair is not one this reader submitted. See 'openAckFor'.
+  | UnrelatedAck
   deriving stock (Eq,Show)
 
 -- | What a letter's op can become once the owner triages it (PEP-18/PEP-19).
@@ -310,6 +314,13 @@ openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
 -- The predicate takes the repo as well as the key: which maintainer set
 -- applies is only known once the ack says what it is about, and the caller
 -- cannot be asked to decide that before reading it.
+--
+-- What this does NOT establish, and the caller must: that the thread belongs
+-- to the repo the ack names. The check here is "a maintainer of X signed an
+-- ack about X", which any maintainer of any repo passes for their own repo
+-- while naming a thread in someone else's. Prefer 'openAckFor', which closes
+-- that. Note also that an ack carries no clock and no counter, so an old one
+-- replays verbatim; nothing here dedups, and canon is what decides status.
 openAck
   :: (RepoRef -> HubKey -> Bool)  -- ^ is this key a maintainer of that repo?
   -> EnvelopeSigner               -- ^ who signed the Mailbox envelope
@@ -335,6 +346,24 @@ txt t = mkStr @C (Text.unpack t)
 
 tsym :: Text -> Syntax C
 tsym t = mkSym @C (Text.unpack t)
+
+-- | Open an ack and bind it to something this reader actually sent.
+--
+-- The second predicate answers what 'openAck' cannot: is this (repo, thread)
+-- pair mine? The thread-id is the hash of an author box, so nothing in the ack
+-- proves which repo the thread was opened against, and a reader correlating by
+-- thread alone would show a stranger's status on its own submission
+-- (@hub updates@, PEP-22). A sender can answer it, though, because it computed
+-- the thread-id itself before delivery ('letterThreadId').
+openAckFor
+  :: (RepoRef -> HubKey -> Bool)    -- ^ is this key a maintainer of that repo?
+  -> (RepoRef -> ThreadId -> Bool)  -- ^ did I submit that thread to that repo?
+  -> EnvelopeSigner                 -- ^ who signed the Mailbox envelope
+  -> MessageData
+  -> Either LetterError AckRecord
+openAckFor isMaintainer isMine signer md = do
+  a <- openAck isMaintainer signer md
+  if isMine (akTarget a) (akThread a) then Right a else Left UnrelatedAck
 
 -- | The readable S-expression projection of an acknowledgement (PEP-18
 -- "Acknowledgement letter"). Pinned because it is what a contributor's

@@ -27,6 +27,7 @@ module HBS2.Hub.Types
   , authorThread
   , eventId
   , authorBoxId
+  , canonBoxId
   , signAuthor
   , signCanon
   , mkEvent
@@ -226,6 +227,16 @@ instance Show Event where
 -- sender know the canonical thread-id at send time (PEP-18 threading).
 authorBoxId :: SignedBox AuthorContent HubScheme -> EventId
 authorBoxId = HashRef . hashObject . serialise
+
+-- | The hash of a serialised canon box.
+--
+-- Not an identity anything refers to: it exists to break a tie the event-id
+-- cannot. The same author box blessed twice at the same @seq@ is ONE event to
+-- the fold, and which of the two canon boxes the fold reads its stamp from
+-- must not depend on the order the events came out of the tree (PEP-19
+-- "Ordering").
+canonBoxId :: SignedBox CanonContent HubScheme -> HashRef
+canonBoxId = HashRef . hashObject . serialise
 
 -- | The event-id: the hbs2 content hash of the serialised author box.
 -- Stable before seq/number exist and computable by the author.

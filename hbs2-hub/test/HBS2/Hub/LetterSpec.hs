@@ -122,6 +122,29 @@ spec = do
       openAck isMaintainer (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
       expectLeft UntrustedAck (openAck isMaintainer (EnvelopeSigner (fst mallory)) got)
 
+    it "refuses an ack about a thread the reader never submitted" $ do
+      mine <- kp
+      other <- kp
+      alice <- kp
+      thr <- someHash
+      -- A maintainer of their OWN repo naming a thread in someone else's: the
+      -- signature and the maintainer check both pass, so only the reader's own
+      -- record of what it sent can tell the difference. Correlating by thread
+      -- alone would show a stranger's status on the reader's submission.
+      let rec' = AckRecord (fst other) thr (Just 1) "closed" Nothing
+          isMaintainer repo k = k == repo
+          isMine repo t = repo == fst mine && t == thr
+      got <- expectRight (parsePayload (letterPayload (makeAck rec')))
+      -- openAck alone takes it
+      openAck isMaintainer (EnvelopeSigner (fst other)) got `shouldBe` Right rec'
+      expectLeft UnrelatedAck (openAckFor isMaintainer isMine (EnvelopeSigner (fst other)) got)
+      -- ...and the reader's own ack still passes
+      let ours = AckRecord (fst mine) thr (Just 1) "closed" Nothing
+      oursMd <- expectRight (parsePayload (letterPayload (makeAck ours)))
+      openAckFor isMaintainer isMine (EnvelopeSigner (fst mine)) oursMd `shouldBe` Right ours
+      -- alice is nobody's maintainer, so the first check still fires first
+      expectLeft UntrustedAck (openAckFor isMaintainer isMine (EnvelopeSigner (fst alice)) oursMd)
+
     it "rejects a tampered inner box" $ do
       alice <- kp
       owner <- kp

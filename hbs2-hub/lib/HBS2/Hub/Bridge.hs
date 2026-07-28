@@ -203,7 +203,10 @@ data TriageError =
     -- referring to one. Fold the opening letter first: minting now would
     -- produce an event the fold can never admit.
   | UnknownThread
-    -- | This exact author box is already in canon (a rewrapped resend).
+    -- | This exact author box is already in canon. What is left for this to
+    -- catch once the origin is checked first: a resend under a NEW Mailbox
+    -- message, which is what rewrapping produces (PEP-18) and what an
+    -- owner-native op re-minted from identical content produces too.
   | AlreadyInCanon
     -- | A revise from someone other than the thread's author of record, or
     -- on a thread that is not a PR.
@@ -229,9 +232,12 @@ data TriageError =
     -- request being honoured. Editing what was asked for is fine; moving it
     -- elsewhere is not honouring it.
   | ThreadMismatch
-    -- | This letter has already been folded into canon. Distinct from
-    -- 'AlreadyInCanon', which is about the event: a re-authored request
-    -- gets a fresh id each time, so only the origin catches it.
+    -- | This Mailbox message has already been folded into canon. Distinct
+    -- from 'AlreadyInCanon', which is about the event: honouring a request
+    -- re-authors it under the owner's clock, so the same letter honoured
+    -- twice yields two different event-ids and only the origin ties them
+    -- back to one message. Both paths check it, so this also covers a letter
+    -- simply presented twice, which is the ordinary case after a restart.
   | AlreadyHonoured
     -- | The view describes a different repository than the context.
   | ViewRepoMismatch

@@ -209,10 +209,22 @@ reads these and correlates them to sent threads:
 
 An `ack` is a courtesy notification, not canon: it is a Mailbox message signed
 by the owner (or a delegated maintainer), and the recipient trusts it by
-checking the sender key against the repo's maintainer set. It carries no inner
-box and is never folded; the authoritative status always lives in canon, and
-`ack` only saves the contributor a poll. It has no `op` because it asserts
-nothing the contributor authored.
+checking the sender key against the maintainer set of the repo the ack names.
+It carries no inner box and is never folded; the authoritative status always
+lives in canon, and `ack` only saves the contributor a poll. It has no `op`
+because it asserts nothing the contributor authored.
+
+That sender check alone is not enough to correlate, and a reader that stops
+there is wrong in a way that shows. Nothing in the ack ties `thread` to
+`target`: a thread-id is the hash of an author box the reader may never have
+seen, so a maintainer of any repo can sign a perfectly valid ack about a thread
+in someone else's, and a reader matching on `thread` alone would display it as
+the status of its own submission. The recipient must therefore also check that
+the `(target, thread)` pair is one it submitted, which it can, having computed
+the thread-id itself before sending (see Thread identity). Note also that an
+`ack` carries no clock and no counter, so an old one replays verbatim and there
+is nothing to dedup on. Both are reasons the status shown to a user should come
+from canon, with the ack serving only to say when to go and look.
 
 
 The back-channel (transport, not canon)
