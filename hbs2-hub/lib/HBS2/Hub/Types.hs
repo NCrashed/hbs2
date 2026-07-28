@@ -253,7 +253,10 @@ data Event = Event
   { evAuthorBox :: SignedBox AuthorContent HubScheme
   , evCanonBox  :: SignedBox CanonContent HubScheme
   }
-  deriving stock (Generic)
+  -- Equality is over the two boxes byte for byte, which is what the canon file
+  -- round trip has to preserve: an event that comes back "the same" but for a
+  -- signature is not the same event.
+  deriving stock (Eq,Generic)
 
 -- Deliberately NO Serialise instance. Canon does not store an Event as one
 -- blob: PEP-19 writes the two boxes separately, base58 inside the event

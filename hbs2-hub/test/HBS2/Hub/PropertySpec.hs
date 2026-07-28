@@ -1,9 +1,11 @@
+{-# LANGUAGE ViewPatterns #-}
 module HBS2.Hub.PropertySpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter hiding (classify)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
+import HBS2.Hub.Canon
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
@@ -65,11 +67,14 @@ data Step =
     -- reach the view a folder mints from, or one file from anyone who can
     -- write to a clone leaves the owner unable to mint even the revoke.
   | StepIntruder Word64
+    -- | Throw the accumulated view away and rebuild it from canon, which is
+    -- what a restart is. Everything after this mints from the rebuilt one.
+  | StepRestart
   deriving stock (Show)
 
 -- | What the caller can say about an attachment, and what it costs to be
 -- wrong. Each of the four is a different answer, and only one mints.
-data Attach = Ready | NotFetched | NotCarried | NoKey
+data Attach = Ready | NotFetched | NotCarried | NoKey | TooBig
   deriving stock (Eq,Show)
 
 instance Arbitrary Step where
@@ -90,12 +95,13 @@ instance Arbitrary Step where
     , (2, StepSetLabels <$> genIx <*> genTs <*> arbitrary)
     , (2, StepHonourWith <$> genIx <*> genTs)
     , (2, StepAttach <$> genIx <*> genTs
-            <*> elements [Ready,NotFetched,NotCarried,NoKey])
+            <*> elements [Ready,NotFetched,NotCarried,NoKey,TooBig])
     , (1, StepBigBody <$> genTs)
     , (2, StepRewrapped <$> genTs <*> elements [HubIssue,HubPR])
     , (1, StepFromDenied <$> genTs)
     , (1, StepCorrupt <$> genTs)
     , (1, StepIntruder <$> genTs)
+    , (2, pure StepRestart)
     ]
 
   -- Without a shrink a counterexample is the whole generated script with
@@ -120,6 +126,7 @@ instance Arbitrary Step where
     StepFromDenied ts   -> [StepFromDenied ts' | ts' <- shrinkTs ts]
     StepCorrupt ts      -> [StepCorrupt ts' | ts' <- shrinkTs ts]
     StepIntruder ts     -> [StepIntruder ts' | ts' <- shrinkTs ts]
+    StepRestart         -> []
     StepRewrapped ts k  -> [StepRewrapped ts' k | ts' <- shrinkTs ts]
                         <> [StepRewrapped ts HubIssue | k /= HubIssue]
     StepSetLabels i ts ok -> [StepSetLabels i' ts ok | i' <- shrinkIx i]
@@ -174,6 +181,8 @@ data Tag =
   | TDeniedRefused   -- ^ a deny-listed author was turned away
   | TCorruptRefused  -- ^ ...and so was a letter whose signature does not hold
   | TIntruder        -- ^ a stranger's event was put in the tree by hand
+  | TRestart         -- ^ the view was rebuilt from canon mid-run
+  | TBigRefused      -- ^ an oversized body was refused rather than minted
   deriving stock (Eq,Show)
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
@@ -192,9 +201,16 @@ msgSecret = fromMaybe (error "bad fixture secret")
 noParts :: LetterParts
 noParts = noMessageParts msgSecret
 
--- An inline body one byte over what triage will carry.
+-- A part that is here and small enough to carry.
+here :: HashRef -> (HashRef, PartEvidence)
+here h = (h, PartHere 1024)
+
+-- An inline body over what triage will carry, in BYTES: half as many
+-- characters as the limit, of two bytes each, plus one. A gate written in
+-- characters would take this and put it in every clone; the limit is about
+-- payload, and payload is bytes.
 bigBody :: Text
-bigBody = Text.replicate (maxInlineBody + 1) "x"
+bigBody = Text.replicate (maxInlineBody `div` 2 + 1) "\1103"
 
 coords :: Bool -> PRCoords
 -- A fork-pointer PR. PEP-20 requires one of the two ways to fetch the
@@ -241,8 +257,8 @@ data St = St
 
 -- | What one run produced.
 data Run = Run
-  { rDropped  :: [(EventId,DropReason)]
-  , rAnoms    :: [(EventId,Anomaly)]
+  { rDropped  :: [Dropped]
+  , rAnoms    :: [Anomalous]
   , rAgrees   :: Bool
   , rOnePer   :: Bool
   , rStaleDup :: Bool
@@ -282,6 +298,8 @@ spec =
         monitor (cover 5 (TDeniedRefused `elem` rTags r) "turned away a deny-listed author")
         monitor (cover 5 (TCorruptRefused `elem` rTags r) "turned away a forged letter")
         monitor (cover 5 (TIntruder `elem` rTags r) "folded canon a stranger wrote into")
+        monitor (cover 5 (TRestart `elem` rTags r) "rebuilt the view from canon mid-run")
+        monitor (cover 5 (TBigRefused `elem` rTags r) "refused an oversized body")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
@@ -338,12 +356,13 @@ runSteps steps = do
       origs = mapMaybe (ccOrigin <=< canonOf) mine
       live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) mine)
   pure Run
-    { rDropped  = [ d | d@(eid,_) <- frDropped fr, not (HS.member eid intruders) ]
+    { rDropped  = [ d | d <- frDropped fr, not (HS.member (drEvent d) intruders) ]
     , rAnoms    = frAnomalies fr
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
     , rStaleDup = all (`HS.member` live) (stStale st)
-    , rIntruded = all (\eid -> lookup eid (frDropped fr) == Just UnauthorizedCanon)
+    , rIntruded = all (\eid -> [UnauthorizedCanon] ==
+                                 [ drWhy d | d <- frDropped fr, drEvent d == eid ])
                       (stIntruders st)
     , rTags     = stTags st
     , rRefused  = stRefused st
@@ -442,15 +461,31 @@ step cast st = \case
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
-               Ready      -> attachments secret32 msgSecret [part]
-               NotFetched -> attachmentsPending secret32 msgSecret [part]
+               Ready      -> attachments secret32 msgSecret [here part]
+               NotFetched -> attachments secret32 msgSecret [(part, PartPending)]
                NotCarried -> noParts
-               NoKey      -> attachmentsNoKey msgSecret [part]
+               NoKey      -> attachmentsNoKey msgSecret [here part]
+               TooBig     -> attachments secret32 msgSecret
+                               [(part, PartHere (maxPartBytes + 1))]
         content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
-    in acceptWith po TAttached (letterOf content)
+    in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
+              (clockOf st) (originOf (stStep st)) po (letterOf content) of
+         -- Only Ready may mint. Swallowing the refusal was how removing the
+         -- fetched check went unnoticed: the fold has no opinion about whether
+         -- a tree the event references is on this disk.
+         Right acc | att /= Ready -> error ("minted an attachment it could not "
+                                            <> "vouch for: " <> show att <> " " <> show acc)
+                   | otherwise    -> keep TAttached acc
+         Left e -> refuse e
 
+  -- Never mints, and the assertion is the point: the fold admits an event of
+  -- any size, so nothing else in this test would notice the gate going away.
   StepBigBody ts ->
-    accept TBigBody (letterOf (AOpen repo HubIssue "t" [] (Just bigBody) Nothing Nothing ts))
+    case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
+           (clockOf st) (originOf (stStep st)) noParts
+           (letterOf (AOpen repo HubIssue "t" [] (Just bigBody) Nothing Nothing ts)) of
+      Right _ -> error "an oversized body was minted"
+      Left e  -> (refuse e) { stTags = TBigRefused : stTags st }
 
   -- Authored by carol, put on the wire by alice. Rewrapping is how an
   -- envelope-key ban is evaded (PEP-18), so what must survive it is the
@@ -502,12 +537,23 @@ step cast st = \case
                 (t:_) -> t
                 []    -> originOf (stStep st)
         ev = mkEvent (mpk,msk) (mpk,msk)
-               (AComment thr Nothing (Just "intruder") Nothing ts)
+               -- Distinct per step, so that two intruders are two files rather
+               -- than one file written twice.
+               (AComment thr Nothing (Just (Text.pack (show (stStep st)))) Nothing ts)
                (\e -> CanonContent e (maxBound - 1) Nothing Nothing ts Nothing)
     in st { stEvents = ev : stEvents st
           , stIntruders = eventId ev : stIntruders st
           , stTags = TIntruder : stTags st
           }
+
+  -- What a triage loop does after a crash: everything it knew is gone and the
+  -- view comes back out of the fold. Every later step mints from that one, so a
+  -- field the accumulated view keeps and the rebuilt one does not shows up as a
+  -- refusal or a bad mint rather than as a quiet difference at the end.
+  StepRestart ->
+    st { stView = viewOf (foldEvents (castRepo cast) (stEvents st))
+       , stTags = TRestart : stTags st
+       }
 
   StepStaleView i ts -> case drop i (stOld st) of
     []      -> st
@@ -557,7 +603,21 @@ step cast st = \case
     -- something about add one, so 'stTags' stays a record of what was minted.
     refuse e = st { stRefused = e : stRefused st }
 
-    keep tag acc = st
+    -- Two things every mint owes the layer that writes it, checked here rather
+    -- than at the end because both are about ONE event and neither leaves a
+    -- trace in the fold. The writer names the file by acSeq and the fold reads
+    -- the seq out of the canon box, so a disagreement puts the event at a path
+    -- that says one thing and a stamp that says another. And the writer's other
+    -- job is turning the event into bytes: a round trip that loses a byte loses
+    -- a signature.
+    checked acc
+      | Just (acSeq acc) /= fmap ccSeq (canonOf (acEvent acc)) =
+          error ("acSeq disagrees with the canon box: " <> show acc)
+      | parseEvent (renderEvent (acEvent acc)) /= Right (hubEventVersion, acEvent acc) =
+          error ("event does not survive the canon file: " <> show acc)
+      | otherwise = acc
+
+    keep tag (checked -> acc) = st
       { stView   = acView acc
       , stEvents = acEvent acc : stEvents st
       , stOld    = stView st : stOld st

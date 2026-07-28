@@ -35,6 +35,7 @@ module HBS2.Hub.Letter
   , EnvelopeSigner(..)
   , hubMsgVersion
   , maxInlineBody
+  , maxPartBytes
   , maxTitle
   , maxAttrValue
   , maxAttrName
@@ -56,7 +57,9 @@ module HBS2.Hub.Letter
   , letterThreadId
   , classify
   , letterSyntax
+  , contentSyntax
   , ackSyntax
+  , sexpStr
   , Envelope(..)
   ) where
 
@@ -122,6 +125,21 @@ hubMsgVersion = 1
 -- bridge enforces it because that is the last gate before permanence.
 maxInlineBody :: Int
 maxInlineBody = 32 * 1024
+
+-- | And on one encrypted part, in bytes.
+--
+-- The inline limit above pushes anything substantial into an attachment, so
+-- without a limit here there is no limit at all: what the sender saves on the
+-- gossiped payload they spend on a tree that canon then references from inside
+-- a signed author box, which means every clone that wants the thread keeps it
+-- for as long as canon does. A part cannot be trimmed afterwards either, since
+-- a new ciphertext has a new hash.
+--
+-- Triage policy like 'maxInlineBody', not consensus: two hubs may draw the line
+-- differently without disagreeing about canon, and a part over the line is
+-- parked rather than deleted.
+maxPartBytes :: Word64
+maxPartBytes = 64 * 1024 * 1024
 
 -- | And on a title, which has no attachment form: it is an attribute of the
 -- thread, rendered in every list. A title long enough to need chunking is a
@@ -425,7 +443,8 @@ openLetter md
 --   * the deny-list is checked against the INNER author, since a banned
 --     author's box can be rewrapped under a fresh envelope key; and
 --   * the reply channel is honoured only when the envelope signer is the
---     inner author, because a rewrapper can substitute their own.
+--     inner author AND the channel names that same key's mailbox, because a
+--     rewrapper can substitute their own and a sender can name a stranger's.
 openLetterAs
      -- | May a letter from this key be folded? Asked about the inner author,
      -- and about the envelope signer when there is no inner author to ask
@@ -455,7 +474,18 @@ openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
     Left e -> Left e
     Right (box, author, ac, rc)
       | not (allowed author) -> Left AuthorDenied
-      | otherwise -> pure (box, author, ac, if envelopeSigner == author then rc else NoReply)
+      | otherwise -> pure (box, author, ac, vetted author rc)
+  where
+    -- Two separate conditions, and only the first was checked. The envelope
+    -- signature says who put this letter on the wire, which is why a rewrapper
+    -- must not keep the channel. It says nothing about whose mailbox the
+    -- channel NAMES, and PEP-18 requires the sender's own: without that, one
+    -- key can send N letters naming a stranger's mailbox and the hub becomes a
+    -- reflector, turning each into a maintainer-signed ack delivered to
+    -- someone who asked for none of it.
+    vetted author = \case
+      ReplyTo k sig | k == author, k == envelopeSigner -> ReplyTo k sig
+      _                                                -> NoReply
 
 -- | Open an ack. It carries no inner box, so the only trust available is the
 -- envelope signer being a current maintainer of the repo; the authoritative
@@ -483,6 +513,30 @@ openAck isMaintainer (EnvelopeSigner envelopeSigner) md
         | isMaintainer (akTarget a) envelopeSigner -> Right a
         | otherwise                                -> Left UntrustedAck
 
+-- | Text as an S-expression string literal, escaped so that it reads back.
+--
+-- The printer wraps a literal in quotes and does nothing else, so a title
+-- containing one is not a display wart: everything after it is re-read as
+-- whatever it happens to look like. PEP-19 puts this same projection in the
+-- event FILE, next to the two authoritative boxes, and a title comes from
+-- whoever sent the letter. One quote would make that file unparseable, or
+-- worse, parseable as something else, permanently and with valid signatures
+-- inside it.
+--
+-- The escapes are the ones the reader understands (it un-escapes with
+-- 'Prelude.readLitChar'), so this is the inverse of the parse, not a
+-- best-effort sanitizer: nothing is dropped and nothing is replaced.
+sexpStr :: Text -> Syntax C
+sexpStr = mkStr @C . Text.unpack . Text.concatMap esc
+  where
+    esc = \case
+      '\\' -> "\\\\"
+      '"'  -> "\\\""
+      '\n' -> "\\n"
+      '\r' -> "\\r"
+      '\t' -> "\\t"
+      c    -> Text.singleton c
+
 -- Shared by both projections below.
 b58 :: HubKey -> Syntax C
 b58 x = mkSym @C (show (pretty (AsBase58 x)))
@@ -491,7 +545,7 @@ href :: HashRef -> Syntax C
 href h = mkSym @C (show (pretty h))
 
 txt :: Text -> Syntax C
-txt t = mkStr @C (Text.unpack t)
+txt = sexpStr
 
 tsym :: Text -> Syntax C
 tsym t = mkSym @C (Text.unpack t)
@@ -538,8 +592,16 @@ ackSyntax a =
 -- authoritative form is the binary inner box. Used by @hub show@ and for
 -- debugging.
 letterSyntax :: AuthorContent -> [Syntax C]
-letterSyntax ac =
-  [ mkForm "hub-msg" [mkInt hubMsgVersion] ] <> body ac
+letterSyntax ac = mkForm "hub-msg" [mkInt hubMsgVersion] : contentSyntax ac
+
+-- | The same projection without the envelope clause.
+--
+-- Shared with the canon event file (PEP-19), which carries these very clauses
+-- beside the authoritative boxes: one projection, so a reader looking at a
+-- letter and at the event it became reads the same words, and one place where
+-- a field can be forgotten.
+contentSyntax :: AuthorContent -> [Syntax C]
+contentSyntax = body
   where
     kindOf :: HubKind -> Syntax C
     kindOf = \case

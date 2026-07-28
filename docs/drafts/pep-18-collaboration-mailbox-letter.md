@@ -174,7 +174,19 @@ Body size. `messageData` is a single `SmallEncryptedBlock`: one secretbox
 over the whole payload, no chunking, and it rides in a gossiped message.
 Inline body text must therefore stay small; above a soft limit (on the order
 of tens of KiB) the body must move to a `body-part` attachment (a chunked
-encrypted tree) and the inline body left empty.
+encrypted tree) and the inline body left empty. The limit is measured in
+BYTES of UTF-8, not in characters, because what it bounds is what every peer
+relaying the mailbox pays.
+
+Part size. That rule pushes everything substantial into an attachment, so a
+limit there is what keeps the whole thing bounded: a part a hub folds ends up
+referenced from inside a signed author box, which means every clone that wants
+the thread keeps the tree for as long as canon does, and a part cannot be
+trimmed afterwards because a new ciphertext has a new hash. Triage refuses to
+fold a part over its own limit. Like the inline limit this is local policy
+rather than consensus: two hubs may draw the line differently without
+disagreeing about canon, and a letter over the line is kept and parked, not
+deleted, because the decision is not canon's to make.
 
 Interop rule. Ignoring the unknown is a property of the S-expression
 projection, not of the wire format, and only the projection gets that
@@ -257,6 +269,15 @@ signer equals the inner author, and otherwise treats the letter as having
 none. Honouring it unconditionally would let a rewrapper redirect a
 contributor's notifications to themselves, which is worse than the
 contributor simply not getting notified.
+
+That is one of two conditions, and the second is the one the clause above
+states in words: `reply-mailbox` is the SENDER'S OWN mailbox key, and triage
+checks it, honouring the channel only when the key it names is the inner
+author's. The envelope signature says who put the letter on the wire; it says
+nothing about whose address is written inside. Without the check a hub is a
+reflector: one key sends N letters naming a stranger's mailbox, and each
+becomes a maintainer-signed acknowledgement delivered to somebody who asked for
+none of it, from an address they cannot easily ban because it is the repo's.
 
 The cost is that a store-and-forward relay (an open question below) cannot
 carry the back-channel on someone's behalf: relayed letters arrive with no

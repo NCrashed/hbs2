@@ -80,6 +80,11 @@ msgSecret = fromMaybe (error "bad fixture secret")
 noParts :: LetterParts
 noParts = noMessageParts msgSecret
 
+-- A part that is here and small enough to carry. There is no way to say
+-- "fetched" without saying how big, which is the number the gate reads.
+here :: HashRef -> (HashRef, PartEvidence)
+here h = (h, PartHere 1024)
+
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
@@ -313,7 +318,10 @@ spec = do
       origin <- someHash
       thr <- someHash
       let req = makeLetter (fst alice) (snd alice) (AClose thr Nothing 1) noReplyChannel
-      expectErr UnknownThread (honourRequest (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView (fst owner)) 1 origin req)
+      -- Wrapped: what the owner would be signing names a thread canon does not
+      -- hold, which says nothing about the letter and must not delete it.
+      expectErr (Composed UnknownThread)
+        (honourRequest (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView (fst owner)) 1 origin req)
 
     it "rejects a letter authored for another repo" $ do
       alice <- kp
@@ -614,7 +622,7 @@ spec = do
           withPart = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
       a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments secret32 msgSecret []) plain)
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments secret32 msgSecret [part]) withPart)
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments secret32 msgSecret [here part]) withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
       tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
       tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just secret32
@@ -648,51 +656,53 @@ spec = do
       -- The caller reaching for the empty value IS still a stop, on the one
       -- path where it can happen: an owner-native event has no message behind
       -- it, so 'noOwnAttachments' is the only value that says nothing at all.
-      expectErr NoAttachmentsSupplied
+      expectErr (Composed NoAttachmentsSupplied)
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1))
-      outcome NoAttachmentsSupplied `shouldBe` Abort
+      outcome (Composed NoAttachmentsSupplied) `shouldBe` Abort
       -- ...but once it HAS supplied evidence, a part that evidence does not
       -- list is the letter's doing, and anyone can send such a letter. Abort
       -- here would let one stranger wedge triage for good: the letter stays in
       -- the mailbox and every later pass hits it again.
       other <- someHash
-      expectErr (PartNotInMessage part) (accept (attachments secret32 msgSecret [other]))
-      either outcome (const Decide) (accept (attachments secret32 msgSecret [other]))
+      expectErr (PartNotInMessage part) (accept (attachments secret32 msgSecret [here other]))
+      either outcome (const Decide) (accept (attachments secret32 msgSecret [here other]))
         `shouldBe` Discard
       -- Carried but not fetched yet is a wait.
-      let notYet = attachmentsPending secret32 msgSecret [part]
+      let notYet = attachments secret32 msgSecret [(part, PartPending)]
       expectErr (PartNotFetched part) (accept notYet)
       either outcome (const Decide) (accept notYet) `shouldBe` Retry
       -- Here, but with no key to it, and with a key that cannot be one.
 
-      expectErr MissingPartSecret (accept (attachmentsNoKey msgSecret [part]))
-      either outcome (const Decide) (accept (attachmentsNoKey msgSecret [part])) `shouldBe` Retry
+      expectErr MissingPartSecret (accept (attachmentsNoKey msgSecret [here part]))
+      either outcome (const Decide) (accept (attachmentsNoKey msgSecret [here part])) `shouldBe` Retry
       -- ...and the one the type exists for: the message's own secret offered
       -- as the parts secret would publish the letter's envelope, and with it
       -- the sender's private reply address, to every clone.
       -- Discard, not Abort: the sender picks this too, since nothing stops
       -- them encrypting their parts with the message key and a Message is a
       -- box anyone can build. Minting is still refused; handing them the loop
-      -- as well would not be.
-      let wrongKey = attachments secret32 (sameAs secret32) [part]
+      -- as well would not be. Nor is it deleted: the identical shape is what a
+      -- caller that wrapped one secret twice produces, and discarding would
+      -- then take the only copy of the part secret with it.
+      let wrongKey = attachments secret32 (sameAs secret32) [here part]
       expectErr MessageSecretOffered (accept wrongKey)
-      either outcome (const Decide) (accept wrongKey) `shouldBe` Discard
+      either outcome (const Decide) (accept wrongKey) `shouldBe` Park
       -- ...which is why the convenient constructor demands the message secret
       -- rather than defaulting it away. The owner path has its own, because
       -- an owner-native event arrived in no message at all.
       expectErr MessageSecretOffered
-        (accept (attachments secret32 (sameAs secret32) [part]))
-      _ <- expectRight (accept (attachments secret32 msgSecret [part]))
+        (accept (attachments secret32 (sameAs secret32) [here part]))
+      _ <- expectRight (accept (attachments secret32 msgSecret [here part]))
       _ <- expectRight
-        (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments secret32 [part])
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments secret32 [here part])
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
       pure ()
-      _ <- expectRight (accept (attachments secret32 msgSecret [part]))
+      _ <- expectRight (accept (attachments secret32 msgSecret [here part]))
       -- On the owner path the mistake this type exists for cannot be made at
       -- all: there is no message, so the builder takes the parts secret and
       -- nothing else. What is still catchable there is vouching for nothing.
-      expectErr NoAttachmentsSupplied
+      expectErr (Composed NoAttachmentsSupplied)
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
 
@@ -745,7 +755,10 @@ spec = do
       let tid = scopeOf aOpen
       expectErr (UnnormalizedValue "labels")
         (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (ASet tid "labels" "ui,bug" 2))
-      outcome (UnnormalizedValue "labels") `shouldBe` Abort
+      -- The letter path answers for the sender, who chose those bytes; the
+      -- honour path answers for the caller, who did not have to repeat them.
+      outcome (UnnormalizedValue "labels") `shouldBe` Discard
+      outcome (Composed (UnnormalizedValue "labels")) `shouldBe` Abort
       -- normalized is fine, and so is a scalar attribute
       _ <- expectRight
         (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments
@@ -755,7 +768,7 @@ spec = do
       -- and honourWith signs owner content too, so it is checked there
       reqOrigin <- someHash
       let req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
-      expectErr (UnnormalizedValue "labels")
+      expectErr (Composed (UnnormalizedValue "labels"))
         (honourWith (ctxOf owner) env (acView aOpen) 2 reqOrigin
            (ASet tid "labels" "ui,bug" 2) req)
 
@@ -812,9 +825,9 @@ spec = do
       let tid = scopeOf aOpen
           req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
       origin2 <- someHash
-      expectErr (NotARequest OwnerNative)
+      expectErr (Composed (NotAcceptable OwnerNative))
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (AMerge tid "abc" "master" 2) req)
-      expectErr (NotARequest OwnerNative)
+      expectErr (Composed (NotAcceptable OwnerNative))
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
       either outcome (const Decide)
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
@@ -905,7 +918,7 @@ spec = do
         (ownerEvent (ctxOf owner) view 2 noOwnAttachments
            (AClose tid (Just (Text.replicate (maxInlineBody + 1) "x")) 2))
       -- size, via honourWith: the owner signs this too
-      expectErr (BodyTooLarge "note")
+      expectErr (Composed (BodyTooLarge "note"))
         (honourWith (ctxOf owner) env view 2 origin2
            (AClose tid (Just (Text.replicate (maxInlineBody + 1) "x")) 2) req)
       -- an attribute NAME has its own bound, narrower than a value's
@@ -922,11 +935,11 @@ spec = do
       -- path compaction takes when it re-stamps
       let stunted = fromMaybe (error "no decode")
                       (decodeStrict (LBS.toStrict (serialise ("abc" :: BS.ByteString))))
-      expectErr BadPartSecret
-        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [part])
+      expectErr (Composed BadPartSecret)
+        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [here part])
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
       either outcome (const Decide)
-        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [part])
+        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [here part])
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
         `shouldBe` Abort
 
@@ -1066,7 +1079,7 @@ spec = do
                     (Just coords { prBundle = Just bundle }) 1)
                  noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (attachments secret32 msgSecret [bundle]) pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (attachments secret32 msgSecret [here bundle]) pr)
       let t = threadOf (foldEvents repo [acEvent acc]) (scopeOf acc)
       fmap psPartSecret (tsPR t) `shouldBe` Just (Just secret32)
 
@@ -1103,7 +1116,7 @@ spec = do
                   (AClose (scopeOf aA) Nothing 3) noReplyChannel
           elsewhere = AClose (scopeOf aB) Nothing 3
       origin2 <- someHash
-      expectErr ThreadMismatch
+      expectErr (Composed ThreadMismatch)
         (honourWith (ctxOf owner) env (acView aB) 3 origin2 elsewhere req)
       -- the same edit on the thread that was asked about is fine
       _ <- expectRight
@@ -1223,6 +1236,25 @@ spec = do
       expectErr (UnnormalizedValue "labels ")
         (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
            (ASet (scopeOf acc) "labels " "bug" 2))
+      -- ...and the letter carrying one never reaches a maintainer. It would
+      -- arrive as an ordinary request, the obvious thing to do with a request
+      -- is to hand what it carries to honourWith, and that refuses it as the
+      -- caller's doing and stops the loop: one letter naming an attribute
+      -- "Labels" would be all it takes.
+      origin2 <- someHash
+      let asked = makeLetter (fst alice) (snd alice)
+                    (ASet (scopeOf acc) "Labels" "bug" 2) noReplyChannel
+      expectErr (UnnormalizedValue "Labels")
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView acc) 2 origin2
+           noParts asked)
+      either outcome (const Decide)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView acc) 2 origin2
+           noParts asked) `shouldBe` Discard
+      -- what the owner may still do is sign a normalized version of their own
+      _ <- expectRight
+        (honourWith (ctxOf owner) (EnvelopeSigner (fst alice)) (acView acc) 2 origin2
+           (ASet (scopeOf acc) "labels" (normalizeAttr "labels" "bug") 2) asked)
+      pure ()
 
     it "honours a request under a delegation, and not once it is withdrawn" $ do
       alice <- kp
@@ -1329,7 +1361,7 @@ spec = do
       pending `shouldSatisfy` (not . isInfixOf (Text.unpack note))
       pending `shouldSatisfy` (not . isInfixOf (show sig))
       -- the evidence: how many parts, never the key to them
-      let evidence = show (attachments secret32 msgSecret [part])
+      let evidence = show (attachments secret32 msgSecret [here part])
       evidence `shouldSatisfy` isInfixOf "secret = present"
       evidence `shouldSatisfy` (not . isInfixOf (replicate 8 'A'))
       evidence `shouldSatisfy` (not . isInfixOf (replicate 8 'B'))
@@ -1340,6 +1372,101 @@ spec = do
         (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
       show acc `shouldSatisfy` isInfixOf (show origin)
       show acc `shouldSatisfy` (not . isInfixOf (Text.unpack note))
+
+    it "refuses a reply channel naming somebody else's mailbox" $ do
+      alice <- kp
+      victim <- kp
+      owner <- kp
+      origin <- someHash
+      sig <- someHash
+      -- The envelope proves who put the letter on the wire, not whose mailbox
+      -- the channel names. Without the second check a hub is a reflector: N
+      -- letters from one key become N maintainer-signed acks delivered to
+      -- somebody who asked for none of them.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letterTo k = makeLetter (fst alice) (snd alice)
+                         (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (ReplyTo k sig)
+      acc <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letterTo (fst victim)))
+      acReply acc `shouldBe` NoReply
+      -- ...and the sender's own mailbox is still honoured
+      origin2 <- someHash
+      acc2 <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin2 noParts
+           (letterTo (fst alice)))
+      acReply acc2 `shouldBe` ReplyTo (fst alice) sig
+
+    it "measures a body in bytes, not in characters" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- Half as many characters as the limit, of two bytes each, plus one. A
+      -- gate written in characters takes this and puts it in every clone, and
+      -- the limit is about what a gossiped message costs to relay.
+      let repo = fst owner
+          body = Text.replicate (maxInlineBody `div` 2 + 1) "\1103"
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] (Just body) Nothing Nothing 1) noReplyChannel
+      Text.length body `shouldSatisfy` (< maxInlineBody)
+      expectErr (BodyTooLarge "body")
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin
+           noParts letter)
+
+    it "refuses an attachment over what this hub will carry" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      part <- someHash
+      -- The inline limit pushes everything substantial into an attachment, so
+      -- without a limit here there is none: the reference lives inside a signed
+      -- author box and every clone that wants the thread keeps the tree.
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
+          with n = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo)
+                     1 origin (attachments secret32 msgSecret [(part, PartHere n)]) letter
+      expectErr (PartTooLarge part) (with (maxPartBytes + 1))
+      either outcome (const Decide) (with (maxPartBytes + 1)) `shouldBe` Park
+      _ <- expectRight (with maxPartBytes)
+      pure ()
+
+    it "hands back the acknowledgement for what it accepted" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      o2 <- someHash
+      -- The number and the status belong to the THREAD, not to the event, so a
+      -- caller holding an Accepted would otherwise re-fold canon after every
+      -- letter or keep a second copy of the last-writer-wins rule.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1)))
+      let thr = scopeOf aOpen
+      ackFor aOpen `shouldBe` Just (AckRecord repo thr (Just 1) "open" Nothing)
+      -- a reply carries the thread's number, which the sender cannot compute
+      aCmt <- expectRight
+        (acceptLetter (ctxOf owner) env (acView aOpen) 2 o2 noParts
+           (letter (AComment thr Nothing (Just "hi") Nothing 2)))
+      ackFor aCmt `shouldBe` Just (AckRecord repo thr (Just 1) "open" Nothing)
+      -- ...and a merge reports the status the fold will show, and the commit
+      aMerge <- expectRight
+        (ownerEvent (ctxOf owner) (acView aCmt) 3 noOwnAttachments
+           (AMerge thr "cafe" "refs/heads/master" 3))
+      ackFor aMerge `shouldBe` Just (AckRecord repo thr (Just 1) "merged" (Just "cafe"))
+      -- what the bridge cached is what the fold materializes
+      let fr = foldEvents repo (map acEvent [aOpen,aCmt,aMerge])
+      HM.lookup "status" (tsAttrs (threadOf fr thr)) `shouldBe` Just "merged"
+      acView aMerge `shouldBe` viewOf fr
+      -- an event that belongs to no thread acknowledges nothing
+      aDel <- expectRight
+        (ownerEvent (ctxOf owner) (acView aMerge) 4 noOwnAttachments (ADelegate (fst alice) 4))
+      ackFor aDel `shouldBe` Nothing
 
     it "tells the caller what to do with a refusal" $ do
       -- Treating every refusal alike either loses letters or retries spam
@@ -1362,8 +1489,11 @@ spec = do
       outcome (NotAcceptable RequestOnly) `shouldBe` Abort
       -- ...and what the maintainer's own tooling composed is judged apart from
       -- the letter, whatever it happens to be.
-      outcome (NotARequest OwnerNative) `shouldBe` Abort
-      outcome (NotARequest FoldsToCanon) `shouldBe` Abort
+      outcome (Composed (NotAcceptable OwnerNative)) `shouldBe` Abort
+      outcome (Composed (BodyTooLarge "note")) `shouldBe` Abort
+      outcome (Composed ThreadMismatch) `shouldBe` Abort
+      outcome (Composed UnknownThread) `shouldBe` Abort
+      outcome (Composed (PartNotInMessage thr)) `shouldBe` Abort
       outcome WrongRepo `shouldBe` Discard
       outcome (BadLetter AuthorDenied) `shouldBe` Discard
       outcome AlreadyInCanon `shouldBe` Discard
@@ -1391,7 +1521,7 @@ spec = do
       -- The sender picks this one too, for the same reason: a Message is a box
       -- anyone can build, and nothing stops them encrypting their own parts
       -- with the message key.
-      outcome MessageSecretOffered `shouldBe` Discard
+      outcome MessageSecretOffered `shouldBe` Park
       -- The letter is intact and the caller can go and get what is missing.
       outcome MissingPartSecret `shouldBe` Retry
       outcome (PartNotFetched thr) `shouldBe` Retry
@@ -1410,7 +1540,7 @@ spec = do
       outcome OwnerKeyRequired `shouldBe` Abort
       outcome NoAttachmentsSupplied `shouldBe` Abort
       outcome BadPartSecret `shouldBe` Abort
-      outcome (UnnormalizedValue "labels") `shouldBe` Abort
+      outcome (UnnormalizedValue "labels") `shouldBe` Discard
 
     it "remembers a thread's number, so a reply can be acknowledged" $ do
       alice <- kp
@@ -1483,7 +1613,7 @@ spec = do
                            (ADelegate (fst bob) 1))
       a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments secret32 msgSecret [part])
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments secret32 msgSecret [here part])
                            (letter (AComment (scopeOf a2) Nothing Nothing (Just part) 3)))
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
                            (ASet (scopeOf a2) "labels" "bug" 4))

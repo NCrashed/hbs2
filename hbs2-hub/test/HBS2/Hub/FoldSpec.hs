@@ -78,7 +78,7 @@ rotate [] = []
 rotate (x:xs) = xs <> [x]
 
 reasons :: FoldResult -> [DropReason]
-reasons = map snd . frDropped
+reasons = map drWhy . frDropped
 
 -- Fetch a thread the test asserts must exist.
 threadOf :: FoldResult -> ThreadId -> ThreadState
@@ -169,7 +169,7 @@ spec = do
           full fr = ( summary fr, frDropped fr, frAnomalies fr
                     , frRedacted fr, frParts fr, frMaxSeq fr, frMaxNumber fr
                     , frLastFolded fr, frOrigins fr, frMaintainers fr
-                    , frAdmitted fr )
+                    , frAdmitted fr, frLog fr )
       full (foldEvents repo evs) `shouldBe` full (foldEvents repo (reverse evs))
       full (foldEvents repo evs) `shouldBe` full (foldEvents repo (rotate evs))
       -- ...and the log is actually exercising all of it
@@ -217,7 +217,7 @@ spec = do
           forged2 = Event (evAuthorBox (mk "b1")) (evCanonBox (mk "b2"))  -- IdMismatch
           x = frDropped (foldEvents repo [forged1, forged2])
           y = frDropped (foldEvents repo [forged2, forged1])
-      map snd x `shouldBe` [IdMismatch, IdMismatch]
+      map drWhy x `shouldBe` [IdMismatch, IdMismatch]
       x `shouldBe` y
 
     it "drops a comment on a non-admitted thread (dangling)" $ do
@@ -298,13 +298,13 @@ spec = do
           o4 = mkEvent owner owner (ASet (eventId o1) "labels" "ui,bug" 4) (canonAt 4 Nothing 7000)
           fr = foldEvents repo [o1,o2,o3,o4]
       frDropped fr `shouldBe` []
-      map snd (frAnomalies fr) `shouldBe`
+      map anWhat (frAnomalies fr) `shouldBe`
         [ NumberWentBack 5 3, FoldedTsWentBack 5000 4000, DupOrigin origin
         , PartWithoutSecret
         , UnnormalizedAttr "labels"
         ]
       -- in seq order, so a report reads like the log
-      map fst (frAnomalies fr) `shouldBe` [eventId o2, eventId o2, eventId o2, eventId o3, eventId o4]
+      map anEvent (frAnomalies fr) `shouldBe` [eventId o2, eventId o2, eventId o2, eventId o3, eventId o4]
 
     it "reports a duplicate seq and a duplicate number" $ do
       owner <- kp
@@ -316,7 +316,7 @@ spec = do
                 (canon 1 (Just 1))
           fr = foldEvents repo [a,b]
       frDropped fr `shouldBe` []
-      map snd (frAnomalies fr) `shouldSatisfy` \as ->
+      map anWhat (frAnomalies fr) `shouldSatisfy` \as ->
         DupSeq 1 `elem` as && DupNumber 1 `elem` as
 
     it "collects every part canon references, for retention" $ do
@@ -377,7 +377,7 @@ spec = do
           shown fr = ( fmap tsNumber (HM.lookup tid (frThreads fr))
                      , fmap tsCreated (HM.lookup tid (frThreads fr))
                      , frMaxNumber fr
-                     , map snd (frDropped fr)
+                     , map drWhy (frDropped fr)
                      )
       eventId e2 `shouldBe` tid
       shown (foldEvents repo [e1,e2]) `shouldBe` shown (foldEvents repo [e2,e1])
@@ -455,13 +455,17 @@ spec = do
                          (canon 9 (Just 3))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
-      map snd (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
-      cursorFrom fr `shouldBe` CanonCursor 10 4
+      map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      -- the seq, and with it the clock; not the number, which is spent on
+      -- admission and would otherwise be counted by the build that cannot read
+      -- the event and refused by the build that can
+      cursorFrom fr `shouldBe` CanonCursor 10 1
+      frLastFolded fr `shouldBe` 9
       -- ...and nothing is spent when the canon box is not readable either:
       -- then there is no stamp, only bytes claiming to be one.
       let unreadable = Event (futureBox alice) (mangleSig (evCanonBox real))
           fr2 = foldEvents repo [unreadable]
-      map snd (frDropped fr2) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      map drWhy (frDropped fr2) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       cursorFrom fr2 `shouldBe` CanonCursor 1 1
 
     it "counts a dropped event's stamp so it cannot be handed out twice" $ do
@@ -486,25 +490,73 @@ spec = do
 
     it "does not let a key canon never authorized move the cursor" $ do
       owner <- kp
+      alice <- kp
+      mallory <- kp
+      -- The other half of the same rule, and the reason it is not simply "every
+      -- event in the tree". A stamp counts because a key this log authorized
+      -- wrote it; counting the rest would let anyone who can get one file into
+      -- one clone push the cursor to the top of its range, and the owner would
+      -- then be unable to mint even the revoke that would stop it.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                    (canon 1 (Just 1))
+          intruder = mkEvent alice mallory
+                       (AComment (eventId eOpen) Nothing (Just "hello") Nothing 2)
+                       (canonAt (maxBound - 1) Nothing 2)
+          fr = foldEvents repo [eOpen, intruder]
+      reasons fr `shouldBe` [UnauthorizedCanon]
+      cursorFrom fr `shouldBe` CanonCursor 2 2
+
+    it "still counts a seq a maintainer took before their revocation landed" $ do
+      owner <- kp
       bob <- kp
       alice <- kp
-      -- The other half of the same rule, and the reason it is not simply "every
-      -- event in the tree". A stamp counts because an authorized key wrote it;
-      -- counting the rest would let anyone who can get one file into the tree
-      -- push the cursor to the top of its range, and the owner would then be
-      -- unable to mint even the revoke that would stop it.
+      -- The delegate minted from a view built before the revocation and the
+      -- publisher wrote the result. The fold refuses the event, but the file is
+      -- in the tree at that seq, so handing the seq out again puts two events
+      -- there. No ill intent needed, and a key that was a maintainer could
+      -- have stranded the cursor while its delegation stood anyway, so nothing
+      -- is conceded by counting it now.
       let repo = fst owner
           eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
                     (canon 2 (Just 1))
           eRev = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
-          -- bob races the revoke and loses, from as far up the range as a
-          -- usable folded-ts allows
           eLate = mkEvent alice bob (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
-                    (canonAt (maxBound - 1) Nothing 4)
+                    (canon 9 Nothing)
           fr = foldEvents repo [eDel, eOpen, eRev, eLate]
       reasons fr `shouldBe` [UnauthorizedCanon]
-      cursorFrom fr `shouldBe` CanonCursor 4 2
+      cursorFrom fr `shouldBe` CanonCursor 10 2
+      frLastFolded fr `shouldBe` 9
+
+    it "hands back the admitted events in order, including the invisible ones" $ do
+      owner <- kp
+      bob <- kp
+      alice <- kp
+      -- What 'hub log' is made of. The threads are a map and say nothing about
+      -- order, and the events that leave no visible trace (a set, a merge, a
+      -- note-less close, a delegate) appear in no other view at all.
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
+                    (canon 2 (Just 1))
+          tid = eventId eOpen
+          eSet = mkEvent owner owner (ASet tid "labels" "bug" 3) (canon 3 Nothing)
+          -- refused, so it is in the drop report and not here
+          eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 4)
+                   (canon 4 Nothing)
+          fr = foldEvents repo [eSet, eBad, eOpen, eDel]
+      map lgSeq (frLog fr) `shouldBe` [1,2,3]
+      map lgEvent (frLog fr) `shouldBe` map eventId [eDel, eOpen, eSet]
+      map lgThread (frLog fr) `shouldBe` [Nothing, Just tid, Just tid]
+      map lgCanonBy (frLog fr) `shouldBe` [fst owner, fst bob, fst owner]
+      map lgAuthor (frLog fr) `shouldBe` [fst owner, fst alice, fst owner]
+      map lgContent (frLog fr) `shouldBe`
+        [ ADelegate (fst bob) 1
+        , AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2
+        , ASet tid "labels" "bug" 3
+        ]
+      map drWhy (frDropped fr) `shouldBe` [UnauthorizedCanon]
 
     it "reports a key published for nothing" $ do
       owner <- kp
@@ -516,7 +568,7 @@ spec = do
                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
-      map snd (frAnomalies fr) `shouldBe` [SecretWithoutPart]
+      map anWhat (frAnomalies fr) `shouldBe` [SecretWithoutPart]
 
     it "refuses an attribute name that is not a name" $ do
       -- Checking the case alone closed one spelling out of an infinite family:
@@ -554,7 +606,7 @@ spec = do
                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just stunted))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
-      map snd (frAnomalies fr) `shouldBe` [UnusablePartSecret]
+      map anWhat (frAnomalies fr) `shouldBe` [UnusablePartSecret]
 
     it "refuses a signature made for another kind of record" $ do
       owner <- kp
@@ -587,7 +639,7 @@ spec = do
         Left (BoxUndecodable _ why) -> why `shouldBe` WrongDomain
         other -> expectationFailure ("expected a domain refusal: " <> show (fmap fst other))
       -- The fold reports it as an undecodable author box, not as a forgery.
-      map snd (frDropped (foldEvents repo [ev]))
+      map drWhy (frDropped (foldEvents repo [ev]))
         `shouldBe` [UndecodableAuthor (fst owner) Undecodable]
 
     it "refuses a mangled signature rather than a mangled payload" $ do
@@ -604,7 +656,7 @@ spec = do
       unboxChecked (mangleSig (evAuthorBox ev)) `shouldSatisfy` \case
         Left BoxBadSig -> True
         _              -> False
-      map snd (frDropped (foldEvents repo [Event (mangleSig (evAuthorBox ev)) (evCanonBox ev)]))
+      map drWhy (frDropped (foldEvents repo [Event (mangleSig (evAuthorBox ev)) (evCanonBox ev)]))
         `shouldBe` [BadAuthorSig]
 
     it "reports trailing bytes in a box as tampering, not as a newer schema" $ do
@@ -622,7 +674,7 @@ spec = do
           k `shouldBe` fst alice
           why `shouldBe` TrailingData
         other -> expectationFailure ("expected trailing data: " <> show (fmap fst other))
-      map snd (frDropped (foldEvents repo [Event padded (evCanonBox real)]))
+      map drWhy (frDropped (foldEvents repo [Event padded (evCanonBox real)]))
         `shouldBe` [UndecodableAuthor (fst alice) TrailingData]
 
     it "refuses to fold canon from a newer consensus version" $ do
@@ -634,15 +686,14 @@ spec = do
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                        (canon 1 (Just 1))
-      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) hubEventVersion repo [ev])
+      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) repo [ev])
         `shouldBe` Just (MetaTooNew (hubMetaVersion + 1))
-      -- ...and separately for the file version, which answers a different
-      -- question: a reader can know the admission rules and still not know the
-      -- shape of the file an event is in.
-      either Just (const Nothing) (foldCanon hubMetaVersion (hubEventVersion + 1) repo [ev])
-        `shouldBe` Just (EventTooNew (hubEventVersion + 1))
-      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion hubEventVersion repo [ev])
+      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion repo [ev])
         `shouldBe` [eventId ev]
+      -- The TREE's version only. A file's own version is one file's problem
+      -- and belongs to the reader: taken as a maximum over the tree, it handed
+      -- a veto over the whole repository to anyone who could write one
+      -- unsigned line ("HBS2.Hub.Canon").
 
     it "keeps a thread's state moving through merge and reopen" $ do
       owner <- kp
@@ -729,7 +780,7 @@ spec = do
           futureCanon = signBare owner
                           (Domained (domainOf (Nothing @CanonContent)) (12345 :: Word64))
           ev = Event (evAuthorBox real) futureCanon
-      map snd (frDropped (foldEvents repo [ev]))
+      map drWhy (frDropped (foldEvents repo [ev]))
         `shouldBe` [UndecodableCanon (fst owner) Undecodable]
 
     it "tells an undecodable box apart from a forged one" $ do
@@ -743,8 +794,8 @@ spec = do
                          (canon 1 (Just 1))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
-      map fst (frDropped fr) `shouldBe` [eventId ev]
-      case map snd (frDropped fr) of
+      map drEvent (frDropped fr) `shouldBe` [eventId ev]
+      case map drWhy (frDropped fr) of
         [UndecodableAuthor k why] -> do
           -- the reader can still name whose event it could not read
           k `shouldBe` fst alice
@@ -843,7 +894,9 @@ spec = do
       -- maxBound is the one thing that cannot happen, since the next mint is
       -- the maximum plus one and would wrap to zero.
       frMaxSeq fr `shouldBe` 1
-      frMaxNumber fr `shouldBe` 1
+      -- and no number at all: that one is spent on admission, and neither of
+      -- these was admitted
+      frMaxNumber fr `shouldBe` 0
 
     it "rejects a tampered author box" $ do
       owner <- kp

@@ -214,6 +214,24 @@ are the loop's problem rather than the letter's.
   - ABORT means the caller is wired wrong: stop, do not touch the letter.
     DISCARD and DECIDE are the ordinary outcomes.
 
+Which of the five a refusal gets depends on WHERE it was raised, not on what it
+says. Honouring a request runs every check twice, once over what the letter
+asked for and once over what the maintainer is actually signing, and the same
+words mean opposite things on the two sides: a thread mismatch, an oversized
+note, an unknown thread or an attribute name that is not canonical, raised
+against content triage composed, says nothing whatever about the letter. Those
+are ABORT, and a loop that folds then deletes must not delete a good submission
+over a bug in a maintainer's own tooling. Everything the owner-native path
+refuses is composed in the same sense, since there is no letter there at all.
+
+The mirror of that rule is that a refusal about a LETTER must never stop the
+loop, because anyone can send a letter. Naming an attachment the message does
+not carry, offering a secret that turns out to be the message's own, an
+attribute the sender did not canonicalize: all of these are things a stranger
+chooses, so the answer is to be rid of the letter or to park it, never to halt.
+Getting this backwards in either direction is how one letter takes a hub down,
+or how a hub deletes the submissions it was built to collect.
+
 The deny-list reaches an undecodable letter through its envelope key, which is
 the only key available when the payload cannot be parsed. That is deliberately
 the one place an envelope ban is used at all, and it should not be mistaken for
@@ -283,12 +301,23 @@ from the same data it verifies, and validity is ordered:
   - The owner emits `delegate`/`revoke` events (owner-only ops, canon-signed
     by the LWWRef owner key) naming a maintainer sign key.
   - A canon event signed by key K is admitted iff K is the owner key, or K
-    was delegated and not yet revoked as of that event's `seq`. Ordering by
-    `seq` gives the precise rule: events a maintainer signed while authorized
-    stay valid even after the maintainer is revoked; events signed outside
-    their authorized window are dropped by the fold.
+    was delegated and not yet revoked AS OF THAT EVENT'S `seq`. Events a
+    maintainer blessed at a `seq` inside their window stay valid after the
+    revocation, which is what makes revoking safe to do.
+  - Read as of that event's `seq`, and not "signed while authorized", because
+    the fold cannot tell when anything was signed: it reads the `seq` the
+    signer chose. A revoked maintainer who picks a `seq` below their own
+    revocation therefore still satisfies the rule, and can bless a `redact`,
+    an `open`, or a comment for as long as they hold the key. What stops that
+    is publication and not the fold: only the reflog key can write
+    `refs/hbs2/meta`, so a withdrawn maintainer has nothing to put the file
+    into. A scheme that widens publication (a shared RefChan) loses the
+    guarantee and needs an admission rule about `seq` relative to canon, which
+    is a `hub-meta` bump and which a partially fetched clone cannot evaluate.
+    PEP-19 records the same limit; do not read either as more than it says.
   - The owner key is the root of trust and cannot be delegated away; revoke
-    applies only to delegated keys.
+    applies only to delegated keys, and a `revoke` naming the owner key is
+    admitted and does nothing.
 
 This makes the maintainer set event-sourced and auditable, consistent with
 the rest of canon, and supersedes the PEP-19 placeholder.

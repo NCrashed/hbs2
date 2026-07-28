@@ -191,12 +191,13 @@ On acceptance the maintainer integrates and records the result:
      ```
      (op merge) (merge-commit <sha1>) (merged-into refs/heads/master)
      ```
-  4. Set status to merged with an owner-signed `set`:
-     ```
-     (op set) (set status merged)
-     ```
-     (`merge` records the git result; `set status merged` records the tracker
-     state. A repo may treat merged as a terminal closed sub-state.)
+     The `merge` event sets `status` to `merged` itself, in the fold (PEP-19):
+     no second event is needed and none should be written. Requiring a separate
+     owner-signed `set` was the earlier design and it leaves canon claiming a
+     merged PR is open until that second event arrives, which is a state every
+     renderer would have to display. A repo that wants a different final status
+     can still write a `set` afterwards; last writer wins, and a repo may treat
+     merged as a terminal closed sub-state.
 
 The `pulls/<n>/head` ref may be retained for the record or dropped per the
 retention policy. The proposed commits, once merged, live in the normal

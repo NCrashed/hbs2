@@ -63,16 +63,24 @@ module HBS2.Hub.Bridge
   , Pending(..)
   , LetterParts
   , OwnerParts
+  , PartEvidence(..)
   , noMessageParts
   , attachments
-  , attachmentsPending
   , attachmentsNoKey
   , noOwnAttachments
   , ownAttachments
   , outcome
   , EventScope(..)
-  , CanonView(..)
+    -- The constructor is deliberately not exported: a view is a cache of what
+    -- the fold would say, and the module's promise (never mint what the fold
+    -- drops) is only as good as that. Build one with 'viewOf' or 'emptyView'.
+    -- The fields are readable, and updatable, which is an escape hatch a test
+    -- or a tool can still use knowingly rather than by reaching for the
+    -- nearest constructor.
+  , CanonView( cvCursor, cvThreads, cvEvents, cvMaintainers, cvOrigins
+             , cvLastFolded, cvRepo )
   , Accepted(..)
+  , ackFor
   , TriageError(..)
   , viewOf
   , emptyView
@@ -99,7 +107,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Control.Monad (when)
-import Data.Maybe (isJust,isNothing)
+import Data.Maybe (fromMaybe,isJust,isNothing)
 import Data.Text (Text)
 import Data.Word (Word64)
 
@@ -137,6 +145,15 @@ data ThreadFacts = ThreadFacts
   { tfKind   :: HubKind
   , tfAuthor :: HubKey       -- ^ author of record: only they may revise
   , tfNumber :: Maybe Word64 -- ^ the human number, for acknowledging a reply
+    -- | The thread's status as of the last accept.
+    --
+    -- Here because an acknowledgement carries it (PEP-18) and the layer that
+    -- sends one has an 'Accepted' and a view, not a fold: without this it
+    -- would have to re-fold canon after every letter, or write a second
+    -- implementation of the last-writer-wins rule and have it drift. The fold
+    -- keeps the same value in @tsAttrs@, and the two are checked against each
+    -- other on every accept the property test makes.
+  , tfStatus :: Text
   }
   deriving stock (Eq,Show)
 
@@ -210,13 +227,19 @@ initialCursor = CanonCursor 1 1
 viewOf :: FoldResult -> CanonView
 viewOf fr = CanonView
   { cvCursor  = cursorFrom fr
-  , cvThreads = fmap (\t -> ThreadFacts (tsKind t) (tsAuthor t) (tsNumber t)) (frThreads fr)
+  , cvThreads = fmap facts (frThreads fr)
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
   , cvOrigins = frOrigins fr
   , cvLastFolded = frLastFolded fr
   , cvRepo = frOwner fr
   }
+  where
+    -- The status comes out of the same attribute map the render contract reads
+    -- (PEP-22), so the cached copy cannot mean anything else. An open always
+    -- has one; the default is for canon written by something that did not.
+    facts t = ThreadFacts (tsKind t) (tsAuthor t) (tsNumber t)
+                (fromMaybe "" (HM.lookup "status" (tsAttrs t)))
 
 -- | The next seq and number to mint, given folded canon.
 cursorFrom :: FoldResult -> CanonCursor
@@ -302,6 +325,10 @@ data TriageError =
     -- | The message carries the part but this node has not fetched the tree
     -- yet. Nothing is wrong; come back when it has.
   | PartNotFetched HashRef
+    -- | The part is over what this hub will carry ('maxPartBytes'). Local
+    -- policy like 'BodyTooLarge' and parked for the same reason: another hub
+    -- may take it, and the reference would be permanent here.
+  | PartTooLarge HashRef
     -- | The secret offered for the parts cannot be a key: it is the wrong
     -- length. Minting it would put a reference to bytes nobody can read into
     -- canon, permanently.
@@ -320,11 +347,20 @@ data TriageError =
     -- that one another folder can satisfy, this one nobody but the owner can,
     -- so a delegate's tooling asking for it is a bug in the caller.
   | OwnerKeyRequired
-    -- | What the OWNER supplied is not a request-shaped op. Distinct from
-    -- 'NotAcceptable', which is about the letter: this one is raised where
-    -- 'honourWith' checks the content triage composed, so it says nothing
-    -- about the letter and the letter must not be discarded over it.
-  | NotARequest Disposition
+    -- | A refusal about what the CALLER composed rather than about the letter.
+    --
+    -- Every check on the honour path runs twice over, once on what the letter
+    -- asked for and once on what the owner is actually signing, and the same
+    -- refusal means opposite things on the two sides. A thread mismatch, an
+    -- oversized note, an unknown thread or a name that is not canonical, raised
+    -- against content triage wrote, says nothing whatever about the letter, and
+    -- a loop that folds then deletes would delete a good submission over a bug
+    -- in a maintainer's own tooling. Everything the owner-native path refuses
+    -- is composed too, since there is no letter there at all.
+    --
+    -- Wrapping rather than a constructor per site: the site is the fact, and
+    -- the inner error still says which check it was.
+  | Composed TriageError
     -- | The request carries text the owner would be signing as their own
     -- words. 'honourRequest' will not do that; use 'honourWith' with content
     -- the maintainer actually wrote.
@@ -433,9 +469,10 @@ outcome = \case
   -- folds then deletes would delete it. (`NotAcceptable RequestOnly` is
   -- unreachable through `acceptLetter`, which raises `Requested` first.)
   NotAcceptable _   -> Abort
-  -- Not about the letter at all: the maintainer's tooling composed something
-  -- that is not a request.
-  NotARequest _     -> Abort
+  -- Not about the letter at all: whatever the check was, it ran against
+  -- something the caller wrote. Stop and fix the caller, and leave the letter
+  -- exactly where it is.
+  Composed _        -> Abort
   BadLetter _       -> Discard
   WrongRepo         -> Discard
   AlreadyInCanon    -> Discard
@@ -448,18 +485,25 @@ outcome = \case
   -- there is nothing for it to fix; stopping the loop instead would let one
   -- stranger wedge triage with a single letter.
   PartNotInMessage _   -> Discard
+  -- The sender chose an attribute name or value that is not in canonical form,
+  -- so no owner can honour it as sent and no later pass changes that. Raised
+  -- against what triage composes it is 'Composed' instead, which is a stop.
+  UnnormalizedValue _  -> Discard
   -- These two are the caller's own doing.
   NoAttachmentsSupplied -> Abort
   BadPartSecret        -> Abort
-  -- The sender picks this one too: nothing stops them encrypting their parts
-  -- with the message key, and a bare 'Message' is a SignedBox anyone can
-  -- build. Minting is still refused, but the letter is theirs to have ruined
-  -- and Abort would hand them the loop.
-  MessageSecretOffered -> Discard
-  -- Local policy, not consensus: another hub may carry a body this one will
-  -- not ('maxInlineBody'). Deleting a letter over a threshold this build
-  -- picked would be irreversible for a decision that is not canon's.
+  -- Two causes that look identical from here: a sender who encrypted their own
+  -- parts with the message key, and a caller that wrapped one secret twice.
+  -- Discarding would have the second delete every letter carrying an
+  -- attachment, and with it the only copy of the part secret; aborting would
+  -- hand the loop to the first. Park is the one answer that costs neither.
+  MessageSecretOffered -> Park
+  -- Local policy, not consensus: another hub may carry a body or a part this
+  -- one will not ('maxInlineBody', 'maxPartBytes'). Deleting a letter over a
+  -- threshold this build picked would be irreversible for a decision that is
+  -- not canon's.
   BodyTooLarge _     -> Park
+  PartTooLarge _     -> Park
   -- The letter is intact and the caller can supply what is missing.
   MissingPartSecret  -> Retry
   PartNotFetched _   -> Retry
@@ -468,9 +512,14 @@ outcome = \case
   -- of its range needs an operator, not another pass.
   ViewRepoMismatch    -> Abort
   OwnerKeyRequired    -> Abort
-  UnnormalizedValue _ -> Abort
   CursorExhausted   -> Abort
   StampOutOfRange   -> Abort
+
+-- Mark a refusal as being about what the caller composed rather than about the
+-- letter it was answering. Idempotent by construction: nothing wraps twice,
+-- because the checks under it never look at a letter.
+composed :: Either TriageError a -> Either TriageError a
+composed = either (Left . Composed) Right
 
 -- Refuse an author box canon already holds: the fold would drop the second
 -- copy as a duplicate.
@@ -505,13 +554,25 @@ data PartsOf = PartsOf
     -- clauses must never reach canon. Nothing about the bytes says which is
     -- which, so this is the only check that can catch it.
   , poMessage :: Maybe MessageSecret
-    -- | The parts the caller vouches for. On the letter path these are the
-    -- message's @messageParts@; on an owner-native event there is no message,
-    -- and the caller is vouching for what it just created.
-  , poCarried :: HashSet HashRef
-  , poLocal   :: HashSet HashRef   -- ^ of those, the trees present in storage
+    -- | The parts the caller vouches for, and what it knows about each. On the
+    -- letter path these are the message's @messageParts@; on an owner-native
+    -- event there is no message, and the caller is vouching for what it just
+    -- created.
+  , poCarried :: HashMap HashRef PartEvidence
   }
   deriving stock (Eq)
+
+-- | What the caller knows about ONE part.
+--
+-- Per part rather than per message, because a message is fetched a tree at a
+-- time and the answer for one attachment is not the answer for the next. The
+-- shape also refuses to let a caller claim more than it knows: there is no way
+-- to say "fetched" without saying how big, which is the number the gate needs
+-- and the one a caller cannot have without having looked.
+data PartEvidence =
+    PartHere Word64   -- ^ present in local storage, this many bytes
+  | PartPending       -- ^ carried by the message, not fetched yet
+  deriving stock (Eq,Show)
 
 -- Deliberately partial, like 'Show' on 'PartSecret' and for the same reason:
 -- 'poMessage' is the more dangerous of the two secrets and it is plain bytes,
@@ -520,8 +581,8 @@ data PartsOf = PartsOf
 instance Show PartsOf where
   show p = "PartsOf {secret = " <> maybe "none" (const "present") (poSecret p)
         <> ", message-secret = " <> maybe "none" (const "present") (poMessage p)
-        <> ", carried = " <> show (HS.size (poCarried p))
-        <> ", local = " <> show (HS.size (poLocal p))
+        <> ", carried = " <> show (HM.size (poCarried p))
+        <> ", fetched = " <> show (length [ () | PartHere _ <- HM.elems (poCarried p) ])
         <> "}"
 
 -- | A letter's attachments.
@@ -548,37 +609,39 @@ newtype OwnerParts = OwnerParts PartsOf
 -- the parts through is a bug that must. Only 'noOwnAttachments' can say the
 -- second thing now, and on that path there is no message to be wrong about.
 noMessageParts :: MessageSecret -> LetterParts
-noMessageParts msg = LetterParts (PartsOf Nothing (Just msg) HS.empty HS.empty)
+noMessageParts msg = LetterParts (PartsOf Nothing (Just msg) HM.empty)
 
--- | Every part the message carries, already fetched: what a triage loop has
--- once it has downloaded the attachments.
+-- | What the message carries, and what the caller knows about each part.
+--
+-- One builder rather than one per state of the download, because a message is
+-- fetched a tree at a time: a letter with two attachments, one of them here,
+-- was not expressible before and the convenient builder answered "fetched" for
+-- everything it was given, which is the answer the gate exists to check.
 attachments
-  :: PartSecret     -- ^ the secret the PARTS are encrypted with
-  -> MessageSecret  -- ^ the secret @messageData@ was encrypted with, to refuse
-  -> [HashRef]      -- ^ the message's parts
+  :: PartSecret                   -- ^ the secret the PARTS are encrypted with
+  -> MessageSecret                -- ^ the secret @messageData@ was encrypted with, to refuse
+  -> [(HashRef, PartEvidence)]    -- ^ the message's parts
   -> LetterParts
-attachments s msg hs =
-  LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) (HS.fromList hs))
+attachments s msg hs = LetterParts (PartsOf (Just s) (Just msg) (HM.fromList hs))
 
--- | Carried by the message, not fetched yet.
-attachmentsPending :: PartSecret -> MessageSecret -> [HashRef] -> LetterParts
-attachmentsPending s msg hs =
-  LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) HS.empty)
-
--- | Fetched, but the caller has no key for them.
-attachmentsNoKey :: MessageSecret -> [HashRef] -> LetterParts
-attachmentsNoKey msg hs =
-  LetterParts (PartsOf Nothing (Just msg) (HS.fromList hs) (HS.fromList hs))
+-- | The same, but the caller has no key for them.
+attachmentsNoKey :: MessageSecret -> [(HashRef, PartEvidence)] -> LetterParts
+attachmentsNoKey msg hs = LetterParts (PartsOf Nothing (Just msg) (HM.fromList hs))
 
 -- | An owner-native event with no attachments.
 noOwnAttachments :: OwnerParts
-noOwnAttachments = OwnerParts (PartsOf Nothing Nothing HS.empty HS.empty)
+noOwnAttachments = OwnerParts (PartsOf Nothing Nothing HM.empty)
 
--- | Attachments the owner created itself, so there is no message secret to
--- confuse the parts secret with.
-ownAttachments :: PartSecret -> [HashRef] -> OwnerParts
-ownAttachments s hs =
-  OwnerParts (PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs))
+-- | Attachments the owner created itself.
+--
+-- There is no message secret to compare against here, so the check that the
+-- parts secret is not the message secret cannot run: this path takes the
+-- caller's word. It is not the impossible-to-get-wrong case it may look like,
+-- since an owner-native @open@ or @comment@ can carry a body-part like any
+-- other; PEP-19 records deriving the secret from the part tree's own group key
+-- as the fix that would make the question unaskable.
+ownAttachments :: PartSecret -> [(HashRef, PartEvidence)] -> OwnerParts
+ownAttachments s hs = OwnerParts (PartsOf (Just s) Nothing (HM.fromList hs))
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
@@ -600,17 +663,18 @@ requireParts po content
     -- 'noOwnAttachments' now: every letter builder demands the message
     -- secret, which is exactly the evidence this asks for.
     toldNothing = isNothing (poSecret po)
-               && HS.null (poCarried po)
+               && HM.null (poCarried po)
                && isNothing (poMessage po)
 
     -- Past that, the caller has supplied evidence about the message, so a part
     -- the evidence does not list is the letter's doing and no later pass
     -- changes it. Anyone can send such a letter; treating it as a caller bug
     -- would let one stranger stop triage for good.
-    present h
-      | not (HS.member h (poCarried po)) = Left (PartNotInMessage h)
-      | not (HS.member h (poLocal po))   = Left (PartNotFetched h)
-      | otherwise                        = Right ()
+    present h = case HM.lookup h (poCarried po) of
+      Nothing                            -> Left (PartNotInMessage h)
+      Just PartPending                   -> Left (PartNotFetched h)
+      Just (PartHere n) | n > maxPartBytes -> Left (PartTooLarge h)
+                        | otherwise      -> Right ()
 
     secretOK = case poSecret po of
       Nothing -> Left MissingPartSecret
@@ -740,6 +804,29 @@ instance Show Accepted where
         <> ", origin = " <> show (acOrigin a)
         <> "}"
 
+-- | The acknowledgement for what was just accepted (PEP-18), or 'Nothing' for
+-- an event that belongs to no thread and so acknowledges nothing.
+--
+-- Assembled here because everything it needs is here and nowhere else together:
+-- the number and the status belong to the THREAD, not to the event, and a
+-- caller holding an 'Accepted' would otherwise have to re-fold canon to learn
+-- them, or keep its own copy of the last-writer-wins rule. Whether to send it,
+-- and where, is the caller's ('acReply').
+ackFor :: Accepted -> Maybe AckRecord
+ackFor a = case acScope a of
+  RepoScope       -> Nothing
+  ThreadScope thr -> do
+    tf <- HM.lookup thr (cvThreads (acView a))
+    pure AckRecord
+      { akTarget = cvRepo (acView a)
+      , akThread = thr
+      , akNumber = tfNumber tf
+      , akStatus = tfStatus tf
+      , akMergeCommit = case acContent a of
+          AMerge _ mc _ _ -> Just mc
+          _               -> Nothing
+      }
+
 -- | Accept a letter into canon.
 --
 -- Only 'FoldsToCanon' ops (open, comment, revise) may be blessed as they
@@ -780,6 +867,15 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- whoever wrote it, and raising it as a decision first would put a letter in
   -- front of a maintainer that no answer can fold.
   requireSize content
+
+  -- And the same for an attribute nobody can sign as sent. Without this the
+  -- letter reaches a maintainer as a request, the obvious thing to do with a
+  -- request is to hand what it carries to 'honourWith', and that refuses it as
+  -- the caller's doing and stops the loop: one letter naming an attribute
+  -- "Labels" would be all it takes. What the owner may still do is sign a
+  -- normalized version of their own, which is 'honourWith' with content the
+  -- caller ran through 'normalizeAttr'.
+  requireNormalized content
 
   -- A request needs its thread to exist before it is worth a maintainer's
   -- attention: otherwise a close naming an unfolded thread would raise a
@@ -922,32 +1018,37 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
   -- normal-looking request.
   when (path == Verbatim && verbatimUnsafe content0) (Left NeedsReview)
 
-  -- The owner signs this, so the same size gate applies as on any other
-  -- owner-authored event: 'ownerEvent' checks it, and there is no reason for
-  -- the two owner paths to disagree.
-  requireSize content0
-  requireNormalized content0
-
+  -- What the letter asked for is judged bare, because a refusal here is about
+  -- the letter.
   case classify asked of
     RequestOnly -> Right ()
     other       -> Left (NotAcceptable other)
 
-  -- What the owner signs must still be a request-shaped op on a thread that
-  -- exists, whether or not it is exactly what was asked for. A separate error
-  -- from the check above: that one judges the letter, this one judges what
-  -- triage composed, and a letter must not be discarded over the latter.
-  case classify content0 of
-    RequestOnly -> Right ()
-    other       -> Left (NotARequest other)
+  -- Everything from here down judges content the CALLER composed, so every
+  -- refusal is wrapped: the same words mean opposite things depending on which
+  -- side they were raised against, and a loop that folds then deletes would
+  -- otherwise delete a good submission over a bug in a maintainer's tooling.
+  composed $ do
+    -- The owner signs this, so the same size gate applies as on any other
+    -- owner-authored event: 'ownerEvent' checks it, and there is no reason for
+    -- the two owner paths to disagree.
+    requireSize content0
+    requireNormalized content0
 
-  -- Editing what a request asked for is the point of this function; moving
-  -- it to another thread is not, and would leave the event carrying an
-  -- origin that points at a letter about something else.
-  if authorThread content0 == authorThread asked
-    then Right ()
-    else Left ThreadMismatch
+    -- What the owner signs must still be a request-shaped op on a thread that
+    -- exists, whether or not it is exactly what was asked for.
+    case classify content0 of
+      RequestOnly -> Right ()
+      other       -> Left (NotAcceptable other)
 
-  thread <- case authorThread content0 of
+    -- Editing what a request asked for is the point of this function; moving
+    -- it to another thread is not, and would leave the event carrying an
+    -- origin that points at a letter about something else.
+    if authorThread content0 == authorThread asked
+      then Right ()
+      else Left ThreadMismatch
+
+  thread <- composed $ case authorThread content0 of
     Just thr | HM.member thr (cvThreads view) -> Right thr
              | otherwise                      -> Left UnknownThread
     Nothing -> Left BadContent
@@ -1030,7 +1131,11 @@ ownerEvent ctx view folded (OwnerParts parts) content = do
 
   requireSize content
   requireNormalized content
-  requireParts parts content
+  -- Wrapped, because on this path the evidence is the caller vouching for
+  -- trees it created itself: there is no message, so "the message does not
+  -- carry this part" is not a statement about anything a sender did, and
+  -- answering it with Discard would have a loop delete letters over it.
+  composed (requireParts parts content)
 
   Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)
   where
@@ -1122,10 +1227,19 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
           { ccrNextSeq    = ccrNextSeq cur + 1
           , ccrNextNumber = if opensThread then ccrNextNumber cur + 1 else ccrNextNumber cur
           }
+        -- The status is maintained here exactly as the fold maintains the
+        -- attribute it mirrors, and by the same four ops. A divergence would be
+        -- a bug even if nothing read the field, since the accumulated view is a
+        -- cache of the rebuilt one.
       , cvThreads = case content of
           AOpen _ kind _ _ _ _ _ _ ->
-            HM.insert eid (ThreadFacts kind authorOf (mintedNumber content cur)) (cvThreads view)
-          _                        -> cvThreads view
+            HM.insert eid (ThreadFacts kind authorOf (mintedNumber content cur) "open")
+              (cvThreads view)
+          ASet thr "status" v _ -> setStatus thr v
+          AClose thr _ _        -> setStatus thr "closed"
+          AReopen thr _ _       -> setStatus thr "open"
+          AMerge thr _ _ _      -> setStatus thr "merged"
+          _                     -> cvThreads view
       , cvEvents = HM.insert eid (scopeThread scope) (cvEvents view)
         -- Delegation takes effect for the next accept, exactly as it will
         -- when the view is later rebuilt from canon. Revoking the owner is a
@@ -1140,6 +1254,8 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
       , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
       , cvLastFolded = stamped
       }
+
+    setStatus thr v = HM.adjust (\tf -> tf { tfStatus = v }) thr (cvThreads view)
 
     scopeThread = \case
       ThreadScope thr -> Just thr

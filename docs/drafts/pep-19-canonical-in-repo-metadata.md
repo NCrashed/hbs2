@@ -174,6 +174,27 @@ Threading needs no canon-box normalization: a thread id and a reply-to are
 canonical event-ids, and an event-id is the hash of an author box, which the
 sender constructs, so the sender computes them directly (see Thread identity).
 
+What is signed, exactly. A signature says "this key signed these bytes", never
+"this key signed an event", so each of the two payloads is written with the
+domain it is signed for in front of it: the CBOR that gets signed and hashed is
+`[domain, payload]`, with `domain` the `word32` `0x48423241` ("HB2A") for an
+author box and `0x48423243` ("HB2C") for a canon box. A verifier that finds any
+other domain refuses the box. Without this, a signature made over some other
+record with a coincidentally identical encoding is a valid signature here: a
+sum-constructor tag is an ordinary small CBOR integer, so anything of the shape
+[small int, hash, int] signed by the owner for any purpose was a signed
+redaction of any event. The domains are assigned once and never reused or
+renumbered, because they are inside the signed bytes and therefore inside every
+event-id.
+
+Two more things are frozen for the same reason and are named here rather than
+left to an implementation. The order of the ops in the author payload's sum is
+part of the encoding, so new ops are appended and existing ones are never
+reordered or removed: an event-id hashes those bytes. And the order of the
+fields inside PR coordinates is likewise fixed, since they are reachable from
+an author box. Two implementations that disagree about either produce canon
+they cannot verify for each other, and there is no repair afterwards.
+
 The two boxes are independent so the event-id is stable before `seq`/`number`
 exist, and so an event extracted from the tree in isolation is verifiable:
 the author box proves authorship, the canon box proves admission to canon.
@@ -295,6 +316,37 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   messageData: publishing that one would publish
                                    ;   the sender's reply address (PEP-18)
 ```
+
+Four rules make those bytes a format rather than a habit, and a reader and a
+writer that disagree about any of them cannot exchange canon.
+
+One clause per line, and no line wrapping. Several forms on one line read back
+as one nested form in this s-expression dialect, so the line breaks are part of
+the grammar; and a printer that wraps at a page width would make the bytes of an
+event depend on somebody's idea of a terminal, in a tree that is
+content-addressed.
+
+Strings are escaped so that they read back: a backslash, a double quote, and
+the three whitespace characters are written `\\`, `\"`, `\n`, `\r`, `\t`. This
+is not cosmetic. A title comes from whoever sent the letter, and one unescaped
+quote does not spoil a display line, it ends the string early and everything
+after it is re-read as whatever it happens to look like, in a file that has two
+valid signatures in it and can never be rewritten.
+
+The projection is never read back. A reader takes the two box clauses and the
+version, and regenerates everything else from what it unboxed. Believing
+`(seq 5)` over the canon box would mean believing an unsigned line of text
+written by whoever last touched the file.
+
+`(hub-event N)` governs ONE FILE. A reader that meets a version it does not know
+drops that file and reports it, exactly as it drops an event whose author box it
+cannot decode; it does not refuse the tree. The clause is unsigned text, so a
+tree-wide veto would be available to anyone who can write a single file, and one
+line saying `(hub-event 4294967295)` would make a repository unreadable for
+every clone, permanently and for free. The tree's own `(hub-meta N)` is the one
+that governs everything, because it names the admission rules that produced the
+canon, and folding under rules a reader does not know is how a clone quietly
+disagrees with every other clone.
 
 An owner-blessed status change is therefore a fully signed event: the owner
 signs an author box carrying `(op set) (set status closed)` and a canon box
@@ -475,11 +527,16 @@ altering state:
      op: it is a canon-box field on the `open` event, so it is owner-signed
      by construction.)
   4a. Payload rules that are admission rules, and so are consensus like the
-     rest of this list: a `pr` open carries coordinates and an `issue` open
-     does not, and a PR's coordinates name at least one of a fork to pull from
-     or a bundle to fetch. An open that breaks either is dropped rather than
-     admitted, because canon would otherwise hold a proposal nobody can obtain
-     or a thread whose kind and payload disagree.
+     rest of this list. An `open` names THIS repository (the owner key its
+     author box was signed for): otherwise an open authored for another repo
+     could be lifted out of that repo's canon and replayed here, arriving with
+     a valid signature and somebody else's words. A `pr` open carries
+     coordinates and an `issue` open does not. A PR's coordinates, on an `open`
+     and on every `revise`, name at least one of a fork to pull from or a
+     bundle to fetch. A `revise` and a `merge` are PR-only, so both are dropped
+     on an issue thread. An event that breaks any of these is dropped rather
+     than admitted, because canon would otherwise hold a proposal nobody can
+     obtain, or a thread whose kind and payload disagree.
   5. For `delegate`/`revoke`, both the author box signer and `canon-by` must
      equal the LWWRef owner key exactly, not merely an authorized canon key.
      This is the root-of-trust rule: without it a delegate could sign its own
@@ -522,17 +579,45 @@ for e in sort(events, by=(seq, event_id)):
       comment-> state[e.thread].comments.append(e)    ; kept in seq order
       revise -> if e.author == state[e.thread].author or e.author in maintainers:
                   state[e.thread].pr.coords = coords(e)  ; new proposed tip; else drop
-      merge  -> state[e.thread].pr = merged(e)
-      redact -> if e.redacts in byid: byid[e.redacts].rendered = hidden ; content stays in tree
+      merge  -> if state[e.thread].kind /= pr: drop  ; a pr-only op on an issue
+                state[e.thread].pr = merged(e)
+                state[e.thread].attrs.status = merged ; the merge IS the status
+      redact -> if e.redacts in byid: byid[e.redacts].rendered = hidden ; content stays
+                state[thread_of(e.redacts)].updated = e.folded_ts       ;   in tree
       delegate -> maintainers.add(e.key)              ; admit() enforced rule 5:
-      revoke   -> maintainers.remove(e.key)           ;   owner-key-signed only
+      revoke   -> if e.key /= owner_key:              ;   owner-key-signed only
+                    maintainers.remove(e.key)         ; revoking the owner is a no-op
 ```
 
+Three details in there are easy to miss and are all consensus. A `merge`
+sets `status` itself rather than waiting for a separate owner-signed `set`:
+the alternative leaves canon claiming a merged PR is open until a second event
+arrives, and the render contract reads `status`. Revoking the OWNER key is a
+no-op, because the owner key is the root of trust and cannot be delegated away,
+so it cannot be withdrawn either; the event is admitted and changes nothing. And
+a `redact` moves the `updated` clock of the thread it hides an event in, because
+moderating a thread changes it: without that a thread whose comment was just
+withdrawn sorts as untouched since before the redaction, and `updated` is what
+orders every list a renderer shows.
+
 Because `delegate`/`revoke` are applied in the same `seq` order that governs
-admission, an event is judged against exactly the maintainer set in force when
-it was signed; a later `revoke` never retroactively invalidates events the key
-signed while authorized. This is why compaction must never drop a
-`delegate`/`revoke` event (see Retention).
+admission, an event is judged against the maintainer set in force AT ITS `seq`,
+and a later `revoke` never retroactively invalidates events the key blessed
+before it. This is why compaction must never drop a `delegate`/`revoke` event
+(see Retention).
+
+Read that literally, because the difference is load-bearing. The fold has no
+idea when anything was signed: it knows the `seq` the signer chose. A revoked
+maintainer who picks a `seq` below their own revocation therefore passes rule 3
+and can bless a `redact`, an `open` with a number, or a comment on an old
+thread, for as long as they hold the key. What stops that today is not the fold
+but publication: only the holder of the reflog key can write `refs/hbs2/meta`,
+so a withdrawn maintainer has nothing to put their file into (see the two-tier
+model above). Anything that widens publication, a shared RefChan in particular,
+loses that guarantee and needs a real rule: the obvious one is that an event's
+`seq` must be above everything already in canon, which is an admission rule and
+so a `hub-meta` bump, and which a partially-fetched clone cannot evaluate. It
+is not in this version. PEP-21 states the same limit in the same words.
 
 A revocation also cannot be undone by replaying the `delegate` that preceded
 it. Moving the old event later in the log means writing it again, and its
@@ -663,6 +748,24 @@ decrypted, and the fold bridge additionally refuses to mint when the secret
 offered for the parts equals the secret over the message payload. That check is
 the only mechanical defence available, the two values being otherwise
 indistinguishable.
+
+Neither the type nor the check is the end of it, and the residue is worth
+writing down. Comparing the two catches one secret handed over twice; it cannot
+catch them handed over crossed, and on an owner-native event there is no message
+secret to compare against at all, which is not the impossible case it looks
+like, since an owner-authored `open` or `comment` carries a body-part like any
+other. The structural fix is to stop taking the parts secret as an argument and
+derive it from the group key embedded in the part tree itself: that is the one
+value which by construction cannot be the message secret, because it is the key
+the tree was encrypted under. That is a change to the layer that fetches trees,
+so it is recorded here as the intended shape rather than done: until then the
+check is the best available and the type is what keeps the question visible.
+
+Relatedly, one event carries one `part-secret` while an `open` can reference two
+trees, a body-part and a PR bundle. That is sound only because both come from
+the same Mailbox message and therefore from the same parts key. An event whose
+references came from two messages cannot be represented, and nothing may mint
+one.
 
 For that check to run, the caller has to hand over the message secret with the
 parts, so the letter-side evidence always carries it and there is no value on
@@ -847,19 +950,45 @@ its own clock and canon's, and minting past the ceiling would produce an event
 the fold drops. Inside the range the pin remains possible, and the recovery is
 the re-stamping compaction below.
 
-An event that was not admitted still spends its stamp. This is not an
+An event that was not admitted still spends its POSITION. This is not an
 optimization to skip. Admission is not final: canon arrives a file at a time,
 and a reply dropped as dangling is admitted the moment the opening event it
 names turns up. And even where admission is final, the file occupies that
 `seq`, so minting into it leaves canon holding two events there for good, with
 every last-writer-wins attribute between them settled by a hash rather than by
-time. The rule is therefore about the canon box, not about the event: a stamp
-signed by a then-authorized key is spent whether or not the event was applied,
-including one whose author content this build cannot decode at all, which is
-precisely the older build reading a newer schema's `open`. What is not spent is
-a value the fold refuses outright (`maxBound`, or a `number` on something that
-is not an `open`), and what stays restricted to admitted events is the `origin`
-set, since an event that was not applied folded no letter.
+time. The rule is therefore about the canon box, not about the event: the `seq`
+and the `folded-ts` of a stamp signed by an authorized key are spent whether or
+not the event was applied, including one whose author content this build cannot
+decode at all, which is precisely the older build reading a newer schema's
+`open`. Both together: an event that took a `seq` without taking the clock with
+it leaves the next mint stamping a time below one canon already holds, which is
+a non-monotonic `folded-ts` every verifier then reports forever.
+
+The human `number` is the exception, and it is spent only on ADMISSION. It is
+not a position in the log but a label on a thread that exists, so an `open`
+aimed at another repository, blessed by a maintainer of this one, must not burn
+one: it never showed anyone a number, and at the top of the range it would
+strand the counter and abort every later triage run. The two failure modes are
+not equal. A number handed out twice is a reported anomaly on a field that is
+displayed and nothing more; a number that cannot be handed out at all stops the
+repository. The same rule keeps two builds agreeing: an event whose content one
+of them cannot read is not admitted by either, so neither spends its number.
+
+Authorized means a key this log has ever authorized, which is not the same as
+one authorized right now. A delegate who minted from a view built before their
+revocation, and whose event the publisher then wrote, leaves a file the fold
+refuses at a `seq` that is nonetheless taken; requiring a live delegation there
+would hand that `seq` out a second time, and no ill intent is needed for it to
+happen. What is excluded is a key the log never authorized at all, and that
+exclusion is the load-bearing one: the fold is a public function over whatever
+files a tree happens to hold, so counting a stranger's stamp would let anyone
+who can write one file into one clone strand the cursor at the top of its range,
+with the owner unable to mint even the `revoke` that would answer it. A former
+maintainer could already have stranded it while their delegation stood, so
+nothing is conceded by counting them.
+
+What stays restricted to admitted events, besides the number, is the `origin`
+set: an event that was not applied folded no letter.
 
 Compaction must retain what the fold's own checks read. Two of them look at
 canon rather than at the event in hand, and compaction is what can take that
@@ -880,6 +1009,16 @@ whose `origin` a still-reachable letter could repeat. The first is exact. The
 second is not, since a letter's hash is not derivable from canon, so in
 practice it means retaining the `origin` field of compacted events even when
 their content is dropped, as a set the fold can still consult.
+
+A purge of attachment trees needs one more precondition, and it is not about
+retention rules but about what the running build can see. The set of parts canon
+references is collected from the events the fold could READ, and an event from a
+newer schema is exactly the one whose references are unavailable: its author
+content does not decode here, so its `body-part` and its bundle are invisible.
+Deleting trees on that basis would delete what a newer build can see canon
+pointing at. A canon-aware purge is therefore only safe on a fold that reported
+no undecodable event; meeting one means upgrade first, and the drop report names
+them.
 
 Recovery, since the bound is reachable in practice. A delegated maintainer who
 stamps `number = maxBound - 1` leaves every later `open` refused, and

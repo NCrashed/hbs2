@@ -252,6 +252,26 @@ spec = do
         Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
         Right _ -> pure ()
 
+    it "projects a title a stranger wrote, whatever is in it" $ do
+      owner <- kp
+      -- A title comes from anyone, and the same projection is what PEP-19
+      -- writes into the event file beside the authoritative boxes. One
+      -- unescaped quote there does not spoil a display line: it makes the FILE
+      -- unparseable, permanently, with two valid signed boxes inside it.
+      let nasty = "a \"quoted\" \\ title\nwith a newline and \1088\1091\1089\1089\1082\1080\1081"
+          ac = AOpen (fst owner) HubIssue nasty ["with \"quotes\""] (Just nasty) Nothing Nothing 5
+          rendered = unwords (fmap (show . pretty) (letterSyntax ac))
+      case parseTop rendered of
+        Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
+        Right forms -> do
+          -- Parsing is not enough. An unescaped quote ends the string early and
+          -- what follows is read as whatever it happens to look like, so the
+          -- clauses AFTER the title are what a hostile title really attacks.
+          let clauses = concat [ xs | List _ xs <- forms ]
+          [ t | List _ [SymbolVal "title", LitStrVal t] <- clauses ]
+            `shouldBe` [nasty]
+          [ () | List _ (SymbolVal "created" : _) <- clauses ] `shouldBe` [()]
+
     it "projects an acknowledgement the way PEP-18 pins it" $ do
       owner <- kp
       thr <- someHash

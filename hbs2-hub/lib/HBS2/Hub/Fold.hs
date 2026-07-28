@@ -20,6 +20,9 @@
 module HBS2.Hub.Fold
   ( Resolved(..)
   , DropReason(..)
+  , Dropped(..)
+  , Anomalous(..)
+  , LogEntry(..)
   , ThreadState(..)
   , tsTitle
   , PRState(..)
@@ -137,6 +140,53 @@ data Anomaly =
   | UnnormalizedAttr Text
   deriving stock (Eq,Ord,Show)
 
+-- | One refusal, with what @hub verify@ has to print about it (PEP-22, which
+-- requires naming the canon keys involved).
+--
+-- A pair of (event-id, reason) was not enough for that: neither half says who
+-- blessed the event or where in the log it sits, and both are what an operator
+-- needs to act. The two are optional together, and only for an event whose
+-- canon box could not be opened at all, which is the one case where nothing is
+-- known but the file's own hash.
+data Dropped = Dropped
+  { drEvent   :: EventId
+  , drSeq     :: Maybe Word64
+  , drCanonBy :: Maybe HubKey
+  , drWhy     :: DropReason
+  }
+  deriving stock (Eq,Show)
+
+-- | One admitted event, in the order the fold applied it.
+--
+-- The materialized threads are a HashMap and say nothing about order, and
+-- 'frAdmitted' is a map too, so neither can answer "what happened, in order",
+-- which is the whole of @hub log@ (PEP-22) and the only view an event that
+-- leaves no visible trace appears in at all: a @set@, a @merge@, a note-less
+-- @close@, a @delegate@. Reconstructing it outside would mean sorting canon a
+-- second time and getting the tie-break right a second time.
+data LogEntry = LogEntry
+  { lgSeq      :: Word64
+  , lgEvent    :: EventId
+  , lgThread   :: Maybe ThreadId   -- ^ 'Nothing' for the repo-scope ops
+  , lgAuthor   :: HubKey
+  , lgCanonBy  :: HubKey
+  , lgFoldedTs :: Word64
+  , lgOrigin   :: Maybe HashRef
+  , lgContent  :: AuthorContent
+  }
+  deriving stock (Eq,Show)
+
+-- | One anomaly, with the same provenance. Never optional here: an anomaly is
+-- reported against an event that WAS admitted, so its stamp and its blesser
+-- are both known.
+data Anomalous = Anomalous
+  { anEvent   :: EventId
+  , anSeq     :: Word64
+  , anCanonBy :: HubKey
+  , anWhat    :: Anomaly
+  }
+  deriving stock (Eq,Show)
+
 data Comment = Comment
   { cId         :: EventId
   , cAuthor     :: HubKey
@@ -248,7 +298,7 @@ tsTitle = fromMaybe "" . HM.lookup "title" . tsAttrs
 data FoldResult = FoldResult
   { frThreads  :: HashMap ThreadId ThreadState
   , frRedacted :: HashSet EventId          -- ^ events a renderer must withhold
-  , frDropped  :: [(EventId,DropReason)]   -- ^ deterministic order
+  , frDropped  :: [Dropped]                -- ^ deterministic order
     -- | The largest @seq@ and @number@ actually admitted, 0 when none. A
     -- publisher mints the next ones from these, so minting is a function of
     -- canon rather than of any node-local counter.
@@ -284,13 +334,15 @@ data FoldResult = FoldResult
   , frOwner :: HubKey
     -- | Anomalies in what was admitted, in @seq@ order. See 'Anomaly': none of
     -- these stops the fold, and all of them are somebody's mistake.
-  , frAnomalies :: [(EventId,Anomaly)]
+  , frAnomalies :: [Anomalous]
     -- | Every encrypted part canon references, from any admitted event.
     --
     -- Retention needs this as a set rather than as a walk over the threads:
     -- a canon-aware purge (PEP-21) must keep the trees canon points at, and
     -- they are otherwise scattered across three fields of two records.
   , frParts :: HashSet HashRef
+    -- | Every admitted event in @seq@ order. See 'LogEntry'.
+  , frLog :: [LogEntry]
     -- | The @folded-ts@ of the highest-@seq@ admitted event, 0 when none.
     --
     -- A folder mints the next one from this, so a clock that is behind canon
@@ -306,10 +358,12 @@ data FoldResult = FoldResult
 data Stamp = Stamp
   { spSeq    :: Word64
   , spKey    :: HubKey        -- ^ the canon box signer
-    -- | Only when it could be a thread number. A number on anything but an
-    -- @open@ is not one, and spending it would burn a human number nobody was
-    -- ever given.
-  , spNumber :: Maybe Word64
+    -- | The clock the stamp asserts. Carried here rather than left to 'keep'
+    -- because the next mint is clamped to be no lower than the highest one in
+    -- canon, so an event that spends a @seq@ without spending its @folded-ts@
+    -- leaves the bridge minting below a stamp canon already holds, which is a
+    -- 'FoldedTsWentBack' every verifier then reports forever.
+  , spFolded :: Word64
   }
 
 -- | The stamp of an event this build could not resolve.
@@ -325,9 +379,13 @@ data Stamp = Stamp
 --
 -- 'Nothing' when the canon box itself does not verify or does not decode: then
 -- there is no stamp, only bytes claiming to be one.
+-- Deliberately says nothing about @number@: that one is spent on admission, and
+-- this event was not admitted. A build that counted it would hand out different
+-- numbers than the build that can read the content and drops it, from the same
+-- canon.
 ghostStamp :: Event -> Maybe Stamp
 ghostStamp e = case unboxChecked (evCanonBox e) of
-  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccNumber cc))
+  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccFoldedTs cc))
   Left _        -> Nothing
 
 -- One entry in the ordered pass.
@@ -361,9 +419,15 @@ resolve e = do
 -- Carries the declared version so a reader can say which, and is a distinct
 -- type rather than a 'DropReason' because it is not about an event: nothing
 -- was folded at all.
-data CanonTooNew =
+-- Only the tree's version, deliberately. A file's own @(hub-event N)@ used to
+-- veto the fold as well, taken as the maximum over the tree, which handed a
+-- veto to whoever could write one file: the clause is unsigned text, so a
+-- single line saying @(hub-event 4294967295)@ made a repository unreadable for
+-- every clone, permanently and for free. A file this build cannot read is one
+-- file, refused by the reader ("HBS2.Hub.Canon") and reported, exactly like an
+-- event whose author box does not decode.
+newtype CanonTooNew =
     MetaTooNew Word32   -- ^ the tree's @hub-meta@
-  | EventTooNew Word32  -- ^ the highest @hub-event@ on any file in it
   deriving stock (Eq,Show)
 
 -- | Fold canon that declares its consensus version: the gate PEP-19 requires.
@@ -377,18 +441,12 @@ data CanonTooNew =
 -- (the bridge, which is minting into canon it is reading).
 foldCanon
   :: Word32   -- ^ the tree's @(hub-meta N)@
-  -> Word32   -- ^ the highest @(hub-event N)@ found on any event file
   -> HubKey
   -> [Event]
   -> Either CanonTooNew FoldResult
-foldCanon meta event owner es
-  | meta > hubMetaVersion   = Left (MetaTooNew meta)
-    -- Separately, because they answer different questions: the tree version
-    -- governs the admission rules, a file version governs the shape of one
-    -- event, and a reader that knows the rules but not the file layout is just
-    -- as unable to fold.
-  | event > hubEventVersion = Left (EventTooNew event)
-  | otherwise               = Right (foldEvents owner es)
+foldCanon meta owner es
+  | meta > hubMetaVersion = Left (MetaTooNew meta)
+  | otherwise             = Right (foldEvents owner es)
 
 -- | The whole fold: resolve, then materialize.
 --
@@ -429,13 +487,14 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     key (Ghost eid _ sp cid) = (spSeq sp, eid, cid)
 
     st0 = S { sMaint    = HS.singleton owner
+            , sEver     = HS.singleton owner
             , sThreads  = HM.empty
             , sSeen     = HM.empty
             , sRedacted = HS.empty
             -- These are the ones whose canon box did not verify or did not
             -- decode either, so there is no seq to order them by at all: after
             -- the rest, still deterministically among themselves by event-id.
-            , sDropped  = [ (maxBound, eid, reason) | (eid,reason) <- pre ]
+            , sDropped  = [ Dropped eid Nothing Nothing reason | (eid,reason) <- pre ]
             , sMaxSeq    = 0
             , sMaxNumber = 0
             , sOrigins   = HS.empty
@@ -444,6 +503,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             , sLastNumber = 0
             , sLastFolded = 0
             , sAnoms      = []
+            , sLog        = []
             , sParts      = HS.empty
             }
 
@@ -453,7 +513,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frRedacted = sRedacted s
       -- Ordered by the whole triple: two drops sharing (seq, event-id) but
       -- differing in reason must not fall back on input order.
-      , frDropped  = [ (e,d) | (_,e,d) <- sortOn id (sDropped s) ]
+      , frDropped  = sortOn dropKey (sDropped s)
       , frMaxSeq    = sMaxSeq s
       , frMaxNumber = sMaxNumber s
       , frAdmitted  = sSeen s
@@ -461,6 +521,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frOrigins   = sOrigins s
       , frOwner     = owner
       , frAnomalies = reverse (sAnoms s)
+      , frLog       = reverse (sLog s)
       , frParts     = sParts s
       , frLastFolded = sLastFolded s
       }
@@ -472,7 +533,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- What it can still do is spend the stamp, which is the whole reason a
     -- ghost is in the ordered pass at all.
     go (Ghost eid reason sp _ : rest) s =
-      go rest (dropAt (spSeq sp) eid reason (stamp sp s))
+      go rest (dropAt eid (Just (spSeq sp)) (Just (spKey sp)) reason (stamp sp s))
     go (Whole r : rest) s0
       | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
       | not (sane r)                = go rest (dropE r BadStamp s)
@@ -509,46 +570,55 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         -- window around the reader's own clock.
         foldedOK = ccFoldedTs cc <= maxFoldedTs
 
-    -- Spend a stamp: raise the high-water marks the next mint reads.
+    -- Spend a stamp: raise the two high-water marks that describe a POSITION in
+    -- the log, the @seq@ and the @folded-ts@. The human number is not one of
+    -- them; it is spent by 'keep', on admission, and the difference is
+    -- deliberate (see there).
     --
-    -- Spent by anything whose canon box a then-authorized key signed, admitted
-    -- or not, for two reasons. Admission is not final: a reply dropped as
-    -- dangling is admitted as soon as the opening event it names arrives, and
-    -- canon arrives a file at a time. And even where it is final, the file
+    -- Spent by anything whose canon box a key this log ever authorized signed,
+    -- admitted or not, for two reasons. Admission is not final: a reply dropped
+    -- as dangling is admitted as soon as the opening event it names arrives,
+    -- and canon arrives a file at a time. And even where it is final, the file
     -- occupies that seq, so minting into it leaves canon holding two events at
     -- one seq for good, with every LWW attribute between them settled by a hash
     -- instead of by time.
     --
-    -- What does not spend one is a canon box that does not verify, or one from
-    -- a key that was never authorized or is no longer: those are exactly the
-    -- files a stranger can add, and counting them would let anyone who can get
-    -- a file into the tree push the cursor to the top of its range and leave
-    -- the owner unable to mint even the revoke that would stop it.
+    -- EVER authorized, not currently: a delegate who minted from a view built
+    -- before their revocation, and whose event the publisher then wrote, leaves
+    -- a file the fold refuses at a seq that is nonetheless taken. Requiring a
+    -- live delegation there would hand that seq out a second time, and needs no
+    -- ill intent to happen. What it does exclude is a key this log never
+    -- authorized at all, which is the case that matters: the fold is a public
+    -- function over whatever files a tree holds, and counting a stranger's
+    -- would let anyone who can write one file strand the cursor. A former
+    -- maintainer could already have stranded it while their delegation stood,
+    -- so nothing is conceded by counting them now.
     stamp sp s
-      | not (HS.member (spKey sp) (sMaint s)) = s
+      | not (HS.member (spKey sp) (sEver s)) = s
       | otherwise = s
           { sMaxSeq = if spSeq sp == maxBound
                         then sMaxSeq s
                         else max (sMaxSeq s) (spSeq sp)
-          , sMaxNumber = case spNumber sp of
-              Just n | n /= maxBound -> max (sMaxNumber s) n
-              _                      -> sMaxNumber s
+            -- Field by field, like the counters: a value the fold refuses is
+            -- not spent, or the refusal would be the poisoning.
+          , sLastFolded = if spFolded sp > maxFoldedTs
+                            then sLastFolded s
+                            else max (sLastFolded s) (spFolded sp)
           }
 
-    -- A resolved event's own stamp. Unlike a ghost's, the content is readable,
-    -- so a number that cannot be one is dropped here rather than spent.
+    -- A resolved event's own stamp.
     stampOf r = Stamp
       { spSeq    = rSeq r
       , spKey    = rCanonKey r
-      , spNumber = case rContent r of
-          AOpen{} -> ccNumber (rCanon r)
-          _       -> Nothing
+      , spFolded = ccFoldedTs (rCanon r)
       }
 
     apply r s = case rContent r of
 
       ADelegate k _
-        | ownerOnly r -> keep repoScope r s { sMaint = HS.insert k (sMaint s) }
+        | ownerOnly r -> keep repoScope r s { sMaint = HS.insert k (sMaint s)
+                                            , sEver  = HS.insert k (sEver s)
+                                            }
         | otherwise   -> dropE r UnauthorizedDelegate s
 
       -- Revoking the owner key is a no-op: it is the root of trust and
@@ -667,10 +737,15 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 -- Internal accumulator.
 data St = S
   { sMaint    :: HashSet HubKey
+    -- Every key this log has EVER authorized, which only grows. Used for one
+    -- thing, spending stamps, and separate from 'sMaint' because a withdrawn
+    -- delegation must stop an event being ADMITTED without also making the
+    -- seq it occupies available again (see 'stamp').
+  , sEver     :: HashSet HubKey
   , sThreads  :: HashMap ThreadId ThreadState
   , sSeen     :: HashMap EventId (Maybe ThreadId)
   , sRedacted :: HashSet EventId
-  , sDropped  :: [(Word64,EventId,DropReason)]
+  , sDropped  :: [Dropped]
   , sMaxSeq    :: Word64
   , sMaxNumber :: Word64
   , sOrigins   :: HashSet HashRef
@@ -685,7 +760,10 @@ data St = S
     -- appends, so reversing at the end is already the log's own order. A drop
     -- can happen before that order is established, which is why that one
     -- carries its seq.
-  , sAnoms      :: [(EventId,Anomaly)]
+  , sAnoms      :: [Anomalous]
+    -- Newest first while accumulating, like the anomalies and for the same
+    -- reason: the pass runs in the order the log itself has.
+  , sLog        :: [LogEntry]
   , sParts      :: HashSet HashRef
   }
 
@@ -694,16 +772,31 @@ data St = S
 keep :: Maybe ThreadId -> Resolved -> St -> St
 keep scope r s = s
   { sSeen      = HM.insert (rId r) scope (sSeen s)
-    -- The stamps are advanced by 'stamp' before this, for events that were not
-    -- admitted too; the origin is not, because an event that was not admitted
-    -- folded no letter.
+    -- The seq and the folded-ts are advanced by 'stamp' before this, for events
+    -- that were not admitted too. These three are not.
+    --
+    -- The origin, because an event that was not admitted folded no letter. And
+    -- the human number, because it is not a position in the log but a label on
+    -- a thread that exists: an @open@ aimed at another repository, blessed by a
+    -- maintainer of this one, is refused here and never showed anyone a number,
+    -- so spending it would burn one for nothing, and at the top of the range it
+    -- would strand the counter and abort every later triage run. A number
+    -- handed out twice is a reported anomaly on a display field; a number that
+    -- cannot be handed out at all stops the repo.
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
   , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
   , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num
   , sLastNumber = fromMaybe (sLastNumber s) num
-  , sLastFolded = folded
+  , sMaxNumber = case num of
+      Just n | n /= maxBound -> max (sMaxNumber s) n
+      _                      -> sMaxNumber s
   , sParts     = foldr HS.insert (sParts s) (eventParts (rContent r))
-  , sAnoms     = [ (rId r, a) | a <- reverse anoms ] <> sAnoms s
+  , sLog       = LogEntry { lgSeq = rSeq r, lgEvent = rId r, lgThread = scope
+                          , lgAuthor = rAuthorKey r, lgCanonBy = rCanonKey r
+                          , lgFoldedTs = folded, lgOrigin = ccOrigin cc
+                          , lgContent = rContent r
+                          } : sLog s
+  , sAnoms     = [ Anomalous (rId r) (rSeq r) (rCanonKey r) a | a <- reverse anoms ] <> sAnoms s
   }
   where
     cc = rCanon r
@@ -791,12 +884,18 @@ threadOfEvent :: EventId -> St -> Maybe ThreadId
 threadOfEvent eid s = fromMaybe Nothing (HM.lookup eid (sSeen s))
 
 dropE :: Resolved -> DropReason -> St -> St
-dropE r = dropAt (rSeq r) (rId r)
+dropE r = dropAt (rId r) (Just (rSeq r)) (Just (rCanonKey r))
 
--- The seq is carried into the drop list rather than taken from the event,
--- because a ghost has no event to take it from.
-dropAt :: Word64 -> EventId -> DropReason -> St -> St
-dropAt sq eid reason s = s { sDropped = (sq, eid, reason) : sDropped s }
+-- The provenance is passed in rather than taken from an event, because a ghost
+-- has no event to take it from and an unreadable canon box has neither half.
+dropAt :: EventId -> Maybe Word64 -> Maybe HubKey -> DropReason -> St -> St
+dropAt eid sq by reason s = s { sDropped = Dropped eid sq by reason : sDropped s }
+
+-- Ordered by the whole triple, so that two drops sharing an event-id and a seq
+-- but differing in reason do not fall back on input order. An event with no
+-- readable canon box has no seq to sort by and goes after the rest.
+dropKey :: Dropped -> (Word64, EventId, DropReason)
+dropKey d = (fromMaybe maxBound (drSeq d), drEvent d, drWhy d)
 
 -- A close/reopen note becomes a comment attached to the status change.
 addNote :: Maybe Text -> Resolved -> Word64 -> ThreadState -> ThreadState
