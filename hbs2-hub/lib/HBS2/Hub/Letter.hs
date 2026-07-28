@@ -28,6 +28,11 @@ module HBS2.Hub.Letter
   , Disposition(..)
   , EnvelopeSigner(..)
   , hubMsgVersion
+  , maxInlineBody
+  , maxTitle
+  , maxAttrValue
+  , textSize
+  , oversizedField
   , noReplyChannel
   , makeLetter
   , makeAck
@@ -57,10 +62,12 @@ import Data.Config.Suckless.Syntax
 
 import Codec.Serialise (Serialise(..),serialise)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
 import Data.Word (Word32,Word64)
 import GHC.Generics (Generic)
 
@@ -92,6 +99,61 @@ newtype EnvelopeSigner = EnvelopeSigner { fromEnvelopeSigner :: HubKey }
 -- v2 build that refuses them would strand them.
 hubMsgVersion :: Word32
 hubMsgVersion = 1
+
+-- | The soft limit PEP-18 puts on an inline body, as a number.
+--
+-- @messageData@ is one secretbox over the whole payload, unchunked, and it
+-- rides in a gossiped message, so an inline body is a cost every peer that
+-- relays the mailbox pays. Above this the body belongs in a @body-part@
+-- attachment, which is chunked and fetched only by whoever wants it.
+--
+-- Triage policy, not consensus: the fold admits an event of any size, and two
+-- hubs may draw the line differently without disagreeing about canon. The
+-- bridge enforces it because that is the last gate before permanence.
+maxInlineBody :: Int
+maxInlineBody = 32 * 1024
+
+-- | And on a title, which has no attachment form: it is an attribute of the
+-- thread, rendered in every list. A title long enough to need chunking is a
+-- body in the wrong field.
+maxTitle :: Int
+maxTitle = 512
+
+-- | And on an attribute name or value. Wider than a title because a
+-- multi-valued attribute is a list of keys ('encodeLabels'), and narrow enough
+-- that an attribute cannot be used as a body.
+maxAttrValue :: Int
+maxAttrValue = 4 * 1024
+
+-- | The size of a text field as it costs on the wire: UTF-8 bytes, not
+-- characters. A limit about payload size has to be measured in payload.
+textSize :: Text -> Int
+textSize = BS.length . Text.encodeUtf8
+
+-- | Which text field is over its limit, if any.
+--
+-- Returns the field name rather than a Bool so triage can tell the sender what
+-- to move to an attachment.
+oversizedField :: AuthorContent -> Maybe Text
+oversizedField = \case
+  AOpen _ _ title _ body _ _ _
+    | textSize title > maxTitle -> Just "title"
+    | maybe False big body      -> Just "body"
+  AComment _ _ body _ _
+    | maybe False big body      -> Just "body"
+  AClose _ note _
+    | maybe False big note      -> Just "note"
+  AReopen _ note _
+    | maybe False big note      -> Just "note"
+  ASet _ k v _
+    | textSize k > maxAttrValue -> Just "attr"
+    | textSize v > maxAttrValue -> Just "value"
+  AMerge _ mc into _
+    | textSize mc > maxTitle    -> Just "merge-commit"
+    | textSize into > maxTitle  -> Just "merged-into"
+  _ -> Nothing
+  where
+    big = (> maxInlineBody) . textSize
 
 -- | Where the owner should send acknowledgements and status updates.
 --

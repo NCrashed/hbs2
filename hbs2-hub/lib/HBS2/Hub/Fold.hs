@@ -21,6 +21,9 @@ module HBS2.Hub.Fold
   , materialize
   , foldEvents
   , reachableCoords
+  , Anomaly(..)
+  , eventParts
+  , referencesPart
   ) where
 
 import HBS2.Hub.Types
@@ -81,6 +84,40 @@ data DropReason =
   | BadStamp
   deriving stock (Eq,Ord,Show)
 
+-- | Something admitted canon should not contain.
+--
+-- Not a drop reason: every one of these is a fold-legal event, and refusing
+-- them would make a clone show less than canon holds, which is worse than
+-- showing it and saying so. They are collected here because the fold is the
+-- one pass that sees the whole log in order, and reported by @hub verify@
+-- (PEP-22), which is the only place they can be acted on.
+--
+-- The pairs carry (what came before, what this event says), because the useful
+-- output names both.
+data Anomaly =
+    -- | Two admitted events stamped with one @seq@. Deterministic here (the
+    -- sort key settles it) but not what either signer intended.
+    DupSeq Word64
+  | DupNumber Word64          -- ^ two threads with one human number
+  | NumberWentBack Word64 Word64
+    -- | @folded-ts@ decreasing as @seq@ increases. Load-bearing, since the
+    -- render contract's times come from it, and asserted by whoever signs the
+    -- canon box (PEP-22).
+  | FoldedTsWentBack Word64 Word64
+    -- | Two events folded from one Mailbox message. PEP-19 allows exactly one
+    -- event per letter, so this is either a bug or two folders racing.
+  | DupOrigin HashRef
+    -- | An event naming an encrypted part with no @part-secret@ to open it.
+    -- Admitted, because the reference is inside a signed author box and
+    -- nothing is wrong with the event; what is missing is the key, and no
+    -- later event can supply it.
+  | PartWithoutSecret
+    -- | An attribute whose value is not in the canonical form for its name
+    -- ('normalizeAttr'), so the same set of labels can appear under two
+    -- different event-ids.
+  | UnnormalizedAttr Text
+  deriving stock (Eq,Ord,Show)
+
 data Comment = Comment
   { cId         :: EventId
   , cAuthor     :: HubKey
@@ -136,7 +173,7 @@ data ThreadState = ThreadState
   , tsCreated  :: Word64           -- ^ folded-at of the open event, epoch ms (trusted)
   , tsUpdated  :: Word64           -- ^ folded-at of the latest event, epoch ms (trusted)
   , tsAttrs    :: HashMap Text Text
-  , tsComments :: [Comment]        -- ^ in seq order
+  , tsComments :: [Comment]        -- ^ in seq order, oldest first
   , tsPR       :: Maybe PRState
     -- | Labels the author asked for on open. Deliberately NOT merged into
     -- 'tsAttrs': applying them would let a stranger label their own
@@ -153,6 +190,7 @@ data ThreadState = ThreadState
     -- | The Tier B letter this was folded from, for provenance.
   , tsOrigin     :: Maybe HashRef
   }
+  deriving stock (Eq,Show)
 
 -- | The thread title, an LWW attribute like any other.
 tsTitle :: ThreadState -> Text
@@ -204,6 +242,15 @@ data FoldResult = FoldResult
     -- Recorded so a caller cannot end up with a view built for one repo and
     -- a fold of another. It is the same key that seeds the maintainer set.
   , frOwner :: HubKey
+    -- | Anomalies in what was admitted, in @seq@ order. See 'Anomaly': none of
+    -- these stops the fold, and all of them are somebody's mistake.
+  , frAnomalies :: [(EventId,Anomaly)]
+    -- | Every encrypted part canon references, from any admitted event.
+    --
+    -- Retention needs this as a set rather than as a walk over the threads:
+    -- a canon-aware purge (PEP-21) must keep the trees canon points at, and
+    -- they are otherwise scattered across three fields of two records.
+  , frParts :: HashSet HashRef
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -254,10 +301,10 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- folders reading the same tree in different orders would report a
     -- different frMaxNumber and so mint different numbers next.
     --
-    -- A well-formed canon cannot contain such a pair (the file name is
-    -- %020d(seq)-<event-id>, so both copies are the same path), but the fold
-    -- is a public function over a list, and 'hub verify' exists to read canon
-    -- somebody else wrote.
+    -- A well-formed canon cannot contain such a pair, because the file name is
+    -- 'eventFileName' and both copies are therefore the same path. The fold is
+    -- still a public function over a list, and @hub verify@ exists to read
+    -- canon somebody else wrote.
     key r = (rSeq r, rId r, rCanonId r)
 
     st0 = S { sMaint    = HS.singleton owner
@@ -270,6 +317,12 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             , sMaxSeq    = 0
             , sMaxNumber = 0
             , sOrigins   = HS.empty
+            , sSeqSeen    = HS.empty
+            , sNumbers    = HS.empty
+            , sLastNumber = 0
+            , sLastFolded = 0
+            , sAnoms      = []
+            , sParts      = HS.empty
             }
 
     -- Comments accumulate reversed (O(1) append) and are flipped here.
@@ -285,6 +338,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frMaintainers = sMaint s
       , frOrigins   = sOrigins s
       , frOwner     = owner
+      , frAnomalies = [ (e,a) | (_,e,a) <- reverse (sAnoms s) ]
+      , frParts     = sParts s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
@@ -444,6 +499,14 @@ data St = S
   , sMaxSeq    :: Word64
   , sMaxNumber :: Word64
   , sOrigins   :: HashSet HashRef
+    -- Anomaly bookkeeping: what has been stamped already, and the last
+    -- values seen, so a counter going backwards is visible.
+  , sSeqSeen    :: HashSet Word64
+  , sNumbers    :: HashSet Word64
+  , sLastNumber :: Word64
+  , sLastFolded :: Word64
+  , sAnoms      :: [(Word64,EventId,Anomaly)]
+  , sParts      :: HashSet HashRef
   }
 
 -- Mark an event applied (dedup + the id every later redact resolves
@@ -456,7 +519,53 @@ keep scope r s = s
   , sMaxSeq    = max (sMaxSeq s) (rSeq r)
   , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
+  , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
+  , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num
+  , sLastNumber = fromMaybe (sLastNumber s) num
+  , sLastFolded = folded
+  , sParts     = foldr HS.insert (sParts s) (eventParts (rContent r))
+    -- Newest first while accumulating, reversed once at the end.
+  , sAnoms     = [ (rSeq r, rId r, a) | a <- reverse anoms ] <> sAnoms s
   }
+  where
+    cc = rCanon r
+    num = ccNumber cc
+    folded = ccFoldedTs cc
+
+    anoms = concat
+      [ [ DupSeq (rSeq r) | HS.member (rSeq r) (sSeqSeen s) ]
+      , [ DupNumber n | Just n <- [num], HS.member n (sNumbers s) ]
+        -- Numbers are assigned in open order, so one that does not advance is
+        -- either a duplicate publisher or a hand-written stamp.
+      , [ NumberWentBack (sLastNumber s) n
+        | Just n <- [num], sLastNumber s > 0, n <= sLastNumber s ]
+      , [ FoldedTsWentBack (sLastFolded s) folded | folded < sLastFolded s ]
+      , [ DupOrigin o | Just o <- [ccOrigin cc], HS.member o (sOrigins s) ]
+      , [ PartWithoutSecret
+        | referencesPart (rContent r), isNothing (ccPartSecret cc) ]
+      , [ UnnormalizedAttr k
+        | ASet _ k v _ <- [rContent r], not (normalizedAttr k v) ]
+      ]
+
+-- | Every encrypted part an event references.
+--
+-- Here rather than in the bridge because two callers need the same answer for
+-- different reasons: the bridge refuses to mint an event whose parts it cannot
+-- vouch for, and retention must keep the trees canon points at. One list, so
+-- the two cannot drift.
+eventParts :: AuthorContent -> [HashRef]
+eventParts = \case
+  AOpen _ _ _ _ _ part coords _ -> maybe [] pure part <> maybe [] bundle coords
+  AComment _ _ _ part _         -> maybe [] pure part
+  ARevise _ coords _            -> bundle coords
+  _                             -> []
+  where
+    bundle = maybe [] pure . prBundle
+
+-- | Does this event reference an encrypted part, so that its canon box must
+-- carry the group secret for it (PEP-19 "Attachments in public canon")?
+referencesPart :: AuthorContent -> Bool
+referencesPart = not . null . eventParts
 
 -- | Can the proposed change actually be obtained?
 --

@@ -39,11 +39,22 @@ module HBS2.Hub.Types
   , encodeLabels
   , decodeLabels
   , validLabel
+  , multiValued
+  , normalizeAttr
+  , normalizedAttr
+  , validPartSecret
+  , hubMetaVersion
+  , hubEventVersion
+  , threadDir
+  , repoDir
+  , numberIndexPath
+  , eventFileName
   ) where
 
 import HBS2.Prelude.Plated
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 
@@ -52,9 +63,10 @@ import Codec.Serialise (Serialise(..),serialise)
 import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.List (nub,sort)
 import Data.Text qualified as Text
-import Data.Word (Word64)
+import Data.Word (Word32,Word64)
 
 -- | The whole hub is fixed to the basic scheme, like hbs2-git3.
 type HubScheme = 'HBS2Basic
@@ -203,7 +215,17 @@ data CanonContent = CanonContent
   , ccNumber     :: Maybe Word64     -- ^ human #N, on open only
   , ccOrigin     :: Maybe HashRef    -- ^ Tier B letter hash (absent if owner-native)
   , ccFoldedTs   :: Word64           -- ^ owner clock at fold, Unix epoch milliseconds
-  , ccPartSecret :: Maybe ByteString -- ^ group secret, on events with encrypted parts
+    -- | The group secret for this event's encrypted parts, on events that
+    -- reference one.
+    --
+    -- Raw key bytes: exactly what @Saltine.encode@ gives for a 'GroupSecret',
+    -- which is what a reader hands back to the decryptor. Deliberately not the
+    -- 'GroupSecret' type: canon is forever, and the CBOR shape of a bare
+    -- ByteString is pinned by CBOR itself, while the shape of the key type is
+    -- pinned by whatever the crypto library derives. There is no way to fix an
+    -- encoding mismatch after the fact (see PEP-19 "Attachments in public
+    -- canon"), so 'validPartSecret' checks what goes in.
+  , ccPartSecret :: Maybe ByteString
   }
   deriving stock (Eq,Show,Generic)
 
@@ -216,7 +238,10 @@ data Event = Event
   }
   deriving stock (Generic)
 
-instance Serialise Event
+-- Deliberately NO Serialise instance. Canon does not store an Event as one
+-- blob: PEP-19 writes the two boxes separately, base58 inside the event
+-- file's S-expression, so a Serialise here would be a second, unused
+-- encoding of the thing whose encoding matters most.
 
 -- | Events are identified by their event-id; boxes are opaque bytes.
 instance Show Event where
@@ -266,6 +291,74 @@ decodeLabels t
 -- empty.
 validLabel :: Text -> Bool
 validLabel l = not (Text.null l) && not (Text.isInfixOf "," l)
+
+-- | Attribute names whose value is a set, not a scalar.
+--
+-- The canonical rendering of a set ('encodeLabels') is what makes two
+-- maintainers agreeing on the same labels produce the same event-id, so the
+-- list of names it applies to has to live next to it rather than in each
+-- caller. A writer normalizes the value of these before signing; @hub verify@
+-- (PEP-22) reports a value in canon that is not normalized, since the fold
+-- cannot fix one (the author box is signed) and must not drop it either.
+multiValued :: [Text]
+multiValued = ["labels","assignees"]
+
+-- | Normalize an attribute value for signing: canonical for a set-valued
+-- name, untouched otherwise.
+normalizeAttr :: Text -> Text -> Text
+normalizeAttr k v
+  | k `elem` multiValued = encodeLabels (decodeLabels v)
+  | otherwise            = v
+
+-- | Is this value already what 'normalizeAttr' would produce?
+normalizedAttr :: Text -> Text -> Bool
+normalizedAttr k v = normalizeAttr k v == v
+
+-- | Is this a plausible group secret ('ccPartSecret')?
+--
+-- A length check, not a validity check: nothing here can tell a real key from
+-- 32 arbitrary bytes. It exists because the field is raw bytes with a pinned
+-- meaning, and a writer that put something else there (a base58 string, a
+-- serialised key type) would produce canon whose attachments never open and
+-- cannot be repaired.
+validPartSecret :: ByteString -> Bool
+validPartSecret bs = BS.length bs == (typicalKeyLength :: Int)
+
+-- | The consensus version of the canon layout and fold rules: the
+-- @(hub-meta N)@ of PEP-19.
+--
+-- A reader that meets a higher one reports it rather than folding. Any change
+-- to the admission rules, to the drop reasons, or to how state is derived from
+-- an admitted event bumps this.
+hubMetaVersion :: Word32
+hubMetaVersion = 1
+
+-- | The version of a single event file: the @(hub-event N)@ of PEP-19.
+hubEventVersion :: Word32
+hubEventVersion = 1
+
+-- | Where a thread's events live, relative to the canon tree root.
+threadDir :: ThreadId -> FilePath
+threadDir tid = "threads/" <> show (pretty tid)
+
+-- | Where events that belong to no thread live (delegate, revoke).
+repoDir :: FilePath
+repoDir = "repo"
+
+-- | The rebuildable number index (PEP-19); canon does not depend on it.
+numberIndexPath :: FilePath
+numberIndexPath = "index/number.sexp"
+
+-- | The file name of one event: zero-padded @seq@, then the event-id.
+--
+-- The padding is what makes a plain lexical directory listing agree with the
+-- fold's order, and the pair is what makes the name unique: two blessings of
+-- one author box at one @seq@ are the same path, which is why a well-formed
+-- canon cannot contain them (see the sort key in "HBS2.Hub.Fold").
+eventFileName :: Word64 -> EventId -> FilePath
+eventFileName sq eid = pad (show sq) <> "-" <> show (pretty eid)
+  where
+    pad t = replicate (20 - length t) '0' <> t
 
 -- | Why a signed box could not be opened.
 data BoxError =

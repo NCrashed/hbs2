@@ -186,6 +186,89 @@ spec = do
       HS.member cid (frRedacted fr) `shouldBe` False
       reasons fr `shouldBe` [UnauthorizedCanon]
 
+    it "reports what it admitted but should not have" $ do
+      owner <- kp
+      alice <- kp
+      part <- someHash
+      origin <- someHash
+      -- None of these is a drop: refusing them would make a clone show less
+      -- than canon holds. They exist for hub verify (PEP-22), which is the
+      -- only place they can be acted on.
+      let repo = fst owner
+          o1 = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
+                 (\e -> CanonContent e 1 (Just 5) (Just origin) 5000 Nothing)
+          -- number goes backwards, folded-ts goes backwards, and the same
+          -- letter is folded a second time
+          o2 = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
+                 (\e -> CanonContent e 2 (Just 3) (Just origin) 4000 Nothing)
+          -- ...and this one names an encrypted part with no key to it
+          o3 = mkEvent alice owner (AOpen repo HubIssue "c" [] Nothing (Just part) Nothing 3)
+                 (\e -> CanonContent e 3 (Just 9) Nothing 6000 Nothing)
+          -- an unnormalized multi-valued attribute: the same two labels in
+          -- another order are other bytes and so another event-id
+          o4 = mkEvent owner owner (ASet (eventId o1) "labels" "ui,bug" 4) (canonAt 4 Nothing 7000)
+          fr = foldEvents repo [o1,o2,o3,o4]
+      frDropped fr `shouldBe` []
+      map snd (frAnomalies fr) `shouldBe`
+        [ NumberWentBack 5 3, FoldedTsWentBack 5000 4000, DupOrigin origin
+        , PartWithoutSecret
+        , UnnormalizedAttr "labels"
+        ]
+      -- in seq order, so a report reads like the log
+      map fst (frAnomalies fr) `shouldBe` [eventId o2, eventId o2, eventId o2, eventId o3, eventId o4]
+
+    it "reports a duplicate seq and a duplicate number" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          a = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
+                (canon 1 (Just 1))
+          b = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
+                (canon 1 (Just 1))
+          fr = foldEvents repo [a,b]
+      frDropped fr `shouldBe` []
+      map snd (frAnomalies fr) `shouldSatisfy` \as ->
+        DupSeq 1 `elem` as && DupNumber 1 `elem` as
+
+    it "collects every part canon references, for retention" $ do
+      owner <- kp
+      alice <- kp
+      body <- someHash
+      cmt <- someHash
+      bundle <- someHash
+      -- A canon-aware purge has to keep the trees canon points at (PEP-21),
+      -- and they are otherwise scattered across three fields of two records.
+      let repo = fst owner
+          ePR = mkEvent alice owner
+                  (AOpen repo HubPR "pr" [] Nothing (Just body)
+                     (Just coords { prBundle = Just bundle }) 1)
+                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just "S"))
+          eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just cmt) 2)
+                 (\e -> CanonContent e 2 Nothing Nothing 2 (Just "S"))
+          fr = foldEvents repo [ePR, eC]
+      frDropped fr `shouldBe` []
+      frParts fr `shouldBe` HS.fromList [body, cmt, bundle]
+
+    it "canonicalizes a multi-valued attribute and leaves scalars alone" $ do
+      -- The rule PEP-19 states in prose: the same set of labels must always
+      -- produce the same bytes, or two maintainers agreeing mint two events.
+      normalizeAttr "labels" "ui,bug" `shouldBe` "bug,ui"
+      normalizeAttr "labels" "bug,ui,bug" `shouldBe` "bug,ui"
+      normalizeAttr "assignees" "b,a" `shouldBe` "a,b"
+      normalizeAttr "status" "in,progress" `shouldBe` "in,progress"
+      normalizedAttr "labels" "bug,ui" `shouldBe` True
+      normalizedAttr "labels" "ui,bug" `shouldBe` False
+
+    it "names an event file so a lexical listing is the fold order" $ do
+      owner <- kp
+      alice <- kp
+      let ac n = AOpen (fst owner) HubIssue n [] Nothing Nothing Nothing 1
+          e1 = mkEvent alice owner (ac "a") (canon 1 (Just 1))
+          e2 = mkEvent alice owner (ac "b") (canon 10 (Just 2))
+      -- The padding is the point: "10" must not sort before "2".
+      eventFileName 1 (eventId e1) `shouldSatisfy` (< eventFileName 10 (eventId e2))
+      length (eventFileName 1 (eventId e1)) `shouldBe` length (eventFileName 10 (eventId e2))
+
     it "orders two blessings of one author box by content, not by input" $ do
       owner <- kp
       alice <- kp

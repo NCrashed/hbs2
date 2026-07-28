@@ -111,8 +111,14 @@ There is no fixed open/close/label schema baked into storage. Structured
 fields (status, labels, assignee, title, milestone, number) are attributes
 set by `set` events under last-writer-wins by a monotonic weight, with
 multi-valued ones (labels, assignees) encoded as a comma-separated list in
-sorted order with no spaces, so that the same set of labels always produces
-the same bytes and therefore the same event-id; free-form
+sorted order with no spaces, so that the same set of labels always produces the
+same bytes and therefore the same event-id. Which names are multi-valued is
+part of that rule, so the list belongs with the encoder rather than in each
+writer. Note where the obligation falls: a writer normalizes the value before
+signing, and the fold does NOT normalize on the way in. It cannot, since the
+value is inside a signed author box, and it must not drop the event either, so
+an unnormalized value is admitted and reported as an anomaly for `hub verify`.
+Free-form
 discussion is carried by `comment` events that accumulate in order. New
 field kinds are added by convention without a storage migration.
 
@@ -557,9 +563,22 @@ not possible: a new ciphertext has a new hash and would break the signed
 reference.
 
 So when a folded event references encrypted parts, the owner publishes the
-message group secret in the owner-signed canon box (`part-secret`). This
-reveals nothing beyond what the fold already makes public, because that
-secret encrypted only this letter's own content, which is being published.
+secret those parts were encrypted with in the owner-signed canon box
+(`part-secret`). That is the PARTS secret, which PEP-18 requires to be separate
+from the one over `messageData`, and the separation is what makes publishing it
+safe: it opens the attachments the fold is publishing anyway and nothing else.
+Publishing the message's own secret instead would also open the letter's
+transport envelope, and with it the back-channel clauses that PEP-18 keeps out
+of the signed letter precisely so a contributor's personal mailbox address does
+not reach every clone. That leak would also be retroactive, since the
+ciphertext is held by every peer that ever relayed the mailbox.
+
+The field is raw key bytes (`Saltine.encode` of the group secret), not a
+serialised key type: canon is forever, and the CBOR shape of a byte string is
+pinned by CBOR itself, while the shape of a key type is pinned by whatever the
+crypto library derives for it. A writer that put something else there produces
+canon whose attachments never open, and by the paragraph below there is no
+repair, so a size check on the way in is worth the line it costs.
 A canon reader fetches the referenced tree over hbs2 and decrypts it with
 `part-secret`. Note the attachment blocks are hbs2 storage objects fetched
 over the same transport as the git data, not git blobs in the meta tree;

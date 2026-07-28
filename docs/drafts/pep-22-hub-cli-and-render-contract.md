@@ -267,6 +267,15 @@ and non-monotonic numbers, naming the canon keys involved. Making the fold
 reject them would be worse, since a clone would then silently show fewer
 threads than canon contains.
 
+Where these come from, concretely: the fold collects them as it goes and hands
+back a list alongside the threads, in `seq` order. It is the one pass that sees
+the whole log in order, so anything `hub verify` recomputed from the raw events
+would be a second, divergent implementation of the same walk. The list covers
+duplicate `seq`, duplicate and backwards `number`, backwards `folded-ts`, two
+events folded from one letter, an event naming an encrypted part with no
+`part-secret`, and an attribute value that is not in canonical form for its
+name.
+
 `hub verify` also flags what the fold accepts but cannot police. The
 canon-box `folded-ts` is load-bearing (the render contract's times come from
 it, precisely because the author's declared timestamp is attacker-chosen),

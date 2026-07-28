@@ -32,6 +32,22 @@
         find where to submit and how to encrypt to it with no live
         lookup.
 
+## Fixes
+
+  - **Mailbox attachments get their own group secret.** `createMessage`
+    encrypted the message parts with the same secret as `messageData`.
+    That is fine in isolation, but it makes the forge unbuildable:
+    folding an attachment into public canon means publishing the key to
+    it (PEP-19), and if that key also opens `messageData` it publishes
+    the sender's private reply address along with it, to every clone,
+    forever. Retroactively, too: the ciphertext sits with every peer that
+    ever hosted or relayed the mailbox, so a copy kept today reads the
+    address out of a message folded years later. Parts now get a separate
+    secret over the same recipients, and since each part tree embeds its
+    own group key, a reader given a part hash and that secret needs
+    nothing from the message it arrived in. No wire-format change, and no
+    existing caller sends parts.
+
 ## Documentation
 
   - **PEP-17 forge specification.** An umbrella draft plus five

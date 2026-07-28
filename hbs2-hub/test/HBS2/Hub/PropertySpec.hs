@@ -267,7 +267,7 @@ step cast st = \case
   -- where a revoked maintainer would slip through.
   StepAsDelegate i ts -> withThread i $ \thr ->
     case acceptLetter (castDeleg cast) (EnvelopeSigner alicePk) (stView st) ts
-           (originOf (stStep st)) Nothing
+           (originOf (stStep st)) noParts
            (letterOf (AComment thr Nothing (Just "d") Nothing ts)) of
       Right acc -> keep TByDelegate acc
       -- Refused after minting earlier in this run: the delegation was
@@ -311,7 +311,7 @@ step cast st = \case
     (old:_) ->
       let content = AOpen repo HubIssue "stale" [] Nothing Nothing Nothing ts
       in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) old ts
-                (originOf (stStep st)) Nothing (letterOf content) of
+                (originOf (stStep st)) noParts (letterOf content) of
            Left e    -> refuse e
            Right acc -> case canonOf (acEvent acc) of
              Nothing -> st
@@ -338,12 +338,12 @@ step cast st = \case
 
     accept tag ts letter =
       case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-             (originOf (stStep st)) Nothing letter of
+             (originOf (stStep st)) noParts letter of
         Right acc -> keep tag acc
         Left e    -> refuse e
 
     mint tag content ts =
-      case ownerEvent (castOwner cast) (stView st) ts Nothing content of
+      case ownerEvent (castOwner cast) (stView st) ts noParts content of
         Right acc -> keep tag acc
         Left e    -> refuse e
 

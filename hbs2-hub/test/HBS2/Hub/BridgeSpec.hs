@@ -5,9 +5,14 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
 
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
+import Data.Text qualified as Text
 import Data.Maybe (fromMaybe)
 import Test.Hspec
 
@@ -48,6 +53,11 @@ expectErr want = \case
   Left got -> got `shouldBe` want
   Right _  -> expectationFailure ("expected " <> show want)
 
+-- A group secret is raw key bytes of a fixed size, which the bridge checks
+-- (validPartSecret): a one-byte stand-in would be refused.
+secret32 :: ByteString
+secret32 = BS.replicate typicalKeyLength 0x41
+
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
@@ -81,7 +91,7 @@ spec = do
                      (AOpen repo HubIssue "hello" [] (Just "b") Nothing Nothing 1)
                      noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 100 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 100 origin noParts letter)
       -- The sender's inner box is kept verbatim, so the id it computed holds.
       letterEventId letter `shouldBe` Just (eventId (acEvent acc))
       acNumber acc `shouldBe` Just 1
@@ -103,11 +113,11 @@ spec = do
           env = fst alice
           open n = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 o1 Nothing (open "a"))
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 o2 Nothing (open "b"))
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 o1 noParts (open "a"))
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 o2 noParts (open "b"))
       let reply = makeLetter (fst alice) (snd alice)
                     (AComment (scopeOf a1) Nothing (Just "hi") Nothing 3) noReplyChannel
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 o3 Nothing reply)
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 o3 noParts reply)
       cvCursor (acView a3) `shouldBe` CanonCursor 4 3
       acNumber a3 `shouldBe` Nothing
       let fr = foldEvents repo (map acEvent [a1,a2,a3])
@@ -130,12 +140,12 @@ spec = do
           reply = makeLetter (fst alice) (snd alice)
                     (AComment tid Nothing (Just "early") Nothing 2) noReplyChannel
       expectErr UnknownThread
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin2 Nothing reply)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin2 noParts reply)
       -- ...and once the open is folded, the same reply is accepted.
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing opening)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts opening)
       aReply <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 Nothing reply)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 noParts reply)
       let fr = foldEvents repo [acEvent aOpen, acEvent aReply]
       frDropped fr `shouldBe` []
       length (tsComments (threadOf fr tid)) `shouldBe` 1
@@ -152,9 +162,9 @@ spec = do
       -- Banning by envelope key is evaded by rewrapping, so the ban is on
       -- the inner author and holds under any envelope.
       expectErr (BadLetter AuthorDenied)
-        (acceptLetter (TriageCtx owner allowed repo) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (TriageCtx owner allowed repo) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin noParts letter)
       expectErr (BadLetter AuthorDenied)
-        (acceptLetter (TriageCtx owner allowed repo) (EnvelopeSigner (fst relay)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (TriageCtx owner allowed repo) (EnvelopeSigner (fst relay)) (emptyView repo) 1 origin noParts letter)
 
     it "hands back the vetted reply channel and the minted number" $ do
       alice <- kp
@@ -168,12 +178,12 @@ spec = do
                      (ReplyTo (fst alice) sigil)
       -- Everything an ack needs, without opening the letter twice.
       mine <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       acReply mine `shouldBe` ReplyTo (fst alice) sigil
       acNumber mine `shouldBe` Just 1
       -- A rewrapper's envelope does not get to redirect the notification.
       relayed <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst relay)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst relay)) (emptyView repo) 1 origin noParts letter)
       acReply relayed `shouldBe` NoReply
 
     it "refuses to bless an owner-native op arriving as a letter" $ do
@@ -187,7 +197,7 @@ spec = do
       let repo = fst owner
           evil = makeLetter (fst mallory) (snd mallory) (ARedact target 1) noReplyChannel
       expectErr (NotAcceptable OwnerNative)
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin Nothing evil)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin noParts evil)
 
     it "refuses to bless a request as the requester's own event" $ do
       alice <- kp
@@ -197,11 +207,11 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       origin2 <- someHash
       let req = makeLetter (fst alice) (snd alice) (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
       p <- expectRequested
-             (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 Nothing req)
+             (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 noParts req)
       pdAuthor p `shouldBe` fst alice
 
     -- A request whose thread is not in canon is early, exactly as a comment
@@ -214,7 +224,7 @@ spec = do
       thr <- someHash
       let repo = fst owner
           req = makeLetter (fst alice) (snd alice) (AClose thr Nothing 1) noReplyChannel
-          got = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing req
+          got = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts req
       expectErr UnknownThread got
       either outcome (const Decide) got `shouldBe` Retry
 
@@ -226,20 +236,54 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       let tid = scopeOf aOpen
           -- the requester declares an absurd time; the owner must not adopt it
           req = makeLetter (fst alice) (snd alice)
-                  (AClose tid (Just "please") maxBound) noReplyChannel
+                  (AClose tid Nothing maxBound) noReplyChannel
       origin2 <- someHash
       aClose <- expectRight (honourRequest (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 500 origin2 req)
       let fr = foldEvents repo [acEvent aOpen, acEvent aClose]
           t = threadOf fr tid
       HM.lookup "status" (tsAttrs t) `shouldBe` Just "closed"
       frDropped fr `shouldBe` []
+      -- the event is the owner's, declared at the owner's clock
+      acAuthor aClose `shouldBe` fst owner
+      authorTs (acContent aClose) `shouldBe` 500
+
+    it "will not sign a stranger's prose as the owner's own words" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
+      let tid = scopeOf aOpen
+          -- a closing note becomes a comment authored by whoever signs the
+          -- event, so honouring this verbatim publishes a stranger's text as
+          -- the maintainer's, in every clone, forever
+          withNote = makeLetter (fst alice) (snd alice)
+                       (AClose tid (Just "shipped, obviously") 2) noReplyChannel
+          -- and a set is the requester's choice of both name and value
+          withAttr = makeLetter (fst alice) (snd alice)
+                       (ASet tid "assignee" "alice" 2) noReplyChannel
+      origin2 <- someHash
+      expectErr NeedsReview
+        (honourRequest (ctxOf owner) env (acView aOpen) 2 origin2 withNote)
+      expectErr NeedsReview
+        (honourRequest (ctxOf owner) env (acView aOpen) 2 origin2 withAttr)
+      outcome NeedsReview `shouldBe` Decide
+      -- ...and honourWith is how a maintainer says yes in their own words
+      acc <- expectRight
+        (honourWith (ctxOf owner) env (acView aOpen) 7 origin2
+           (AClose tid (Just "agreed, thanks") 2) withNote)
+      let t = threadOf (foldEvents repo [acEvent aOpen, acEvent acc]) tid
       map cAuthor (tsComments t) `shouldBe` [fst owner]
-      -- the note is the owner's, declared at the owner's clock
-      map cAuthorTs (tsComments t) `shouldBe` [500]
+      map cBody (tsComments t) `shouldBe` [Just "agreed, thanks"]
+      map cAuthorTs (tsComments t) `shouldBe` [7]
 
     it "refuses a request against an unknown thread" $ do
       alice <- kp
@@ -258,7 +302,7 @@ spec = do
                      (AOpen (fst other) HubIssue "t" [] Nothing Nothing Nothing 1)
                      noReplyChannel
       expectErr WrongRepo
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView (fst owner)) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView (fst owner)) 1 origin noParts letter)
 
     it "rejects content the fold would drop, before burning a seq" $ do
       alice <- kp
@@ -272,9 +316,9 @@ spec = do
                               (AOpen repo HubIssue "i" [] Nothing Nothing (Just coords) 1)
                               noReplyChannel
       expectErr BadContent
-        (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin Nothing prNoCoords)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts prNoCoords)
       expectErr BadContent
-        (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin Nothing issueWithCoords)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts issueWithCoords)
 
     it "refuses a revise from anyone but the author of record" $ do
       alice <- kp
@@ -286,11 +330,11 @@ spec = do
           pr = makeLetter (fst alice) (snd alice)
                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
       aPR <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let evil = makeLetter (fst mallory) (snd mallory)
                    (ARevise (scopeOf aPR) coords { prSourceTip = "dead" } 2) noReplyChannel
       expectErr NotAuthorOfRecord
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (acView aPR) 2 origin2 Nothing evil)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (acView aPR) 2 origin2 noParts evil)
 
     it "refuses the same author box twice" $ do
       alice <- kp
@@ -303,15 +347,15 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       -- a rewrapped resend of the very same inner box
       expectErr AlreadyInCanon
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView acc) 2 origin2 Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView acc) 2 origin2 noParts letter)
 
     it "refuses an owner redact whose target is not in canon yet" $ do
       owner <- kp
       ghost <- someHash
-      expectErr UnknownTarget (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ARedact ghost 1))
+      expectErr UnknownTarget (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ARedact ghost 1))
 
     it "can redact an event that left no visible trace" $ do
       alice <- kp
@@ -326,14 +370,14 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       aSet <- expectRight
-        (ownerEvent (ctxOf owner) (acView aOpen) 2 Nothing (ASet (scopeOf aOpen) "labels" "bug" 2))
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts (ASet (scopeOf aOpen) "labels" "bug" 2))
       -- rebuild the view the way a restarted folder would
       let fr = foldEvents repo (map acEvent [aOpen, aSet])
           rebuilt = viewOf fr
       aRedact <- expectRight
-        (ownerEvent (ctxOf owner) rebuilt 3 Nothing (ARedact (eventId (acEvent aSet)) 3))
+        (ownerEvent (ctxOf owner) rebuilt 3 noParts (ARedact (eventId (acEvent aSet)) 3))
       -- and it lands with the thread it belongs to, not under its target's id
       acScope aRedact `shouldBe` ThreadScope (scopeOf aOpen)
       let fr' = foldEvents repo (map acEvent [aOpen, aSet, aRedact])
@@ -352,14 +396,14 @@ spec = do
           pr = makeLetter (fst alice) (snd alice)
                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
       aPR <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let rev = makeLetter (fst alice) (snd alice)
                   (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2) noReplyChannel
       aRev <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aPR) 2 o2 Nothing rev)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aPR) 2 o2 noParts rev)
       let rebuilt = viewOf (foldEvents repo (map acEvent [aPR, aRev]))
       expectErr AlreadyInCanon
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) rebuilt 3 o3 Nothing rev)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) rebuilt 3 o3 noParts rev)
 
     it "refuses to fold under a revoked maintainer key" $ do
       owner <- kp
@@ -373,19 +417,19 @@ spec = do
       let repo = fst owner
           letter n = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ADelegate (fst bob) 1))
       -- while delegated, bob may fold
       aOk <- expectRight
-        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin Nothing (letter "ok"))
-      aRev <- expectRight (ownerEvent (ctxOf owner) (acView aOk) 3 Nothing (ARevoke (fst bob) 3))
+        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin noParts (letter "ok"))
+      aRev <- expectRight (ownerEvent (ctxOf owner) (acView aOk) 3 noParts (ARevoke (fst bob) 3))
       -- the view is rebuilt from canon, fully up to date, and bob is out
       let rebuilt = viewOf (foldEvents repo (map acEvent [aDel, aOk, aRev]))
       expectErr UnauthorizedForRepo
-        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) rebuilt 4 origin Nothing (letter "after"))
+        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) rebuilt 4 origin noParts (letter "after"))
       expectErr UnauthorizedForRepo
-        (ownerEvent (ctxAs bob repo) rebuilt 4 Nothing (ASet (scopeOf aOk) "status" "closed" 4))
+        (ownerEvent (ctxAs bob repo) rebuilt 4 noParts (ASet (scopeOf aOk) "status" "closed" 4))
       -- and the owner still can
-      _ <- expectRight (ownerEvent (ctxOf owner) rebuilt 4 Nothing
+      _ <- expectRight (ownerEvent (ctxOf owner) rebuilt 4 noParts
                           (ASet (scopeOf aOk) "status" "closed" 4))
       pure ()
 
@@ -397,11 +441,11 @@ spec = do
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ADelegate (fst bob) 1))
       aOpen <- expectRight
-        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin Nothing letter)
+        (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin noParts letter)
       aSet <- expectRight
-        (ownerEvent (ctxAs bob repo) (acView aOpen) 3 Nothing (ASet (scopeOf aOpen) "status" "closed" 3))
+        (ownerEvent (ctxAs bob repo) (acView aOpen) 3 noParts (ASet (scopeOf aOpen) "status" "closed" 3))
       -- and canon takes all of it
       let fr = foldEvents repo (map acEvent [aDel, aOpen, aSet])
       frDropped fr `shouldBe` []
@@ -413,30 +457,32 @@ spec = do
       carol <- kp
       -- bob is a real maintainer here, so this exercises the root-of-trust
       -- guard rather than the general authority check.
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ADelegate (fst bob) 1))
       authorizedCanon (acView aDel) (fst bob) `shouldBe` True
-      expectErr UnauthorizedForRepo
-        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 Nothing (ADelegate (fst carol) 2))
-      expectErr UnauthorizedForRepo
-        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 Nothing (ARevoke (fst bob) 2))
+      expectErr OwnerKeyRequired
+        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noParts (ADelegate (fst carol) 2))
+      expectErr OwnerKeyRequired
+        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noParts (ARevoke (fst bob) 2))
       -- the owner still may
       acc <- expectRight
-        (ownerEvent (ctxOf owner) (acView aDel) 2 Nothing (ADelegate (fst carol) 2))
+        (ownerEvent (ctxOf owner) (acView aDel) 2 noParts (ADelegate (fst carol) 2))
       acScope acc `shouldBe` RepoScope
 
     it "refuses a stranger's delegate too" $ do
       owner <- kp
       bob <- kp
+      -- A stranger is not authorized to bless anything at all, so this stops
+      -- at the general authority check and never reaches the owner-only rule.
       expectErr UnauthorizedForRepo
-        (ownerEvent (ctxAs bob (fst owner)) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
+        (ownerEvent (ctxAs bob (fst owner)) (emptyView (fst owner)) 1 noParts (ADelegate (fst bob) 1))
 
     it "puts a redact of a repo-scope event under repo scope" $ do
       owner <- kp
       bob <- kp
       aDel <- expectRight
-        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ADelegate (fst bob) 1))
+        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ADelegate (fst bob) 1))
       aRed <- expectRight
-        (ownerEvent (ctxOf owner) (acView aDel) 2 Nothing
+        (ownerEvent (ctxOf owner) (acView aDel) 2 noParts
            (ARedact (eventId (acEvent aDel)) 2))
       acScope aRed `shouldBe` RepoScope
 
@@ -444,7 +490,7 @@ spec = do
       owner <- kp
       ghost <- someHash
       expectErr UnknownTarget
-        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 Nothing (ARedact ghost 1))
+        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noParts (ARedact ghost 1))
 
     it "reports a revise on an issue thread as bad content" $ do
       origin2 <- someHash
@@ -457,11 +503,11 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       let rev = makeLetter (fst alice) (snd alice)
                   (ARevise (scopeOf aOpen) coords 2) noReplyChannel
       expectErr BadContent
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 Nothing rev)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 noParts rev)
 
     it "reports seq, author and content for the writer" $ do
       alice <- kp
@@ -471,7 +517,7 @@ spec = do
           content = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 7
           letter = makeLetter (fst alice) (snd alice) content noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       -- everything the tree writer needs, without unboxing anything again
       acSeq acc `shouldBe` 1
       acAuthor acc `shouldBe` fst alice
@@ -485,7 +531,7 @@ spec = do
           letter = makeLetter (fst mallory) (snd mallory)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin noParts letter)
       let tid = scopeOf aOpen
           -- a request to set an attribute of the requester's choosing
           req = makeLetter (fst mallory) (snd mallory)
@@ -509,9 +555,9 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       expectErr BadContent
-        (ownerEvent (ctxOf owner) (acView aOpen) 2 Nothing
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts
            (AMerge (scopeOf aOpen) "cafe" "refs/heads/master" 2))
 
     it "refuses honouring the same request twice" $ do
@@ -522,7 +568,7 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing letter)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       let req = makeLetter (fst alice) (snd alice)
                   (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
       origin2 <- someHash
@@ -545,11 +591,11 @@ spec = do
                     (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1) noReplyChannel
           withPart = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (Just "S") plain)
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (Just "S") withPart)
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 []) plain)
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 [part]) withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
       tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
-      tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just "S"
+      tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just secret32
 
     it "refuses to publish an encrypted part with no key to it" $ do
       alice <- kp
@@ -563,15 +609,55 @@ spec = do
       -- The alternative is canon holding a signed reference to bytes nobody
       -- can ever read: the part cannot be re-encrypted without breaking the
       -- signature, and the secret is gone once the message is deleted.
-      let got = acceptLetter (ctxOf owner) env (emptyView repo) 1 origin Nothing withPart
-      expectErr MissingPartSecret got
-      -- The letter is intact, so the caller retries with the secret.
-      either outcome (const Decide) got `shouldBe` Retry
-      _ <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin (Just "S") withPart)
-      -- ...and the same rule holds for an owner-native event.
+      --
+      -- Four ways to get there, and they are not the same answer. Named but
+      -- not carried is a dead reference and always will be.
+      let accept po = acceptLetter (ctxOf owner) env (emptyView repo) 1 origin po withPart
+      expectErr (PartNotInMessage part) (accept noParts)
+      either outcome (const Decide) (accept noParts) `shouldBe` Discard
+      -- Carried but not fetched yet is a wait.
+      let notYet = PartsOf (Just secret32) (HS.singleton part) HS.empty
+      expectErr (PartNotFetched part) (accept notYet)
+      either outcome (const Decide) (accept notYet) `shouldBe` Retry
+      -- Here, but with no key to it, and with a key that cannot be one.
+      let here = HS.singleton part
+      expectErr MissingPartSecret (accept (PartsOf Nothing here here))
+      either outcome (const Decide) (accept (PartsOf Nothing here here)) `shouldBe` Retry
+      expectErr BadPartSecret (accept (PartsOf (Just "S") here here))
+      either outcome (const Decide) (accept (PartsOf (Just "S") here here)) `shouldBe` Discard
+      _ <- expectRight (accept (partsReady secret32 [part]))
+      -- ...and the same rules hold for an owner-native event.
       expectErr MissingPartSecret
-        (ownerEvent (ctxOf owner) (emptyView repo) 1 Nothing
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 (PartsOf Nothing here here)
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
+
+    it "refuses a body it will not carry inline" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- messageData is one secretbox over the whole payload, unchunked, and it
+      -- rides in a gossiped message, so a huge inline body is a cost every
+      -- relaying peer pays. Above the limit it belongs in a body-part.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          big = Text.replicate (maxInlineBody + 1) "x"
+          fat = makeLetter (fst alice) (snd alice)
+                  (AOpen repo HubIssue "t" [] (Just big) Nothing Nothing 1) noReplyChannel
+          longTitle = makeLetter (fst alice) (snd alice)
+                  (AOpen repo HubIssue (Text.replicate (maxTitle + 1) "t") []
+                     Nothing Nothing Nothing 1) noReplyChannel
+      expectErr (BodyTooLarge "body")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts fat)
+      expectErr (BodyTooLarge "title")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts longTitle)
+      -- Resending is the only fix, so there is nothing to come back to.
+      outcome (BodyTooLarge "body") `shouldBe` Discard
+      -- Exactly at the limit is fine.
+      let ok = makeLetter (fst alice) (snd alice)
+                 (AOpen repo HubIssue "t" [] (Just (Text.replicate maxInlineBody "x"))
+                    Nothing Nothing 1) noReplyChannel
+      _ <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts ok)
+      pure ()
 
     it "does not raise a decision on a letter it already folded" $ do
       alice <- kp
@@ -582,17 +668,17 @@ spec = do
           env = EnvelopeSigner (fst alice)
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
-      aOpen <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin Nothing letter)
+      aOpen <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
       let req = makeLetter (fst alice) (snd alice)
                   (AClose (scopeOf aOpen) Nothing 2) noReplyChannel
       -- First pass: a decision for the maintainer.
-      _ <- expectRequested (acceptLetter (ctxOf owner) env (acView aOpen) 2 reqOrigin Nothing req)
+      _ <- expectRequested (acceptLetter (ctxOf owner) env (acView aOpen) 2 reqOrigin noParts req)
       aClose <- expectRight
         (honourRequest (ctxOf owner) env (acView aOpen) 2 reqOrigin req)
       -- After a restart the loop re-reads the mailbox. Raising the same
       -- request again would put a decision in front of a human that
       -- 'honourRequest' refuses the moment they take it.
-      let again = acceptLetter (ctxOf owner) env (acView aClose) 3 reqOrigin Nothing req
+      let again = acceptLetter (ctxOf owner) env (acView aClose) 3 reqOrigin noParts req
       expectErr AlreadyHonoured again
       either outcome (const Retry) again `shouldBe` Discard
 
@@ -607,9 +693,9 @@ spec = do
                     (Just coords { prBundle = Just bundle }) 1)
                  noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (Just "S") pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (partsReady secret32 [bundle]) pr)
       let t = threadOf (foldEvents repo [acEvent acc]) (scopeOf acc)
-      fmap psPartSecret (tsPR t) `shouldBe` Just (Just "S")
+      fmap psPartSecret (tsPR t) `shouldBe` Just (Just secret32)
 
     it "derives the next cursor from canon, not from a local counter" $ do
       alice <- kp
@@ -620,8 +706,8 @@ spec = do
           env = fst alice
           open n = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin Nothing (open "a"))
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 origin2 Nothing (open "b"))
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts (open "a"))
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 origin2 noParts (open "b"))
       -- A folder that restarts and rebuilds from canon mints the same next
       -- values as the one that never stopped.
       cursorFrom (foldEvents repo (map acEvent [a1,a2])) `shouldBe` cvCursor (acView a2)
@@ -638,8 +724,8 @@ spec = do
           env = EnvelopeSigner (fst alice)
           open n = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
-      aA <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin Nothing (open "a"))
-      aB <- expectRight (acceptLetter (ctxOf owner) env (acView aA) 2 originB Nothing (open "b"))
+      aA <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts (open "a"))
+      aB <- expectRight (acceptLetter (ctxOf owner) env (acView aA) 2 originB noParts (open "b"))
       let req = makeLetter (fst alice) (snd alice)
                   (AClose (scopeOf aA) Nothing 3) noReplyChannel
           elsewhere = AClose (scopeOf aB) Nothing 3
@@ -674,12 +760,18 @@ spec = do
       -- A letter from a newer schema is valid; this build is behind.
       -- Discarding it would strand a submission an upgrade could fold, which
       -- is exactly what happens to letters already sitting in mailboxes.
-      outcome (BadLetter (UnsupportedVersion 2)) `shouldBe` Retry
-      outcome (BadLetter (UndecodableContent (fst alice) Undecodable)) `shouldBe` Retry
+      -- Park, not Retry: a loop that re-checked these every pass would
+      -- re-verify the signature of every piece of signed garbage an attacker
+      -- cares to send.
+      outcome (BadLetter (UnsupportedVersion 2)) `shouldBe` Park
+      outcome (BadLetter (UndecodableContent (fst alice) Undecodable)) `shouldBe` Park
       -- Trailing bytes are not what an honest newer sender produces.
       outcome (BadLetter (UndecodableContent (fst alice) TrailingData)) `shouldBe` Discard
-      -- ...but a cursor at the end of its range never becomes ready.
-      outcome CursorExhausted `shouldBe` Discard
+      -- Wiring bugs and an exhausted cursor are neither the letter's fault nor
+      -- fixable by another pass: stop, do not delete anything.
+      outcome CursorExhausted `shouldBe` Abort
+      outcome ViewRepoMismatch `shouldBe` Abort
+      outcome OwnerKeyRequired `shouldBe` Abort
 
     it "remembers a thread's number, so a reply can be acknowledged" $ do
       alice <- kp
@@ -692,10 +784,10 @@ spec = do
           env = EnvelopeSigner (fst alice)
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
-      aOpen <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin Nothing letter)
+      aOpen <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
       let reply = makeLetter (fst alice) (snd alice)
                     (AComment (scopeOf aOpen) Nothing (Just "hi") Nothing 2) noReplyChannel
-      aCmt <- expectRight (acceptLetter (ctxOf owner) env (acView aOpen) 2 origin2 Nothing reply)
+      aCmt <- expectRight (acceptLetter (ctxOf owner) env (acView aOpen) 2 origin2 noParts reply)
       acNumber aCmt `shouldBe` Nothing
       fmap tfNumber (HM.lookup (scopeOf aOpen) (cvThreads (acView aCmt)))
         `shouldBe` Just (Just 1)
@@ -711,13 +803,13 @@ spec = do
           pr = makeLetter (fst alice) (snd alice)
                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
       aPR <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin Nothing pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let nowhere = coords { prSource = Nothing, prBundle = Nothing }
       expectErr BadContent
-        (ownerEvent (ctxOf owner) (acView aPR) 2 Nothing (ARevise (scopeOf aPR) nowhere 2))
+        (ownerEvent (ctxOf owner) (acView aPR) 2 noParts (ARevise (scopeOf aPR) nowhere 2))
       -- a revise that keeps a way to fetch is fine
       _ <- expectRight
-        (ownerEvent (ctxOf owner) (acView aPR) 2 Nothing
+        (ownerEvent (ctxOf owner) (acView aPR) 2 noParts
            (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2))
       pure ()
 
@@ -732,7 +824,7 @@ spec = do
                      (AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
       expectErr ViewRepoMismatch
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice))
-           (emptyView (fst other)) 1 origin Nothing letter)
+           (emptyView (fst other)) 1 origin noParts letter)
 
     it "keeps the accumulated view equal to the rebuilt one" $ do
       alice <- kp
@@ -748,22 +840,22 @@ spec = do
       let repo = fst owner
           env = fst alice
           letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
-      a1 <- expectRight (ownerEvent (ctxOf owner) (emptyView repo) 1 Nothing
+      a1 <- expectRight (ownerEvent (ctxOf owner) (emptyView repo) 1 noParts
                            (ADelegate (fst bob) 1))
-      a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin Nothing
+      a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (Just "S")
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (partsReady secret32 [part])
                            (letter (AComment (scopeOf a2) Nothing Nothing (Just part) 3)))
-      a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 Nothing
+      a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noParts
                            (ASet (scopeOf a2) "labels" "bug" 4))
-      a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 Nothing
+      a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 noParts
                            (ARedact (eventId (acEvent a4)) 5))
-      a6 <- expectRight (ownerEvent (ctxOf owner) (acView a5) 6 Nothing
+      a6 <- expectRight (ownerEvent (ctxOf owner) (acView a5) 6 noParts
                            (ADelegate (fst carol) 6))
-      a7 <- expectRight (ownerEvent (ctxOf owner) (acView a6) 7 Nothing
+      a7 <- expectRight (ownerEvent (ctxOf owner) (acView a6) 7 noParts
                            (ARevoke (fst bob) 7))
       -- including the case the fold treats as a no-op
-      a8 <- expectRight (ownerEvent (ctxOf owner) (acView a7) 8 Nothing
+      a8 <- expectRight (ownerEvent (ctxOf owner) (acView a7) 8 noParts
                            (ARevoke repo 8))
       let evs = map acEvent [a1,a2,a3,a4,a5,a6,a7,a8]
           fr = foldEvents repo evs
@@ -782,14 +874,14 @@ spec = do
           env = fst alice
           opening = makeLetter (fst alice) (snd alice)
                       (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin Nothing opening)
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts opening)
       let cmt = makeLetter (fst alice) (snd alice)
                   (AComment (scopeOf a1) Nothing (Just "hi") Nothing 2) noReplyChannel
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 o2 Nothing cmt)
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 o2 noParts cmt)
       let rev = makeLetter (fst alice) (snd alice)
                   (ARevise (scopeOf a1) coords { prSourceTip = "cccc" } 3) noReplyChannel
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 o3 Nothing rev)
-      a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 Nothing
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 o3 noParts rev)
+      a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noParts
                           (AMerge (scopeOf a1) "cafe" "refs/heads/master" 4))
       let fr = foldEvents repo (map acEvent [a1,a2,a3,a4])
       frDropped fr `shouldBe` []

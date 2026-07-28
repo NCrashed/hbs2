@@ -50,6 +50,9 @@ module HBS2.Hub.Bridge
   , ThreadFacts(..)
   , Outcome(..)
   , Pending(..)
+  , PartsOf(..)
+  , noParts
+  , partsReady
   , outcome
   , EventScope(..)
   , CanonView(..)
@@ -79,7 +82,9 @@ import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Control.Monad (when)
 import Data.Maybe (isJust,isNothing)
+import Data.Text (Text)
 import Data.Word (Word64)
 
 -- | What the next canon box gets stamped with.
@@ -250,6 +255,28 @@ data TriageError =
     -- would break the author signature) and once the message is deleted from
     -- the mailbox the secret is gone (PEP-19 "Attachments in public canon").
   | MissingPartSecret
+    -- | The content names a part the message does not carry. Not repairable:
+    -- a later message cannot add a part to an author box already signed.
+  | PartNotInMessage HashRef
+    -- | The message carries the part but this node has not fetched the tree
+    -- yet. Nothing is wrong; come back when it has.
+  | PartNotFetched HashRef
+    -- | The group secret is not the right size to be one ('validPartSecret').
+    -- Minting it would publish canon whose attachments never open.
+  | BadPartSecret
+    -- | A text field over the limit triage will carry inline
+    -- ('maxInlineBody'): the field name, so the sender can be told what to
+    -- move to an attachment.
+  | BodyTooLarge Text
+    -- | Only the repo owner key may delegate or revoke (PEP-19 rule 5), and
+    -- this folding key is a delegate. Distinct from 'UnauthorizedForRepo':
+    -- that one another folder can satisfy, this one nobody but the owner can,
+    -- so a delegate's tooling asking for it is a bug in the caller.
+  | OwnerKeyRequired
+    -- | The request carries text the owner would be signing as their own
+    -- words. 'honourRequest' will not do that; use 'honourWith' with content
+    -- the maintainer actually wrote.
+  | NeedsReview
   deriving stock (Eq,Show)
 
 -- | What the caller should do with a letter the bridge refused.
@@ -258,10 +285,25 @@ data TriageError =
 -- spam forever, or discarding a letter that only arrived out of order. PEP-18
 -- is explicit that an early reply is not rejected, it waits in the mailbox
 -- until its thread is folded.
+-- | What a triage loop should do with a refusal.
+--
+-- Five outcomes rather than three because the three collapsed cases that need
+-- different handling. 'Retry' and 'Park' both mean "keep the letter", but a
+-- loop that treats them alike re-verifies the signature of every piece of
+-- undecodable garbage on every pass, which an attacker produces by signing
+-- random bytes. 'Abort' both means "keep the letter" and "stop": a caller that
+-- silently retried its own wiring bug would spin, and one that discarded would
+-- delete valid letters (PEP-21 folds then deletes).
 data Outcome =
     Retry     -- ^ nothing is wrong with the letter; the repo is not ready yet
+    -- | Nothing is wrong with the letter and nothing about this repo will fix
+    -- it: it needs a newer build. Keep it, but stop looking at it every pass.
+  | Park
   | Decide    -- ^ a valid request the maintainer must act on ('honourWith')
   | Discard   -- ^ the letter can never become canon here
+    -- | The caller is wired wrong. Not about the letter at all: leave it
+    -- alone, stop the loop, and fix the caller.
+  | Abort
   deriving stock (Eq,Show)
 
 -- | A request the maintainer has to rule on, already opened.
@@ -305,16 +347,17 @@ outcome = \case
   -- would strand a perfectly good submission that an upgrade could fold, and
   -- letters already sitting in mailboxes are exactly the ones this happens
   -- to (see 'hubMsgVersion').
-  BadLetter (UnsupportedVersion _)              -> Retry
-  BadLetter (UndecodableContent _ Undecodable)  -> Retry
+  BadLetter (UnsupportedVersion _)              -> Park
+  BadLetter (UndecodableContent _ Undecodable)  -> Park
   -- Trailing bytes are not what an honest newer sender produces, so this
   -- one is tampering rather than a version gap.
   BadLetter (UndecodableContent _ TrailingData) -> Discard
-  -- A request is a normal triage outcome, not a failure.
+  -- Both are normal triage outcomes, not failures: a maintainer has to look.
   Requested _ -> Decide
+  NeedsReview -> Decide
   -- Everything else is about the letter itself and will not improve.
-  -- Note that .NotAcceptable RequestOnly. is unreachable through
-  -- .acceptLetter., which raises .Requested. for those ops before it can be
+  -- Note that `NotAcceptable RequestOnly` is unreachable through
+  -- `acceptLetter`, which raises `Requested` for those ops before it can be
   -- built; the mapping is here because the type admits it.
   NotAcceptable _   -> Discard
   BadLetter _       -> Discard
@@ -324,11 +367,21 @@ outcome = \case
   BadContent        -> Discard
   ThreadMismatch    -> Discard
   AlreadyHonoured   -> Discard
-  ViewRepoMismatch  -> Discard
+  -- Names a part no message carried, or a secret that cannot be one: neither
+  -- is repairable, since the reference is inside a signed author box.
+  PartNotInMessage _ -> Discard
+  BadPartSecret      -> Discard
+  -- The sender has to resend with the body as an attachment.
+  BodyTooLarge _     -> Discard
   -- The letter is intact and the caller can supply what is missing.
-  MissingPartSecret -> Retry
-  -- Not "not ready yet" but "never again": retrying would spin forever.
-  CursorExhausted   -> Discard
+  MissingPartSecret  -> Retry
+  PartNotFetched _   -> Retry
+  -- Wiring, not letters. Retrying a view built for another repo would spin on
+  -- a bug, and discarding would throw away a valid letter; a cursor at the end
+  -- of its range needs an operator, not another pass.
+  ViewRepoMismatch  -> Abort
+  OwnerKeyRequired  -> Abort
+  CursorExhausted   -> Abort
 
 -- Refuse an author box canon already holds: the fold would drop the second
 -- copy as a duplicate.
@@ -346,13 +399,62 @@ honouredAlready view origin
   | HS.member origin (cvOrigins view) = Left AlreadyHonoured
   | otherwise                         = Right ()
 
--- Refuse to publish a reference to encrypted bytes together with no way to
--- read them. PEP-19 requires the owner to publish the group secret in the
--- canon box whenever the event names an encrypted part.
-requirePartSecret :: Maybe ByteString -> AuthorContent -> Either TriageError ()
-requirePartSecret secret content
-  | referencesPart content, isNothing secret = Left MissingPartSecret
-  | otherwise                                = Right ()
+-- | What the caller can vouch for about an event's encrypted attachments.
+--
+-- Three separate facts, because they fail differently. A part the message
+-- never carried is a dead reference and always will be; a part not fetched yet
+-- is a wait; a missing or malformed secret is a key the caller has to go and
+-- get. All three are permanent if minted, because the reference lives inside a
+-- signed author box (PEP-19 "Attachments in public canon"), which is why the
+-- bridge takes the evidence rather than a bare secret.
+data PartsOf = PartsOf
+  { poSecret  :: Maybe ByteString  -- ^ group secret for the part trees
+  , poCarried :: HashSet HashRef   -- ^ parts the message (or the owner) supplies
+  , poLocal   :: HashSet HashRef   -- ^ of those, the trees present in storage
+  }
+  deriving stock (Eq,Show)
+
+-- | An event with no attachments.
+noParts :: PartsOf
+noParts = PartsOf Nothing HS.empty HS.empty
+
+-- | Every part carried and already fetched, under this secret. What a triage
+-- loop has once it has downloaded the message's attachments.
+partsReady :: ByteString -> [HashRef] -> PartsOf
+partsReady s hs = PartsOf (Just s) (HS.fromList hs) (HS.fromList hs)
+
+-- Refuse to publish a reference to encrypted bytes with no way to read them,
+-- and refuse a reference to bytes that are not there at all.
+requireParts :: PartsOf -> AuthorContent -> Either TriageError ()
+requireParts po content = do
+  mapM_ present (eventParts content)
+  if referencesPart content then secretOK else Right ()
+  where
+    present h
+      | not (HS.member h (poCarried po)) = Left (PartNotInMessage h)
+      | not (HS.member h (poLocal po))   = Left (PartNotFetched h)
+      | otherwise                        = Right ()
+
+    secretOK = case poSecret po of
+      Nothing -> Left MissingPartSecret
+      Just sec | not (validPartSecret sec) -> Left BadPartSecret
+               | otherwise                 -> Right ()
+
+-- Refuse a field triage will not carry inline. A local policy, not an
+-- admission rule (see 'maxInlineBody'), enforced here because the bridge is
+-- the last gate before something is in every clone forever.
+requireSize :: AuthorContent -> Either TriageError ()
+requireSize content = maybe (Right ()) (Left . BodyTooLarge) (oversizedField content)
+
+-- Would signing this verbatim put someone else's words in the owner's mouth?
+-- A note materializes as a comment authored by whoever signed the event, and
+-- an attribute is the requester's choice of both name and value.
+verbatimUnsafe :: AuthorContent -> Bool
+verbatimUnsafe = \case
+  AClose _ note _  -> isJust note
+  AReopen _ note _ -> isJust note
+  ASet{}           -> True
+  _                -> False
 
 -- Refuse to mint a number the cursor cannot produce. Only an open mints
 -- one, so only an open is checked.
@@ -431,10 +533,10 @@ acceptLetter
   -> CanonView
   -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
   -> HashRef                            -- ^ origin: hash of the Mailbox message
-  -> Maybe ByteString                   -- ^ the message's group secret, if any
+  -> PartsOf                            -- ^ the message's attachments, if any
   -> MessageData
   -> Either TriageError Accepted
-acceptLetter ctx envelopeSigner view folded origin secret md = do
+acceptLetter ctx envelopeSigner view folded origin parts md = do
   let canonKp@(canonPk,_) = tcCanon ctx
       allowed = tcAllowed ctx
       repo = tcRepo ctx
@@ -492,12 +594,13 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
     -- classify has already restricted this to the three ops above.
     _ -> Left BadContent
 
-  -- Last, because everything above is about the letter and this one is about
-  -- the caller: a shape error should be reported as such rather than as a
-  -- missing key.
-  requirePartSecret secret content
+  -- Last, because everything above is about the letter and these are about
+  -- what the caller supplied: a shape error should be reported as such rather
+  -- than as a missing key.
+  requireSize content
+  requireParts parts content
 
-  Right (accepted canonKp repo view folded (Just origin) secret content box author
+  Right (accepted canonKp repo view folded (Just origin) (poSecret parts) content box author
            (ThreadScope thread) reply)
   where
     known thr
@@ -513,6 +616,10 @@ acceptLetter ctx envelopeSigner view folded origin secret md = do
 --
 -- A stranger's @close@/@reopen@/@label@ letter cannot become canon as
 -- theirs: the fold would drop it, because those ops are owner-authored. What
+-- it will not do is sign the requester's prose or their choice of attribute:
+-- that is 'NeedsReview', and 'honourWith' is the way to say yes to it in the
+-- maintainer's own words.
+--
 -- the owner can do is agree, which means authoring the same content
 -- themselves. The declared timestamp becomes the owner's, since the owner is
 -- the one declaring it now; the letter's provenance is kept as the origin.
@@ -527,6 +634,14 @@ honourRequest
 honourRequest ctx envelopeSigner view folded origin md = do
   (_box, _author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
+
+  -- Verbatim means verbatim, so anything the requester wrote as text would be
+  -- signed as the owner's own words: a note materializes as a comment authored
+  -- by the signer, in every clone, forever, and an attribute is the
+  -- requester's choice of both name and value. A note-less close or reopen is
+  -- the only case where "agreed as sent" has no wording to agree to.
+  when (verbatimUnsafe content) (Left NeedsReview)
+
   honourOpened (tcCanon ctx) (tcRepo ctx) view folded origin content content reply
 
 -- | Honour a request, but sign content the maintainer has looked at and
@@ -604,8 +719,8 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
       box = signAuthor pk sk content
   seenAlready view (authorBoxId box)
 
-  -- No requirePartSecret: 'classify' has established that this is a
-  -- close, reopen or set, none of which can reference a part.
+  -- No requireParts: 'classify' has established that this is a close, reopen
+  -- or set, none of which can reference a part.
   Right (accepted canonKp repo view folded (Just origin) Nothing content box pk
            (ThreadScope thread) reply)
 
@@ -620,10 +735,10 @@ ownerEvent
   :: TriageCtx
   -> CanonView
   -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
-  -> Maybe ByteString                   -- ^ part secret, if the event has one
+  -> PartsOf                            -- ^ the event's attachments, if any
   -> AuthorContent
   -> Either TriageError Accepted
-ownerEvent ctx view folded secret content = do
+ownerEvent ctx view folded parts content = do
   let kp@(pk,sk) = tcCanon ctx
       repo = tcRepo ctx
   requireCanon repo view pk
@@ -644,9 +759,9 @@ ownerEvent ctx view folded secret content = do
 
     -- Only the owner key may delegate (PEP-19 rule 5): a delegate signing
     -- one would be dropped, so refuse before minting.
-    ADelegate{} | pk /= repo -> Left UnauthorizedForRepo
+    ADelegate{} | pk /= repo -> Left OwnerKeyRequired
                 | otherwise  -> Right RepoScope
-    ARevoke{}   | pk /= repo -> Left UnauthorizedForRepo
+    ARevoke{}   | pk /= repo -> Left OwnerKeyRequired
                 | otherwise  -> Right RepoScope
 
     AOpen target kind _ _ _ _ coords _
@@ -671,9 +786,10 @@ ownerEvent ctx view folded secret content = do
                | not (coordsOK content)               -> Left BadContent
                | otherwise                            -> Right (ThreadScope thr)
 
-  requirePartSecret secret content
+  requireSize content
+  requireParts parts content
 
-  Right (accepted kp repo view folded Nothing secret content box pk scope NoReply)
+  Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)
   where
     coordsOK = \case
       ARevise _ c _ -> reachableCoords c
@@ -766,12 +882,3 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
     scopeThread = \case
       ThreadScope thr -> Just thr
       RepoScope       -> Nothing
-
--- Does this content point at an encrypted tree that a reader will need the
--- group secret for?
-referencesPart :: AuthorContent -> Bool
-referencesPart = \case
-  AOpen _ _ _ _ _ part coords _ -> isJust part || maybe False (isJust . prBundle) coords
-  AComment _ _ _ part _         -> isJust part
-  ARevise _ coords _            -> isJust (prBundle coords)
-  _                             -> False

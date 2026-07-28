@@ -136,7 +136,7 @@ either: PEP-19 versions canon at the event-file and tree level.
 ```
 (hub-msg  1)                       ; schema version, carried by the envelope
 (kind     issue)                   ; issue | pr
-(op       open)                    ; open | comment | revise | close | reopen | label
+(op       open)                    ; open | comment | revise | set | close | reopen
 (target   <repo-lwwref-b58>)       ; on open only: which repository, which is
                                    ;   what blocks cross-repo replay. A reply
                                    ;   needs none: it names a thread, and a
@@ -152,7 +152,9 @@ either: PEP-19 versions canon at the event-file and tree level.
 
 ;; content
 (title    "...")                   ; on open
-(labels   bug ui)                  ; requested labels (advisory; owner decides)
+(labels   "bug" "ui")              ; requested labels (advisory; owner decides).
+                                   ;   Strings, not symbols: a label may hold
+                                   ;   a space.
 ;; body: inline text in the record's body field, or (body-part <hashref>)
 ```
 
@@ -304,9 +306,17 @@ Attachments, and how they survive folding into public canon
 
 Attachments (an inline patch, screenshots, logs) are Mailbox parts: each is
 an encrypted merkle tree stored in hbs2 storage, referenced by `HashRef` in
-`messageParts` and named from the payload (`body-part`, `bundle-part`). The
-same per-message group secret encrypts them, and `readMessage` decrypts only
-the body, so a triage tool downloads and decrypts a part separately.
+`messageParts` and named from the payload (`body-part`, `bundle-part`).
+`readMessage` decrypts only the body, so a triage tool downloads and decrypts
+a part separately.
+
+The parts have a group secret of their own, distinct from the one over
+`messageData`, wrapped for the same recipients. This is not an optimization,
+it is what makes the next section possible: folding an attachment into public
+canon means publishing the key to it, and if that key were the message's own
+it would also open `messageData`, which carries the back-channel. Each part
+tree embeds its own group key, so a reader given a part hash and the parts
+secret needs nothing from the message the part arrived in.
 
 This creates a problem PEP-17 and the first draft glossed over. The
 `body-part`/`bundle-part` hashrefs live inside the signed inner box, which
@@ -316,12 +326,22 @@ clone would therefore see an event referencing an attachment it cannot
 decrypt. Re-encrypting and re-publishing the part is not an option: a new
 ciphertext has a new hash and would break the signed reference.
 
-The fix: at fold, the owner publishes the message's group secret alongside
-the event (PEP-19 carries it in the owner-signed canon box). This reveals
-nothing that is not already being made public, because that same secret
-encrypted only this letter's own content, which the fold is publishing
-anyway. A canon reader then fetches the referenced encrypted tree over hbs2
-and decrypts it with the published secret. For this to keep working, the fold
+The fix: at fold, the owner publishes the PARTS group secret alongside the
+event (PEP-19 carries it in the owner-signed canon box). This reveals nothing
+that is not already being made public, because that secret encrypts only the
+attachments the fold is publishing anyway.
+
+It is emphatically not the secret over `messageData`. That one also opens the
+back-channel clauses, which are outside the signed letter precisely so that a
+contributor's personal mailbox key does not end up in every clone forever (see
+The back-channel). Publishing it would defeat that, and retroactively: the
+ciphertext is held by every peer that ever hosted or relayed the mailbox, so
+anyone with a copy could go back and read the address out of a message folded
+years earlier. This is the whole reason `createMessage` gives the parts a
+secret of their own.
+
+A canon reader fetches the referenced encrypted tree over hbs2 and decrypts it
+with the published secret. For this to keep working, the fold
 also pins the referenced part trees so retention does not garbage-collect
 them when it deletes the accepted letter from the mailbox (PEP-21 makes purge
 canon-aware); only parts of unfolded or rejected letters are reclaimed. Note the attachment blocks are
