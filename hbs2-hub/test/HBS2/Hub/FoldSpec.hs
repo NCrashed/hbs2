@@ -12,11 +12,15 @@ import Data.Maybe (fromMaybe)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise (Serialise,serialise)
+import Data.ByteString.Base16 qualified as B16
+import Data.ByteString.Char8 qualified as B8
+import HBS2.Hash (hashObject)
+import HBS2.Prelude.Plated (pretty)
 import Codec.Serialise qualified as CBOR
 import Data.Bits (xor)
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import Data.ByteString (ByteString)
-import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Data.Types.Refs (HashRef(..))
 import Data.Text (Text)
 import Data.Word (Word64)
 import Test.Hspec
@@ -66,6 +70,11 @@ titles fr =
   sortOn fst
     [ (tsId t, (tsTitle t, HM.lookup "status" (tsAttrs t), length (tsComments t)))
     | t <- HM.elems (frThreads fr) ]
+
+-- Any other order that is neither the input nor its reverse.
+rotate :: [a] -> [a]
+rotate [] = []
+rotate (x:xs) = xs <> [x]
 
 reasons :: FoldResult -> [DropReason]
 reasons = map snd . frDropped
@@ -133,6 +142,38 @@ spec :: Spec
 spec = do
 
   describe "PEP-19 fold" $ do
+
+    it "is deterministic under reordering, whole result and all" $ do
+      owner <- kp
+      alice <- kp
+      bob <- kp
+      part <- someHash
+      origin <- someHash
+      -- The existing determinism test compares a projection of frThreads on
+      -- three events. This one compares everything the fold returns, on a log
+      -- that produces drops, anomalies, parts and a redaction, so a field
+      -- added later is covered without anyone remembering to add it.
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eOpen = mkEvent alice owner
+                    (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 2)
+                    (\e -> CanonContent e 2 (Just 1) (Just origin) 2 (Just secret32))
+          tid = eventId eOpen
+          eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
+                   (\e -> CanonContent e 3 Nothing (Just origin) 3 Nothing)
+          eBad = mkEvent alice alice (AComment tid Nothing (Just "unblessed") Nothing 4)
+                   (canon 4 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId eCmt) 5) (canon 5 Nothing)
+          evs = [eDel, eOpen, eCmt, eBad, eRed]
+          full fr = ( summary fr, frDropped fr, frAnomalies fr
+                    , frRedacted fr, frParts fr, frMaxSeq fr, frMaxNumber fr
+                    , frLastFolded fr, frOrigins fr, frMaintainers fr
+                    , frAdmitted fr )
+      full (foldEvents repo evs) `shouldBe` full (foldEvents repo (reverse evs))
+      full (foldEvents repo evs) `shouldBe` full (foldEvents repo (rotate evs))
+      -- ...and the log is actually exercising all of it
+      frDropped (foldEvents repo evs) `shouldSatisfy` (not . null)
+      frAnomalies (foldEvents repo evs) `shouldSatisfy` (not . null)
 
     it "is deterministic under input reordering" $ do
       owner <- kp
@@ -340,6 +381,63 @@ spec = do
       eventId e2 `shouldBe` tid
       shown (foldEvents repo [e1,e2]) `shouldBe` shown (foldEvents repo [e2,e1])
       reasons (foldEvents repo [e1,e2]) `shouldBe` [DupId]
+
+    it "keeps the frozen encoding frozen" $ do
+      -- Types.hs declares this encoding append-only and permanent four times
+      -- over, and every other test signs and unboxes through the same pair of
+      -- functions, which move together: reordering a constructor or inserting
+      -- a field mid-record rewrites every event-id and invalidates every
+      -- signature ever made, and nothing would notice. These bytes are what
+      -- notices. If one of them changes, either the change is wrong or the
+      -- consensus version has to be bumped and the old canon migrated.
+      let h = HashRef (hashObject ("hbs2-hub golden fixture" :: ByteString)) :: HashRef
+          hx :: Serialise a => a -> String
+          hx = B8.unpack . B16.encode . LBS.toStrict . serialise
+          author = domainOf (Nothing @AuthorContent)
+          canonD = domainOf (Nothing @CanonContent)
+      -- The fixture hash itself, so a change in the hashing is caught here
+      -- rather than as an unexplained diff in the bytes below.
+      show (pretty h) `shouldBe` "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
+      -- Domain constants: assigned once, never reused, never renumbered.
+      (author, canonD) `shouldBe` (0x48423241, 0x48423243)
+      hx (Domained author (ARedact h 5)) `shouldBe`
+        "83001a4842324183078200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a795726605"
+      hx (Domained author (AComment h (Just h) (Just "hi") Nothing 7)) `shouldBe`
+        "83001a4842324186018200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266816268698007"
+      hx (Domained canonD (CanonContent h 3 (Just 9) (Just h) 11 (Nothing :: Maybe PartSecret))) `shouldBe`
+        "83001a4842324387008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a79572660b80"
+
+    it "reports a key published for nothing" $ do
+      owner <- kp
+      alice <- kp
+      -- Not a leak now that the parts have a secret of their own, but a key
+      -- put in public canon for an event with nothing to unlock.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1)
+                 (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
+          fr = foldEvents repo [ev]
+      frDropped fr `shouldBe` []
+      map snd (frAnomalies fr) `shouldBe` [SecretWithoutPart]
+
+    it "refuses an attribute name that is not a name" $ do
+      -- Checking the case alone closed one spelling out of an infinite family:
+      -- every one of these is a separate attribute that no set canonicalization
+      -- touches, that the render contract never reads, and that nothing can
+      -- delete, since the ops only insert.
+      validAttrName "labels" `shouldBe` True
+      validAttrName "needs-triage" `shouldBe` True
+      validAttrName "x1" `shouldBe` True
+      mapM_ (\k -> (k, validAttrName k) `shouldBe` (k, False))
+        ["Labels", "labels ", " labels", "la bels", "", "1label", "labels\n", "labels,"]
+      normalizedAttr "labels " "bug" `shouldBe` False
+      -- and a value that is a set is still canonicalized under a valid name
+      normalizedAttr "labels" "ui,bug" `shouldBe` False
+
+    it "refuses to build a part-secret from the wrong number of bytes" $ do
+      mkPartSecret "abc" `shouldBe` Nothing
+      mkPartSecret BS.empty `shouldBe` Nothing
+      fmap usablePartSecret (mkPartSecret (BS.replicate typicalKeyLength 0x41))
+        `shouldBe` Just True
 
     it "reports a part-secret that cannot be a key" $ do
       owner <- kp

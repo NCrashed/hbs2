@@ -86,6 +86,9 @@ test-suite spec
                  , suckless-conf
                  , hspec
                  , QuickCheck
+                 , base16-bytestring
+                 , bytestring
+                 , serialise
                  , unordered-containers
                  , text
   other-modules:

@@ -50,10 +50,14 @@ module HBS2.Hub.Bridge
   , ThreadFacts(..)
   , Outcome(..)
   , Pending(..)
-  , PartsOf(..)
-  , noParts
-  , partsReady
-  , ownParts
+  , LetterParts
+  , OwnerParts
+  , noAttachments
+  , attachments
+  , attachmentsPending
+  , attachmentsNoKey
+  , noOwnAttachments
+  , ownAttachments
   , outcome
   , EventScope(..)
   , CanonView(..)
@@ -271,6 +275,10 @@ data TriageError =
     -- | The message carries the part but this node has not fetched the tree
     -- yet. Nothing is wrong; come back when it has.
   | PartNotFetched HashRef
+    -- | The secret offered for the parts cannot be a key: it is the wrong
+    -- length. Minting it would put a reference to bytes nobody can read into
+    -- canon, permanently.
+  | BadPartSecret
     -- | The secret offered for the parts is the secret over the message
     -- payload. Publishing it would publish the letter's transport envelope,
     -- and with it the sender's private reply address, to every clone forever
@@ -379,11 +387,15 @@ outcome = \case
   -- Both are normal triage outcomes, not failures: a maintainer has to look.
   Requested _ -> Decide
   NeedsReview -> Decide
-  -- Everything else is about the letter itself and will not improve.
-  -- Note that `NotAcceptable RequestOnly` is unreachable through
-  -- `acceptLetter`, which raises `Requested` for those ops before it can be
-  -- built; the mapping is here because the type admits it.
-  NotAcceptable _   -> Discard
+  -- A letter carrying an op only the owner may author: the letter is at
+  -- fault and no later pass changes that.
+  NotAcceptable OwnerNative -> Discard
+  -- The other two mean the caller used the wrong door. A perfectly valid
+  -- opening letter handed to 'honourRequest' comes back like this, and a
+  -- triage loop that folds then deletes would delete it. Note also that
+  -- `NotAcceptable RequestOnly` is unreachable through `acceptLetter`, which
+  -- raises `Requested` for those ops before it can be built.
+  NotAcceptable _   -> Abort
   BadLetter _       -> Discard
   WrongRepo         -> Discard
   AlreadyInCanon    -> Discard
@@ -391,12 +403,17 @@ outcome = \case
   BadContent        -> Discard
   ThreadMismatch    -> Discard
   AlreadyHonoured   -> Discard
-  -- Names a part no message carried, or a secret that cannot be one: neither
-  -- is repairable, since the reference is inside a signed author box.
-  PartNotInMessage _ -> Discard
+  -- Both are the caller's evidence about the message, not the letter's doing:
+  -- wiring that forgot to pass @messageParts@ looks exactly like a letter
+  -- naming a part that was never carried, and discarding on that would throw
+  -- away every letter with an attachment, forever.
+  PartNotInMessage _   -> Abort
+  BadPartSecret        -> Abort
   MessageSecretOffered -> Abort
-  -- The sender has to resend with the body as an attachment.
-  BodyTooLarge _     -> Discard
+  -- Local policy, not consensus: another hub may carry a body this one will
+  -- not ('maxInlineBody'). Deleting a letter over a threshold this build
+  -- picked would be irreversible for a decision that is not canon's.
+  BodyTooLarge _     -> Park
   -- The letter is intact and the caller can supply what is missing.
   MissingPartSecret  -> Retry
   PartNotFetched _   -> Retry
@@ -434,47 +451,78 @@ honouredAlready view origin
 -- bridge takes the evidence rather than a bare secret.
 data PartsOf = PartsOf
   { poSecret  :: Maybe PartSecret  -- ^ group secret for the part trees
-    -- | The secret over the Mailbox message's own payload, when the caller
-    -- knows it. Not published, and here only to be refused: PEP-18 gives the
-    -- parts a secret of their own, and if the two ever arrive equal then the
-    -- caller has handed over the key to the envelope, whose back-channel
+    -- | The secret over the Mailbox message's own payload, when there is a
+    -- message. Never published, and carried only to be refused: PEP-18 gives
+    -- the parts a secret of their own, and if the two arrive equal then the
+    -- caller is handing over the key to the envelope, whose back-channel
     -- clauses must never reach canon. Nothing about the bytes says which is
     -- which, so this is the only check that can catch it.
   , poMessage :: Maybe ByteString
     -- | The parts the caller vouches for. On the letter path these are the
     -- message's @messageParts@; on an owner-native event there is no message,
-    -- and the caller is vouching for what it just created, so the check is
-    -- only as good as the caller.
+    -- and the caller is vouching for what it just created.
   , poCarried :: HashSet HashRef
   , poLocal   :: HashSet HashRef   -- ^ of those, the trees present in storage
   }
-  deriving stock (Eq,Show)
+  deriving stock (Eq)
 
--- | An event with no attachments.
-noParts :: PartsOf
-noParts = PartsOf Nothing Nothing HS.empty HS.empty
+-- Deliberately partial, like 'Show' on 'PartSecret' and for the same reason:
+-- 'poMessage' is the more dangerous of the two secrets and it is plain bytes,
+-- so a derived instance would put it in a log the first time anyone traced a
+-- refusal.
+instance Show PartsOf where
+  show p = "PartsOf {secret = " <> maybe "none" (const "present") (poSecret p)
+        <> ", message-secret = " <> maybe "none" (const "present") (poMessage p)
+        <> ", carried = " <> show (HS.size (poCarried p))
+        <> ", local = " <> show (HS.size (poLocal p))
+        <> "}"
 
--- | Every part carried and already fetched. What a triage loop has once it has
--- downloaded a message's attachments.
+-- | A letter's attachments.
 --
--- The message secret is not optional here. It is the only thing that can catch
--- the one mistake this type exists for, and a caller reading a letter always
--- has it: the letter was decrypted with it. A convenience constructor that
--- quietly left it out would turn the check off for every caller who reached
--- for the convenient thing.
-partsReady
+-- Opaque, and the two paths have separate types, because the message secret
+-- cannot be optional here and a constructor in reach makes it optional. The
+-- letter builders all demand it; the one that does not is 'OwnerParts', where
+-- there is no message and therefore nothing to confuse the parts secret with.
+newtype LetterParts = LetterParts PartsOf
+  deriving newtype (Eq,Show)
+
+-- | An owner-native event's attachments.
+newtype OwnerParts = OwnerParts PartsOf
+  deriving newtype (Eq,Show)
+
+-- | A letter with no attachments. Nothing to check, so nothing to supply.
+noAttachments :: LetterParts
+noAttachments = LetterParts (PartsOf Nothing Nothing HS.empty HS.empty)
+
+-- | Every part the message carries, already fetched: what a triage loop has
+-- once it has downloaded the attachments.
+attachments
   :: PartSecret   -- ^ the secret the PARTS are encrypted with
   -> ByteString   -- ^ the secret @messageData@ was encrypted with, to refuse
-  -> [HashRef]
-  -> PartsOf
-partsReady s msg hs = PartsOf (Just s) (Just msg) (HS.fromList hs) (HS.fromList hs)
+  -> [HashRef]    -- ^ the message's parts
+  -> LetterParts
+attachments s msg hs =
+  LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) (HS.fromList hs))
 
--- | Attachments on an owner-native event, which arrived in no message.
---
--- No message secret because there is no message: the owner created these trees
--- itself, so there is nothing for the parts secret to be confused with.
-ownParts :: PartSecret -> [HashRef] -> PartsOf
-ownParts s hs = PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs)
+-- | Carried by the message, not fetched yet.
+attachmentsPending :: PartSecret -> ByteString -> [HashRef] -> LetterParts
+attachmentsPending s msg hs =
+  LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) HS.empty)
+
+-- | Fetched, but the caller has no key for them.
+attachmentsNoKey :: ByteString -> [HashRef] -> LetterParts
+attachmentsNoKey msg hs =
+  LetterParts (PartsOf Nothing (Just msg) (HS.fromList hs) (HS.fromList hs))
+
+-- | An owner-native event with no attachments.
+noOwnAttachments :: OwnerParts
+noOwnAttachments = OwnerParts (PartsOf Nothing Nothing HS.empty HS.empty)
+
+-- | Attachments the owner created itself, so there is no message secret to
+-- confuse the parts secret with.
+ownAttachments :: PartSecret -> [HashRef] -> OwnerParts
+ownAttachments s hs =
+  OwnerParts (PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs))
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
@@ -492,6 +540,11 @@ requireParts po content = do
       Nothing -> Left MissingPartSecret
       Just sec
         | Just (partSecretBytes sec) == poMessage po -> Left MessageSecretOffered
+        -- Checked here as well as in 'mkPartSecret', because a secret can
+        -- reach this point without passing through it: 'Serialise' decodes one
+        -- unchecked so that canon somebody else wrote can be read, and
+        -- compaction re-stamps events by reading the old canon boxes.
+        | not (usablePartSecret sec)                 -> Left BadPartSecret
         | otherwise                                  -> Right ()
 
 -- Refuse a field triage will not carry inline. A local policy, not an
@@ -595,10 +648,10 @@ acceptLetter
   -> CanonView
   -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
   -> HashRef                            -- ^ origin: hash of the Mailbox message
-  -> PartsOf                            -- ^ the message's attachments, if any
+  -> LetterParts                        -- ^ the message's attachments, if any
   -> MessageData
   -> Either TriageError Accepted
-acceptLetter ctx envelopeSigner view folded origin parts md = do
+acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   let canonKp@(canonPk,_) = tcCanon ctx
       allowed = tcAllowed ctx
       repo = tcRepo ctx
@@ -813,10 +866,10 @@ ownerEvent
   :: TriageCtx
   -> CanonView
   -> Word64                             -- ^ folded-at: owner clock, epoch MILLISECONDS
-  -> PartsOf                            -- ^ the event's attachments, if any
+  -> OwnerParts                         -- ^ the event's attachments, if any
   -> AuthorContent
   -> Either TriageError Accepted
-ownerEvent ctx view folded parts content = do
+ownerEvent ctx view folded (OwnerParts parts) content = do
   let kp@(pk,sk) = tcCanon ctx
       repo = tcRepo ctx
   requireCanon repo view pk

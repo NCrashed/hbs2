@@ -464,7 +464,8 @@ altering state:
      revoked as of this event's `seq`. Delegation is by owner-signed
      `delegate`/`revoke` canon events (PEP-21); with no delegation, the owner
      key is the sole canon key. Any other `canon-by` is rejected.
-  4. For owner-authored ops (`set`, `merge`, `redact`), the author box signer
+  4. For owner-authored ops (`set`, `close`, `reopen`, `merge`, `redact`), the
+     author box signer
      is also an authorized canon key. A stranger cannot author these; their
      letter equivalents are only requests (see Folding). (`number` is not an
      op: it is a canon-box field on the `open` event, so it is owner-signed
@@ -537,11 +538,13 @@ Two safety rules the pass encodes. A reply-class event whose `thread` is not
 an admitted `open` is dropped with a warning (a dangling reference, which
 `hub verify` reports, PEP-22), so a comment on a rejected or never-folded open
 cannot create a phantom thread. And `redact` locates its target through the
-`byid` index of already-materialized events; a `redact` naming an unknown
-event-id is a no-op. The pass is `seq`-ordered, so the target is present
-whenever the `redact` was minted after it, which is the ordering the bridge
-enforces: it refuses to mint a `redact` for a target not yet in canon,
-because such an event would be admitted and then do nothing, silently.
+`byid` index of already-materialized events; a `redact` naming an event that
+is not in it is DROPPED, with its own reason, rather than admitted as a no-op.
+Dropping is the better of the two because it is visible: `hub verify` names
+it, where a silent no-op leaves a redaction that reported success and did
+nothing. The pass is `seq`-ordered, so the target is present whenever the
+`redact` was minted after it, which is the ordering the bridge enforces: it
+refuses to mint a `redact` for a target not yet in canon.
 
 `revise` is author-authored but restricted to the author of record: the fold
 applies it only when its author box signer equals the opening event's author
@@ -782,6 +785,26 @@ rule and therefore consensus: it cannot be added to a repo that already has
 canon without bumping `hub-meta` (see Deterministic materialization). Until
 someone needs it, the exposure is one hostile or broken maintainer, who can
 already do worse, and `hub verify` names them.
+
+Compaction must retain what the fold's own checks read. Two of them look at
+canon rather than at the event in hand, and compaction is what can take that
+canon away.
+
+The first is the origin set. One letter folds to at most one event, and the
+check that enforces it asks whether canon already holds an event with this
+letter's hash as its `origin`. That set is built from admitted events, so
+compacting away an honoured `close` removes the only record that its letter
+was honoured, and the same letter honoured again after a restart produces a
+second event. The second is `redact`: a retained redaction whose target has
+been compacted away names an event that is no longer there, and the fold drops
+it, silently un-redacting the content the redaction existed to withhold.
+
+The retention predicate therefore keeps, in addition to what Retention already
+lists: every event that is the target of a retained `redact`, and every event
+whose `origin` a still-reachable letter could repeat. The first is exact. The
+second is not, since a letter's hash is not derivable from canon, so in
+practice it means retaining the `origin` field of compacted events even when
+their content is dropped, as a set the fold can still consult.
 
 Recovery, since the bound is reachable in practice. A delegated maintainer who
 stamps `number = maxBound - 1` leaves every later `open` refused, and

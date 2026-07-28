@@ -166,6 +166,18 @@ spec = do
       -- alice is nobody's maintainer, so the first check still fires first
       expectLeft UntrustedAck (openAckFor isMaintainer isMine (EnvelopeSigner (fst alice)) oursMd)
 
+    it "refuses to read a letter as an ack" $ do
+      alice <- kp
+      owner <- kp
+      -- The mirror of "an ack is not a letter": both directions matter,
+      -- because a reader picks the door by what it expected, not by what came.
+      let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
+          letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
+      got <- expectRight (parsePayload (letterPayload letter))
+      expectLeft NotAnAck (openAck (\_ _ -> True) (EnvelopeSigner (fst alice)) got)
+      expectLeft NotAnAck
+        (openAckFor (\_ _ -> True) (\_ _ -> True) (EnvelopeSigner (fst alice)) got)
+
     it "rejects a tampered inner box" $ do
       alice <- kp
       owner <- kp

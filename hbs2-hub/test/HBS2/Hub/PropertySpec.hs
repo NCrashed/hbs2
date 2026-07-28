@@ -358,7 +358,7 @@ step cast st = \case
   -- where a revoked maintainer would slip through.
   StepAsDelegate i ts -> withThread i $ \thr ->
     case acceptLetter (castDeleg cast) (EnvelopeSigner alicePk) (stView st) (clockOf st)
-           (originOf (stStep st)) noParts
+           (originOf (stStep st)) noAttachments
            (letterOf (AComment thr Nothing (Just "d") Nothing ts)) of
       Right acc -> keep TByDelegate acc
       -- Refused after minting earlier in this run: the delegation was
@@ -414,10 +414,10 @@ step cast st = \case
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
-               Ready      -> partsReady secret32 msgSecret [part]
-               NotFetched -> PartsOf (Just secret32) (Just msgSecret) (HS.singleton part) HS.empty
-               NotCarried -> noParts
-               NoKey      -> PartsOf Nothing (Just msgSecret) (HS.singleton part) (HS.singleton part)
+               Ready      -> attachments secret32 msgSecret [part]
+               NotFetched -> attachmentsPending secret32 msgSecret [part]
+               NotCarried -> noAttachments
+               NoKey      -> attachmentsNoKey msgSecret [part]
         content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
     in acceptWith po TAttached (letterOf content)
 
@@ -433,7 +433,7 @@ step cast st = \case
                     (if kind == HubPR then Just (coords True) else Nothing) ts
         letter = makeLetter cpk csk content (ReplyTo cpk (originOf (stStep st)))
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noParts letter of
+              (originOf (stStep st)) noAttachments letter of
          Right acc | acReply acc /= NoReply ->
            -- Not an invariant of the fold, so it would go unnoticed there: a
            -- rewrapper must not be able to redirect the notification.
@@ -445,7 +445,7 @@ step cast st = \case
     let (mpk,msk) = castMallory cast
         content = AOpen repo HubIssue "spam" [] Nothing Nothing Nothing ts
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noParts (makeLetter mpk msk content noReplyChannel) of
+              (originOf (stStep st)) noAttachments (makeLetter mpk msk content noReplyChannel) of
          Right _ -> error "a deny-listed author was folded"
          Left e  -> (refuse e) { stTags = TDeniedRefused : stTags st }
 
@@ -459,7 +459,7 @@ step cast st = \case
                      MessageData hubMsgVersion (Letter (SignedBox pk (bs <> "x") sig) rc)
                    ack -> MessageData hubMsgVersion ack
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noParts broken of
+              (originOf (stStep st)) noAttachments broken of
          Right _ -> error "a forged letter was folded"
          Left e  -> (refuse e) { stTags = TCorruptRefused : stTags st }
 
@@ -468,7 +468,7 @@ step cast st = \case
     (old:_) ->
       let content = AOpen repo HubIssue "stale" [] Nothing Nothing Nothing ts
       in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) old (clockOf st)
-                (originOf (stStep st)) noParts (letterOf content) of
+                (originOf (stStep st)) noAttachments (letterOf content) of
            Left e    -> refuse e
            Right acc -> case canonOf (acEvent acc) of
              Nothing -> st
@@ -493,7 +493,7 @@ step cast st = \case
       (thr:_) -> k thr
       []      -> st
 
-    accept tag letter = acceptWith noParts tag letter
+    accept tag letter = acceptWith noAttachments tag letter
 
     acceptWith po tag letter =
       case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
@@ -502,7 +502,7 @@ step cast st = \case
         Left e    -> refuse e
 
     mint tag content _ts =
-      case ownerEvent (castOwner cast) (stView st) (clockOf st) noParts content of
+      case ownerEvent (castOwner cast) (stView st) (clockOf st) noOwnAttachments content of
         Right acc -> keep tag acc
         Left e    -> refuse e
 

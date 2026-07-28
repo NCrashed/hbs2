@@ -44,6 +44,7 @@ module HBS2.Hub.Types
   , multiValued
   , normalizeAttr
   , normalizedAttr
+  , validAttrName
   , PartSecret
   , mkPartSecret
   , usablePartSecret
@@ -69,6 +70,7 @@ import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Char (isAsciiLower,isDigit)
 import Data.List (nub,sort)
 import Data.Text qualified as Text
 import Data.Word (Word32,Word64)
@@ -229,7 +231,8 @@ data CanonContent = CanonContent
     -- ByteString is pinned by CBOR itself, while the shape of the key type is
     -- pinned by whatever the crypto library derives. There is no way to fix an
     -- encoding mismatch after the fact (see PEP-19 "Attachments in public
-    -- canon"), so 'validPartSecret' checks what goes in.
+    -- canon"), so 'mkPartSecret' checks what goes in and 'usablePartSecret'
+    -- checks what came back out of canon somebody else wrote.
   , ccPartSecret :: Maybe PartSecret
   }
   deriving stock (Eq,Show,Generic)
@@ -315,14 +318,26 @@ normalizeAttr k v
   | k `elem` multiValued = encodeLabels (decodeLabels v)
   | otherwise            = v
 
--- | Is this attribute already in canonical form, name and value both?
+-- | Is this a well-formed attribute name?
 --
--- The name matters as much as the value: @Labels@ is not @labels@, so it would
--- sail past set canonicalization as if it were a scalar and then sit in the
--- attribute map as a second, near-invisible attribute. Lowercase is the whole
--- rule, since an attribute name is a vocabulary word rather than prose.
+-- A shape rule, not a spelling rule, and the difference is the whole point. A
+-- name is matched literally against 'multiValued' to decide whether its value
+-- is a set, so @labels @, @ labels@, @la bels@ and @""@ are each a separate
+-- attribute that no set canonicalization touches, that the render contract
+-- never reads, and that nothing can delete afterwards, since the ops only ever
+-- insert. Checking the case alone closes one spelling out of an infinite
+-- family. A name is a vocabulary word: a lowercase letter, then lowercase
+-- letters, digits and hyphens.
+validAttrName :: Text -> Bool
+validAttrName k = case Text.uncons k of
+  Just (c,rest) -> isAsciiLower c && Text.all part rest
+  Nothing       -> False
+  where
+    part c = isAsciiLower c || isDigit c || c == '-'
+
+-- | Is this attribute already in canonical form, name and value both?
 normalizedAttr :: Text -> Text -> Bool
-normalizedAttr k v = Text.toLower k == k && normalizeAttr k v == v
+normalizedAttr k v = validAttrName k && normalizeAttr k v == v
 
 -- | The group secret an event's encrypted parts were encrypted with.
 --

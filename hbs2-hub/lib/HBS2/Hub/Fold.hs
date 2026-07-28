@@ -148,6 +148,13 @@ data Comment = Comment
   , cBodyPart   :: Maybe HashRef     -- ^ large body shipped as an encrypted tree
   , cPartSecret :: Maybe PartSecret  -- ^ group secret the owner published for it
   , cOrigin     :: Maybe HashRef     -- ^ the Tier B letter this was folded from
+    -- | This comment was redacted, so a renderer must withhold its body.
+    --
+    -- Here for the reason 'tsRedacted' is on the thread, only more so: a
+    -- comment is what a redaction is usually FOR, and a renderer that forgot
+    -- to join against the flat set would publish the withdrawn text in every
+    -- clone while the redact reported success.
+  , cRedacted   :: Bool
   }
   deriving stock (Eq,Show)
 
@@ -628,7 +635,10 @@ keep scope r s = s
 -- is not in a thread at all, and because the fold is one pass: the redact of
 -- an open is the same shape as any other.
 markRedacted :: HashSet EventId -> ThreadState -> ThreadState
-markRedacted red t = t { tsRedacted = HS.member (tsId t) red }
+markRedacted red t = t
+  { tsRedacted = HS.member (tsId t) red
+  , tsComments = [ c { cRedacted = HS.member (cId c) red } | c <- tsComments t ]
+  }
 
 -- | Every encrypted part an event references.
 --
@@ -697,4 +707,6 @@ mkComment r replyto ts body bodypart = Comment
   , cBodyPart = bodypart
   , cPartSecret = ccPartSecret (rCanon r)
   , cOrigin = ccOrigin (rCanon r)
+    -- Filled in at the end: a redact may arrive after the comment it hides.
+  , cRedacted = False
   }
