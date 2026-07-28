@@ -279,12 +279,30 @@ spec = do
       let repo = fst owner
           ac0 = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac0)
+      -- All ten, because the bridge dispatches on this to decide whether a
+      -- letter is folded as the sender's own, put in front of a maintainer, or
+      -- refused outright, and an op missing from the list is an op nothing
+      -- says which of the three it is.
       classify ac0 `shouldBe` FoldsToCanon
       classify (AComment tid Nothing Nothing Nothing 1) `shouldBe` FoldsToCanon
+      classify (ARevise tid coords 1) `shouldBe` FoldsToCanon
       classify (AClose tid Nothing 1) `shouldBe` RequestOnly
+      classify (AReopen tid Nothing 1) `shouldBe` RequestOnly
       classify (ASet tid "labels" "bug" 1) `shouldBe` RequestOnly
       classify (AMerge tid "a" "b" 1) `shouldBe` OwnerNative
+      classify (ARedact tid 1) `shouldBe` OwnerNative
       classify (ADelegate (fst owner) 1) `shouldBe` OwnerNative
+      classify (ARevoke (fst owner) 1) `shouldBe` OwnerNative
+
+    it "keeps a contributor's reply channel out of a log" $ do
+      alice <- kp
+      sig <- someHash
+      -- The channel lives outside the signed letter precisely so a
+      -- contributor's mailbox key never reaches canon, and a derived Show is
+      -- the same leak by a shorter route: every refusal carrying a Pending is
+      -- something a triage loop logs.
+      show (ReplyTo (fst alice) sig) `shouldBe` "ReplyTo <hidden>"
+      show NoReply `shouldBe` "NoReply"
 
   describe "PEP-18/PEP-19 bridge" $ do
 

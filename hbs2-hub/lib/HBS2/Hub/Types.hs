@@ -1,3 +1,8 @@
+-- 'authorTs', 'withAuthorTs' and 'authorThread' dispatch on every constructor
+-- of 'AuthorContent' with no wildcard, and a constructor added without a case
+-- there is a crash on a letter an attacker composed rather than a build error.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
 -- | Core types for hbs2-hub canon (PEP-19).
 --
 -- An issue or PR thread is event-sourced: its state is the deterministic
@@ -49,11 +54,12 @@ module HBS2.Hub.Types
   , mkPartSecret
   , MessageSecret
   , mkMessageSecret
-  , messageSecretBytes
+  , sameSecret
   , usablePartSecret
   , partSecretBytes
   , hubMetaVersion
   , hubEventVersion
+  , maxFoldedTs
   , threadDir
   , repoDir
   , numberIndexPath
@@ -372,7 +378,14 @@ instance Serialise PartSecret where
 -- 'PartSecret' by type rather than by whether the caller remembered which was
 -- which. They are the same bytes and the same length, and confusing them
 -- publishes the sender's private reply address into every clone forever.
-newtype MessageSecret = MessageSecret { messageSecretBytes :: ByteString }
+--
+-- There is deliberately no accessor at all, unlike 'partSecretBytes': a part
+-- secret is published into canon and a reader hands those bytes to the
+-- decryptor, while nothing outside this module has any business reading these.
+-- An accessor is also how one type becomes the other in one composition, by a
+-- caller who is sure they know which they are holding, which is the mistake
+-- both newtypes exist to make impossible.
+newtype MessageSecret = MessageSecret ByteString
   deriving stock (Eq)
 
 instance Show MessageSecret where
@@ -383,6 +396,16 @@ mkMessageSecret :: ByteString -> Maybe MessageSecret
 mkMessageSecret bs
   | BS.length bs == (typicalKeyLength :: Int) = Just (MessageSecret bs)
   | otherwise                                 = Nothing
+
+-- | Are these two the same key?
+--
+-- The one thing the two secret types can be asked about each other, and the
+-- only thing anything needs: the bridge refuses to publish a parts secret that
+-- is really the message secret, and no reader can tell them apart by their
+-- bytes. Comparing them any other way needs an accessor, and an accessor is
+-- what puts a secret in a log.
+sameSecret :: PartSecret -> MessageSecret -> Bool
+sameSecret (PartSecret a) (MessageSecret b) = a == b
 
 -- | Build one, checking the only thing bytes can be checked for.
 --
@@ -417,6 +440,26 @@ hubMetaVersion = 1
 -- | The version of a single event file: the @(hub-event N)@ of PEP-19.
 hubEventVersion :: Word32
 hubEventVersion = 1
+
+-- | The highest @folded-ts@ canon admits: 2100-01-01T00:00:00Z in epoch
+-- milliseconds.
+--
+-- An admission rule, so it is consensus and part of @hub-meta 1@: it cannot be
+-- raised or lowered once a repo has canon written under it.
+--
+-- It has to be a constant rather than a window around the reader's own clock,
+-- which is what a "not absurdly far ahead" rule would want. The fold is a pure
+-- function of canon; a rule that consulted the wall clock would have two nodes
+-- disagree about which events count, and the same node disagree with itself an
+-- hour later, which is the one thing the fold may never do.
+--
+-- What it bounds is the damage, not the mistake. The next stamp is clamped to
+-- be no lower than the last one, so a stamp anywhere in the range pins every
+-- later event to it; the ceiling only stops that from being permanent in the
+-- sense of "no clock will ever pass it". Recovery from a stamp inside the
+-- range is compaction (PEP-19), which restamps.
+maxFoldedTs :: Word64
+maxFoldedTs = 4102444800000
 
 -- | Where a thread's events live, relative to the canon tree root.
 threadDir :: ThreadId -> FilePath

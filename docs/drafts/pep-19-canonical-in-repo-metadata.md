@@ -287,6 +287,8 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   request (the letter is its provenance).
                                    ;   Absent only when nothing prompted it.
 (folded-ts <word64>)               ; Unix epoch milliseconds, UTC, owner's clock at fold
+                                   ;   refused above 4102444800000 (2100-01-01Z):
+                                   ;   the next stamp is clamped to be no lower
 (canon-by  <sign-pubkey-b58>)      ; owner or delegated maintainer
 (part-secret <group-secret-b58>)   ; only on events referencing encrypted parts:
                                    ;   the PARTS group secret, NOT the one over
@@ -662,6 +664,16 @@ offered for the parts equals the secret over the message payload. That check is
 the only mechanical defence available, the two values being otherwise
 indistinguishable.
 
+For that check to run, the caller has to hand over the message secret with the
+parts, so the letter-side evidence always carries it and there is no value on
+that path meaning "I have nothing to say about attachments". A reader of a
+letter holds the message secret by definition, having read the letter with it,
+and the distinction matters because the alternative reading is a wedge: a letter
+naming a part its message does not carry is the sender's doing and must not stop
+the loop, while a caller that never wired the parts through is a bug that must.
+Only an owner-native event, which has no message behind it, can say the second
+thing.
+
 The field is raw key bytes (`Saltine.encode` of the group secret), not a
 serialised key type: canon is forever, and the CBOR shape of a byte string is
 pinned by CBOR itself, while the shape of a key type is pinned by whatever the
@@ -800,33 +812,54 @@ bridge. Recovering means the re-stamping compaction described below, which
 the owner can still perform because it rewrites canon rather than appending
 to it.
 
+Who can do that is exactly the maintainer set, and no one else. A stamp is
+spent only when the canon box carrying it was signed by a key authorized at
+that point in the log (see the rule below), so a file written into a clone by
+someone who was never a maintainer, or by one whose delegation had already been
+withdrawn, contributes nothing to either counter. The fold is a public function
+over whatever files a tree happens to hold, and `hub verify` runs it on canon
+somebody else wrote, so without that restriction anyone able to get one file
+into one clone could strand the cursor there.
+
 A known bound on the same weakness. The fold refuses a `seq` or `number` of
-`maxBound`, since the next mint is the maximum plus one and would wrap. It
-does not, and cannot without a new admission rule, refuse a stamp that is
-merely absurd: a maintainer who signs `number = maxBound - 1` leaves the
-counter one mint from the end, and from then on every `open` is refused
-because there is no number left to assign. Closing this needs a rule about
-what a stamp may be relative to the ones before it, which is an admission
-rule and therefore consensus: it cannot be added to a repo that already has
-canon without bumping `hub-meta` (see Deterministic materialization). Until
-someone needs it, the exposure is one hostile or broken maintainer, who can
-already do worse, and `hub verify` names them.
+`maxBound`, since the next mint is the maximum plus one and would wrap. It does
+not refuse a stamp that is merely absurd: a maintainer who signs
+`number = maxBound - 1` leaves the counter one mint from the end, and from then
+on every `open` is refused because there is no number left to assign. Closing
+that needs a rule about what a stamp may be RELATIVE to the ones before it, and
+a relative rule needs the log that came before, which a clone that has fetched
+part of canon does not have; two nodes would then disagree about which events
+count. Until someone needs it, the exposure is one hostile or broken
+maintainer, who can already do worse, and `hub verify` names them.
 
-`folded-ts` is bounded the same way and for a sharper reason: the next stamp
-is clamped to be no lower than the last one in canon, so a single event at the
-top of the range pins every later event to it, on every node, permanently, and
-every time the render contract shows is derived from that field. The top of
-the range is refused for all three.
+`folded-ts` is bounded differently, because the damage is shaped differently.
+The counters wrap only at the very top, and each mint moves them by one; this
+one is carried forward by `max`, so a stamp ANYWHERE in the range pins every
+later event to it, on every node, and every time the render contract shows is
+derived from that field. What bounds it is therefore a ceiling rather than the
+top of the range: `folded-ts` above 2100-01-01T00:00:00Z (`4102444800000`) is
+refused. That is an admission rule, so it is part of `hub-meta 1` and cannot be
+changed afterwards; it is expressible as one because it is absolute, needing no
+knowledge of the events before it, which is exactly what the counters' rule
+would need. The triage bridge refuses to stamp the same value from the other
+side, since the clamp means the value it is about to write is the greater of
+its own clock and canon's, and minting past the ceiling would produce an event
+the fold drops. Inside the range the pin remains possible, and the recovery is
+the re-stamping compaction below.
 
-A dropped event still spends its stamp. This is not an optimization to skip:
-admission is not final. An event dropped because its signer had been revoked
-becomes admissible the moment a later `delegate` restores that signer, so a
-`seq` that was never counted can be handed to a second event, and the two
-would then sit at one `seq` in a canon that is no longer what either publisher
-intended. Delegating a maintainer again after revoking them is an ordinary
-thing to do. The high-water marks therefore advance over every event whose
-stamp is usable, admitted or not; only the `origin` set is restricted to
-admitted events, since a dropped event folded no letter.
+An event that was not admitted still spends its stamp. This is not an
+optimization to skip. Admission is not final: canon arrives a file at a time,
+and a reply dropped as dangling is admitted the moment the opening event it
+names turns up. And even where admission is final, the file occupies that
+`seq`, so minting into it leaves canon holding two events there for good, with
+every last-writer-wins attribute between them settled by a hash rather than by
+time. The rule is therefore about the canon box, not about the event: a stamp
+signed by a then-authorized key is spent whether or not the event was applied,
+including one whose author content this build cannot decode at all, which is
+precisely the older build reading a newer schema's `open`. What is not spent is
+a value the fold refuses outright (`maxBound`, or a `number` on something that
+is not an `open`), and what stays restricted to admitted events is the `origin`
+set, since an event that was not applied folded no letter.
 
 Compaction must retain what the fold's own checks read. Two of them look at
 canon rather than at the event in hand, and compaction is what can take that

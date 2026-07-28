@@ -1,3 +1,9 @@
+-- 'classify' and 'letterSyntax' dispatch on every constructor of
+-- 'AuthorContent' with no wildcard, and 'classify' runs on content an attacker
+-- composed, inside the triage loop. A constructor added without a case there is
+-- a crash in that loop rather than a build error, so the warning is an error.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
 -- | The Tier B letter (PEP-18).
 --
 -- A letter rides the Mailbox protocol: the Mailbox 'Message' is a
@@ -169,18 +175,30 @@ oversizedField = \case
     | otherwise                        -> maybe Nothing coordsOver coords
   AComment _ _ body _ _
     | maybe False big body      -> Just "body"
+    | otherwise                 -> Nothing
   ARevise _ coords _            -> coordsOver coords
   AClose _ note _
     | maybe False big note      -> Just "note"
+    | otherwise                 -> Nothing
   AReopen _ note _
     | maybe False big note      -> Just "note"
+    | otherwise                 -> Nothing
   ASet _ k v _
     | textSize k > maxAttrName  -> Just "attr"
     | textSize v > maxAttrValue -> Just "value"
+    | otherwise                 -> Nothing
   AMerge _ mc into _
     | textSize mc > maxRef      -> Just "merge-commit"
     | textSize into > maxRef    -> Just "merged-into"
-  _ -> Nothing
+    | otherwise                 -> Nothing
+  -- The three with no text in them at all, spelled out rather than caught by a
+  -- wildcard: a new constructor carrying prose must not arrive here as one
+  -- carrying none. That is what makes the module's own
+  -- -Werror=incomplete-patterns see it, and this is the last gate before a
+  -- field is in every clone forever.
+  ARedact{}                     -> Nothing
+  ADelegate{}                   -> Nothing
+  ARevoke{}                     -> Nothing
   where
     big = (> maxInlineBody) . textSize
 
@@ -281,7 +299,13 @@ data LetterError =
   | UndecodableContent HubKey UndecodableWhy
   | NotALetter            -- ^ an Ack where a Letter was expected
   | NotAnAck              -- ^ a Letter where an Ack was expected
-  | AuthorDenied          -- ^ the inner author is deny-listed (triage, PEP-21)
+    -- | A deny-listed author (triage, PEP-21). The INNER author, since that is
+    -- the identity a ban is about and an envelope key is rewrapped away, except
+    -- on a letter whose schema this build cannot parse: there is no inner
+    -- author to name there, and the envelope signer is all there is
+    -- ('openLetterAs'). So this one error has two subjects, and a deny-list
+    -- built from inner authors alone will never fire on the second.
+  | AuthorDenied
   | UntrustedAck          -- ^ the ack's envelope signer is not a maintainer
     -- | The ack is signed by a maintainer of the repo it names, but that
     -- (repo, thread) pair is not one this reader submitted. See 'openAckFor'.
@@ -403,7 +427,10 @@ openLetter md
 --   * the reply channel is honoured only when the envelope signer is the
 --     inner author, because a rewrapper can substitute their own.
 openLetterAs
-  :: (HubKey -> Bool)   -- ^ may this inner author be folded? (not deny-listed)
+     -- | May a letter from this key be folded? Asked about the inner author,
+     -- and about the envelope signer when there is no inner author to ask
+     -- about (see 'AuthorDenied').
+  :: (HubKey -> Bool)
   -> EnvelopeSigner     -- ^ who signed the Mailbox envelope
   -> MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)

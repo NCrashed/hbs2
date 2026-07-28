@@ -60,6 +60,11 @@ data Step =
   | StepRewrapped Word64 HubKind
   | StepFromDenied Word64       -- ^ a letter from a deny-listed author (PEP-21)
   | StepCorrupt Word64          -- ^ a letter whose inner box does not verify
+    -- | Not a letter at all: a stranger's event written straight into the
+    -- canon tree, stamped near the top of the range. Nothing about it may
+    -- reach the view a folder mints from, or one file from anyone who can
+    -- write to a clone leaves the owner unable to mint even the revoke.
+  | StepIntruder Word64
   deriving stock (Show)
 
 -- | What the caller can say about an attachment, and what it costs to be
@@ -90,6 +95,7 @@ instance Arbitrary Step where
     , (2, StepRewrapped <$> genTs <*> elements [HubIssue,HubPR])
     , (1, StepFromDenied <$> genTs)
     , (1, StepCorrupt <$> genTs)
+    , (1, StepIntruder <$> genTs)
     ]
 
   -- Without a shrink a counterexample is the whole generated script with
@@ -113,6 +119,7 @@ instance Arbitrary Step where
     StepBigBody ts      -> [StepBigBody ts' | ts' <- shrinkTs ts]
     StepFromDenied ts   -> [StepFromDenied ts' | ts' <- shrinkTs ts]
     StepCorrupt ts      -> [StepCorrupt ts' | ts' <- shrinkTs ts]
+    StepIntruder ts     -> [StepIntruder ts' | ts' <- shrinkTs ts]
     StepRewrapped ts k  -> [StepRewrapped ts' k | ts' <- shrinkTs ts]
                         <> [StepRewrapped ts HubIssue | k /= HubIssue]
     StepSetLabels i ts ok -> [StepSetLabels i' ts ok | i' <- shrinkIx i]
@@ -166,6 +173,7 @@ data Tag =
   | TSetLabels | THonourWith | TAttached | TBigBody | TRewrapped
   | TDeniedRefused   -- ^ a deny-listed author was turned away
   | TCorruptRefused  -- ^ ...and so was a letter whose signature does not hold
+  | TIntruder        -- ^ a stranger's event was put in the tree by hand
   deriving stock (Eq,Show)
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
@@ -179,6 +187,10 @@ secret32 = fromMaybe (error "bad fixture secret")
 msgSecret :: MessageSecret
 msgSecret = fromMaybe (error "bad fixture secret")
               (mkMessageSecret (BS.replicate typicalKeyLength 0x42))
+
+-- A message that carried no attachments.
+noParts :: LetterParts
+noParts = noMessageParts msgSecret
 
 -- An inline body one byte over what triage will carry.
 bigBody :: Text
@@ -222,6 +234,9 @@ data St = St
   , stRefused :: [TriageError]
     -- The seq of every event minted against a stale view and then discarded.
   , stStale   :: [Word64]
+    -- Events nobody authorized, written straight into the tree. They are canon
+    -- in the sense that they are in it, and in no other sense.
+  , stIntruders :: [EventId]
   }
 
 -- | What one run produced.
@@ -231,6 +246,9 @@ data Run = Run
   , rAgrees   :: Bool
   , rOnePer   :: Bool
   , rStaleDup :: Bool
+    -- | Every event a stranger wrote into the tree was refused, and refused
+    -- for being unauthorized rather than for anything about its content.
+  , rIntruded :: Bool
   , rTags     :: [Tag]
   , rRefused  :: [TriageError]
   }
@@ -263,21 +281,24 @@ spec =
         monitor (cover 5 (TRewrapped `elem` rTags r) "folded a rewrapped letter")
         monitor (cover 5 (TDeniedRefused `elem` rTags r) "turned away a deny-listed author")
         monitor (cover 5 (TCorruptRefused `elem` rTags r) "turned away a forged letter")
+        monitor (cover 5 (TIntruder `elem` rTags r) "folded canon a stranger wrote into")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
         monitor (cover 1 (any isDoubleHonour (rRefused r)) "refused a second honour")
-        -- Five invariants. The fold admits everything the bridge minted; it
+        -- Six invariants. The fold admits everything the bridge minted; it
         -- reports no anomaly in what the bridge minted either, which is the
         -- stronger half (an anomaly is fold-legal, so nothing else here would
         -- notice); the view carried across the run still equals a rebuild from
-        -- the canon that resulted; no letter produced two canon events, which
-        -- none of the others can see (two close events with different ids are a
-        -- valid canon, just a wrong one); and a mint against a stale view
+        -- the canon that resulted, INCLUDING the runs where a stranger wrote
+        -- into that canon, which is the whole of what keeps one hand-written
+        -- file from stranding the cursor; no letter produced two canon events,
+        -- which none of the others can see (two close events with different ids
+        -- are a valid canon, just a wrong one); a mint against a stale view
         -- really would have collided, which is why the caller has to discard
-        -- it.
+        -- it; and every intruder was refused for being unauthorized.
         assert (  null (rDropped r) && null (rAnoms r)
-               && rAgrees r && rOnePer r && rStaleDup r )
+               && rAgrees r && rOnePer r && rStaleDup r && rIntruded r )
   where
     isDoubleHonour = \case
       AlreadyHonoured -> True
@@ -306,18 +327,24 @@ runSteps steps = do
         , castMallory = mallory
         , castDelegKey = fst deleg
         }
-      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] []
+      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] []
       st  = foldl' (\s sp -> step cast s { stStep = stStep s + 1 } sp) st0 steps
       fr  = foldEvents repo (stEvents st)
-      -- One canon event per letter: count the origins the events carry.
-      origs = mapMaybe (ccOrigin <=< canonOf) (stEvents st)
-      live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) (stEvents st))
+      intruders = HS.fromList (stIntruders st)
+      -- One canon event per letter: count the origins the events carry. The
+      -- intruders' own events are excluded from both of these: they are in the
+      -- tree, so the fold must see them, and they are nobody's letter.
+      mine  = [ e | e <- stEvents st, not (HS.member (eventId e) intruders) ]
+      origs = mapMaybe (ccOrigin <=< canonOf) mine
+      live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) mine)
   pure Run
-    { rDropped  = frDropped fr
+    { rDropped  = [ d | d@(eid,_) <- frDropped fr, not (HS.member eid intruders) ]
     , rAnoms    = frAnomalies fr
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
     , rStaleDup = all (`HS.member` live) (stStale st)
+    , rIntruded = all (\eid -> lookup eid (frDropped fr) == Just UnauthorizedCanon)
+                      (stIntruders st)
     , rTags     = stTags st
     , rRefused  = stRefused st
     }
@@ -359,7 +386,7 @@ step cast st = \case
   -- where a revoked maintainer would slip through.
   StepAsDelegate i ts -> withThread i $ \thr ->
     case acceptLetter (castDeleg cast) (EnvelopeSigner alicePk) (stView st) (clockOf st)
-           (originOf (stStep st)) noAttachments
+           (originOf (stStep st)) noParts
            (letterOf (AComment thr Nothing (Just "d") Nothing ts)) of
       Right acc -> keep TByDelegate acc
       -- Refused after minting earlier in this run: the delegation was
@@ -417,7 +444,7 @@ step cast st = \case
         po = case att of
                Ready      -> attachments secret32 msgSecret [part]
                NotFetched -> attachmentsPending secret32 msgSecret [part]
-               NotCarried -> noAttachments
+               NotCarried -> noParts
                NoKey      -> attachmentsNoKey msgSecret [part]
         content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
     in acceptWith po TAttached (letterOf content)
@@ -434,7 +461,7 @@ step cast st = \case
                     (if kind == HubPR then Just (coords True) else Nothing) ts
         letter = makeLetter cpk csk content (ReplyTo cpk (originOf (stStep st)))
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noAttachments letter of
+              (originOf (stStep st)) noParts letter of
          Right acc | acReply acc /= NoReply ->
            -- Not an invariant of the fold, so it would go unnoticed there: a
            -- rewrapper must not be able to redirect the notification.
@@ -446,7 +473,7 @@ step cast st = \case
     let (mpk,msk) = castMallory cast
         content = AOpen repo HubIssue "spam" [] Nothing Nothing Nothing ts
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noAttachments (makeLetter mpk msk content noReplyChannel) of
+              (originOf (stStep st)) noParts (makeLetter mpk msk content noReplyChannel) of
          Right _ -> error "a deny-listed author was folded"
          Left e  -> (refuse e) { stTags = TDeniedRefused : stTags st }
 
@@ -460,16 +487,34 @@ step cast st = \case
                      MessageData hubMsgVersion (Letter (SignedBox pk (bs <> "x") sig) rc)
                    ack -> MessageData hubMsgVersion ack
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-              (originOf (stStep st)) noAttachments broken of
+              (originOf (stStep st)) noParts broken of
          Right _ -> error "a forged letter was folded"
          Left e  -> (refuse e) { stTags = TCorruptRefused : stTags st }
+
+  -- Straight into the tree, bypassing the bridge entirely: the fold is a
+  -- public function over whatever files a clone happens to hold, and a
+  -- maintainer's own key is not what gets one of those there. Stamped near the
+  -- top of the range, because counting it is what would leave the owner unable
+  -- to mint anything ever again, including the revoke.
+  StepIntruder ts ->
+    let (mpk,msk) = castMallory cast
+        thr = case stThreads st of
+                (t:_) -> t
+                []    -> originOf (stStep st)
+        ev = mkEvent (mpk,msk) (mpk,msk)
+               (AComment thr Nothing (Just "intruder") Nothing ts)
+               (\e -> CanonContent e (maxBound - 1) Nothing Nothing ts Nothing)
+    in st { stEvents = ev : stEvents st
+          , stIntruders = eventId ev : stIntruders st
+          , stTags = TIntruder : stTags st
+          }
 
   StepStaleView i ts -> case drop i (stOld st) of
     []      -> st
     (old:_) ->
       let content = AOpen repo HubIssue "stale" [] Nothing Nothing Nothing ts
       in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) old (clockOf st)
-                (originOf (stStep st)) noAttachments (letterOf content) of
+                (originOf (stStep st)) noParts (letterOf content) of
            Left e    -> refuse e
            Right acc -> case canonOf (acEvent acc) of
              Nothing -> st
@@ -494,7 +539,7 @@ step cast st = \case
       (thr:_) -> k thr
       []      -> st
 
-    accept tag letter = acceptWith noAttachments tag letter
+    accept tag letter = acceptWith noParts tag letter
 
     acceptWith po tag letter =
       case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)

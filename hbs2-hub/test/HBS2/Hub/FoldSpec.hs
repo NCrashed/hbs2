@@ -422,37 +422,89 @@ spec = do
       hx (Domained author (ARevoke key 4)) `shouldBe`
         "83001a4842324183098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
 
-    it "refuses a folded-ts at the top of the range" $ do
+    it "refuses a folded-ts past the ceiling" $ do
       owner <- kp
       alice <- kp
-      -- The next stamp is clamped to be no lower than this one, so admitting
-      -- maxBound pins every later event to it, on every node, for good, and
-      -- every time the render contract shows comes from this field.
+      -- The next stamp is clamped to be no lower than this one, so a stamp
+      -- pins every later event to it, on every node, and every time the render
+      -- contract shows comes from this field. The top of the range is not a
+      -- special case here the way it is for the two counters: those wrap, this
+      -- one is carried forward by 'max' from anywhere in the range, so what
+      -- bounds it is a ceiling.
       let repo = fst owner
-          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canonAt 1 (Just 1) maxBound)
-      reasons (foldEvents repo [ev]) `shouldBe` [BadStamp]
+          at t = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                   (canonAt 1 (Just 1) t)
+      reasons (foldEvents repo [at maxBound]) `shouldBe` [BadStamp]
+      reasons (foldEvents repo [at (maxFoldedTs + 1)]) `shouldBe` [BadStamp]
+      -- and the ceiling itself is admitted, so the bridge's gate and this one
+      -- are the same boundary
+      reasons (foldEvents repo [at maxFoldedTs]) `shouldBe` []
+
+    it "spends the seq of an event from a newer schema" $ do
+      owner <- kp
+      alice <- kp
+      -- The extension path PEP-19 designs for: a new op is an append-only
+      -- addition to AuthorContent, which is exactly what an older build cannot
+      -- decode. The canon box is a separate signature over separate bytes and
+      -- the seq is in that one, so the stamp is still readable and still
+      -- spent. A build that skipped it would mint into that seq, and the newer
+      -- build reading the result would find two events there with every LWW
+      -- attribute between them settled by a hash instead of by time.
+      let repo = fst owner
+          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon 9 (Just 3))
+          ev = Event (futureBox alice) (evCanonBox real)
+          fr = foldEvents repo [ev]
+      map snd (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      cursorFrom fr `shouldBe` CanonCursor 10 4
+      -- ...and nothing is spent when the canon box is not readable either:
+      -- then there is no stamp, only bytes claiming to be one.
+      let unreadable = Event (futureBox alice) (mangleSig (evCanonBox real))
+          fr2 = foldEvents repo [unreadable]
+      map snd (frDropped fr2) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      cursorFrom fr2 `shouldBe` CanonCursor 1 1
 
     it "counts a dropped event's stamp so it cannot be handed out twice" $ do
       owner <- kp
+      alice <- kp
+      -- Admission is not final: canon arrives a file at a time, and a reply
+      -- dropped as dangling is admitted the moment the open it names turns up.
+      -- And even where it is final the file sits at that seq, so minting into
+      -- it leaves two events there for good, with every LWW attribute between
+      -- them settled by a hash instead of by time.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                    (canon 1 (Just 1))
+          -- a comment on a thread this fold has not got (yet)
+          eDangling = mkEvent alice owner
+                        (AComment (eventId eOpen) Nothing (Just "early") Nothing 2)
+                        (canon 9 Nothing)
+          fr = foldEvents repo [eDangling]
+      reasons fr `shouldBe` [BadThread]
+      -- the dropped event's seq is spent: the next mint is 10, not 1
+      cursorFrom fr `shouldBe` CanonCursor 10 1
+
+    it "does not let a key canon never authorized move the cursor" $ do
+      owner <- kp
       bob <- kp
       alice <- kp
-      -- Admission is not final. A comment dropped because its signer had been
-      -- revoked becomes admissible the moment a later delegate restores them,
-      -- so a seq that was never counted gets handed to something else and
-      -- canon ends up with two events at one seq.
+      -- The other half of the same rule, and the reason it is not simply "every
+      -- event in the tree". A stamp counts because an authorized key wrote it;
+      -- counting the rest would let anyone who can get one file into the tree
+      -- push the cursor to the top of its range, and the owner would then be
+      -- unable to mint even the revoke that would stop it.
       let repo = fst owner
           eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
                     (canon 2 (Just 1))
           eRev = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
-          -- bob races the revoke and loses
+          -- bob races the revoke and loses, from as far up the range as a
+          -- usable folded-ts allows
           eLate = mkEvent alice bob (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
-                    (canon 4 Nothing)
+                    (canonAt (maxBound - 1) Nothing 4)
           fr = foldEvents repo [eDel, eOpen, eRev, eLate]
       reasons fr `shouldBe` [UnauthorizedCanon]
-      -- the dropped event's seq is spent: the next mint is 5, not 4
-      cursorFrom fr `shouldBe` CanonCursor 5 2
+      cursorFrom fr `shouldBe` CanonCursor 4 2
 
     it "reports a key published for nothing" $ do
       owner <- kp
@@ -786,7 +838,12 @@ spec = do
           fr = foldEvents repo [eMax, eNum]
       reasons fr `shouldBe` [BadStamp, BadStamp]
       HM.null (frThreads fr) `shouldBe` True
-      frMaxSeq fr `shouldBe` 0
+      -- Refused, and the stamps are still spent field by field: the usable
+      -- half of each of these two is, the out-of-range half is not. Spending
+      -- maxBound is the one thing that cannot happen, since the next mint is
+      -- the maximum plus one and would wrap to zero.
+      frMaxSeq fr `shouldBe` 1
+      frMaxNumber fr `shouldBe` 1
 
     it "rejects a tampered author box" $ do
       owner <- kp

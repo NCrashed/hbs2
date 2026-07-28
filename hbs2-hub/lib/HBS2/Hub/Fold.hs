@@ -11,6 +11,10 @@
 -- revise-of-record checks, and the delegate/revoke maintainer set, over
 -- 'Resolved' values alone.
 --
+-- An event whose author box this build cannot use still takes part in the
+-- ordered pass as a stamp and nothing else (see 'ghostStamp'): its canon box is
+-- a separate signature over separate bytes, and the @seq@ is in that one.
+--
 -- The fold is pure and total: sort by (seq, event-id), apply. Re-folding the
 -- same events always yields the same result, including the drop report.
 module HBS2.Hub.Fold
@@ -83,9 +87,10 @@ data DropReason =
   | BadKind           -- ^ kind and payload disagree, or a PR-only op on an issue
   | UnknownRedact     -- ^ redact target never admitted (no-op)
     -- | A canon box whose stamped values are not usable: a @number@ on
-    -- anything but an @open@, or a @seq@/@number@ at the very top of the
-    -- range, which would leave the next mint with nowhere to go. A wrong or
-    -- hostile maintainer could otherwise poison the cursor permanently.
+    -- anything but an @open@, a @seq@ or @number@ at the very top of the
+    -- range, which would leave the next mint with nowhere to go, or a
+    -- @folded-ts@ above 'maxFoldedTs'. A wrong or hostile maintainer could
+    -- otherwise poison the cursor permanently.
   | BadStamp
   deriving stock (Eq,Ord,Show)
 
@@ -294,6 +299,44 @@ data FoldResult = FoldResult
   , frLastFolded :: Word64
   }
 
+-- | What a canon box stamps: the two counters, and the key that blessed them.
+--
+-- Recovered separately from the event, because it is spent separately from it
+-- (see 'stamp' in 'materializeWith').
+data Stamp = Stamp
+  { spSeq    :: Word64
+  , spKey    :: HubKey        -- ^ the canon box signer
+    -- | Only when it could be a thread number. A number on anything but an
+    -- @open@ is not one, and spending it would burn a human number nobody was
+    -- ever given.
+  , spNumber :: Maybe Word64
+  }
+
+-- | The stamp of an event this build could not resolve.
+--
+-- The author box and the canon box are two signatures over two payloads, and
+-- only the second carries the @seq@. So an event whose author content is from a
+-- newer schema ('UndecodableAuthor') still says exactly where it sits, and this
+-- is the case that forces the distinction: PEP-19 makes a new op an
+-- append-only addition to 'AuthorContent', which is precisely what an older
+-- build cannot decode. A build that skipped those seqs would mint into them,
+-- and the newer build reading the result would see two events at one @seq@ with
+-- every LWW attribute between them settled by a hash rather than by time.
+--
+-- 'Nothing' when the canon box itself does not verify or does not decode: then
+-- there is no stamp, only bytes claiming to be one.
+ghostStamp :: Event -> Maybe Stamp
+ghostStamp e = case unboxChecked (evCanonBox e) of
+  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccNumber cc))
+  Left _        -> Nothing
+
+-- One entry in the ordered pass.
+data Item =
+    Whole Resolved
+    -- | An event that did not resolve but whose canon box did: its id, why it
+    -- was dropped, its stamp, and the canon box hash for the tie-break.
+  | Ghost EventId DropReason Stamp HashRef
+
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
 -- this event's id.
 resolve :: Event -> Either DropReason Resolved
@@ -352,20 +395,22 @@ foldCanon meta event owner es
 -- The first argument is the repo's LWWRef owner key: it is both the root of
 -- trust for canon signing and the repo identity an @open@ must name.
 foldEvents :: HubKey -> [Event] -> FoldResult
-foldEvents owner es = materializeWith owner resolved unresolved
+foldEvents owner es = materializeWith owner items unstamped
   where
-    (unresolved, resolved) = foldr step ([],[]) es
+    (unstamped, items) = foldr step ([],[]) es
     step e (bad,oks) = case resolve e of
-      Right r     -> (bad, r:oks)
-      Left reason -> ((eventId e, reason):bad, oks)
+      Right r     -> (bad, Whole r : oks)
+      Left reason -> case ghostStamp e of
+        Just sp -> (bad, Ghost (eventId e) reason sp (canonBoxId (evCanonBox e)) : oks)
+        Nothing -> ((eventId e, reason):bad, oks)
 
 -- | The pure, seq-ordered fold over resolved events (PEP-19 admission rules
 -- 3-5 + the fold body). Deterministic: total order by
 -- (seq, event-id, canon-box hash).
 materialize :: HubKey -> [Resolved] -> FoldResult
-materialize owner rs = materializeWith owner rs []
+materialize owner rs = materializeWith owner (fmap Whole rs) []
 
-materializeWith :: HubKey -> [Resolved] -> [(EventId,DropReason)] -> FoldResult
+materializeWith :: HubKey -> [Item] -> [(EventId,DropReason)] -> FoldResult
 materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
   where
     -- The third key is what makes this independent of the input order rather
@@ -380,14 +425,16 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- 'eventFileName' and both copies are therefore the same path. The fold is
     -- still a public function over a list, and @hub verify@ exists to read
     -- canon somebody else wrote.
-    key r = (rSeq r, rId r, rCanonId r)
+    key (Whole r)            = (rSeq r, rId r, rCanonId r)
+    key (Ghost eid _ sp cid) = (spSeq sp, eid, cid)
 
     st0 = S { sMaint    = HS.singleton owner
             , sThreads  = HM.empty
             , sSeen     = HM.empty
             , sRedacted = HS.empty
-            -- Unresolvable events have no seq; order them after the rest,
-            -- still deterministically among themselves by event-id.
+            -- These are the ones whose canon box did not verify or did not
+            -- decode either, so there is no seq to order them by at all: after
+            -- the rest, still deterministically among themselves by event-id.
             , sDropped  = [ (maxBound, eid, reason) | (eid,reason) <- pre ]
             , sMaxSeq    = 0
             , sMaxNumber = 0
@@ -421,10 +468,17 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     unrev t = t { tsComments = reverse (tsComments t) }
 
     go [] s = s
-    go (r:rest) s
+    -- Nothing to admit and nothing to check: this build cannot read the event.
+    -- What it can still do is spend the stamp, which is the whole reason a
+    -- ghost is in the ordered pass at all.
+    go (Ghost eid reason sp _ : rest) s =
+      go rest (dropAt (spSeq sp) eid reason (stamp sp s))
+    go (Whole r : rest) s0
       | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
       | not (sane r)                = go rest (dropE r BadStamp s)
-      | otherwise                   = go rest (apply r (stamp r s))
+      | otherwise                   = go rest (apply r s)
+      where
+        s = stamp (stampOf r) s0
 
     -- The stamped values must be usable. A number belongs to an open and
     -- nothing else, and neither counter may sit at the top of its range: the
@@ -432,13 +486,12 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- the cursor to zero and send every later event to the front of the
     -- order.
     --
-    -- This is the top of the range only, not a monotonicity rule: a
+    -- The counters are the top of the range only, not a monotonicity rule: a
     -- maintainer who stamps maxBound-1 still strands the cursor one mint
     -- later, at which point every open is refused as 'CursorExhausted'.
     -- Closing that needs an admission rule about what a stamp may be
-    -- relative to the ones before it, which is consensus and cannot be
-    -- introduced without bumping @hub-meta@ (PEP-19). Recorded there as a
-    -- known bound rather than fixed here.
+    -- relative to the ones before it, and one that a partial clone can
+    -- evaluate at that; PEP-19 records it as a known bound.
     sane r = numberOK && seqOK && numberSmallEnough && foldedOK
       where
         cc = rCanon r
@@ -448,26 +501,48 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
           (_, Just _)       -> False
         seqOK = ccSeq cc /= maxBound
         numberSmallEnough = maybe True (/= maxBound) (ccNumber cc)
-        -- Same argument as the two counters, and it took a while to see: the
-        -- next stamp is clamped to be no lower than this one, so admitting the
-        -- top of the range pins every later event to it, on every node, for
-        -- good. Every time the render contract shows comes from this field.
-        foldedOK = ccFoldedTs cc /= maxBound
+        -- A ceiling rather than the top of the range, because the harm here is
+        -- not the wrap the counters suffer: the next stamp is clamped to be no
+        -- lower than this one, so 'max' carries a bad value forward from
+        -- anywhere in the range, and every time the render contract shows comes
+        -- from this field. See 'maxFoldedTs' for why the bound cannot be a
+        -- window around the reader's own clock.
+        foldedOK = ccFoldedTs cc <= maxFoldedTs
 
-    -- Advance the high-water marks for every event whose stamp is usable,
-    -- admitted or not.
+    -- Spend a stamp: raise the high-water marks the next mint reads.
     --
-    -- Not only for admitted ones, which is what this used to do and what the
-    -- comment on 'keep' still argued for. The reason is that admission is not
-    -- final: a comment dropped as UnauthorizedCanon becomes admissible the
-    -- moment a later delegate event restores its signer, and if its seq was
-    -- never counted, the publisher will hand that same seq to something else.
-    -- Revoking a maintainer and delegating them again is an ordinary thing to
-    -- do, and it left canon with two events at one seq and a rebuilt view that
-    -- disagreed with the accumulated one.
-    stamp r s = s
-      { sMaxSeq    = max (sMaxSeq s) (rSeq r)
-      , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
+    -- Spent by anything whose canon box a then-authorized key signed, admitted
+    -- or not, for two reasons. Admission is not final: a reply dropped as
+    -- dangling is admitted as soon as the opening event it names arrives, and
+    -- canon arrives a file at a time. And even where it is final, the file
+    -- occupies that seq, so minting into it leaves canon holding two events at
+    -- one seq for good, with every LWW attribute between them settled by a hash
+    -- instead of by time.
+    --
+    -- What does not spend one is a canon box that does not verify, or one from
+    -- a key that was never authorized or is no longer: those are exactly the
+    -- files a stranger can add, and counting them would let anyone who can get
+    -- a file into the tree push the cursor to the top of its range and leave
+    -- the owner unable to mint even the revoke that would stop it.
+    stamp sp s
+      | not (HS.member (spKey sp) (sMaint s)) = s
+      | otherwise = s
+          { sMaxSeq = if spSeq sp == maxBound
+                        then sMaxSeq s
+                        else max (sMaxSeq s) (spSeq sp)
+          , sMaxNumber = case spNumber sp of
+              Just n | n /= maxBound -> max (sMaxNumber s) n
+              _                      -> sMaxNumber s
+          }
+
+    -- A resolved event's own stamp. Unlike a ghost's, the content is readable,
+    -- so a number that cannot be one is dropped here rather than spent.
+    stampOf r = Stamp
+      { spSeq    = rSeq r
+      , spKey    = rCanonKey r
+      , spNumber = case rContent r of
+          AOpen{} -> ccNumber (rCanon r)
+          _       -> Nothing
       }
 
     apply r s = case rContent r of
@@ -619,8 +694,9 @@ data St = S
 keep :: Maybe ThreadId -> Resolved -> St -> St
 keep scope r s = s
   { sSeen      = HM.insert (rId r) scope (sSeen s)
-    -- The stamps are advanced by 'stamp' before this, for dropped events too;
-    -- the origin is not, because a dropped event folded no letter.
+    -- The stamps are advanced by 'stamp' before this, for events that were not
+    -- admitted too; the origin is not, because an event that was not admitted
+    -- folded no letter.
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
   , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
   , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num
@@ -674,7 +750,17 @@ eventParts = \case
   AOpen _ _ _ _ _ part coords _ -> maybe [] pure part <> maybe [] bundle coords
   AComment _ _ _ part _         -> maybe [] pure part
   ARevise _ coords _            -> bundle coords
-  _                             -> []
+  -- Spelled out rather than caught by a wildcard: a new constructor with an
+  -- attachment must not silently arrive here as one without. A wildcard is
+  -- what makes the module's own -Werror=incomplete-patterns blind to it, and
+  -- the event would then be minted with no secret required and no tree held.
+  ASet{}                        -> []
+  AClose{}                      -> []
+  AReopen{}                     -> []
+  AMerge{}                      -> []
+  ARedact{}                     -> []
+  ADelegate{}                   -> []
+  ARevoke{}                     -> []
   where
     bundle = maybe [] pure . prBundle
 
@@ -705,7 +791,12 @@ threadOfEvent :: EventId -> St -> Maybe ThreadId
 threadOfEvent eid s = fromMaybe Nothing (HM.lookup eid (sSeen s))
 
 dropE :: Resolved -> DropReason -> St -> St
-dropE r reason s = s { sDropped = (rSeq r, rId r, reason) : sDropped s }
+dropE r = dropAt (rSeq r) (rId r)
+
+-- The seq is carried into the drop list rather than taken from the event,
+-- because a ghost has no event to take it from.
+dropAt :: Word64 -> EventId -> DropReason -> St -> St
+dropAt sq eid reason s = s { sDropped = (sq, eid, reason) : sDropped s }
 
 -- A close/reopen note becomes a comment attached to the status change.
 addNote :: Maybe Text -> Resolved -> Word64 -> ThreadState -> ThreadState

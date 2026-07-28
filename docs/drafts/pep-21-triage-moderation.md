@@ -215,9 +215,14 @@ are the loop's problem rather than the letter's.
     DISCARD and DECIDE are the ordinary outcomes.
 
 The deny-list reaches an undecodable letter through its envelope key, which is
-the only key available when the payload cannot be parsed. That is weaker than
-the inner-author ban (rewrapping evades it), and it is deliberately the one
-place an envelope ban is used at all.
+the only key available when the payload cannot be parsed. That is deliberately
+the one place an envelope ban is used at all, and it should not be mistaken for
+a bound on the parked set: an envelope key costs nothing to generate, so what
+this stops is a repeat sender who keeps using one, not a sender who rotates.
+The cap above is what bounds the set; this only saves the loop from re-checking
+the same key's garbage. It also means one refusal, AuthorDenied, now has two
+subjects, and an operator whose list holds inner authors alone will never see
+it fire on the second: the two lists are not the same list.
 
 Retention and garbage collection
 ==============================

@@ -4,12 +4,6 @@
 -- a build error. Here it is a build error.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- The taxonomy in 'outcome' is a total function over 'TriageError' and the
--- only mechanical check of that is the incomplete-patterns warning, which
--- would otherwise be a pattern-match failure inside a triage loop rather than
--- a build error. Here it is a build error.
-{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-
 -- | The triage bridge: Tier B letter to Tier A canon event (PEP-19
 -- "Folding Tier B letters into Tier A").
 --
@@ -19,7 +13,9 @@
 --   * Authority. A bridge that blessed whatever arrived would let anyone
 --     author an owner-native op (a @redact@ hiding any event) and hand it to
 --     the owner to sign. The deny-list is applied to the INNER author, since
---     an envelope-key ban is evaded by rewrapping (PEP-18).
+--     an envelope-key ban is evaded by rewrapping (PEP-18); the one exception
+--     is a letter whose schema this build cannot parse, where there is no
+--     inner author to name (see 'tcAllowed').
 --
 --   * Order. The fold is a single ascending pass over @seq@, so a reply must
 --     carry a higher @seq@ than the event it answers. Minting a reply whose
@@ -47,9 +43,12 @@
 --     letter path and the owner-native one.
 --   * @UnauthorizedCanon@: refused by checking this folder's own key against
 --     the maintainer set canon reports, which is why 'CanonView' carries it.
---   * @BadStamp@: a number is minted only for an open, and the cursor is
---     refused once it reaches the top of its range ('CursorExhausted'),
---     which is the only way a stamp minted here could be out of bounds.
+--   * @BadStamp@: a number is minted only for an open; the cursor is refused
+--     once it reaches the top of its range ('CursorExhausted'); and the
+--     @folded-ts@ about to be stamped is refused once it passes the ceiling
+--     canon admits ('StampOutOfRange'). Those are the three stamped fields,
+--     and every gate is in 'requireCanon' or 'requireStamp', which all four
+--     entry points go through.
 --
 -- Anything that weakens one of those checks weakens the property, so the
 -- view must come from the fold ('viewOf') rather than be reconstructed.
@@ -64,7 +63,7 @@ module HBS2.Hub.Bridge
   , Pending(..)
   , LetterParts
   , OwnerParts
-  , noAttachments
+  , noMessageParts
   , attachments
   , attachmentsPending
   , attachmentsNoKey
@@ -123,7 +122,13 @@ data CanonCursor = CanonCursor
 -- ends up in the wrong slot.
 data TriageCtx = TriageCtx
   { tcCanon   :: (HubKey, PrivKey 'Sign HubScheme)  -- ^ the folding key
-  , tcAllowed :: HubKey -> Bool  -- ^ may this inner author be folded? (PEP-21)
+    -- | May a letter from this key be folded (PEP-21)? Asked about the INNER
+    -- author, which is the identity a ban is about, except on a letter this
+    -- build cannot parse: there is no inner author to name there, so it is
+    -- asked about the envelope signer instead ('openLetterAs'). A list holding
+    -- only inner authors therefore never matches a sender who rotates envelope
+    -- keys, which is the one case where an envelope ban does anything.
+  , tcAllowed :: HubKey -> Bool
   , tcRepo    :: RepoRef
   }
 
@@ -258,6 +263,13 @@ data TriageError =
     -- is the one case that would otherwise leave the module's promise
     -- incomplete.
   | CursorExhausted
+    -- | The @folded-ts@ this mint would stamp is above the ceiling canon
+    -- admits ('maxFoldedTs'): either this folder's clock reads a century out,
+    -- or canon already holds a stamp that high and the clamp cannot go under
+    -- it. The same case as 'CursorExhausted' for the third stamped field, and
+    -- an operator's to fix either way: no later event can lower a signed
+    -- timestamp, so what fixes it is compaction.
+  | StampOutOfRange
     -- | The content the owner signed names a different thread than the
     -- request being honoured. Editing what was asked for is fine; moving it
     -- elsewhere is not honouring it.
@@ -458,6 +470,7 @@ outcome = \case
   OwnerKeyRequired    -> Abort
   UnnormalizedValue _ -> Abort
   CursorExhausted   -> Abort
+  StampOutOfRange   -> Abort
 
 -- Refuse an author box canon already holds: the fold would drop the second
 -- copy as a duplicate.
@@ -524,9 +537,18 @@ newtype LetterParts = LetterParts PartsOf
 newtype OwnerParts = OwnerParts PartsOf
   deriving newtype (Eq,Show)
 
--- | A letter with no attachments. Nothing to check, so nothing to supply.
-noAttachments :: LetterParts
-noAttachments = LetterParts (PartsOf Nothing Nothing HS.empty HS.empty)
+-- | A message that carries no attachments.
+--
+-- It takes the message secret like every other letter builder, and that is the
+-- whole of the point. A reader of a letter always holds one, because it read
+-- the letter with it, so an argument-less value here would be a way of saying
+-- "I have no evidence" that reads as "there is nothing to check". Those are
+-- different answers: a letter naming a part its message does not carry is the
+-- sender's doing and must not stop the loop, while a caller that never wired
+-- the parts through is a bug that must. Only 'noOwnAttachments' can say the
+-- second thing now, and on that path there is no message to be wrong about.
+noMessageParts :: MessageSecret -> LetterParts
+noMessageParts msg = LetterParts (PartsOf Nothing (Just msg) HS.empty HS.empty)
 
 -- | Every part the message carries, already fetched: what a triage loop has
 -- once it has downloaded the attachments.
@@ -563,10 +585,9 @@ ownAttachments s hs =
 requireParts :: PartsOf -> AuthorContent -> Either TriageError ()
 requireParts po content
   -- Told nothing at all about attachments, for content that names one. That
-  -- is the caller reaching for the empty value rather than wiring the
-  -- message's parts through, and it is the only shape in which a caller bug
-  -- and a hostile letter are indistinguishable, so it is the only one that
-  -- stops the loop.
+  -- is the caller reaching for the empty value rather than wiring the parts
+  -- through, and it is the only shape in which a caller bug and a hostile
+  -- letter are indistinguishable, so it is the only one that stops the loop.
   | referencesPart content, toldNothing = Left NoAttachmentsSupplied
   | otherwise = do
       mapM_ present (eventParts content)
@@ -575,7 +596,9 @@ requireParts po content
     -- Told nothing means exactly that: no secret, no parts AND no message
     -- behind them. A message that carried no attachments is not the same
     -- thing, and reading it as one let any stranger wedge the loop by naming
-    -- a part in a letter whose message has none.
+    -- a part in a letter whose message has none. Only reachable from
+    -- 'noOwnAttachments' now: every letter builder demands the message
+    -- secret, which is exactly the evidence this asks for.
     toldNothing = isNothing (poSecret po)
                && HS.null (poCarried po)
                && isNothing (poMessage po)
@@ -592,8 +615,7 @@ requireParts po content
     secretOK = case poSecret po of
       Nothing -> Left MissingPartSecret
       Just sec
-        | Just (partSecretBytes sec) == fmap messageSecretBytes (poMessage po)
-                                                     -> Left MessageSecretOffered
+        | maybe False (sameSecret sec) (poMessage po) -> Left MessageSecretOffered
         -- Checked here as well as in 'mkPartSecret', because a secret can
         -- reach this point without passing through it: 'Serialise' decodes one
         -- unchecked so that canon somebody else wrote can be read, and
@@ -634,15 +656,36 @@ requireStamp view content
   | otherwise = Right ()
 
 -- Refuse to mint under a key canon will not accept as a blesser, or with a
--- seq the fold would reject.
-requireCanon :: RepoRef -> CanonView -> HubKey -> Either TriageError ()
-requireCanon repo view k
-  | cvRepo view /= repo               = Left ViewRepoMismatch
-  | not (authorizedCanon view k)      = Left UnauthorizedForRepo
-  | ccrNextSeq cur == maxBound        = Left CursorExhausted
-  | otherwise                         = Right ()
+-- seq or a folded-ts the fold would reject.
+requireCanon :: RepoRef -> CanonView -> Word64 -> HubKey -> Either TriageError ()
+requireCanon repo view folded k
+  | cvRepo view /= repo                    = Left ViewRepoMismatch
+  | not (authorizedCanon view k)           = Left UnauthorizedForRepo
+  | ccrNextSeq cur == maxBound             = Left CursorExhausted
+  -- The mirror of the fold's ceiling on the same field. Without it the one
+  -- stamped value with no gate on this side was the one the caller supplies
+  -- directly, and a folder whose clock read past the ceiling would mint an
+  -- event the fold drops as 'BadStamp', and then keep minting: the accepted
+  -- view carries the stamp forward, so every later letter is clamped up to it
+  -- and burns too, and a loop that folds then deletes deletes each of them.
+  | stampFor folded view > maxFoldedTs     = Left StampOutOfRange
+  | otherwise                              = Right ()
   where
     cur = cvCursor view
+
+-- The folded-ts a mint against this view would stamp.
+--
+-- Clamped, not refused. The stamp is the folder's own, so a clock behind canon
+-- is the folder's problem and not the letter's; refusing would let one
+-- maintainer with a fast clock stop every other folder until real time caught
+-- up, which is the cursor failure again. Monotonic is what the readers need,
+-- and this is the cheapest way to guarantee it.
+--
+-- One function, because 'requireCanon' has to judge the same value 'accepted'
+-- goes on to stamp: two copies of @max@ would be two chances to gate one
+-- expression and stamp another.
+stampFor :: Word64 -> CanonView -> Word64
+stampFor folded view = max folded (cvLastFolded view)
 
 -- | What accepting a letter produced.
 data Accepted = Accepted
@@ -691,6 +734,10 @@ instance Show Accepted where
         <> ", seq = " <> show (acSeq a)
         <> ", number = " <> show (acNumber a)
         <> ", author = " <> show (acAuthor a)
+        -- Not a secret, and the field whose haddock says one off-by-one
+        -- deletes an unread letter: the one thing worth having in the log when
+        -- tracing exactly that confusion.
+        <> ", origin = " <> show (acOrigin a)
         <> "}"
 
 -- | Accept a letter into canon.
@@ -719,7 +766,7 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
       repo = tcRepo ctx
   -- Our own authority first: a revoked maintainer can still sign, but the
   -- fold will not admit it, so minting would burn a triaged letter.
-  requireCanon repo view canonPk
+  requireCanon repo view folded canonPk
 
   (box, author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs allowed envelopeSigner md)
@@ -860,7 +907,7 @@ honourOpened
   -> ReplyChannel
   -> Either TriageError Accepted
 honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply = do
-  requireCanon repo view pk
+  requireCanon repo view folded pk
 
   -- A re-authored request gets a fresh id from the clock, so only the
   -- origin can tell that this very letter was honoured before. Without it a
@@ -936,7 +983,7 @@ ownerEvent
 ownerEvent ctx view folded (OwnerParts parts) content = do
   let kp@(pk,sk) = tcCanon ctx
       repo = tcRepo ctx
-  requireCanon repo view pk
+  requireCanon repo view folded pk
 
   let box = signAuthor pk sk content
       eid = authorBoxId box
@@ -1050,12 +1097,8 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
     cur = cvCursor view
     eid = authorBoxId box
 
-    -- Clamped, not refused. The stamp is the folder's own, so a clock behind
-    -- canon is the folder's problem and not the letter's; refusing would let
-    -- one maintainer with a fast clock stop every other folder until real time
-    -- caught up, which is the cursor failure again. Monotonic is what the
-    -- readers need, and this is the cheapest way to guarantee it.
-    stamped = max folded (cvLastFolded view)
+    -- Bounded above by 'requireCanon', which every entry point runs first.
+    stamped = stampFor folded view
 
     opensThread = case content of
       AOpen{} -> True
