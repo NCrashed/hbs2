@@ -619,12 +619,19 @@ spec = do
       -- Four ways to get there, and they are not the same answer. Named but
       -- not carried is a dead reference and always will be.
       let accept po = acceptLetter (ctxOf owner) env (emptyView repo) 1 origin po withPart
-      -- Abort, not Discard: what the caller passed is evidence ABOUT the
-      -- message, and wiring that forgot to pass its parts looks exactly like a
-      -- letter naming one that was never carried. Discarding on that would
-      -- throw away every letter with an attachment, forever.
-      expectErr (PartNotInMessage part) (accept noAttachments)
+      -- Two different faults, and the discriminator is whether the caller said
+      -- anything about the message at all. The no-attachments value for a
+      -- letter that names one is the caller reaching for the empty thing.
+      expectErr NoAttachmentsSupplied (accept noAttachments)
       either outcome (const Decide) (accept noAttachments) `shouldBe` Abort
+      -- ...but once it HAS supplied evidence, a part that evidence does not
+      -- list is the letter's doing, and anyone can send such a letter. Abort
+      -- here would let one stranger wedge triage for good: the letter stays in
+      -- the mailbox and every later pass hits it again.
+      other <- someHash
+      expectErr (PartNotInMessage part) (accept (attachments secret32 msgSecret [other]))
+      either outcome (const Decide) (accept (attachments secret32 msgSecret [other]))
+        `shouldBe` Discard
       -- Carried but not fetched yet is a wait.
       let notYet = attachmentsPending secret32 msgSecret [part]
       expectErr (PartNotFetched part) (accept notYet)
@@ -653,7 +660,7 @@ spec = do
       -- On the owner path the mistake this type exists for cannot be made at
       -- all: there is no message, so the builder takes the parts secret and
       -- nothing else. What is still catchable there is vouching for nothing.
-      expectErr (PartNotInMessage part)
+      expectErr NoAttachmentsSupplied
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
 
@@ -756,6 +763,35 @@ spec = do
       expectErr (NotAcceptable FoldsToCanon)
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2
            (AClose (scopeOf aOpen) Nothing 2) letter)
+
+    it "does not blame the letter for what triage composed" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- Alice sends a perfectly good close request and the maintainer's tooling
+      -- builds the wrong op. Discarding here deletes a valid request over a bug
+      -- on the other side of the screen.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          opening = makeLetter (fst alice) (snd alice)
+                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noAttachments opening)
+      let tid = scopeOf aOpen
+          req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
+      origin2 <- someHash
+      expectErr (NotARequest OwnerNative)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (AMerge tid "abc" "master" 2) req)
+      expectErr (NotARequest OwnerNative)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
+      either outcome (const Decide)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
+        `shouldBe` Abort
+      -- ...and the request itself is still there to be honoured properly
+      _ <- expectRight
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2
+           (AClose tid (Just "agreed") 2) req)
+      pure ()
 
     it "never stamps a folded-ts below the last one in canon" $ do
       alice <- kp
@@ -969,6 +1005,10 @@ spec = do
       -- that folds then deletes would delete it.
       outcome (NotAcceptable FoldsToCanon) `shouldBe` Abort
       outcome (NotAcceptable RequestOnly) `shouldBe` Abort
+      -- ...and what the maintainer's own tooling composed is judged apart from
+      -- the letter, whatever it happens to be.
+      outcome (NotARequest OwnerNative) `shouldBe` Abort
+      outcome (NotARequest FoldsToCanon) `shouldBe` Abort
       outcome WrongRepo `shouldBe` Discard
       outcome (BadLetter AuthorDenied) `shouldBe` Discard
       outcome AlreadyInCanon `shouldBe` Discard

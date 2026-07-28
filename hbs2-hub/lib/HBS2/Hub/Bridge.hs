@@ -272,6 +272,10 @@ data TriageError =
     -- | The content names a part the message does not carry. Not repairable:
     -- a later message cannot add a part to an author box already signed.
   | PartNotInMessage HashRef
+    -- | The caller passed the no-attachments value for content that names an
+    -- attachment, so there is no evidence to judge against. A caller bug: the
+    -- builders that carry evidence are the ones with a message behind them.
+  | NoAttachmentsSupplied
     -- | The message carries the part but this node has not fetched the tree
     -- yet. Nothing is wrong; come back when it has.
   | PartNotFetched HashRef
@@ -293,6 +297,11 @@ data TriageError =
     -- that one another folder can satisfy, this one nobody but the owner can,
     -- so a delegate's tooling asking for it is a bug in the caller.
   | OwnerKeyRequired
+    -- | What the OWNER supplied is not a request-shaped op. Distinct from
+    -- 'NotAcceptable', which is about the letter: this one is raised where
+    -- 'honourWith' checks the content triage composed, so it says nothing
+    -- about the letter and the letter must not be discarded over it.
+  | NotARequest Disposition
     -- | The request carries text the owner would be signing as their own
     -- words. 'honourRequest' will not do that; use 'honourWith' with content
     -- the maintainer actually wrote.
@@ -321,8 +330,12 @@ data TriageError =
 -- delete valid letters (PEP-21 folds then deletes).
 data Outcome =
     Retry     -- ^ nothing is wrong with the letter; the repo is not ready yet
-    -- | Nothing is wrong with the letter and nothing about this repo will fix
-    -- it: it needs a newer build. Keep it, but stop looking at it every pass.
+    -- | Nothing is wrong with the letter, and nothing that happens to this
+    -- repo will change the answer: it needs a newer build, or a different
+    -- setting, or a resend. Keep it, but stop looking at it every pass.
+    --
+    -- The set has no durable marker yet, so a loop has to remember it out of
+    -- band, and 'BodyTooLarge' is the first way a stranger can grow it.
   | Park
   | Decide    -- ^ a valid request the maintainer must act on ('honourWith')
   | Discard   -- ^ the letter can never become canon here
@@ -387,15 +400,19 @@ outcome = \case
   -- Both are normal triage outcomes, not failures: a maintainer has to look.
   Requested _ -> Decide
   NeedsReview -> Decide
-  -- A letter carrying an op only the owner may author: the letter is at
-  -- fault and no later pass changes that.
+  -- A letter carrying an op only the owner may author: the letter is at fault
+  -- and no later pass changes that. Reached from both 'acceptLetter' and the
+  -- check on what the letter asked for, and it means the same thing in both.
   NotAcceptable OwnerNative -> Discard
-  -- The other two mean the caller used the wrong door. A perfectly valid
-  -- opening letter handed to 'honourRequest' comes back like this, and a
-  -- triage loop that folds then deletes would delete it. Note also that
-  -- `NotAcceptable RequestOnly` is unreachable through `acceptLetter`, which
-  -- raises `Requested` for those ops before it can be built.
+  -- Whereas this one only ever comes from the honour paths, since
+  -- 'acceptLetter' folds a FoldsToCanon letter rather than refusing it: a
+  -- valid opening letter was handed to the wrong entry point, and a loop that
+  -- folds then deletes would delete it. (`NotAcceptable RequestOnly` is
+  -- unreachable through `acceptLetter`, which raises `Requested` first.)
   NotAcceptable _   -> Abort
+  -- Not about the letter at all: the maintainer's tooling composed something
+  -- that is not a request.
+  NotARequest _     -> Abort
   BadLetter _       -> Discard
   WrongRepo         -> Discard
   AlreadyInCanon    -> Discard
@@ -403,11 +420,13 @@ outcome = \case
   BadContent        -> Discard
   ThreadMismatch    -> Discard
   AlreadyHonoured   -> Discard
-  -- Both are the caller's evidence about the message, not the letter's doing:
-  -- wiring that forgot to pass @messageParts@ looks exactly like a letter
-  -- naming a part that was never carried, and discarding on that would throw
-  -- away every letter with an attachment, forever.
-  PartNotInMessage _   -> Abort
+  -- A dead reference in a letter anyone can send. Discard, because the caller
+  -- has already supplied its evidence about the message by this point and
+  -- there is nothing for it to fix; stopping the loop instead would let one
+  -- stranger wedge triage with a single letter.
+  PartNotInMessage _   -> Discard
+  -- These two are the caller's own doing.
+  NoAttachmentsSupplied -> Abort
   BadPartSecret        -> Abort
   MessageSecretOffered -> Abort
   -- Local policy, not consensus: another hub may carry a body this one will
@@ -527,10 +546,23 @@ ownAttachments s hs =
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
 requireParts :: PartsOf -> AuthorContent -> Either TriageError ()
-requireParts po content = do
-  mapM_ present (eventParts content)
-  if referencesPart content then secretOK else Right ()
+requireParts po content
+  -- Told nothing at all about attachments, for content that names one. That
+  -- is the caller reaching for the empty value rather than wiring the
+  -- message's parts through, and it is the only shape in which a caller bug
+  -- and a hostile letter are indistinguishable, so it is the only one that
+  -- stops the loop.
+  | referencesPart content, toldNothing = Left NoAttachmentsSupplied
+  | otherwise = do
+      mapM_ present (eventParts content)
+      if referencesPart content then secretOK else Right ()
   where
+    toldNothing = isNothing (poSecret po) && HS.null (poCarried po)
+
+    -- Past that, the caller has supplied evidence about the message, so a part
+    -- the evidence does not list is the letter's doing and no later pass
+    -- changes it. Anyone can send such a letter; treating it as a caller bug
+    -- would let one stranger stop triage for good.
     present h
       | not (HS.member h (poCarried po)) = Left (PartNotInMessage h)
       | not (HS.member h (poLocal po))   = Left (PartNotFetched h)
@@ -824,10 +856,12 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
     other       -> Left (NotAcceptable other)
 
   -- What the owner signs must still be a request-shaped op on a thread that
-  -- exists, whether or not it is exactly what was asked for.
+  -- exists, whether or not it is exactly what was asked for. A separate error
+  -- from the check above: that one judges the letter, this one judges what
+  -- triage composed, and a letter must not be discarded over the latter.
   case classify content0 of
     RequestOnly -> Right ()
-    other       -> Left (NotAcceptable other)
+    other       -> Left (NotARequest other)
 
   -- Editing what a request asked for is the point of this function; moving
   -- it to another thread is not, and would leave the event carrying an

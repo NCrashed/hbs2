@@ -15,7 +15,7 @@ import Codec.Serialise (Serialise,serialise)
 import Data.ByteString.Base16 qualified as B16
 import Data.ByteString.Char8 qualified as B8
 import HBS2.Hash (hashObject)
-import HBS2.Prelude.Plated (pretty)
+import HBS2.Prelude.Plated (fromStringMay,pretty)
 import Codec.Serialise qualified as CBOR
 import Data.Bits (xor)
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
@@ -406,6 +406,20 @@ spec = do
         "83001a4842324186018200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266816268698007"
       hx (Domained canonD (CanonContent h 3 (Just 9) (Just h) 11 (Nothing :: Maybe PartSecret))) `shouldBe`
         "83001a4842324387008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a79572660b80"
+      -- A fully populated open with full coordinates: the two records most
+      -- likely to gain a field, and the one place PRCoords is pinned at all.
+      let key = fromMaybe (error "fixture key")
+                  (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
+          prc = PRCoords (Just "hbs23://f") "refs/heads/f" "aaaa"
+                         "refs/heads/master" "bbbb" (Just h)
+      hx (Domained author (AOpen key HubPR "title" ["bug","ui"] (Just "body") (Just h) (Just prc) 42))
+        `shouldBe` "83001a4842324189008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8101657469746c659f63627567627569ff8164626f6479818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818700816968627332333a2f2f666c726566732f68656164732f66646161616171726566732f68656164732f6d61737465726462626262818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266182a"
+      -- ...and the two tags at the end of the sum, where a reordering would
+      -- otherwise be invisible.
+      hx (Domained author (ADelegate key 3)) `shouldBe`
+        "83001a4842324183088200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf03"
+      hx (Domained author (ARevoke key 4)) `shouldBe`
+        "83001a4842324183098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
 
     it "reports a key published for nothing" $ do
       owner <- kp
@@ -576,6 +590,27 @@ spec = do
       tsRedacted t `shouldBe` True
       HS.member tid (frRedacted fr) `shouldBe` True
 
+    it "marks a redacted comment on the comment itself" $ do
+      owner <- kp
+      alice <- kp
+      -- What a redaction is usually FOR. A renderer that forgot to join
+      -- against the flat set would publish the withdrawn text in every clone
+      -- while the redact reported success.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                          (canon 1 (Just 1))
+          tid = eventId eOpen
+          keep' = mkEvent alice owner (AComment tid Nothing (Just "fine") Nothing 2)
+                    (canon 2 Nothing)
+          gone = mkEvent alice owner (AComment tid Nothing (Just "abuse") Nothing 3)
+                   (canon 3 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId gone) 4) (canon 4 Nothing)
+          fr = foldEvents repo [eOpen, keep', gone, eRed]
+          t = threadOf fr tid
+      frDropped fr `shouldBe` []
+      map cRedacted (tsComments t) `shouldBe` [False, True]
+      tsRedacted t `shouldBe` False
+
     it "names who supplied the current pr coordinates" $ do
       owner <- kp
       alice <- kp
@@ -596,6 +631,21 @@ spec = do
       tsAuthor t `shouldBe` fst alice
       fmap psAuthor (tsPR t) `shouldBe` Just (fst bob)
       fmap psCanonBy (tsPR t) `shouldBe` Just (fst bob)
+
+    it "tells apart which of the two boxes it could not read" $ do
+      owner <- kp
+      alice <- kp
+      -- Split by box because which side is from the future is the useful part:
+      -- an author box this reader cannot decode is a newer sender, a canon box
+      -- it cannot decode is a newer publisher.
+      let repo = fst owner
+          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon 1 (Just 1))
+          futureCanon = signBare owner
+                          (Domained (domainOf (Nothing @CanonContent)) (12345 :: Word64))
+          ev = Event (evAuthorBox real) futureCanon
+      map snd (frDropped (foldEvents repo [ev]))
+        `shouldBe` [UndecodableCanon (fst owner) Undecodable]
 
     it "tells an undecodable box apart from a forged one" $ do
       owner <- kp
