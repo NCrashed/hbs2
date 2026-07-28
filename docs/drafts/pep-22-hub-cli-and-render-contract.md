@@ -169,7 +169,7 @@ Shape (JSON projection of a thread):
   "title": "...",
   "status": "open",                   // open | closed | merged | ...
   "labels": ["bug","ui"],
-  "assignee": "<sign-key>",
+  "assignees": ["<sign-key>"],       // multi-valued, like labels
   "author": "<sign-key>",             // opening event's author
   "canon_by": "<sign-key>",           // canon key that blessed the opening event
   "created_at": 1737763200,           // author-ts of the opening event

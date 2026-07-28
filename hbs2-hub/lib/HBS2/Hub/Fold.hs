@@ -112,6 +112,10 @@ data Anomaly =
     -- nothing is wrong with the event; what is missing is the key, and no
     -- later event can supply it.
   | PartWithoutSecret
+    -- | And the mirror: a @part-secret@ on an event that references no part.
+    -- Not a leak now that the parts have a secret of their own (PEP-18), but
+    -- it is still a key published for nothing.
+  | SecretWithoutPart
     -- | An attribute whose value is not in the canonical form for its name
     -- ('normalizeAttr'), so the same set of labels can appear under two
     -- different event-ids.
@@ -153,7 +157,7 @@ data PRState = PRState
   }
   deriving stock (Eq,Show)
 
--- | Materialized thread. Structured fields (status, labels, assignee,
+-- | Materialized thread. Structured fields (status, labels, assignees,
 -- title, ...) all live in 'tsAttrs' under last-writer-wins, so there is a
 -- single source of truth for anything a @set@ can change (PEP-19).
 --
@@ -338,7 +342,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frMaintainers = sMaint s
       , frOrigins   = sOrigins s
       , frOwner     = owner
-      , frAnomalies = [ (e,a) | (_,e,a) <- reverse (sAnoms s) ]
+      , frAnomalies = reverse (sAnoms s)
       , frParts     = sParts s
       }
 
@@ -505,7 +509,12 @@ data St = S
   , sNumbers    :: HashSet Word64
   , sLastNumber :: Word64
   , sLastFolded :: Word64
-  , sAnoms      :: [(Word64,EventId,Anomaly)]
+    -- Newest first while accumulating. No sort key alongside, unlike
+    -- 'sDropped': the pass runs in (seq, event-id, canon-box hash) order and
+    -- appends, so reversing at the end is already the log's own order. A drop
+    -- can happen before that order is established, which is why that one
+    -- carries its seq.
+  , sAnoms      :: [(EventId,Anomaly)]
   , sParts      :: HashSet HashRef
   }
 
@@ -524,8 +533,7 @@ keep scope r s = s
   , sLastNumber = fromMaybe (sLastNumber s) num
   , sLastFolded = folded
   , sParts     = foldr HS.insert (sParts s) (eventParts (rContent r))
-    -- Newest first while accumulating, reversed once at the end.
-  , sAnoms     = [ (rSeq r, rId r, a) | a <- reverse anoms ] <> sAnoms s
+  , sAnoms     = [ (rId r, a) | a <- reverse anoms ] <> sAnoms s
   }
   where
     cc = rCanon r
@@ -543,6 +551,8 @@ keep scope r s = s
       , [ DupOrigin o | Just o <- [ccOrigin cc], HS.member o (sOrigins s) ]
       , [ PartWithoutSecret
         | referencesPart (rContent r), isNothing (ccPartSecret cc) ]
+      , [ SecretWithoutPart
+        | not (referencesPart (rContent r)), isJust (ccPartSecret cc) ]
       , [ UnnormalizedAttr k
         | ASet _ k v _ <- [rContent r], not (normalizedAttr k v) ]
       ]

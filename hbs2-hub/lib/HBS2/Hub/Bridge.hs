@@ -277,21 +277,26 @@ data TriageError =
     -- words. 'honourRequest' will not do that; use 'honourWith' with content
     -- the maintainer actually wrote.
   | NeedsReview
+    -- | A multi-valued attribute whose value is not in canonical form
+    -- ('normalizeAttr'). The same set of labels in another order is other
+    -- bytes and so another event-id, which is exactly what the canonical form
+    -- exists to prevent. The bridge will not normalize it silently: what the
+    -- owner signs must be what the caller meant to sign.
+  | UnnormalizedValue Text
   deriving stock (Eq,Show)
 
--- | What the caller should do with a letter the bridge refused.
+-- | What a triage loop should do with a refusal.
 --
 -- Treating every 'Left' the same way is wrong in both directions: retrying
 -- spam forever, or discarding a letter that only arrived out of order. PEP-18
 -- is explicit that an early reply is not rejected, it waits in the mailbox
 -- until its thread is folded.
--- | What a triage loop should do with a refusal.
 --
--- Five outcomes rather than three because the three collapsed cases that need
+-- Five outcomes rather than three, because three collapsed cases that need
 -- different handling. 'Retry' and 'Park' both mean "keep the letter", but a
 -- loop that treats them alike re-verifies the signature of every piece of
 -- undecodable garbage on every pass, which an attacker produces by signing
--- random bytes. 'Abort' both means "keep the letter" and "stop": a caller that
+-- random bytes. 'Abort' means "keep the letter AND stop": a caller that
 -- silently retried its own wiring bug would spin, and one that discarded would
 -- delete valid letters (PEP-21 folds then deletes).
 data Outcome =
@@ -379,8 +384,9 @@ outcome = \case
   -- Wiring, not letters. Retrying a view built for another repo would spin on
   -- a bug, and discarding would throw away a valid letter; a cursor at the end
   -- of its range needs an operator, not another pass.
-  ViewRepoMismatch  -> Abort
-  OwnerKeyRequired  -> Abort
+  ViewRepoMismatch    -> Abort
+  OwnerKeyRequired    -> Abort
+  UnnormalizedValue _ -> Abort
   CursorExhausted   -> Abort
 
 -- Refuse an author box canon already holds: the fold would drop the second
@@ -409,7 +415,11 @@ honouredAlready view origin
 -- bridge takes the evidence rather than a bare secret.
 data PartsOf = PartsOf
   { poSecret  :: Maybe ByteString  -- ^ group secret for the part trees
-  , poCarried :: HashSet HashRef   -- ^ parts the message (or the owner) supplies
+    -- | The parts the caller vouches for. On the letter path these are the
+    -- message's @messageParts@; on an owner-native event there is no message,
+    -- and the caller is vouching for what it just created, so the check is
+    -- only as good as the caller.
+  , poCarried :: HashSet HashRef
   , poLocal   :: HashSet HashRef   -- ^ of those, the trees present in storage
   }
   deriving stock (Eq,Show)
@@ -445,6 +455,14 @@ requireParts po content = do
 -- the last gate before something is in every clone forever.
 requireSize :: AuthorContent -> Either TriageError ()
 requireSize content = maybe (Right ()) (Left . BodyTooLarge) (oversizedField content)
+
+-- Refuse to sign a multi-valued attribute the caller did not canonicalize.
+-- The fold cannot fix one (the value is inside a signed author box) and must
+-- not drop it either, so it would be admitted and reported forever.
+requireNormalized :: AuthorContent -> Either TriageError ()
+requireNormalized = \case
+  ASet _ k v _ | not (normalizedAttr k v) -> Left (UnnormalizedValue k)
+  _                                       -> Right ()
 
 -- Would signing this verbatim put someone else's words in the owner's mouth?
 -- A note materializes as a comment authored by whoever signed the event, and
@@ -610,19 +628,17 @@ acceptLetter ctx envelopeSigner view folded origin parts md = do
 -- | Honour a request VERBATIM, re-authoring exactly what the letter asked
 -- for under the canon key.
 --
--- The attribute name and value are the requester's, so the owner signs a
--- stranger's choice of both. Prefer 'honourWith', which signs what triage
--- decided; this exists for the case where the request is agreed to as sent.
+-- A stranger's @close@/@reopen@/@set@ letter cannot become canon as theirs:
+-- the fold would drop it, because those ops are owner-authored. What the owner
+-- can do is agree, which means authoring the same content themselves. The
+-- declared timestamp becomes the owner's, since the owner is the one declaring
+-- it now; the letter's provenance is kept as the origin.
 --
--- A stranger's @close@/@reopen@/@label@ letter cannot become canon as
--- theirs: the fold would drop it, because those ops are owner-authored. What
--- it will not do is sign the requester's prose or their choice of attribute:
--- that is 'NeedsReview', and 'honourWith' is the way to say yes to it in the
--- maintainer's own words.
---
--- the owner can do is agree, which means authoring the same content
--- themselves. The declared timestamp becomes the owner's, since the owner is
--- the one declaring it now; the letter's provenance is kept as the origin.
+-- Only what the request carries no words of. A closing note would become a
+-- comment authored by the signer, and an attribute is the requester's choice
+-- of both name and value, so those are refused with 'NeedsReview' and belong
+-- on 'honourWith'. A note-less close or reopen is the whole of what "agreed
+-- as sent" can mean.
 honourRequest
   :: TriageCtx
   -> EnvelopeSigner                     -- ^ who signed the Mailbox envelope
@@ -634,23 +650,15 @@ honourRequest
 honourRequest ctx envelopeSigner view folded origin md = do
   (_box, _author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
-
-  -- Verbatim means verbatim, so anything the requester wrote as text would be
-  -- signed as the owner's own words: a note materializes as a comment authored
-  -- by the signer, in every clone, forever, and an attribute is the
-  -- requester's choice of both name and value. A note-less close or reopen is
-  -- the only case where "agreed as sent" has no wording to agree to.
-  when (verbatimUnsafe content) (Left NeedsReview)
-
-  honourOpened (tcCanon ctx) (tcRepo ctx) view folded origin content content reply
+  honourOpened Verbatim (tcCanon ctx) (tcRepo ctx) view folded origin content content reply
 
 -- | Honour a request, but sign content the maintainer has looked at and
 -- possibly edited.
 --
--- 'honourRequest' signs the requester's content verbatim, which means an
--- arbitrary attribute name and value chosen by a stranger goes into canon
--- under the owner's signature. Triage should normally decide what it is
--- agreeing to, so this takes the content explicitly; the letter is still
+-- 'honourRequest' signs the requester's content verbatim, so it refuses
+-- anything the requester phrased: a note, or an attribute name and value of
+-- their choosing. This is where those go. Triage decides what it is agreeing
+-- to and signs that, so the content is passed explicitly; the letter is still
 -- required, for its provenance and to check that what it asked for was a
 -- request in the first place.
 honourWith
@@ -665,12 +673,21 @@ honourWith
 honourWith ctx envelopeSigner view folded origin content0 md = do
   (_box, _author, asked, reply) <-
     either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
-  honourOpened (tcCanon ctx) (tcRepo ctx) view folded origin asked content0 reply
+  honourOpened Reviewed (tcCanon ctx) (tcRepo ctx) view folded origin asked content0 reply
+
+-- Which of the two honour paths this is.
+--
+-- A flag rather than a comparison of the two contents: on the verbatim path
+-- they are equal by construction, and a maintainer who happens to agree word
+-- for word must not be treated as though they had not read it.
+data Honour = Verbatim | Reviewed
+  deriving stock (Eq)
 
 -- The shared body, taking the letter already opened: 'honourRequest' would
 -- otherwise verify the same signature twice.
 honourOpened
-  :: (HubKey, PrivKey 'Sign HubScheme)
+  :: Honour
+  -> (HubKey, PrivKey 'Sign HubScheme)
   -> RepoRef
   -> CanonView
   -> Word64
@@ -679,7 +696,7 @@ honourOpened
   -> AuthorContent    -- ^ what the owner signs, possibly edited
   -> ReplyChannel
   -> Either TriageError Accepted
-honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
+honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   requireCanon repo view pk
 
   -- A re-authored request gets a fresh id from the clock, so only the
@@ -687,6 +704,19 @@ honourOpened canonKp@(pk,sk) repo view folded origin asked content0 reply = do
   -- triage loop that restarts and re-reads the mailbox closes the thread
   -- twice and duplicates the note.
   honouredAlready view origin
+
+  -- After those two, deliberately. Both are reasons this letter must not
+  -- reach a human at all: a view wired to another repo is a bug to stop on,
+  -- and a letter already folded would have the maintainer write a reply that
+  -- is then refused. Asking for review first would hide either behind a
+  -- normal-looking request.
+  when (path == Verbatim && verbatimUnsafe content0) (Left NeedsReview)
+
+  -- The owner signs this, so the same size gate applies as on any other
+  -- owner-authored event: 'ownerEvent' checks it, and there is no reason for
+  -- the two owner paths to disagree.
+  requireSize content0
+  requireNormalized content0
 
   case classify asked of
     RequestOnly -> Right ()
@@ -787,6 +817,7 @@ ownerEvent ctx view folded parts content = do
                | otherwise                            -> Right (ThreadScope thr)
 
   requireSize content
+  requireNormalized content
   requireParts parts content
 
   Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)

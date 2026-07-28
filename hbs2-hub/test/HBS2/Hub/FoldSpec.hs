@@ -267,7 +267,10 @@ spec = do
           e2 = mkEvent alice owner (ac "b") (canon 10 (Just 2))
       -- The padding is the point: "10" must not sort before "2".
       eventFileName 1 (eventId e1) `shouldSatisfy` (< eventFileName 10 (eventId e2))
-      length (eventFileName 1 (eventId e1)) `shouldBe` length (eventFileName 10 (eventId e2))
+      -- ...which needs the prefix to be fixed width. The name as a whole is
+      -- not, since a base58 hash is 43 or 44 characters.
+      take 20 (eventFileName 1 (eventId e1)) `shouldBe` "00000000000000000001"
+      take 21 (eventFileName 10 (eventId e2)) `shouldBe` "00000000000000000010-"
 
     it "orders two blessings of one author box by content, not by input" $ do
       owner <- kp

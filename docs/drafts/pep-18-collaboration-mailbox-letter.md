@@ -283,7 +283,7 @@ send time, before any acknowledgement. Consequences:
     is the thread root, and its id is the hash of its own inner box (it
     cannot contain that hash). The letter's Mailbox message hash is what the
     owner records as PEP-19 `origin`, for provenance.
-  - Reply letter (`op comment|revise|close|reopen|label`). Carries `thread` = the
+  - Reply letter (`op comment|revise|set|close|reopen`). Carries `thread` = the
     canonical thread id and, optionally, `reply-to` = a specific canonical
     event-id. The author of the thread computed these when they sent the
     opening letter; a third party reads them from public canon. Both are
@@ -405,7 +405,7 @@ permission model:
   - `revise` (PR only) updates the proposed tip. It is author-authored but
     the fold applies it only from the thread's author of record (PEP-19), so
     no one else can redirect a PR to a tip they control.
-  - `close`, `reopen`, `label` are requests, not canon by themselves. A
+  - `close`, `reopen`, `set` are requests, not canon by themselves. A
     stranger's `close` letter asks the owner to close; it becomes canon only
     if the owner issues an owner-signed `set`/`close` event (PEP-19 rule 4).
     A contributor closing or relabelling their own submission is still only a

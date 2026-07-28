@@ -104,13 +104,15 @@ entity: its current state is the deterministic fold of an append-only
 sequence of signed events. This is the model proven in fixme-new (source at
 `/home/user/dev/hbs2-legacy/fixme-new`, not in this repo), where a `Fixme`
 is the monoidal fold of `(key, attr, value, weight)` assignments and state,
-labels, and assignee are all just attributes. PEP-19 generalizes it to
+labels, and assignees are all just attributes. PEP-19 generalizes it to
 threads with comments and to the two-tier trust split.
 
 There is no fixed open/close/label schema baked into storage. Structured
-fields (status, labels, assignee, title, milestone, number) are attributes
+fields (status, labels, assignees, title, milestone, number) are attributes
 set by `set` events under last-writer-wins by a monotonic weight, with
-multi-valued ones (labels, assignees) encoded as a comma-separated list in
+multi-valued ones (`labels`, `assignees`, and the plural is the name: an
+attribute that can hold a set is spelled as one everywhere, so nothing has to
+remember which spelling normalizes) encoded as a comma-separated list in
 sorted order with no spaces, so that the same set of labels always produces the
 same bytes and therefore the same event-id. Which names are multi-valued is
 part of that rule, so the list belongs with the encoder rather than in each
@@ -128,7 +130,7 @@ Every mutation is one event:
   - comment   append discussion to a thread
   - revise    PR-only: update the thread's proposed coordinates (new tip),
               author-of-record only (see Pull-request canon and PEP-20)
-  - set       assign a structured attribute (status, labels, assignee, ...)
+  - set       assign a structured attribute (status, labels, assignees, ...)
   - close     shorthand for (set status closed), may carry a closing note
   - reopen    shorthand for (set status open), may carry a note
   - merge     PR-only: record the merge result (see Pull-request canon)
@@ -625,7 +627,7 @@ letter (op open),  kind issue/pr  ->  open event
                                        origin = letter hash, thread-id = event-id
 letter (op comment)               ->  comment event (author = sender)
 letter (op revise), kind pr       ->  revise event (author-of-record only)
-letter (op close|reopen|label)    ->  a REQUEST, not canon by itself
+letter (op close|reopen|set)      ->  a REQUEST, not canon by itself
 ```
 
 Identifiers need no reconciliation (see Thread identity): a letter already
@@ -646,7 +648,7 @@ Permission model. Three classes of op, enforced by which key signs:
     when its author equals the thread's `open` author (or a canon key), so a
     third party cannot redirect someone else's PR to a tip they control.
 
-  - Owner-authored: `set` (status, labels, assignee, milestone), `merge`,
+  - Owner-authored: `set` (status, labels, assignees, milestone), `merge`,
     `redact`, `delegate`/`revoke`, plus the `number` field the owner assigns
     on `open`. Admission requires the author box signer to be an authorized
     canon key (rule 4 above); `delegate`/`revoke` specifically must be signed
@@ -733,7 +735,7 @@ what they expose. The contract:
 
   - `readEventLog  :: CommitChain -> [Event]`   parse the meta tree
   - `materialize   :: [Event] -> Map ThreadId ThreadState`  the fold above
-  - `ThreadState` fields: number, kind, title, status, labels, assignee,
+  - `ThreadState` fields: number, kind, title, status, labels, assignees,
     author, created_at, updated_at, comments[], and for PRs the source/onto
     coordinates and merge result.
 

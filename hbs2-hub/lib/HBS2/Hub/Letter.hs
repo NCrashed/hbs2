@@ -31,6 +31,9 @@ module HBS2.Hub.Letter
   , maxInlineBody
   , maxTitle
   , maxAttrValue
+  , maxRef
+  , maxLabel
+  , maxLabels
   , textSize
   , oversizedField
   , noReplyChannel
@@ -64,7 +67,7 @@ import Codec.Serialise (Serialise(..),serialise)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -125,6 +128,20 @@ maxTitle = 512
 maxAttrValue :: Int
 maxAttrValue = 4 * 1024
 
+-- | And on a git ref, sha or fork locator. These are identifiers, not prose,
+-- and every one of them ends up in canon verbatim.
+maxRef :: Int
+maxRef = 512
+
+-- | And on one label, and on how many an open may request. Labels are
+-- advisory (the owner decides what to apply), so an unbounded list is free
+-- storage for whoever sends it.
+maxLabel :: Int
+maxLabel = 128
+
+maxLabels :: Int
+maxLabels = 32
+
 -- | The size of a text field as it costs on the wire: UTF-8 bytes, not
 -- characters. A limit about payload size has to be measured in payload.
 textSize :: Text -> Int
@@ -136,11 +153,15 @@ textSize = BS.length . Text.encodeUtf8
 -- to move to an attachment.
 oversizedField :: AuthorContent -> Maybe Text
 oversizedField = \case
-  AOpen _ _ title _ body _ _ _
-    | textSize title > maxTitle -> Just "title"
-    | maybe False big body      -> Just "body"
+  AOpen _ _ title labels body _ coords _
+    | textSize title > maxTitle        -> Just "title"
+    | length labels > maxLabels        -> Just "labels"
+    | any ((> maxLabel) . textSize) labels -> Just "label"
+    | maybe False big body             -> Just "body"
+    | otherwise                        -> maybe Nothing coordsOver coords
   AComment _ _ body _ _
     | maybe False big body      -> Just "body"
+  ARevise _ coords _            -> coordsOver coords
   AClose _ note _
     | maybe False big note      -> Just "note"
   AReopen _ note _
@@ -149,11 +170,23 @@ oversizedField = \case
     | textSize k > maxAttrValue -> Just "attr"
     | textSize v > maxAttrValue -> Just "value"
   AMerge _ mc into _
-    | textSize mc > maxTitle    -> Just "merge-commit"
-    | textSize into > maxTitle  -> Just "merged-into"
+    | textSize mc > maxRef      -> Just "merge-commit"
+    | textSize into > maxRef    -> Just "merged-into"
   _ -> Nothing
   where
     big = (> maxInlineBody) . textSize
+
+    -- Five unbounded strings otherwise, and a revise is nothing but these.
+    coordsOver c = listToMaybe
+      [ name
+      | (name, t) <- [ ("source", fromMaybe "" (prSource c))
+                     , ("source-ref", prSourceRef c)
+                     , ("source-tip", prSourceTip c)
+                     , ("onto", prOnto c)
+                     , ("base", prBase c)
+                     ]
+      , textSize t > maxRef
+      ]
 
 -- | Where the owner should send acknowledgements and status updates.
 --

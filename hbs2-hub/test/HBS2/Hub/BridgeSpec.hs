@@ -269,7 +269,7 @@ spec = do
                        (AClose tid (Just "shipped, obviously") 2) noReplyChannel
           -- and a set is the requester's choice of both name and value
           withAttr = makeLetter (fst alice) (snd alice)
-                       (ASet tid "assignee" "alice" 2) noReplyChannel
+                       (ASet tid "assignees" "alice" 2) noReplyChannel
       origin2 <- someHash
       expectErr NeedsReview
         (honourRequest (ctxOf owner) env (acView aOpen) 2 origin2 withNote)
@@ -535,7 +535,7 @@ spec = do
       let tid = scopeOf aOpen
           -- a request to set an attribute of the requester's choosing
           req = makeLetter (fst mallory) (snd mallory)
-                  (ASet tid "assignee" "mallory" 2) noReplyChannel
+                  (ASet tid "assignees" "mallory" 2) noReplyChannel
           -- triage agrees to something else entirely
           edited = ASet tid "labels" "wontfix" 2
       origin2 <- someHash
@@ -545,7 +545,7 @@ spec = do
       let fr = foldEvents repo [acEvent aOpen, acEvent acc]
           t = threadOf fr tid
       HM.lookup "labels" (tsAttrs t) `shouldBe` Just "wontfix"
-      HM.lookup "assignee" (tsAttrs t) `shouldBe` Nothing
+      HM.lookup "assignees" (tsAttrs t) `shouldBe` Nothing
 
     it "refuses a pr-only owner op on an issue thread" $ do
       alice <- kp
@@ -631,6 +631,69 @@ spec = do
         (ownerEvent (ctxOf owner) (emptyView repo) 1 (PartsOf Nothing here here)
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
 
+    it "checks wiring and dedup before it asks a human" $ do
+      alice <- kp
+      owner <- kp
+      other <- kp
+      origin <- someHash
+      -- A request with a note is NeedsReview, but only once it is a request
+      -- worth reviewing. A view wired to another repo is a bug to stop on, and
+      -- a letter already folded would have the maintainer write a reply that
+      -- honourWith then refuses: both must win over the review prompt.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
+      reqOrigin <- someHash
+      let req = makeLetter (fst alice) (snd alice)
+                  (AClose (scopeOf aOpen) (Just "please close") 2) noReplyChannel
+      -- wrong repo first
+      expectErr ViewRepoMismatch
+        (honourRequest (ctxOf owner) env (emptyView (fst other)) 2 reqOrigin req)
+      -- already folded first
+      aClose <- expectRight
+        (honourWith (ctxOf owner) env (acView aOpen) 2 reqOrigin
+           (AClose (scopeOf aOpen) (Just "closing") 2) req)
+      expectErr AlreadyHonoured
+        (honourRequest (ctxOf owner) env (acView aClose) 3 reqOrigin req)
+      -- ...and with neither in the way, the review prompt
+      other2 <- someHash
+      expectErr NeedsReview
+        (honourRequest (ctxOf owner) env (acView aOpen) 2 other2 req)
+
+    it "refuses to sign an attribute value nobody canonicalized" $ do
+      owner <- kp
+      alice <- kp
+      origin <- someHash
+      -- The same two labels in another order are other bytes and so another
+      -- event-id, which is what the canonical form exists to prevent. The
+      -- bridge will not quietly rewrite what the owner signs, and the fold
+      -- can neither fix nor drop it, so it has to be refused here.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
+      let tid = scopeOf aOpen
+      expectErr (UnnormalizedValue "labels")
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts (ASet tid "labels" "ui,bug" 2))
+      outcome (UnnormalizedValue "labels") `shouldBe` Abort
+      -- normalized is fine, and so is a scalar attribute
+      _ <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts
+           (ASet tid "labels" (normalizeAttr "labels" "ui,bug") 2))
+      _ <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts (ASet tid "status" "b,a" 2))
+      -- and honourWith signs owner content too, so it is checked there
+      reqOrigin <- someHash
+      let req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
+      expectErr (UnnormalizedValue "labels")
+        (honourWith (ctxOf owner) env (acView aOpen) 2 reqOrigin
+           (ASet tid "labels" "ui,bug" 2) req)
+
     it "refuses a body it will not carry inline" $ do
       alice <- kp
       owner <- kp
@@ -652,6 +715,34 @@ spec = do
         (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts longTitle)
       -- Resending is the only fix, so there is nothing to come back to.
       outcome (BodyTooLarge "body") `shouldBe` Discard
+      -- Coordinates are five more unbounded strings, and a revise is nothing
+      -- but those.
+      let longRef = Text.replicate (maxRef + 1) "r"
+          fatPR = makeLetter (fst alice) (snd alice)
+                    (AOpen repo HubPR "pr" [] Nothing Nothing
+                       (Just coords { prOnto = longRef }) 1) noReplyChannel
+      expectErr (BodyTooLarge "onto")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts fatPR)
+      aPR <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (makeLetter (fst alice) (snd alice)
+              (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1) noReplyChannel))
+      origin2 <- someHash
+      expectErr (BodyTooLarge "source-tip")
+        (acceptLetter (ctxOf owner) env (acView aPR) 2 origin2 noParts
+           (makeLetter (fst alice) (snd alice)
+              (ARevise (scopeOf aPR) coords { prSourceTip = longRef } 2) noReplyChannel))
+      -- Labels are advisory, so an unbounded list is free storage.
+      let manyLabels = makeLetter (fst alice) (snd alice)
+                         (AOpen repo HubIssue "t" (replicate (maxLabels + 1) "l")
+                            Nothing Nothing Nothing 1) noReplyChannel
+          longLabel = makeLetter (fst alice) (snd alice)
+                        (AOpen repo HubIssue "t" [Text.replicate (maxLabel + 1) "l"]
+                           Nothing Nothing Nothing 1) noReplyChannel
+      expectErr (BodyTooLarge "labels")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts manyLabels)
+      expectErr (BodyTooLarge "label")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts longLabel)
       -- Exactly at the limit is fine.
       let ok = makeLetter (fst alice) (snd alice)
                  (AOpen repo HubIssue "t" [] (Just (Text.replicate maxInlineBody "x"))

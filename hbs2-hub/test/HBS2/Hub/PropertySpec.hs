@@ -5,12 +5,17 @@ import HBS2.Hub.Letter hiding (classify)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
 
 import Control.Monad ((<=<))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.HashSet qualified as HS
 import Data.List (foldl')
 import Data.Maybe (mapMaybe)
+import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Word (Word64)
 import Test.Hspec
 import Test.QuickCheck
@@ -43,7 +48,18 @@ data Step =
   | StepRevoke Word64           -- ^ withdraw it again
   | StepAsDelegate Int Word64   -- ^ the second key folds a comment letter
   | StepStaleView Int Word64    -- ^ mint against an older view, then discard
+    -- | A multi-valued attribute, canonical or not: the same labels in another
+    -- order are other bytes and so another event-id.
+  | StepSetLabels Int Word64 Bool
+  | StepHonourWith Int Word64   -- ^ the maintainer signs their own note
+  | StepAttach Int Word64 Attach
+  | StepBigBody Word64          -- ^ an inline body over what triage carries
   deriving stock (Show)
+
+-- | What the caller can say about an attachment, and what it costs to be
+-- wrong. Each of the four is a different answer, and only one mints.
+data Attach = Ready | NotFetched | NotCarried | NoKey
+  deriving stock (Eq,Show)
 
 instance Arbitrary Step where
   arbitrary = frequency
@@ -60,6 +76,11 @@ instance Arbitrary Step where
     , (1, StepRevoke <$> genTs)
     , (2, StepAsDelegate <$> genIx <*> genTs)
     , (1, StepStaleView <$> genIx <*> genTs)
+    , (2, StepSetLabels <$> genIx <*> genTs <*> arbitrary)
+    , (2, StepHonourWith <$> genIx <*> genTs)
+    , (2, StepAttach <$> genIx <*> genTs
+            <*> elements [Ready,NotFetched,NotCarried,NoKey])
+    , (1, StepBigBody <$> genTs)
     ]
 
   -- Without a shrink a counterexample is the whole generated script with
@@ -79,6 +100,14 @@ instance Arbitrary Step where
     StepRedact i ts     -> both StepRedact i ts
     StepAsDelegate i ts -> both StepAsDelegate i ts
     StepStaleView i ts  -> both StepStaleView i ts
+    StepHonourWith i ts -> both StepHonourWith i ts
+    StepBigBody ts      -> [StepBigBody ts' | ts' <- shrinkTs ts]
+    StepSetLabels i ts ok -> [StepSetLabels i' ts ok | i' <- shrinkIx i]
+                          <> [StepSetLabels i ts' ok | ts' <- shrinkTs ts]
+                          <> [StepSetLabels i ts False | ok]
+    StepAttach i ts a   -> [StepAttach i' ts a | i' <- shrinkIx i]
+                        <> [StepAttach i ts' a | ts' <- shrinkTs ts]
+                        <> [StepAttach i ts Ready | a /= Ready]
     StepDelegate ts     -> [StepDelegate ts' | ts' <- shrinkTs ts]
     StepRevoke ts       -> [StepRevoke ts' | ts' <- shrinkTs ts]
     StepRevise i ts ok  -> [StepRevise i' ts ok | i' <- shrinkIx i]
@@ -121,7 +150,16 @@ data Tag =
   | TByDelegate      -- ^ the second key minted an event
   | TRevokedRefused  -- ^ ...and was refused after its delegation was withdrawn
   | TStaleDiscarded  -- ^ a mint against an older view, thrown away
+  | TSetLabels | THonourWith | TAttached | TBigBody
   deriving stock (Eq,Show)
+
+-- A group secret is raw key bytes of a fixed size ('validPartSecret').
+secret32 :: ByteString
+secret32 = BS.replicate typicalKeyLength 0x41
+
+-- An inline body one byte over what triage will carry.
+bigBody :: Text
+bigBody = Text.replicate (maxInlineBody + 1) "x"
 
 coords :: Bool -> PRCoords
 -- A fork-pointer PR. PEP-20 requires one of the two ways to fetch the
@@ -164,6 +202,7 @@ data St = St
 -- | What one run produced.
 data Run = Run
   { rDropped  :: [(EventId,DropReason)]
+  , rAnoms    :: [(EventId,Anomaly)]
   , rAgrees   :: Bool
   , rOnePer   :: Bool
   , rStaleDup :: Bool
@@ -191,17 +230,24 @@ spec =
         monitor (classify (TMerge `elem` rTags r) "merged a PR")
         monitor (cover 5 (TRevise `elem` rTags r) "revised a PR")
         monitor (cover 5 (TOwnerOpen `elem` rTags r) "opened a thread as the owner")
+        monitor (cover 5 (TAttached `elem` rTags r) "folded an attachment")
+        monitor (cover 5 (TSetLabels `elem` rTags r) "set a multi-valued attribute")
+        monitor (cover 5 (THonourWith `elem` rTags r) "honoured a request in its own words")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
         monitor (cover 1 (any isDoubleHonour (rRefused r)) "refused a second honour")
-        -- Four invariants. The fold admits everything the bridge minted; the
-        -- view carried across the run still equals a rebuild from the canon
-        -- that resulted; no letter produced two canon events, which the first
-        -- two cannot see (two close events with different ids are a valid
-        -- canon, just a wrong one); and a mint against a stale view really
-        -- would have collided, which is why the caller has to discard it.
-        assert (null (rDropped r) && rAgrees r && rOnePer r && rStaleDup r)
+        -- Five invariants. The fold admits everything the bridge minted; it
+        -- reports no anomaly in what the bridge minted either, which is the
+        -- stronger half (an anomaly is fold-legal, so nothing else here would
+        -- notice); the view carried across the run still equals a rebuild from
+        -- the canon that resulted; no letter produced two canon events, which
+        -- none of the others can see (two close events with different ids are a
+        -- valid canon, just a wrong one); and a mint against a stale view
+        -- really would have collided, which is why the caller has to discard
+        -- it.
+        assert (  null (rDropped r) && null (rAnoms r)
+               && rAgrees r && rOnePer r && rStaleDup r )
   where
     isDoubleHonour = \case
       AlreadyHonoured -> True
@@ -230,6 +276,7 @@ runSteps steps = do
       live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) (stEvents st))
   pure Run
     { rDropped  = frDropped fr
+    , rAnoms    = frAnomalies fr
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
     , rStaleDup = all (`HS.member` live) (stStale st)
@@ -237,12 +284,20 @@ runSteps steps = do
     , rRefused  = stRefused st
     }
 
+-- | The folder's own clock: monotonic, because a triage loop reads the time and
+-- time moves forward. Distinct from the author-declared @ts@ the steps carry,
+-- which is attacker-chosen and constrained by nothing. Conflating the two would
+-- make the fold report a backwards @folded-ts@ on canon the bridge minted, and
+-- that would be the test's fault, not the bridge's.
+clockOf :: St -> Word64
+clockOf st = fromIntegral (stStep st) * 1000
+
 step :: Cast -> St -> Step -> St
 step cast st = \case
   StepOpen ts kind ->
     let content = AOpen repo kind "t" [] Nothing Nothing
                     (if kind == HubPR then Just (coords True) else Nothing) ts
-    in accept TOpen ts (letterOf content)
+    in accept TOpen (letterOf content)
 
   -- The other half of the number path, and the one that puts an
   -- owner-authored thread in front of the letter ops: a revise on one is
@@ -252,21 +307,21 @@ step cast st = \case
                        (if kind == HubPR then Just (coords True) else Nothing) ts) ts
 
   StepComment i ts -> withThread i $ \thr ->
-    accept TComment ts (letterOf (AComment thr Nothing (Just "c") Nothing ts))
+    accept TComment (letterOf (AComment thr Nothing (Just "c") Nothing ts))
 
   -- A close from a stranger is a request, so this is always refused; the
   -- point is that it is refused rather than half-applied.
   StepClose i ts -> withThread i $ \thr ->
-    accept TSet ts (letterOf (AClose thr Nothing ts))
+    accept TSet (letterOf (AClose thr Nothing ts))
 
   StepRevise i ts ok -> withThread i $ \thr ->
-    accept TRevise ts (letterOf (ARevise thr (coords ok) ts))
+    accept TRevise (letterOf (ARevise thr (coords ok) ts))
 
   -- The same key folds the same letter under the delegated context, so an
   -- event minted here is admitted only while the delegation stands. This is
   -- where a revoked maintainer would slip through.
   StepAsDelegate i ts -> withThread i $ \thr ->
-    case acceptLetter (castDeleg cast) (EnvelopeSigner alicePk) (stView st) ts
+    case acceptLetter (castDeleg cast) (EnvelopeSigner alicePk) (stView st) (clockOf st)
            (originOf (stStep st)) noParts
            (letterOf (AComment thr Nothing (Just "d") Nothing ts)) of
       Right acc -> keep TByDelegate acc
@@ -279,7 +334,7 @@ step cast st = \case
 
   StepHonour i ts -> withThread i $ \thr ->
     let req = letterOf (AClose thr Nothing ts)
-    in case honourRequest (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
+    in case honourRequest (castOwner cast) (EnvelopeSigner alicePk) (stView st) (clockOf st)
               (reqOriginOf i) req of
          Right acc -> keep THonour acc
          Left e    -> refuse e
@@ -306,11 +361,38 @@ step cast st = \case
   -- never reaches canon and the view is not advanced. What makes discarding
   -- mandatory is that the stale cursor hands out a seq canon has already
   -- issued, so the run records it and checks exactly that.
+  StepSetLabels i ts ok -> withThread i $ \thr ->
+    mint TSetLabels (ASet thr "labels" (if ok then "bug,ui" else "ui,bug") ts) ts
+
+  -- The reviewed half of the honour path, sharing the request origin with
+  -- StepHonour so that honouring one letter both ways is caught.
+  StepHonourWith i ts -> withThread i $ \thr ->
+    let req = letterOf (AClose thr Nothing ts)
+    in case honourWith (castOwner cast) (EnvelopeSigner alicePk) (stView st)
+              (clockOf st) (reqOriginOf i) (AClose thr (Just "reviewed") ts) req of
+         Right acc -> keep THonourWith acc
+         Left e    -> refuse e
+
+  -- Only Ready may mint. The other three are the ways a caller can be wrong
+  -- about an attachment, and every one of them would be permanent in canon.
+  StepAttach i ts att ->
+    let part = originOf (stStep st + i + 1)
+        po = case att of
+               Ready      -> partsReady secret32 [part]
+               NotFetched -> PartsOf (Just secret32) (HS.singleton part) HS.empty
+               NotCarried -> noParts
+               NoKey      -> PartsOf Nothing (HS.singleton part) (HS.singleton part)
+        content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
+    in acceptWith po TAttached (letterOf content)
+
+  StepBigBody ts ->
+    accept TBigBody (letterOf (AOpen repo HubIssue "t" [] (Just bigBody) Nothing Nothing ts))
+
   StepStaleView i ts -> case drop i (stOld st) of
     []      -> st
     (old:_) ->
       let content = AOpen repo HubIssue "stale" [] Nothing Nothing Nothing ts
-      in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) old ts
+      in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) old (clockOf st)
                 (originOf (stStep st)) noParts (letterOf content) of
            Left e    -> refuse e
            Right acc -> case canonOf (acEvent acc) of
@@ -336,14 +418,16 @@ step cast st = \case
       (thr:_) -> k thr
       []      -> st
 
-    accept tag ts letter =
-      case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
-             (originOf (stStep st)) noParts letter of
+    accept tag letter = acceptWith noParts tag letter
+
+    acceptWith po tag letter =
+      case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
+             (clockOf st) (originOf (stStep st)) po letter of
         Right acc -> keep tag acc
         Left e    -> refuse e
 
-    mint tag content ts =
-      case ownerEvent (castOwner cast) (stView st) ts noParts content of
+    mint tag content _ts =
+      case ownerEvent (castOwner cast) (stView st) (clockOf st) noParts content of
         Right acc -> keep tag acc
         Left e    -> refuse e
 
