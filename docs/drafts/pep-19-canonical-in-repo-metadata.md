@@ -289,7 +289,9 @@ signed boxes; the remaining clauses are the readable projection.
 (folded-ts <word64>)               ; Unix epoch milliseconds, UTC, owner's clock at fold
 (canon-by  <sign-pubkey-b58>)      ; owner or delegated maintainer
 (part-secret <group-secret-b58>)   ; only on events referencing encrypted parts:
-                                   ;   the message group secret, so canon readers decrypt them
+                                   ;   the PARTS group secret, NOT the one over
+                                   ;   messageData: publishing that one would publish
+                                   ;   the sender's reply address (PEP-18)
 ```
 
 An owner-blessed status change is therefore a fully signed event: the owner
@@ -470,6 +472,12 @@ altering state:
      letter equivalents are only requests (see Folding). (`number` is not an
      op: it is a canon-box field on the `open` event, so it is owner-signed
      by construction.)
+  4a. Payload rules that are admission rules, and so are consensus like the
+     rest of this list: a `pr` open carries coordinates and an `issue` open
+     does not, and a PR's coordinates name at least one of a fork to pull from
+     or a bundle to fetch. An open that breaks either is dropped rather than
+     admitted, because canon would otherwise hold a proposal nobody can obtain
+     or a thread whose kind and payload disagree.
   5. For `delegate`/`revoke`, both the author box signer and `canon-by` must
      equal the LWWRef owner key exactly, not merely an authorized canon key.
      This is the root-of-trust rule: without it a delegate could sign its own
@@ -545,6 +553,14 @@ it, where a silent no-op leaves a redaction that reported success and did
 nothing. The pass is `seq`-ordered, so the target is present whenever the
 `redact` was minted after it, which is the ordering the bridge enforces: it
 refuses to mint a `redact` for a target not yet in canon.
+
+`delegate` and `revoke` naming a key that changes nothing (revoking a key that
+was never delegated, or a mistyped key) are admitted as written and spend a
+`seq`, reporting success while doing nothing. This is the same shape as the
+unknown `redact` above, which is dropped precisely so that it is visible, and
+it should be resolved the same way when the rules are next opened; it is left
+as it is for now because the fold's maintainer set is derived, not stored, and
+checking membership at admission time is a rule change rather than a fix.
 
 `revise` is author-authored but restricted to the author of record: the fold
 applies it only when its author box signer equals the opening event's author
@@ -774,6 +790,16 @@ refused, because refusing would let one maintainer with a fast clock stop every
 other folder until real time caught up, which is the cursor failure below in
 another costume.
 
+The cursor can be poisoned by `seq` as well as by `number`, and the `seq`
+variant is worse. A stamp of `maxBound - 1` on any event leaves the next
+`seq` at the top of the range, and from then on EVERY op is refused, not only
+`open`: the folder cannot mint a comment, a close, a redaction, or the
+`revoke` that would withdraw the delegate who did it. One delegated
+maintainer can therefore make their own revocation unwritable through the
+bridge. Recovering means the re-stamping compaction described below, which
+the owner can still perform because it rewrites canon rather than appending
+to it.
+
 A known bound on the same weakness. The fold refuses a `seq` or `number` of
 `maxBound`, since the next mint is the maximum plus one and would wrap. It
 does not, and cannot without a new admission rule, refuse a stamp that is
@@ -785,6 +811,22 @@ rule and therefore consensus: it cannot be added to a repo that already has
 canon without bumping `hub-meta` (see Deterministic materialization). Until
 someone needs it, the exposure is one hostile or broken maintainer, who can
 already do worse, and `hub verify` names them.
+
+`folded-ts` is bounded the same way and for a sharper reason: the next stamp
+is clamped to be no lower than the last one in canon, so a single event at the
+top of the range pins every later event to it, on every node, permanently, and
+every time the render contract shows is derived from that field. The top of
+the range is refused for all three.
+
+A dropped event still spends its stamp. This is not an optimization to skip:
+admission is not final. An event dropped because its signer had been revoked
+becomes admissible the moment a later `delegate` restores that signer, so a
+`seq` that was never counted can be handed to a second event, and the two
+would then sit at one `seq` in a canon that is no longer what either publisher
+intended. Delegating a maintainer again after revoking them is an ordinary
+thing to do. The high-water marks therefore advance over every event whose
+stamp is usable, admitted or not; only the `origin` set is restricted to
+admitted events, since a dropped event folded no letter.
 
 Compaction must retain what the fold's own checks read. Two of them look at
 canon rather than at the event in hand, and compaction is what can take that

@@ -9,6 +9,8 @@ import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
 
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
+import Codec.Serialise (serialise)
 import Data.HashMap.Strict qualified as HM
 import Data.Text qualified as Text
 import Data.Maybe (fromMaybe)
@@ -61,8 +63,14 @@ secret32 = fromMaybe (error "bad fixture secret")
 -- The secret over messageData, which a reader of a letter always has: it read
 -- the letter with it. Distinct from the parts secret by construction here, as
 -- it must be on the wire (PEP-18).
-msgSecret :: BS.ByteString
-msgSecret = BS.replicate typicalKeyLength 0x42
+-- The same bytes as a part secret, which is the mistake the two types exist
+-- to make visible: a caller holding one value cannot tell which it is.
+sameAs :: PartSecret -> MessageSecret
+sameAs = fromMaybe (error "same secret") . mkMessageSecret . partSecretBytes
+
+msgSecret :: MessageSecret
+msgSecret = fromMaybe (error "bad fixture secret")
+              (mkMessageSecret (BS.replicate typicalKeyLength 0x42))
 
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
@@ -624,6 +632,12 @@ spec = do
       -- letter that names one is the caller reaching for the empty thing.
       expectErr NoAttachmentsSupplied (accept noAttachments)
       either outcome (const Decide) (accept noAttachments) `shouldBe` Abort
+      -- ...but a message that really carried nothing is not the caller saying
+      -- nothing. Reading the two alike let any stranger wedge the loop with a
+      -- letter naming a part their message does not have.
+      expectErr (PartNotInMessage part) (accept (attachmentsNoKey msgSecret []))
+      either outcome (const Decide) (accept (attachmentsNoKey msgSecret []))
+        `shouldBe` Discard
       -- ...but once it HAS supplied evidence, a part that evidence does not
       -- list is the letter's doing, and anyone can send such a letter. Abort
       -- here would let one stranger wedge triage for good: the letter stays in
@@ -643,14 +657,18 @@ spec = do
       -- ...and the one the type exists for: the message's own secret offered
       -- as the parts secret would publish the letter's envelope, and with it
       -- the sender's private reply address, to every clone.
-      let wrongKey = attachments secret32 (partSecretBytes secret32) [part]
+      -- Discard, not Abort: the sender picks this too, since nothing stops
+      -- them encrypting their parts with the message key and a Message is a
+      -- box anyone can build. Minting is still refused; handing them the loop
+      -- as well would not be.
+      let wrongKey = attachments secret32 (sameAs secret32) [part]
       expectErr MessageSecretOffered (accept wrongKey)
-      either outcome (const Decide) (accept wrongKey) `shouldBe` Abort
+      either outcome (const Decide) (accept wrongKey) `shouldBe` Discard
       -- ...which is why the convenient constructor demands the message secret
       -- rather than defaulting it away. The owner path has its own, because
       -- an owner-native event arrived in no message at all.
       expectErr MessageSecretOffered
-        (accept (attachments secret32 (partSecretBytes secret32) [part]))
+        (accept (attachments secret32 (sameAs secret32) [part]))
       _ <- expectRight (accept (attachments secret32 msgSecret [part]))
       _ <- expectRight
         (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments secret32 [part])
@@ -849,6 +867,99 @@ spec = do
       expectErr CursorExhausted
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) spentNum 1 origin
            noAttachments letter)
+
+    it "applies the same gates on the owner path as on the letter path" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      part <- someHash
+      -- Three fixes landed on the owner paths with tests that only exercised
+      -- acceptLetter, so deleting the owner-side checks left the suite green.
+      -- These are the assertions that go red.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noAttachments letter)
+      let tid = scopeOf aOpen
+          view = acView aOpen
+          req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
+      origin2 <- someHash
+      -- size, via ownerEvent
+      expectErr (BodyTooLarge "note")
+        (ownerEvent (ctxOf owner) view 2 noOwnAttachments
+           (AClose tid (Just (Text.replicate (maxInlineBody + 1) "x")) 2))
+      -- size, via honourWith: the owner signs this too
+      expectErr (BodyTooLarge "note")
+        (honourWith (ctxOf owner) env view 2 origin2
+           (AClose tid (Just (Text.replicate (maxInlineBody + 1) "x")) 2) req)
+      -- an attribute NAME has its own bound, narrower than a value's
+      expectErr (BodyTooLarge "attr")
+        (ownerEvent (ctxOf owner) view 2 noOwnAttachments
+           (ASet tid (Text.replicate (maxAttrName + 1) "a") "v" 2))
+      _ <- expectRight
+        (ownerEvent (ctxOf owner) view 2 noOwnAttachments
+           (ASet tid "labels" (Text.replicate maxAttrValue "v") 2))
+      expectErr (BodyTooLarge "value")
+        (ownerEvent (ctxOf owner) view 2 noOwnAttachments
+           (ASet tid "labels" (Text.replicate (maxAttrValue + 1) "v") 2))
+      -- a part secret that came back out of canon unchecked, which is the
+      -- path compaction takes when it re-stamps
+      let stunted = fromMaybe (error "no decode")
+                      (decodeStrict (LBS.toStrict (serialise ("abc" :: BS.ByteString))))
+      expectErr BadPartSecret
+        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [part])
+           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
+      either outcome (const Decide)
+        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [part])
+           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
+        `shouldBe` Abort
+
+    it "refuses a letter whose schema it cannot read from a banned envelope" $ do
+      mallory <- kp
+      owner <- kp
+      origin <- someHash
+      -- The version is checked before the body, so there is no inner author to
+      -- ban: the envelope key is the only one in hand. Without this, a version
+      -- number and a few bytes of garbage are the cheapest way to grow the
+      -- parked set, cheaper than an oversized body.
+      let repo = fst owner
+          allowed k = k /= fst mallory
+          v999 = MessageData 999
+                   (mdBody (makeLetter (fst mallory) (snd mallory)
+                              (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                              noReplyChannel))
+          ctx = TriageCtx owner allowed repo
+          got = acceptLetter ctx (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin
+                  noAttachments v999
+      expectErr (BadLetter AuthorDenied) got
+      either outcome (const Decide) got `shouldBe` Discard
+      -- ...and an unbanned sender still gets the honest answer
+      either outcome (const Decide)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin
+           noAttachments v999)
+        `shouldBe` Park
+
+    it "hands back the message hash the caller must delete by" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- What the caller does next is delete that message, by exactly this
+      -- hash. A parallel list zipped against the results is one off-by-one
+      -- away from deleting a letter nobody has read.
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      acc <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin
+           noAttachments letter)
+      acOrigin acc `shouldBe` Just origin
+      -- an owner-native event came from no message, and says so
+      own <- expectRight
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
+           (AClose (scopeOf acc) Nothing 2))
+      acOrigin own `shouldBe` Nothing
 
     it "refuses a body it will not carry inline" $ do
       alice <- kp

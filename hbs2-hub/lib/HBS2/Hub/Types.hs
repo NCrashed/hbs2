@@ -47,6 +47,9 @@ module HBS2.Hub.Types
   , validAttrName
   , PartSecret
   , mkPartSecret
+  , MessageSecret
+  , mkMessageSecret
+  , messageSecretBytes
   , usablePartSecret
   , partSecretBytes
   , hubMetaVersion
@@ -362,6 +365,24 @@ instance Show PartSecret where
 instance Serialise PartSecret where
   encode = CBOR.encode . partSecretBytes
   decode = PartSecret <$> CBOR.decode
+
+-- | The secret a Mailbox message's own payload is encrypted with.
+--
+-- Never published, and here only so that it can be told apart from
+-- 'PartSecret' by type rather than by whether the caller remembered which was
+-- which. They are the same bytes and the same length, and confusing them
+-- publishes the sender's private reply address into every clone forever.
+newtype MessageSecret = MessageSecret { messageSecretBytes :: ByteString }
+  deriving stock (Eq)
+
+instance Show MessageSecret where
+  show _ = "MessageSecret <hidden>"
+
+-- | Build one. Same length check as 'mkPartSecret', for the same reason.
+mkMessageSecret :: ByteString -> Maybe MessageSecret
+mkMessageSecret bs
+  | BS.length bs == (typicalKeyLength :: Int) = Just (MessageSecret bs)
+  | otherwise                                 = Nothing
 
 -- | Build one, checking the only thing bytes can be checked for.
 --

@@ -188,6 +188,37 @@ cheap while pricing the anonymous path, without any protocol change beyond the
 policy clauses above.
 
 
+Refusals a triage loop must budget
+==================================
+
+The bridge answers each letter with one of five dispositions, and two of them
+are the loop's problem rather than the letter's.
+
+  - RETRY means the repo is not ready yet: fold something else and come back.
+    Two of its causes are chosen by the SENDER, though, not by the repo: a
+    letter naming an attachment nobody will serve, and one whose parts are
+    encrypted for a group the maintainers are not in. Both re-verify a
+    signature on every pass and neither ever resolves, so a loop needs a retry
+    budget per message and must move a message that exhausts it to the parked
+    set. Without one, a handful of letters costs a signature check per letter
+    per pass forever.
+
+  - PARK means nothing about this repo will change the answer: a newer schema,
+    a body over the local size limit, a payload this build cannot decode. The
+    letter is kept, because an upgrade or a configuration change can make it
+    foldable, but it must not be re-examined every pass. The set has no
+    durable marker in canon by construction (canon holds what was folded, not
+    what was not), so the loop owns it, and it is the set an attacker can grow
+    most cheaply. Cap it, and prefer capping by sender.
+
+  - ABORT means the caller is wired wrong: stop, do not touch the letter.
+    DISCARD and DECIDE are the ordinary outcomes.
+
+The deny-list reaches an undecodable letter through its envelope key, which is
+the only key available when the payload cannot be parsed. That is weaker than
+the inner-author ban (rewrapping evades it), and it is deliberately the one
+place an envelope ban is used at all.
+
 Retention and garbage collection
 ==============================
 

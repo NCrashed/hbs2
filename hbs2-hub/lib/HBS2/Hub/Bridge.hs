@@ -1,3 +1,15 @@
+-- The taxonomy in 'outcome' is a total function over 'TriageError' and the
+-- only mechanical check of that is the incomplete-patterns warning, which
+-- would otherwise be a pattern-match failure inside a triage loop rather than
+-- a build error. Here it is a build error.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
+-- The taxonomy in 'outcome' is a total function over 'TriageError' and the
+-- only mechanical check of that is the incomplete-patterns warning, which
+-- would otherwise be a pattern-match failure inside a triage loop rather than
+-- a build error. Here it is a build error.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
 -- | The triage bridge: Tier B letter to Tier A canon event (PEP-19
 -- "Folding Tier B letters into Tier A").
 --
@@ -83,7 +95,6 @@ import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Data.Types.SignedBox (SignedBox)
 import HBS2.Net.Auth.Credentials
 
-import Data.ByteString (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
@@ -428,7 +439,11 @@ outcome = \case
   -- These two are the caller's own doing.
   NoAttachmentsSupplied -> Abort
   BadPartSecret        -> Abort
-  MessageSecretOffered -> Abort
+  -- The sender picks this one too: nothing stops them encrypting their parts
+  -- with the message key, and a bare 'Message' is a SignedBox anyone can
+  -- build. Minting is still refused, but the letter is theirs to have ruined
+  -- and Abort would hand them the loop.
+  MessageSecretOffered -> Discard
   -- Local policy, not consensus: another hub may carry a body this one will
   -- not ('maxInlineBody'). Deleting a letter over a threshold this build
   -- picked would be irreversible for a decision that is not canon's.
@@ -476,7 +491,7 @@ data PartsOf = PartsOf
     -- caller is handing over the key to the envelope, whose back-channel
     -- clauses must never reach canon. Nothing about the bytes says which is
     -- which, so this is the only check that can catch it.
-  , poMessage :: Maybe ByteString
+  , poMessage :: Maybe MessageSecret
     -- | The parts the caller vouches for. On the letter path these are the
     -- message's @messageParts@; on an owner-native event there is no message,
     -- and the caller is vouching for what it just created.
@@ -516,20 +531,20 @@ noAttachments = LetterParts (PartsOf Nothing Nothing HS.empty HS.empty)
 -- | Every part the message carries, already fetched: what a triage loop has
 -- once it has downloaded the attachments.
 attachments
-  :: PartSecret   -- ^ the secret the PARTS are encrypted with
-  -> ByteString   -- ^ the secret @messageData@ was encrypted with, to refuse
-  -> [HashRef]    -- ^ the message's parts
+  :: PartSecret     -- ^ the secret the PARTS are encrypted with
+  -> MessageSecret  -- ^ the secret @messageData@ was encrypted with, to refuse
+  -> [HashRef]      -- ^ the message's parts
   -> LetterParts
 attachments s msg hs =
   LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) (HS.fromList hs))
 
 -- | Carried by the message, not fetched yet.
-attachmentsPending :: PartSecret -> ByteString -> [HashRef] -> LetterParts
+attachmentsPending :: PartSecret -> MessageSecret -> [HashRef] -> LetterParts
 attachmentsPending s msg hs =
   LetterParts (PartsOf (Just s) (Just msg) (HS.fromList hs) HS.empty)
 
 -- | Fetched, but the caller has no key for them.
-attachmentsNoKey :: ByteString -> [HashRef] -> LetterParts
+attachmentsNoKey :: MessageSecret -> [HashRef] -> LetterParts
 attachmentsNoKey msg hs =
   LetterParts (PartsOf Nothing (Just msg) (HS.fromList hs) (HS.fromList hs))
 
@@ -557,7 +572,13 @@ requireParts po content
       mapM_ present (eventParts content)
       if referencesPart content then secretOK else Right ()
   where
-    toldNothing = isNothing (poSecret po) && HS.null (poCarried po)
+    -- Told nothing means exactly that: no secret, no parts AND no message
+    -- behind them. A message that carried no attachments is not the same
+    -- thing, and reading it as one let any stranger wedge the loop by naming
+    -- a part in a letter whose message has none.
+    toldNothing = isNothing (poSecret po)
+               && HS.null (poCarried po)
+               && isNothing (poMessage po)
 
     -- Past that, the caller has supplied evidence about the message, so a part
     -- the evidence does not list is the letter's doing and no later pass
@@ -571,7 +592,8 @@ requireParts po content
     secretOK = case poSecret po of
       Nothing -> Left MissingPartSecret
       Just sec
-        | Just (partSecretBytes sec) == poMessage po -> Left MessageSecretOffered
+        | Just (partSecretBytes sec) == fmap messageSecretBytes (poMessage po)
+                                                     -> Left MessageSecretOffered
         -- Checked here as well as in 'mkPartSecret', because a secret can
         -- reach this point without passing through it: 'Serialise' decodes one
         -- unchecked so that canon somebody else wrote can be read, and
@@ -650,6 +672,14 @@ data Accepted = Accepted
     -- envelope signer was the inner author. Returned so the caller can
     -- notify without opening the letter a second time.
   , acReply  :: ReplyChannel
+    -- | The Mailbox message this was folded from, when there was one.
+    --
+    -- Handed back rather than left for the caller to remember alongside,
+    -- because what the caller does next is delete that message, and the
+    -- predicate it deletes by takes this exact hash. A parallel list zipped
+    -- against the results is one off-by-one away from deleting a letter
+    -- nobody has read.
+  , acOrigin :: Maybe HashRef
   }
 
 -- Deliberately partial: the reply channel is transport-only and PEP-18
@@ -1014,6 +1044,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
            , acAuthor = authorOf
            , acContent = content
            , acReply = reply
+           , acOrigin = origin
            }
   where
     cur = cvCursor view

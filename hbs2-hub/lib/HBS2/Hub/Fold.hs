@@ -1,3 +1,7 @@
+-- The fold dispatches on every constructor of 'AuthorContent', and one it
+-- forgets is a crash rather than a drop, so that warning is an error here.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
 -- | The deterministic fold (PEP-19 "Deterministic materialization").
 --
 -- Split in two so the security-critical admission logic is testable without
@@ -420,7 +424,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     go (r:rest) s
       | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
       | not (sane r)                = go rest (dropE r BadStamp s)
-      | otherwise                   = go rest (apply r s)
+      | otherwise                   = go rest (apply r (stamp r s))
 
     -- The stamped values must be usable. A number belongs to an open and
     -- nothing else, and neither counter may sit at the top of its range: the
@@ -435,7 +439,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- relative to the ones before it, which is consensus and cannot be
     -- introduced without bumping @hub-meta@ (PEP-19). Recorded there as a
     -- known bound rather than fixed here.
-    sane r = numberOK && seqOK && numberSmallEnough
+    sane r = numberOK && seqOK && numberSmallEnough && foldedOK
       where
         cc = rCanon r
         numberOK = case (rContent r, ccNumber cc) of
@@ -444,6 +448,27 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
           (_, Just _)       -> False
         seqOK = ccSeq cc /= maxBound
         numberSmallEnough = maybe True (/= maxBound) (ccNumber cc)
+        -- Same argument as the two counters, and it took a while to see: the
+        -- next stamp is clamped to be no lower than this one, so admitting the
+        -- top of the range pins every later event to it, on every node, for
+        -- good. Every time the render contract shows comes from this field.
+        foldedOK = ccFoldedTs cc /= maxBound
+
+    -- Advance the high-water marks for every event whose stamp is usable,
+    -- admitted or not.
+    --
+    -- Not only for admitted ones, which is what this used to do and what the
+    -- comment on 'keep' still argued for. The reason is that admission is not
+    -- final: a comment dropped as UnauthorizedCanon becomes admissible the
+    -- moment a later delegate event restores its signer, and if its seq was
+    -- never counted, the publisher will hand that same seq to something else.
+    -- Revoking a maintainer and delegating them again is an ordinary thing to
+    -- do, and it left canon with two events at one seq and a rebuilt view that
+    -- disagreed with the accumulated one.
+    stamp r s = s
+      { sMaxSeq    = max (sMaxSeq s) (rSeq r)
+      , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
+      }
 
     apply r s = case rContent r of
 
@@ -589,15 +614,13 @@ data St = S
   , sParts      :: HashSet HashRef
   }
 
--- Mark an event applied (dedup + the id every later redact resolves
--- against), record which thread it belongs to, and advance the high-water
--- marks a publisher mints from. Only admitted events count: a dropped one
--- must not consume a seq or a number.
+-- Mark an event applied: the dedup set, the id every later redact resolves
+-- against, which thread it belongs to, and the provenance a later fold reads.
 keep :: Maybe ThreadId -> Resolved -> St -> St
 keep scope r s = s
   { sSeen      = HM.insert (rId r) scope (sSeen s)
-  , sMaxSeq    = max (sMaxSeq s) (rSeq r)
-  , sMaxNumber = max (sMaxNumber s) (fromMaybe 0 (ccNumber (rCanon r)))
+    -- The stamps are advanced by 'stamp' before this, for dropped events too;
+    -- the origin is not, because a dropped event folded no letter.
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
   , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
   , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num

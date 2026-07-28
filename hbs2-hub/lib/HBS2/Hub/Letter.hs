@@ -213,7 +213,17 @@ oversizedField = \case
 data ReplyChannel =
     NoReply
   | ReplyTo HubKey HashRef   -- ^ mailbox key + a sigil resolving its encryption key
-  deriving stock (Eq,Show,Generic)
+  deriving stock (Eq,Generic)
+
+-- Deliberately partial, for the reason this type exists: it holds a
+-- contributor's personal mailbox key and sigil, which are kept out of the
+-- signed letter precisely so they never reach canon. A derived instance puts
+-- them in a log the first time anyone traces a refusal, which is the same
+-- leak by a shorter route. 'Show Pending' and 'Show Accepted' are hand-written
+-- next door for exactly this.
+instance Show ReplyChannel where
+  show NoReply    = "NoReply"
+  show ReplyTo{}  = "ReplyTo <hidden>"
 
 instance Serialise ReplyChannel
 
@@ -399,6 +409,15 @@ openLetterAs
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
 openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
   case openLetter md of
+    -- The version is checked before the body, so for a letter from a schema
+    -- this build cannot parse there is no inner author to ban: the only key
+    -- in hand is the envelope's. PEP-21 is right that an envelope ban is
+    -- evaded by rewrapping, but here it is all there is, and without it a
+    -- version number and a few bytes of garbage are the cheapest way to grow
+    -- the parked set.
+    Left (UnsupportedVersion v)
+      | not (allowed envelopeSigner) -> Left AuthorDenied
+      | otherwise                    -> Left (UnsupportedVersion v)
     -- The deny-list has to reach the undecodable case too. Such a letter is
     -- retried rather than discarded, so without this a banned author whose
     -- content this build cannot read is retried forever with no way out: the

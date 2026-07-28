@@ -176,8 +176,9 @@ secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
 -- The secret over messageData: distinct by construction, as it must be.
-msgSecret :: BS.ByteString
-msgSecret = BS.replicate typicalKeyLength 0x42
+msgSecret :: MessageSecret
+msgSecret = fromMaybe (error "bad fixture secret")
+              (mkMessageSecret (BS.replicate typicalKeyLength 0x42))
 
 -- An inline body one byte over what triage will carry.
 bigBody :: Text
@@ -242,7 +243,7 @@ spec =
       -- after its delegation was withdrawn) turns up in about one run in
       -- twenty, and at 100 runs the coverage check would occasionally miss it
       -- through nothing but luck. The whole suite still takes about a second.
-      property $ withMaxSuccess 300 $ \(Script steps) -> monadicIO $ do
+      property $ checkCoverage $ withMaxSuccess 300 $ \(Script steps) -> monadicIO $ do
         r <- run (runSteps steps)
         -- Coverage, not assertions. Every invariant below holds trivially for
         -- a run that minted nothing, so a generator that stopped reaching an

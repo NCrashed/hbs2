@@ -2,6 +2,7 @@ module HBS2.Hub.FoldSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
+import HBS2.Hub.Bridge (cursorFrom,CanonCursor(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.SignedBox
 
@@ -420,6 +421,38 @@ spec = do
         "83001a4842324183088200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf03"
       hx (Domained author (ARevoke key 4)) `shouldBe`
         "83001a4842324183098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
+
+    it "refuses a folded-ts at the top of the range" $ do
+      owner <- kp
+      alice <- kp
+      -- The next stamp is clamped to be no lower than this one, so admitting
+      -- maxBound pins every later event to it, on every node, for good, and
+      -- every time the render contract shows comes from this field.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canonAt 1 (Just 1) maxBound)
+      reasons (foldEvents repo [ev]) `shouldBe` [BadStamp]
+
+    it "counts a dropped event's stamp so it cannot be handed out twice" $ do
+      owner <- kp
+      bob <- kp
+      alice <- kp
+      -- Admission is not final. A comment dropped because its signer had been
+      -- revoked becomes admissible the moment a later delegate restores them,
+      -- so a seq that was never counted gets handed to something else and
+      -- canon ends up with two events at one seq.
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
+                    (canon 2 (Just 1))
+          eRev = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
+          -- bob races the revoke and loses
+          eLate = mkEvent alice bob (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
+                    (canon 4 Nothing)
+          fr = foldEvents repo [eDel, eOpen, eRev, eLate]
+      reasons fr `shouldBe` [UnauthorizedCanon]
+      -- the dropped event's seq is spent: the next mint is 5, not 4
+      cursorFrom fr `shouldBe` CanonCursor 5 2
 
     it "reports a key published for nothing" $ do
       owner <- kp
