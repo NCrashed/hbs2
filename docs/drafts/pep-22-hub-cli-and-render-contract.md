@@ -172,7 +172,10 @@ Shape (JSON projection of a thread):
   "assignees": ["<sign-key>"],       // multi-valued, like labels
   "author": "<sign-key>",             // opening event's author
   "canon_by": "<sign-key>",           // canon key that blessed the opening event
-  "created_at": 1737763200,           // author-ts of the opening event
+  "created_at": 1737763200,           // folded-ts of the opening event: the
+                                      //   trusted clock, and what sorting uses
+  "declared_at": 1737763100,          // author-ts: advisory and attacker-chosen,
+                                      //   shown but never ordered by
   "updated_at": 1737849600,
   "redacted": false,
   "comments": [
@@ -183,6 +186,9 @@ Shape (JSON projection of a thread):
     "onto": "refs/heads/master",
     "base": "<sha1>", "tip": "<sha1>",      // latest surviving open/revise (PEP-20)
     "merge_commit": "<sha1|null>",
+    "coords_author": "<sign-key>",          // who supplied THESE coordinates: a
+    "coords_canon_by": "<sign-key>",        //   maintainer may revise a PR, so
+                                            //   this is not always `author`
     "diff": { "format": "unified",
               "availability": "available",  // available | reconstructable | unavailable
               "truncated": false, "text": "..." }

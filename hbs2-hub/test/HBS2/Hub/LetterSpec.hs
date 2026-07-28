@@ -14,7 +14,9 @@ import Codec.Serialise (serialise)
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
-import Data.Word (Word64)
+import Data.ByteString qualified as BS
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
+import Data.Word (Word8,Word64)
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
@@ -67,6 +69,21 @@ coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
 coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+
+-- A group secret is raw key bytes of a fixed size, and the constructor checks
+-- only that; telling the parts secret from the message secret is what the
+-- bridge's 'poMessage' is for.
+secret32 :: PartSecret
+secret32 = secretOf 0x41
+
+-- Two distinct secrets, for the case where each message has its own.
+secretA, secretB :: PartSecret
+secretA = secretOf 0x01
+secretB = secretOf 0x02
+
+secretOf :: Word8 -> PartSecret
+secretOf b = fromMaybe (error "bad fixture secret")
+               (mkPartSecret (BS.replicate typicalKeyLength b))
 
 spec :: Spec
 spec = do
@@ -317,7 +334,7 @@ spec = do
                      (Just "inline") (Just part) Nothing 7
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
       (box, _, _, _) <- expectRight (openLetter letter)
-      let cc eid = CanonContent eid 1 (Just 1) (Just origin) 100 (Just "sekret")
+      let cc eid = CanonContent eid 1 (Just 1) (Just origin) 100 (Just secret32)
           ev = Event box (signCanon (fst owner) (snd owner) (cc (authorBoxId box)))
           fr = foldEvents (fst owner) [ev]
           t = threadOf fr (eventId ev)
@@ -328,7 +345,7 @@ spec = do
       -- The attachment and the secret to decrypt it travel together.
       tsBody t `shouldBe` Just "inline"
       tsBodyPart t `shouldBe` Just part
-      tsPartSecret t `shouldBe` Just "sekret"
+      tsPartSecret t `shouldBe` Just secret32
       tsOrigin t `shouldBe` Just origin
 
     it "gives a revised bundle its own secret, not the opening one" $ do
@@ -350,10 +367,10 @@ spec = do
       -- reader the wrong key for the new bundle.
       let mk s sq box = Event box (signCanon (fst owner) (snd owner)
                           (CanonContent (authorBoxId box) sq Nothing Nothing sq (Just s)))
-          fr = foldEvents (fst owner) [mk "S1" 1 obox, mk "S2" 2 rbox]
-          t = threadOf fr (eventId (mk "S1" 1 obox))
+          fr = foldEvents (fst owner) [mk secretA 1 obox, mk secretB 2 rbox]
+          t = threadOf fr (eventId (mk secretA 1 obox))
       fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just b2)
-      fmap psPartSecret (tsPR t) `shouldBe` Just (Just "S2")
+      fmap psPartSecret (tsPR t) `shouldBe` Just (Just secretB)
 
     it "drops a deny-listed inner author, however the envelope was signed" $ do
       mallory <- kp

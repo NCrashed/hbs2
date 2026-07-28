@@ -34,6 +34,16 @@
 
 ## Fixes
 
+  - **Signed payloads carry their domain (`hbs2-hub`).** Ed25519 signs
+    bytes, so a signature was bound to a record type only by the accident
+    that no other record encoded the same way, and the owner key signs
+    four of them across two packages. A sum constructor tag is an
+    ordinary small CBOR integer, so anything of shape [small int, hash,
+    int] signed by the owner for any purpose was byte for byte a signed
+    redaction of any event. Every signed payload now carries a domain
+    constant as its first field. This had to land before any canon
+    exists, since an event-id hashes the whole box.
+
   - **Mailbox attachments get their own group secret.** `createMessage`
     encrypted the message parts with the same secret as `messageData`.
     That is fine in isolation, but it makes the forge unbuildable:

@@ -8,7 +8,6 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
 
-import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
@@ -53,10 +52,12 @@ expectErr want = \case
   Left got -> got `shouldBe` want
   Right _  -> expectationFailure ("expected " <> show want)
 
--- A group secret is raw key bytes of a fixed size, which the bridge checks
--- (validPartSecret): a one-byte stand-in would be refused.
-secret32 :: ByteString
-secret32 = BS.replicate typicalKeyLength 0x41
+-- A group secret is raw key bytes of a fixed size, and the constructor checks
+-- only that; telling the parts secret from the message secret is what
+-- 'poMessage' is for.
+secret32 :: PartSecret
+secret32 = fromMaybe (error "bad fixture secret")
+             (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
@@ -616,19 +617,23 @@ spec = do
       expectErr (PartNotInMessage part) (accept noParts)
       either outcome (const Decide) (accept noParts) `shouldBe` Discard
       -- Carried but not fetched yet is a wait.
-      let notYet = PartsOf (Just secret32) (HS.singleton part) HS.empty
+      let notYet = PartsOf (Just secret32) Nothing (HS.singleton part) HS.empty
       expectErr (PartNotFetched part) (accept notYet)
       either outcome (const Decide) (accept notYet) `shouldBe` Retry
       -- Here, but with no key to it, and with a key that cannot be one.
       let here = HS.singleton part
-      expectErr MissingPartSecret (accept (PartsOf Nothing here here))
-      either outcome (const Decide) (accept (PartsOf Nothing here here)) `shouldBe` Retry
-      expectErr BadPartSecret (accept (PartsOf (Just "S") here here))
-      either outcome (const Decide) (accept (PartsOf (Just "S") here here)) `shouldBe` Discard
+      expectErr MissingPartSecret (accept (PartsOf Nothing Nothing here here))
+      either outcome (const Decide) (accept (PartsOf Nothing Nothing here here)) `shouldBe` Retry
+      -- ...and the one the type exists for: the message's own secret offered
+      -- as the parts secret would publish the letter's envelope, and with it
+      -- the sender's private reply address, to every clone.
+      let wrongKey = PartsOf (Just secret32) (Just (partSecretBytes secret32)) here here
+      expectErr MessageSecretOffered (accept wrongKey)
+      either outcome (const Decide) (accept wrongKey) `shouldBe` Abort
       _ <- expectRight (accept (partsReady secret32 [part]))
       -- ...and the same rules hold for an owner-native event.
       expectErr MissingPartSecret
-        (ownerEvent (ctxOf owner) (emptyView repo) 1 (PartsOf Nothing here here)
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 (PartsOf Nothing Nothing here here)
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
 
     it "checks wiring and dedup before it asks a human" $ do
@@ -693,6 +698,80 @@ spec = do
       expectErr (UnnormalizedValue "labels")
         (honourWith (ctxOf owner) env (acView aOpen) 2 reqOrigin
            (ASet tid "labels" "ui,bug" 2) req)
+
+    it "parks a letter from a newer schema instead of discarding it" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- End to end, not just the outcome table: a v2 letter reaching the
+      -- bridge must come back as something a loop keeps rather than deletes,
+      -- and stops re-checking every pass.
+      let repo = fst owner
+          v2 = MessageData (hubMsgVersion + 1)
+                 (mdBody (makeLetter (fst alice) (snd alice)
+                            (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                            noReplyChannel))
+          got = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo)
+                  1 origin noParts v2
+      expectErr (BadLetter (UnsupportedVersion (hubMsgVersion + 1))) got
+      either outcome (const Decide) got `shouldBe` Park
+
+    it "refuses to honour a letter that was not a request" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- An open folds on its own; honouring it would re-author a stranger's
+      -- submission under the owner's key and lose the authorship the whole
+      -- design exists to keep.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts letter)
+      origin2 <- someHash
+      expectErr (NotAcceptable FoldsToCanon)
+        (honourRequest (ctxOf owner) env (acView aOpen) 2 origin2 letter)
+      expectErr (NotAcceptable FoldsToCanon)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2
+           (AClose (scopeOf aOpen) Nothing 2) letter)
+
+    it "never stamps a folded-ts below the last one in canon" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      origin2 <- someHash
+      -- A maintainer whose clock is corrected backwards would otherwise mint
+      -- canon that hub verify complains about forever, and no later event can
+      -- fix a signed timestamp. Clamped rather than refused: refusing would
+      -- let one fast clock stop every other folder until real time caught up.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          open n = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
+      a1 <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 9000 origin noParts (open "a"))
+      a2 <- expectRight (acceptLetter (ctxOf owner) env (acView a1) 1000 origin2 noParts (open "b"))
+      let fr = foldEvents repo (map acEvent [a1,a2])
+      frDropped fr `shouldBe` []
+      frAnomalies fr `shouldBe` []
+      tsCreated (threadOf fr (scopeOf a2)) `shouldBe` 9000
+      cvLastFolded (acView a2) `shouldBe` 9000
+
+    it "gives an accepted event the path the writer must use" $ do
+      alice <- kp
+      owner <- kp
+      bob <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
+      aDel <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noParts (ADelegate (fst bob) 2))
+      eventPath aOpen `shouldBe`
+        threadDir (scopeOf aOpen) <> "/" <> eventFileName 1 (eventId (acEvent aOpen))
+      eventPath aDel `shouldSatisfy` \p -> take 5 p == "repo/"
 
     it "refuses a body it will not carry inline" $ do
       alice <- kp

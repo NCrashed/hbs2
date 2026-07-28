@@ -20,6 +20,8 @@ module HBS2.Hub.Fold
   , resolve
   , materialize
   , foldEvents
+  , foldCanon
+  , CanonTooNew(..)
   , reachableCoords
   , Anomaly(..)
   , eventParts
@@ -30,7 +32,6 @@ import HBS2.Hub.Types
 
 import HBS2.Data.Types.Refs (HashRef)
 
-import Data.ByteString (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
@@ -38,7 +39,7 @@ import Data.HashSet qualified as HS
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,isJust,isNothing)
 import Data.Text (Text)
-import Data.Word (Word64)
+import Data.Word (Word32,Word64)
 
 -- | An event whose two boxes verified and whose canon box references its
 -- own event-id (rules 1-2 discharged). The recovered keys are carried so
@@ -140,7 +141,7 @@ data Comment = Comment
   , cFoldedTs   :: Word64   -- ^ owner clock at fold, epoch ms; trusted
   , cBody       :: Maybe Text
   , cBodyPart   :: Maybe HashRef     -- ^ large body shipped as an encrypted tree
-  , cPartSecret :: Maybe ByteString  -- ^ group secret the owner published for it
+  , cPartSecret :: Maybe PartSecret  -- ^ group secret the owner published for it
   , cOrigin     :: Maybe HashRef     -- ^ the Tier B letter this was folded from
   }
   deriving stock (Eq,Show)
@@ -152,8 +153,17 @@ data PRState = PRState
     -- coordinates: every Mailbox message has its own per-message group key,
     -- so a later revise ships a new bundle under a new secret, and keeping
     -- the opening event's secret here would hand a reader the wrong key.
-  , psPartSecret :: Maybe ByteString
+  , psPartSecret :: Maybe PartSecret
   , psMerge  :: Maybe (Text,Text)  -- ^ (merge-commit, merged-into)
+    -- | Who supplied THESE coordinates, and which canon key blessed that.
+    --
+    -- Not the same as the thread's author: PEP-19 lets a maintainer revise a
+    -- PR, so the tip a reviewer is looking at can have been chosen by someone
+    -- other than the person the thread is attributed to. Without this pair a
+    -- thread displayed as alice's can point at anyone's fork and nothing
+    -- distinguishes the two.
+  , psAuthor  :: HubKey
+  , psCanonBy :: HubKey
   }
   deriving stock (Eq,Show)
 
@@ -178,6 +188,11 @@ data ThreadState = ThreadState
   , tsUpdated  :: Word64           -- ^ folded-at of the latest event, epoch ms (trusted)
   , tsAttrs    :: HashMap Text Text
   , tsComments :: [Comment]        -- ^ in seq order, oldest first
+    -- | The thread's OWN opening event is redacted, so a renderer must
+    -- withhold its title and body. Here as well as in 'frRedacted' because
+    -- the render contract asks per thread (PEP-22) and a join by 'tsId'
+    -- against a flat set is a join a renderer will forget.
+  , tsRedacted :: Bool
   , tsPR       :: Maybe PRState
     -- | Labels the author asked for on open. Deliberately NOT merged into
     -- 'tsAttrs': applying them would let a stranger label their own
@@ -190,7 +205,7 @@ data ThreadState = ThreadState
     -- event only; a comment carries its own, and a PR bundle's secret
     -- lives in 'PRState', because each message has its own group key.
   , tsBodyPart   :: Maybe HashRef
-  , tsPartSecret :: Maybe ByteString
+  , tsPartSecret :: Maybe PartSecret
     -- | The Tier B letter this was folded from, for provenance.
   , tsOrigin     :: Maybe HashRef
   }
@@ -255,6 +270,12 @@ data FoldResult = FoldResult
     -- a canon-aware purge (PEP-21) must keep the trees canon points at, and
     -- they are otherwise scattered across three fields of two records.
   , frParts :: HashSet HashRef
+    -- | The @folded-ts@ of the highest-@seq@ admitted event, 0 when none.
+    --
+    -- A folder mints the next one from this, so a clock that is behind canon
+    -- cannot walk it backwards. Same reasoning as the cursor: the value a
+    -- publisher stamps comes from canon, not from node-local state.
+  , frLastFolded :: Word64
   }
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
@@ -275,6 +296,28 @@ resolve e = do
       Left BoxBadSig      -> Left badSig
       Left (BoxUndecodable k why) -> Left (undecodable k why)
       Right ok            -> Right ok
+
+-- | Canon declares a version this build does not speak.
+--
+-- Carries the declared version so a reader can say which, and is a distinct
+-- type rather than a 'DropReason' because it is not about an event: nothing
+-- was folded at all.
+newtype CanonTooNew = CanonTooNew Word32
+  deriving stock (Eq,Show)
+
+-- | Fold canon that declares its consensus version: the gate PEP-19 requires.
+--
+-- A reader that meets a higher @hub-meta@ than it knows must report it rather
+-- than fold, because the admission rules are the format. Folding anyway would
+-- produce a view that quietly disagrees with every up-to-date clone, which is
+-- worse than showing nothing: the rules govern which events count.
+--
+-- 'foldEvents' remains for callers that already hold canon of a known version
+-- (the bridge, which is minting into canon it is reading).
+foldCanon :: Word32 -> HubKey -> [Event] -> Either CanonTooNew FoldResult
+foldCanon declared owner es
+  | declared > hubMetaVersion = Left (CanonTooNew declared)
+  | otherwise                 = Right (foldEvents owner es)
 
 -- | The whole fold: resolve, then materialize.
 --
@@ -331,7 +374,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 
     -- Comments accumulate reversed (O(1) append) and are flipped here.
     finish s = FoldResult
-      { frThreads  = fmap unrev (sThreads s)
+      { frThreads  = fmap (markRedacted (sRedacted s) . unrev) (sThreads s)
       , frRedacted = sRedacted s
       -- Ordered by the whole triple: two drops sharing (seq, event-id) but
       -- differing in reason must not fall back on input order.
@@ -344,6 +387,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frOwner     = owner
       , frAnomalies = reverse (sAnoms s)
       , frParts     = sParts s
+      , frLastFolded = sLastFolded s
       }
 
     unrev t = t { tsComments = reverse (tsComments t) }
@@ -428,8 +472,10 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
                       , tsCreated = foldedTs r, tsUpdated = foldedTs r
                       , tsAttrs = HM.fromList [("status","open"),("title",title)]
                       , tsComments = []
+                      , tsRedacted = False
                       , tsPR = if kind == HubPR
-                                 then fmap (\c -> PRState c (ccPartSecret (rCanon r)) Nothing) mpr
+                                 then fmap (\c -> PRState c (ccPartSecret (rCanon r)) Nothing
+                                                    (rAuthorKey r) (rCanonKey r)) mpr
                                  else Nothing
                       , tsLabelsRequested = labels
                       , tsBody = body
@@ -448,7 +494,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         else if rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s)
           -- The new coordinates come with the secret for their own bundle.
           then Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
-                                                      (tsPR t >>= psMerge)) })
+                                                      (tsPR t >>= psMerge)
+                                                      (rAuthorKey r) (rCanonKey r)) })
           else Left BadRevise
 
       ASet thr k v _ts -> onOwnerThread r thr s $ \t ->
@@ -556,6 +603,13 @@ keep scope r s = s
       , [ UnnormalizedAttr k
         | ASet _ k v _ <- [rContent r], not (normalizedAttr k v) ]
       ]
+
+-- A thread whose own opening event was redacted. Applied at the end rather
+-- than when the redact is admitted, because a redact may name an event that
+-- is not in a thread at all, and because the fold is one pass: the redact of
+-- an open is the same shape as any other.
+markRedacted :: HashSet EventId -> ThreadState -> ThreadState
+markRedacted red t = t { tsRedacted = HS.member (tsId t) red }
 
 -- | Every encrypted part an event references.
 --

@@ -67,6 +67,7 @@ module HBS2.Hub.Bridge
   , honourRequest
   , honourWith
   , ownerEvent
+  , eventPath
   ) where
 
 import HBS2.Hub.Types
@@ -148,6 +149,12 @@ data CanonView = CanonView
     -- | Letters already folded, so a triage loop re-reading the mailbox
     -- after a restart does not honour the same request twice.
   , cvOrigins :: HashSet HashRef
+    -- | The @folded-ts@ of the last event in canon, so the next stamp cannot
+    -- go below it. Like the cursor, it comes from canon rather than from the
+    -- folder's own state: an honest maintainer whose clock is corrected
+    -- backwards would otherwise mint canon that @hub verify@ complains about
+    -- forever, and there is no later event that can fix a signed timestamp.
+  , cvLastFolded :: Word64
     -- | The repo this view describes. Kept here rather than passed
     -- alongside, because a view of another repo is otherwise
     -- indistinguishable: RepoRef and HubKey are the same type.
@@ -162,7 +169,8 @@ data CanonView = CanonView
 -- 'viewOf' from the same canon. Any divergence between the two is a bug: the
 -- accumulated view is a cache of what the fold would say.
 emptyView :: RepoRef -> CanonView
-emptyView repo = CanonView initialCursor HM.empty HM.empty (HS.singleton repo) HS.empty repo
+emptyView repo =
+  CanonView initialCursor HM.empty HM.empty (HS.singleton repo) HS.empty 0 repo
 
 -- | May this key bless events for this repo right now?
 --
@@ -185,6 +193,7 @@ viewOf fr = CanonView
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
   , cvOrigins = frOrigins fr
+  , cvLastFolded = frLastFolded fr
   , cvRepo = frOwner fr
   }
 
@@ -261,9 +270,11 @@ data TriageError =
     -- | The message carries the part but this node has not fetched the tree
     -- yet. Nothing is wrong; come back when it has.
   | PartNotFetched HashRef
-    -- | The group secret is not the right size to be one ('validPartSecret').
-    -- Minting it would publish canon whose attachments never open.
-  | BadPartSecret
+    -- | The secret offered for the parts is the secret over the message
+    -- payload. Publishing it would publish the letter's transport envelope,
+    -- and with it the sender's private reply address, to every clone forever
+    -- (PEP-18). A caller bug, and the one this type exists to catch.
+  | MessageSecretOffered
     -- | A text field over the limit triage will carry inline
     -- ('maxInlineBody'): the field name, so the sender can be told what to
     -- move to an attachment.
@@ -375,7 +386,7 @@ outcome = \case
   -- Names a part no message carried, or a secret that cannot be one: neither
   -- is repairable, since the reference is inside a signed author box.
   PartNotInMessage _ -> Discard
-  BadPartSecret      -> Discard
+  MessageSecretOffered -> Abort
   -- The sender has to resend with the body as an attachment.
   BodyTooLarge _     -> Discard
   -- The letter is intact and the caller can supply what is missing.
@@ -414,7 +425,14 @@ honouredAlready view origin
 -- signed author box (PEP-19 "Attachments in public canon"), which is why the
 -- bridge takes the evidence rather than a bare secret.
 data PartsOf = PartsOf
-  { poSecret  :: Maybe ByteString  -- ^ group secret for the part trees
+  { poSecret  :: Maybe PartSecret  -- ^ group secret for the part trees
+    -- | The secret over the Mailbox message's own payload, when the caller
+    -- knows it. Not published, and here only to be refused: PEP-18 gives the
+    -- parts a secret of their own, and if the two ever arrive equal then the
+    -- caller has handed over the key to the envelope, whose back-channel
+    -- clauses must never reach canon. Nothing about the bytes says which is
+    -- which, so this is the only check that can catch it.
+  , poMessage :: Maybe ByteString
     -- | The parts the caller vouches for. On the letter path these are the
     -- message's @messageParts@; on an owner-native event there is no message,
     -- and the caller is vouching for what it just created, so the check is
@@ -426,12 +444,12 @@ data PartsOf = PartsOf
 
 -- | An event with no attachments.
 noParts :: PartsOf
-noParts = PartsOf Nothing HS.empty HS.empty
+noParts = PartsOf Nothing Nothing HS.empty HS.empty
 
 -- | Every part carried and already fetched, under this secret. What a triage
 -- loop has once it has downloaded the message's attachments.
-partsReady :: ByteString -> [HashRef] -> PartsOf
-partsReady s hs = PartsOf (Just s) (HS.fromList hs) (HS.fromList hs)
+partsReady :: PartSecret -> [HashRef] -> PartsOf
+partsReady s hs = PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs)
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
@@ -447,8 +465,9 @@ requireParts po content = do
 
     secretOK = case poSecret po of
       Nothing -> Left MissingPartSecret
-      Just sec | not (validPartSecret sec) -> Left BadPartSecret
-               | otherwise                 -> Right ()
+      Just sec
+        | Just (partSecretBytes sec) == poMessage po -> Left MessageSecretOffered
+        | otherwise                                  -> Right ()
 
 -- Refuse a field triage will not carry inline. A local policy, not an
 -- admission rule (see 'maxInlineBody'), enforced here because the bridge is
@@ -570,6 +589,11 @@ acceptLetter ctx envelopeSigner view folded origin parts md = do
   -- already honoured, only to have 'honourRequest' refuse it afterwards.
   honouredAlready view origin
 
+  -- Before the request prompt as well: an oversized closing note is refused
+  -- whoever wrote it, and raising it as a decision first would put a letter in
+  -- front of a maintainer that no answer can fold.
+  requireSize content
+
   -- A request needs its thread to exist before it is worth a maintainer's
   -- attention: otherwise a close naming an unfolded thread would raise a
   -- decision that 'honourRequest' then refuses, while a comment naming the
@@ -612,10 +636,9 @@ acceptLetter ctx envelopeSigner view folded origin parts md = do
     -- classify has already restricted this to the three ops above.
     _ -> Left BadContent
 
-  -- Last, because everything above is about the letter and these are about
-  -- what the caller supplied: a shape error should be reported as such rather
-  -- than as a missing key.
-  requireSize content
+  -- Last, because this one is about what the caller supplied rather than about
+  -- the letter: a shape error should be reported as such rather than as a
+  -- missing key.
   requireParts parts content
 
   Right (accepted canonKp repo view folded (Just origin) (poSecret parts) content box author
@@ -831,6 +854,20 @@ ownerEvent ctx view folded parts content = do
       AMerge{}  -> True
       _         -> False
 
+-- | Where the writer must put this event in the canon tree (PEP-19 layout).
+--
+-- The name carries the @seq@ zero-padded so that a lexical listing of a
+-- directory is the fold's own order, and the event-id so that two events at
+-- one @seq@ are two files. It is also why a well-formed canon cannot hold two
+-- blessings of one author box at one @seq@: they are the same path (see the
+-- sort key in "HBS2.Hub.Fold").
+eventPath :: Accepted -> FilePath
+eventPath a = dir <> "/" <> eventFileName (acSeq a) (eventId (acEvent a))
+  where
+    dir = case acScope a of
+            ThreadScope t -> threadDir t
+            RepoScope     -> repoDir
+
 -- The number this content mints, if any: only a thread has one.
 mintedNumber :: AuthorContent -> CanonCursor -> Maybe Word64
 mintedNumber AOpen{} cur = Just (ccrNextNumber cur)
@@ -849,7 +886,7 @@ accepted
   -> CanonView
   -> Word64
   -> Maybe HashRef
-  -> Maybe ByteString
+  -> Maybe PartSecret
   -> AuthorContent
   -> SignedBox AuthorContent HubScheme
   -> HubKey                            -- ^ the author box's signer
@@ -870,6 +907,13 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
     cur = cvCursor view
     eid = authorBoxId box
 
+    -- Clamped, not refused. The stamp is the folder's own, so a clock behind
+    -- canon is the folder's problem and not the letter's; refusing would let
+    -- one maintainer with a fast clock stop every other folder until real time
+    -- caught up, which is the cursor failure again. Monotonic is what the
+    -- readers need, and this is the cheapest way to guarantee it.
+    stamped = max folded (cvLastFolded view)
+
     opensThread = case content of
       AOpen{} -> True
       _       -> False
@@ -883,7 +927,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
       , ccSeq        = ccrNextSeq cur
       , ccNumber     = mintedNumber content cur
       , ccOrigin     = origin
-      , ccFoldedTs   = folded
+      , ccFoldedTs   = stamped
       , ccPartSecret = secret'
       }
 
@@ -908,6 +952,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
           ARevoke k _ | k /= repo -> HS.delete k (cvMaintainers view)
           _                       -> cvMaintainers view
       , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
+      , cvLastFolded = stamped
       }
 
     scopeThread = \case

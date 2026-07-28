@@ -116,7 +116,10 @@ remember which spelling normalizes) encoded as a comma-separated list in
 sorted order with no spaces, so that the same set of labels always produces the
 same bytes and therefore the same event-id. Which names are multi-valued is
 part of that rule, so the list belongs with the encoder rather than in each
-writer. Note where the obligation falls: a writer normalizes the value before
+writer. Attribute names are lowercase, for the same reason and enforced the
+same way: `Labels` would sail past set canonicalization as though it were a
+scalar and then sit in the attribute map as a second, near-invisible
+attribute. Note where the obligation falls: a writer normalizes before
 signing, and the fold does NOT normalize on the way in. It cannot, since the
 value is inside a signed author box, and it must not drop the event either, so
 an unnormalized value is admitted and reported as an anomaly for `hub verify`.
@@ -191,6 +194,29 @@ content hash of the serialized author box bytes. The S-expression in the
 event file is a readable projection of the decoded boxes; it is regenerated,
 never trusted over the boxes, and if a projected clause disagrees with the
 box the box wins.
+
+Domain separation. Every signed payload carries the domain it was signed for
+as the first field inside the signed bytes. Ed25519 signs bytes and says
+nothing about what they mean, so a signature is bound to a record type only by
+the accident that no other record has the same encoding, and here the same key
+signs several: an author box, a canon box, a git3 LWWRef on every push, a
+sigil. That accident does not hold up. A sum constructor tag is an ordinary
+small CBOR integer, so `serialise (7, <hashref>, 5)` is byte for byte
+`serialise (redact <hashref> at 5)`: any record of shape [small int, hash,
+int] that the owner signs for any purpose was a signed redaction of any event
+in the repo. Nothing has that shape today (the LWWRef escapes only because its
+third field is optional, and so an array rather than an int), but that is an
+accident of four unrelated types across two packages, and one field type
+changing anywhere would open it silently.
+
+The domain is a large constant, assigned once per payload type and never
+reused or renumbered. It is inside the signed bytes and therefore inside every
+event-id, which is why it has to exist before any canon does: an event-id
+hashes the whole box, so this cannot be added afterwards without invalidating
+every signature ever made. A reader that meets a correctly signed payload
+carrying another domain reports it apart from both a forgery and a newer
+schema: the signature is real and the shape is right, but these bytes were
+signed as a different kind of record.
 
 The signature scheme must be deterministic. The event-id hashes the whole
 author box, signature included, so a randomized scheme would give the same
@@ -575,6 +601,15 @@ of the signed letter precisely so a contributor's personal mailbox address does
 not reach every clone. That leak would also be retroactive, since the
 ciphertext is held by every peer that ever relayed the mailbox.
 
+The two secrets are the same type and the same length, so nothing about the
+bytes says which one a caller is holding, and handing over the wrong one is the
+unrecoverable case above. The API therefore keeps them apart by type: the canon
+field takes a distinct part-secret type, built where a part tree is actually
+decrypted, and the fold bridge additionally refuses to mint when the secret
+offered for the parts equals the secret over the message payload. That check is
+the only mechanical defence available, the two values being otherwise
+indistinguishable.
+
 The field is raw key bytes (`Saltine.encode` of the group secret), not a
 serialised key type: canon is forever, and the CBOR shape of a byte string is
 pinned by CBOR itself, while the shape of a key type is pinned by whatever the
@@ -693,6 +728,16 @@ regardless, because the total order is `(seq, event-id)` and the tie-break
 settles it, but the result is not what either maintainer intended, so
 `hub verify` reports duplicate and non-monotonic `seq`/`number` (PEP-22).
 
+Folded-ts is clamped, not trusted. The publisher stamps `folded-ts` from its
+own clock, and a clock corrected backwards would write canon that every
+verifier flags forever, with no later event able to fix a signed timestamp. The
+stamp is therefore the greater of the folder's clock and the `folded-ts`
+already in canon: monotonic by construction, and taken from canon rather than
+from node-local state, exactly like `seq` and `number`. Clamped rather than
+refused, because refusing would let one maintainer with a fast clock stop every
+other folder until real time caught up, which is the cursor failure below in
+another costume.
+
 A known bound on the same weakness. The fold refuses a `seq` or `number` of
 `maxBound`, since the next mint is the maximum plus one and would wrap. It
 does not, and cannot without a new admission rule, refuse a stamp that is
@@ -704,6 +749,18 @@ rule and therefore consensus: it cannot be added to a repo that already has
 canon without bumping `hub-meta` (see Deterministic materialization). Until
 someone needs it, the exposure is one hostile or broken maintainer, who can
 already do worse, and `hub verify` names them.
+
+Recovery, since the bound is reachable in practice. A delegated maintainer who
+stamps `number = maxBound - 1` leaves every later `open` refused, and
+compaction cannot help by dropping the event, because an `open` is exactly what
+compaction must retain. What does work is that compaction rewrites canon under
+fresh canon boxes: the owner re-stamps the retained events with a fresh `seq`
+and `number` sequence, keeping every author box verbatim so that no event-id,
+and therefore no thread identity, changes. That is a history rewrite of
+`refs/hbs2/meta`, which the fetch refspec already forces, and it is the same
+operation compaction performs for size. `hub verify` reports a stamp far above
+its predecessor, so the situation is noticed before the counter runs out rather
+than after.
 
 Making this structural rather than conventional would mean splitting the
 event in two: a delegate signs only the author box and proposes it, and the

@@ -9,6 +9,12 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
+import Codec.Serialise (Serialise,serialise)
+import Codec.Serialise qualified as CBOR
+import Data.Bits (xor)
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import Data.ByteString (ByteString)
 import HBS2.Data.Types.Refs (HashRef)
 import Data.Text (Text)
@@ -37,11 +43,12 @@ coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master
 -- Everything a fold produces for a thread, so a determinism check compares
 -- the whole state rather than a convenient corner of it. ThreadState has no
 -- Eq (comments and PR state are records), hence the explicit tuple.
+-- The secret is opaque and has no Eq-friendly display, so summaries omit it.
 type Summary =
   ( EventId, HubKind, Maybe Word64, HubKey, Word64, Word64
-  , [(Text,Text)], [Text], Maybe Text, Maybe HashRef, Maybe ByteString, Maybe HashRef
+  , [(Text,Text)], [Text], Maybe Text, Maybe HashRef, Maybe PartSecret, Maybe HashRef
   , [(EventId,HubKey,Word64,Maybe Text,Maybe HashRef)]
-  , Maybe (PRCoords, Maybe ByteString, Maybe (Text,Text)) )
+  , Maybe (PRCoords, Maybe PartSecret, Maybe (Text,Text)) )
 
 summary :: FoldResult -> [Summary]
 summary fr =
@@ -73,6 +80,37 @@ someHash = do
   (pk,sk) <- kp
   pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
 
+-- Sign a payload the way everything OUTSIDE this package does: no domain tag,
+-- because nothing else knows about one. This is what a signature lifted from
+-- another record looks like.
+signBare :: Serialise a => KP -> a -> SignedBox b HubScheme
+signBare (pk,sk) a = reinterpret (makeSignedBox pk sk a)
+
+-- The CBOR an author box signs, domain tag included.
+domainedBytes :: AuthorContent -> ByteString
+domainedBytes = LBS.toStrict . serialise . Domained (domainOf (Nothing @AuthorContent))
+
+-- A box over bytes the caller chose, signed for real.
+rawBox :: KP -> ByteString -> SignedBox p HubScheme
+rawBox (pk,sk) bs = SignedBox pk bs (makeSign @HubScheme sk bs)
+
+-- The box's payload means whatever the reader decodes it as: that is the point
+-- of the domain tag, and what these tests check.
+reinterpret :: SignedBox a HubScheme -> SignedBox b HubScheme
+reinterpret (SignedBox p b s) = SignedBox p b s
+
+-- Flip the high bit of the last signature byte: the classic malleability
+-- probe against a scheme that does not canonicalize S.
+mangleSig :: SignedBox p HubScheme -> SignedBox p HubScheme
+mangleSig (SignedBox pk bs sig) = SignedBox pk bs (mangle sig)
+  where
+    mangle s = case CBOR.deserialiseOrFail (bend (serialise s)) of
+      Right s' -> s'
+      Left e   -> error ("cannot rebuild signature: " <> show e)
+    bend lbs = case LBS.unsnoc lbs of
+      Just (front, b) -> LBS.snoc front (b `xor` 0x80)
+      Nothing         -> lbs
+
 -- A correctly signed box whose content this build cannot decode, which is
 -- what an op added by a newer schema looks like from here. SignedBox is
 -- phantom in its payload type, so signing another type and reinterpreting
@@ -81,6 +119,13 @@ futureBox :: KP -> SignedBox AuthorContent HubScheme
 futureBox (pk,sk) =
   case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
     SignedBox p b s -> SignedBox p b s
+
+-- A group secret is raw key bytes of a fixed size, and the constructor checks
+-- only that; telling the parts secret from the message secret is what the
+-- bridge's 'poMessage' is for.
+secret32 :: PartSecret
+secret32 = fromMaybe (error "bad fixture secret")
+             (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
 spec :: Spec
 spec = do
@@ -242,9 +287,9 @@ spec = do
           ePR = mkEvent alice owner
                   (AOpen repo HubPR "pr" [] Nothing (Just body)
                      (Just coords { prBundle = Just bundle }) 1)
-                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just "S"))
+                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
           eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just cmt) 2)
-                 (\e -> CanonContent e 2 Nothing Nothing 2 (Just "S"))
+                 (\e -> CanonContent e 2 Nothing Nothing 2 (Just secret32))
           fr = foldEvents repo [ePR, eC]
       frDropped fr `shouldBe` []
       frParts fr `shouldBe` HS.fromList [body, cmt, bundle]
@@ -293,6 +338,141 @@ spec = do
       eventId e2 `shouldBe` tid
       shown (foldEvents repo [e1,e2]) `shouldBe` shown (foldEvents repo [e2,e1])
       reasons (foldEvents repo [e1,e2]) `shouldBe` [DupId]
+
+    it "refuses a signature made for another kind of record" $ do
+      owner <- kp
+      alice <- kp
+      target <- someHash
+      -- Ed25519 signs bytes, not types. Without a domain inside the signed
+      -- bytes, any record of shape [small int, hash, int] signed by the owner
+      -- for any purpose is byte for byte a signed redaction: a constructor tag
+      -- is an ordinary small CBOR integer.
+      let repo = fst owner
+          -- byte for byte serialise (ARedact target 5) before the tag existed
+          lookalike = signBare owner ((7 :: Word64), target, (5 :: Word64))
+          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon 1 (Just 1))
+          ev = Event lookalike (evCanonBox real)
+      case unboxChecked (evAuthorBox ev) of
+        Left (BoxUndecodable k why) -> do
+          k `shouldBe` fst owner
+          -- The bytes no longer even parse as an author box: the tag is not
+          -- there, so the array is the wrong length.
+          why `shouldBe` Undecodable
+        other -> expectationFailure ("expected a refusal: " <> show (fmap fst other))
+      -- And the case the tag exists for: bytes that DO decode as an author
+      -- box, tagged for the other domain. That is what a shape collision
+      -- between two signed records looks like once both carry a tag, and it is
+      -- the only way this can be caught, since the payload parses perfectly.
+      let crossed = signBare owner
+                      (Domained (domainOf (Nothing @CanonContent)) (ARedact target 5))
+      case unboxChecked (crossed :: SignedBox AuthorContent HubScheme) of
+        Left (BoxUndecodable _ why) -> why `shouldBe` WrongDomain
+        other -> expectationFailure ("expected a domain refusal: " <> show (fmap fst other))
+      -- The fold reports it as an undecodable author box, not as a forgery.
+      map snd (frDropped (foldEvents repo [ev]))
+        `shouldBe` [UndecodableAuthor (fst owner) Undecodable]
+
+    it "refuses a mangled signature rather than a mangled payload" $ do
+      owner <- kp
+      alice <- kp
+      -- An event-id hashes the whole box, signature included, so a scheme
+      -- whose signatures can be mutated and still verify breaks dedup by
+      -- event-id: one event would have two ids. Ed25519 as libsodium
+      -- implements it rejects both the high-bit and the +1 variants, and any
+      -- replacement (PEP-13) has to as well.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                       (canon 1 (Just 1))
+      unboxChecked (mangleSig (evAuthorBox ev)) `shouldSatisfy` \case
+        Left BoxBadSig -> True
+        _              -> False
+      map snd (frDropped (foldEvents repo [Event (mangleSig (evAuthorBox ev)) (evCanonBox ev)]))
+        `shouldBe` [BadAuthorSig]
+
+    it "reports trailing bytes in a box as tampering, not as a newer schema" $ do
+      owner <- kp
+      alice <- kp
+      -- Produced the way an attacker would: the payload is a valid encoding
+      -- with junk appended, and the signature covers the junk, so the only
+      -- thing that catches it is the decoder refusing to stop early.
+      let repo = fst owner
+          content = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
+          padded = rawBox alice (domainedBytes content <> "!")
+          real = mkEvent alice owner content (canon 1 (Just 1))
+      case unboxChecked padded of
+        Left (BoxUndecodable k why) -> do
+          k `shouldBe` fst alice
+          why `shouldBe` TrailingData
+        other -> expectationFailure ("expected trailing data: " <> show (fmap fst other))
+      map snd (frDropped (foldEvents repo [Event padded (evCanonBox real)]))
+        `shouldBe` [UndecodableAuthor (fst alice) TrailingData]
+
+    it "refuses to fold canon from a newer consensus version" $ do
+      owner <- kp
+      alice <- kp
+      -- The admission rules ARE the format, so folding canon written under
+      -- rules this build does not know produces a view that quietly disagrees
+      -- with every up-to-date clone.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                       (canon 1 (Just 1))
+      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) repo [ev])
+        `shouldBe` Just (CanonTooNew (hubMetaVersion + 1))
+      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion repo [ev])
+        `shouldBe` [eventId ev]
+
+    it "keeps a thread's state moving through merge and reopen" $ do
+      owner <- kp
+      alice <- kp
+      bundle <- someHash
+      -- The state machine nobody had walked end to end: revise and reopen
+      -- after a merge, and a redact of the opening event.
+      let repo = fst owner
+          ePR = mkEvent alice owner
+                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords { prBundle = Just bundle }) 1)
+                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
+          tid = eventId ePR
+          eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon 2 Nothing)
+          -- a revise after the merge is still admitted: PEP-19 has no
+          -- terminal state, and the coordinates are the author's to update
+          eRev = mkEvent alice owner (ARevise tid coords { prSourceTip = "cccc" } 3)
+                   (\e -> CanonContent e 3 Nothing Nothing 3 Nothing)
+          eReopen = mkEvent owner owner (AReopen tid Nothing 4) (canon 4 Nothing)
+          eRed = mkEvent owner owner (ARedact tid 5) (canon 5 Nothing)
+          fr = foldEvents repo [ePR, eMerge, eRev, eReopen, eRed]
+          t = threadOf fr tid
+      frDropped fr `shouldBe` []
+      -- reopen wins over merge, because last writer wins on the attribute
+      HM.lookup "status" (tsAttrs t) `shouldBe` Just "open"
+      -- ...but the merge result is still recorded
+      fmap psMerge (tsPR t) `shouldBe` Just (Just ("cafe","refs/heads/master"))
+      fmap (prSourceTip . psCoords) (tsPR t) `shouldBe` Just "cccc"
+      -- and the redacted open is visible as such on the thread, not only in a
+      -- flat set the renderer has to join against
+      tsRedacted t `shouldBe` True
+      HS.member tid (frRedacted fr) `shouldBe` True
+
+    it "names who supplied the current pr coordinates" $ do
+      owner <- kp
+      alice <- kp
+      bob <- kp
+      -- PEP-19 lets a maintainer revise someone else's PR, so the tip a
+      -- reviewer is looking at may have been chosen by somebody other than the
+      -- author the thread is displayed under.
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          ePR = mkEvent alice owner (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)
+                  (canon 2 (Just 1))
+          tid = eventId ePR
+          eRev = mkEvent bob bob (ARevise tid coords { prSource = Just "hbs23://elsewhere" } 3)
+                   (canon 3 Nothing)
+          fr = foldEvents repo [eDel, ePR, eRev]
+          t = threadOf fr tid
+      frDropped fr `shouldBe` []
+      tsAuthor t `shouldBe` fst alice
+      fmap psAuthor (tsPR t) `shouldBe` Just (fst bob)
+      fmap psCanonBy (tsPR t) `shouldBe` Just (fst bob)
 
     it "tells an undecodable box apart from a forged one" $ do
       owner <- kp

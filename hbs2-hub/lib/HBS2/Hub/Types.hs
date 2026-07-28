@@ -32,6 +32,8 @@ module HBS2.Hub.Types
   , signCanon
   , mkEvent
   , BoxError(..)
+  , SignedIn(..)
+  , Domained(..)
   , unboxChecked
   , decodeStrict
   , decodeChecked
@@ -42,7 +44,9 @@ module HBS2.Hub.Types
   , multiValued
   , normalizeAttr
   , normalizedAttr
-  , validPartSecret
+  , PartSecret
+  , mkPartSecret
+  , partSecretBytes
   , hubMetaVersion
   , hubEventVersion
   , threadDir
@@ -225,7 +229,7 @@ data CanonContent = CanonContent
     -- pinned by whatever the crypto library derives. There is no way to fix an
     -- encoding mismatch after the fact (see PEP-19 "Attachments in public
     -- canon"), so 'validPartSecret' checks what goes in.
-  , ccPartSecret :: Maybe ByteString
+  , ccPartSecret :: Maybe PartSecret
   }
   deriving stock (Eq,Show,Generic)
 
@@ -310,19 +314,50 @@ normalizeAttr k v
   | k `elem` multiValued = encodeLabels (decodeLabels v)
   | otherwise            = v
 
--- | Is this value already what 'normalizeAttr' would produce?
+-- | Is this attribute already in canonical form, name and value both?
+--
+-- The name matters as much as the value: @Labels@ is not @labels@, so it would
+-- sail past set canonicalization as if it were a scalar and then sit in the
+-- attribute map as a second, near-invisible attribute. Lowercase is the whole
+-- rule, since an attribute name is a vocabulary word rather than prose.
 normalizedAttr :: Text -> Text -> Bool
-normalizedAttr k v = normalizeAttr k v == v
+normalizedAttr k v = Text.toLower k == k && normalizeAttr k v == v
 
--- | Is this a plausible group secret ('ccPartSecret')?
+-- | The group secret an event's encrypted parts were encrypted with.
+--
+-- A newtype over the raw key bytes, and the only reason it is one is that the
+-- OTHER secret in reach is the same type and the same length: PEP-18 gives the
+-- parts a secret of their own precisely so that publishing it into canon does
+-- not publish the message payload, and nothing about @ByteString@ says which
+-- of the two a caller is holding. Getting that wrong publishes the sender's
+-- private reply address to every clone, retroactively and with no way back
+-- (PEP-19 "Attachments in public canon").
+--
+-- Build one only where a part tree has actually been decrypted, which is the
+-- one place the distinction is visible. The wire form is unchanged: raw bytes,
+-- exactly what @Saltine.encode@ gives.
+newtype PartSecret = PartSecret { partSecretBytes :: ByteString }
+  deriving stock (Eq)
+
+-- Deliberately partial: a secret must not print itself into a log.
+instance Show PartSecret where
+  show _ = "PartSecret <hidden>"
+
+instance Serialise PartSecret where
+  encode = CBOR.encode . partSecretBytes
+  decode = PartSecret <$> CBOR.decode
+
+-- | Build one, checking the only thing bytes can be checked for.
 --
 -- A length check, not a validity check: nothing here can tell a real key from
--- 32 arbitrary bytes. It exists because the field is raw bytes with a pinned
--- meaning, and a writer that put something else there (a base58 string, a
--- serialised key type) would produce canon whose attachments never open and
--- cannot be repaired.
-validPartSecret :: ByteString -> Bool
-validPartSecret bs = BS.length bs == (typicalKeyLength :: Int)
+-- 32 arbitrary bytes, and it cannot tell the parts secret from the message
+-- secret either. It exists because the field has a pinned meaning, and a
+-- writer that put something else there (a base58 string, a serialised key
+-- type) would produce canon whose attachments never open.
+mkPartSecret :: ByteString -> Maybe PartSecret
+mkPartSecret bs
+  | BS.length bs == (typicalKeyLength :: Int) = Just (PartSecret bs)
+  | otherwise                                 = Nothing
 
 -- | The consensus version of the canon layout and fold rules: the
 -- @(hub-meta N)@ of PEP-19.
@@ -376,6 +411,9 @@ data BoxError =
 data UndecodableWhy =
     Undecodable  -- ^ decode failed outright: a newer op, or plain garbage
   | TrailingData -- ^ decoded, but bytes were left over
+    -- | Correctly signed and correctly shaped, but signed as another kind of
+    -- record (see 'Domained'): a signature lifted from somewhere else.
+  | WrongDomain
   deriving stock (Eq,Ord,Show)
 
 -- | Open a signed box, keeping the two failure modes apart.
@@ -385,14 +423,19 @@ data UndecodableWhy =
 -- matters for diagnostics (@hub verify@) and for triage, so verification and
 -- decoding are done in separate steps here.
 unboxChecked
-  :: Serialise p
+  :: forall p . SignedIn p
   => SignedBox p HubScheme
   -> Either BoxError (HubKey, p)
 unboxChecked (SignedBox pk bs sig)
   | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
   | otherwise = case decodeChecked bs of
       Left why -> Left (BoxUndecodable pk why)
-      Right p  -> Right (pk, p)
+      Right (Domained d p)
+        -- Signed for something else. Not a forgery claim, since the signature
+        -- is real, and not a newer schema either: it is these exact bytes
+        -- presented as a kind of record they were never signed as.
+        | d /= domainOf (Nothing @p) -> Left (BoxUndecodable pk WrongDomain)
+        | otherwise                  -> Right (pk, p)
 
 -- | Decode CBOR requiring the whole input to be consumed.
 --
@@ -411,13 +454,59 @@ decodeChecked bs =
                     | otherwise     -> Left TrailingData
     Left _ -> Left Undecodable
 
+-- | A payload with the domain it was signed for written into the signed bytes.
+--
+-- Ed25519 signs the CBOR of whatever it is handed, so a signature says "this
+-- key signed these bytes", never "this key signed an event". The same key
+-- signs several unrelated records: an author box, a canon box, a git3 LWWRef
+-- on every push, a sigil. If any two of those have a CBOR encoding in common,
+-- a signature made for one is a valid signature for the other, and here that
+-- means a forged event.
+--
+-- Nothing structural prevented that. A sum constructor tag is an ordinary
+-- small CBOR integer, so @serialise (7 :: Word64, h, 5 :: Word64)@ is byte for
+-- byte @serialise (ARedact h 5)@: any record of shape [small int, hash, int]
+-- signed by the owner for any purpose was a signed redaction of any event.
+-- Nothing has that shape today (the LWWRef escapes only because its third
+-- field is a Maybe, and so an array rather than an int), but that is an
+-- accident of four unrelated types, and one field type changing anywhere would
+-- open it silently. There is no repairing it afterwards, since an event-id
+-- hashes the whole box.
+--
+-- The domain constant is a large number on purpose: nothing starts with it by
+-- chance, and a record that did would have to be built to.
+data Domained a = Domained Word32 a
+  deriving stock (Generic)
+
+instance Serialise a => Serialise (Domained a)
+
+-- | The payloads this package signs, each pinned to its own domain.
+--
+-- WIRE FORMAT: a domain is assigned once and never reused or renumbered. It is
+-- inside the signed bytes, and therefore inside every event-id.
+class Serialise a => SignedIn a where
+  domainOf :: proxy a -> Word32
+
+instance SignedIn AuthorContent where domainOf _ = 0x48423241  -- "HB2A"
+instance SignedIn CanonContent  where domainOf _ = 0x48423243  -- "HB2C"
+
+signIn :: forall a . SignedIn a
+       => HubKey -> PrivKey 'Sign HubScheme -> a -> SignedBox a HubScheme
+signIn pk sk a = retag (makeSignedBox pk sk (Domained (domainOf (Nothing @a)) a))
+  where
+    -- The box's type parameter is phantom: it names what the bytes mean, and
+    -- they still mean an 'a'. The wrapper is an encoding detail, not a
+    -- different payload, so it stays out of every signature in the API.
+    retag :: SignedBox (Domained a) HubScheme -> SignedBox a HubScheme
+    retag (SignedBox p b s) = SignedBox p b s
+
 -- | Sign author content into an author box.
 signAuthor :: HubKey -> PrivKey 'Sign HubScheme -> AuthorContent -> SignedBox AuthorContent HubScheme
-signAuthor = makeSignedBox
+signAuthor = signIn
 
 -- | Sign canon content into a canon box.
 signCanon :: HubKey -> PrivKey 'Sign HubScheme -> CanonContent -> SignedBox CanonContent HubScheme
-signCanon = makeSignedBox
+signCanon = signIn
 
 -- | Build a complete event: sign the author content, compute its event-id,
 -- then let the caller (the publisher) build the canon content against that
