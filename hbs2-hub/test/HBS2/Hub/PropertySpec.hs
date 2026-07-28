@@ -164,6 +164,8 @@ data Tag =
   | TRevokedRefused  -- ^ ...and was refused after its delegation was withdrawn
   | TStaleDiscarded  -- ^ a mint against an older view, thrown away
   | TSetLabels | THonourWith | TAttached | TBigBody | TRewrapped
+  | TDeniedRefused   -- ^ a deny-listed author was turned away
+  | TCorruptRefused  -- ^ ...and so was a letter whose signature does not hold
   deriving stock (Eq,Show)
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
@@ -172,6 +174,10 @@ data Tag =
 secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
+
+-- The secret over messageData: distinct by construction, as it must be.
+msgSecret :: BS.ByteString
+msgSecret = BS.replicate typicalKeyLength 0x42
 
 -- An inline body one byte over what triage will carry.
 bigBody :: Text
@@ -251,6 +257,11 @@ spec =
         monitor (cover 5 (TAttached `elem` rTags r) "folded an attachment")
         monitor (cover 5 (TSetLabels `elem` rTags r) "set a multi-valued attribute")
         monitor (cover 5 (THonourWith `elem` rTags r) "honoured a request in its own words")
+        -- The hostile steps assert inside the interpreter rather than here, so
+        -- without these three they would pass by never running.
+        monitor (cover 5 (TRewrapped `elem` rTags r) "folded a rewrapped letter")
+        monitor (cover 5 (TDeniedRefused `elem` rTags r) "turned away a deny-listed author")
+        monitor (cover 5 (TCorruptRefused `elem` rTags r) "turned away a forged letter")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
@@ -403,10 +414,10 @@ step cast st = \case
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
-               Ready      -> partsReady secret32 [part]
-               NotFetched -> PartsOf (Just secret32) Nothing (HS.singleton part) HS.empty
+               Ready      -> partsReady secret32 msgSecret [part]
+               NotFetched -> PartsOf (Just secret32) (Just msgSecret) (HS.singleton part) HS.empty
                NotCarried -> noParts
-               NoKey      -> PartsOf Nothing Nothing (HS.singleton part) (HS.singleton part)
+               NoKey      -> PartsOf Nothing (Just msgSecret) (HS.singleton part) (HS.singleton part)
         content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
     in acceptWith po TAttached (letterOf content)
 
@@ -436,7 +447,7 @@ step cast st = \case
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
               (originOf (stStep st)) noParts (makeLetter mpk msk content noReplyChannel) of
          Right _ -> error "a deny-listed author was folded"
-         Left e  -> refuse e
+         Left e  -> (refuse e) { stTags = TDeniedRefused : stTags st }
 
   -- A letter whose signed bytes were edited after signing. Nothing about it
   -- can be trusted, including the author it names.
@@ -450,7 +461,7 @@ step cast st = \case
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st) ts
               (originOf (stStep st)) noParts broken of
          Right _ -> error "a forged letter was folded"
-         Left e  -> refuse e
+         Left e  -> (refuse e) { stTags = TCorruptRefused : stTags st }
 
   StepStaleView i ts -> case drop i (stOld st) of
     []      -> st

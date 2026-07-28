@@ -31,7 +31,11 @@ kp = do
 -- would accuse an honest sender of forgery.
 futureBox :: KP -> SignedBox AuthorContent HubScheme
 futureBox (pk,sk) =
-  case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
+  -- Tagged with the author domain, because that is what a real v2 sender
+  -- produces: domains are never renumbered, so a newer schema changes the
+  -- payload inside the tag, not the tag.
+  case makeSignedBox @HubScheme pk sk
+         (Domained (domainOf (Nothing @AuthorContent)) (12345 :: Word64)) of
     SignedBox p b s -> SignedBox p b s
 
 canon :: Word64 -> Maybe Word64 -> EventId -> CanonContent

@@ -53,6 +53,7 @@ module HBS2.Hub.Bridge
   , PartsOf(..)
   , noParts
   , partsReady
+  , ownParts
   , outcome
   , EventScope(..)
   , CanonView(..)
@@ -368,6 +369,13 @@ outcome = \case
   -- Trailing bytes are not what an honest newer sender produces, so this
   -- one is tampering rather than a version gap.
   BadLetter (UndecodableContent _ TrailingData) -> Discard
+  -- Nor is a payload signed for another domain. This is Discard rather than
+  -- Park for a reason that is not the neighbours' reason: domains are never
+  -- renumbered, so a newer sender's letter carries the domain this build
+  -- already knows and fails on its payload instead ('Undecodable'). Anything
+  -- that reaches here was signed as something else, and no upgrade changes
+  -- that.
+  BadLetter (UndecodableContent _ WrongDomain)  -> Discard
   -- Both are normal triage outcomes, not failures: a maintainer has to look.
   Requested _ -> Decide
   NeedsReview -> Decide
@@ -446,10 +454,27 @@ data PartsOf = PartsOf
 noParts :: PartsOf
 noParts = PartsOf Nothing Nothing HS.empty HS.empty
 
--- | Every part carried and already fetched, under this secret. What a triage
--- loop has once it has downloaded the message's attachments.
-partsReady :: PartSecret -> [HashRef] -> PartsOf
-partsReady s hs = PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs)
+-- | Every part carried and already fetched. What a triage loop has once it has
+-- downloaded a message's attachments.
+--
+-- The message secret is not optional here. It is the only thing that can catch
+-- the one mistake this type exists for, and a caller reading a letter always
+-- has it: the letter was decrypted with it. A convenience constructor that
+-- quietly left it out would turn the check off for every caller who reached
+-- for the convenient thing.
+partsReady
+  :: PartSecret   -- ^ the secret the PARTS are encrypted with
+  -> ByteString   -- ^ the secret @messageData@ was encrypted with, to refuse
+  -> [HashRef]
+  -> PartsOf
+partsReady s msg hs = PartsOf (Just s) (Just msg) (HS.fromList hs) (HS.fromList hs)
+
+-- | Attachments on an owner-native event, which arrived in no message.
+--
+-- No message secret because there is no message: the owner created these trees
+-- itself, so there is nothing for the parts secret to be confused with.
+ownParts :: PartSecret -> [HashRef] -> PartsOf
+ownParts s hs = PartsOf (Just s) Nothing (HS.fromList hs) (HS.fromList hs)
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.

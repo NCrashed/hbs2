@@ -117,6 +117,11 @@ data Anomaly =
     -- Not a leak now that the parts have a secret of their own (PEP-18), but
     -- it is still a key published for nothing.
   | SecretWithoutPart
+    -- | A @part-secret@ that cannot be a key: the wrong number of bytes. Not a
+    -- drop, since the event is intact and only the key is unusable, and not
+    -- repairable either, so a reader has to be told the attachment will never
+    -- open.
+  | UnusablePartSecret
     -- | An attribute whose value is not in the canonical form for its name
     -- ('normalizeAttr'), so the same set of labels can appear under two
     -- different event-ids.
@@ -302,7 +307,9 @@ resolve e = do
 -- Carries the declared version so a reader can say which, and is a distinct
 -- type rather than a 'DropReason' because it is not about an event: nothing
 -- was folded at all.
-newtype CanonTooNew = CanonTooNew Word32
+data CanonTooNew =
+    MetaTooNew Word32   -- ^ the tree's @hub-meta@
+  | EventTooNew Word32  -- ^ the highest @hub-event@ on any file in it
   deriving stock (Eq,Show)
 
 -- | Fold canon that declares its consensus version: the gate PEP-19 requires.
@@ -314,10 +321,20 @@ newtype CanonTooNew = CanonTooNew Word32
 --
 -- 'foldEvents' remains for callers that already hold canon of a known version
 -- (the bridge, which is minting into canon it is reading).
-foldCanon :: Word32 -> HubKey -> [Event] -> Either CanonTooNew FoldResult
-foldCanon declared owner es
-  | declared > hubMetaVersion = Left (CanonTooNew declared)
-  | otherwise                 = Right (foldEvents owner es)
+foldCanon
+  :: Word32   -- ^ the tree's @(hub-meta N)@
+  -> Word32   -- ^ the highest @(hub-event N)@ found on any event file
+  -> HubKey
+  -> [Event]
+  -> Either CanonTooNew FoldResult
+foldCanon meta event owner es
+  | meta > hubMetaVersion   = Left (MetaTooNew meta)
+    -- Separately, because they answer different questions: the tree version
+    -- governs the admission rules, a file version governs the shape of one
+    -- event, and a reader that knows the rules but not the file layout is just
+    -- as unable to fold.
+  | event > hubEventVersion = Left (EventTooNew event)
+  | otherwise               = Right (foldEvents owner es)
 
 -- | The whole fold: resolve, then materialize.
 --
@@ -600,6 +617,8 @@ keep scope r s = s
         | referencesPart (rContent r), isNothing (ccPartSecret cc) ]
       , [ SecretWithoutPart
         | not (referencesPart (rContent r)), isJust (ccPartSecret cc) ]
+      , [ UnusablePartSecret
+        | Just sec <- [ccPartSecret cc], not (usablePartSecret sec) ]
       , [ UnnormalizedAttr k
         | ASet _ k v _ <- [rContent r], not (normalizedAttr k v) ]
       ]

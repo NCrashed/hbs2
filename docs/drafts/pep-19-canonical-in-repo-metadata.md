@@ -218,6 +218,20 @@ carrying another domain reports it apart from both a forgery and a newer
 schema: the signature is real and the shape is right, but these bytes were
 signed as a different kind of record.
 
+The guarantee is one-directional, and this is worth stating because it will
+otherwise be read as more than it is. Canon payloads are protected from
+signatures made elsewhere. A canon signature lifted INTO another hbs2 protocol
+is not protected by anything here, because the LWWRef, the sigil, the mailbox
+envelope and the refchan all sign untagged payloads: they are older than this
+rule and have live users, so tagging them is a format break for each of them.
+No collision exists today in that direction either, and for the same reason as
+before: it is arithmetic about CBOR shapes, not a property anyone arranged.
+Closing it means the domain wrapper moving into the shared signing helper,
+which is a change to every one of those formats and belongs to whoever
+schedules that break. Until then the rule reads: a hub payload cannot be
+forged from a foreign signature, and a foreign payload may yet be forgeable
+from a hub signature.
+
 The signature scheme must be deterministic. The event-id hashes the whole
 author box, signature included, so a randomized scheme would give the same
 content a different id on every signing, and two properties would go with
@@ -390,6 +404,25 @@ its answer would differ from the publisher's.
 
 Adding an op is the same kind of change and follows the same rule. The
 version file exists for this; the obligation is what was missing.
+
+Two things this does not yet say, both deliberate and both due before a
+release rather than after.
+
+The first is what a v2 build does with v1 canon. Refusing to fold a HIGHER
+version is specified and implemented; the other direction is not. A v2 build
+meeting canon written under v1 rules has three options (fold it under v1 rules
+and render a v1 view, refuse it, or migrate by rewriting), and which one is
+right depends on what the rule change was. Until there is a second version
+there is nothing to decide between, but the decision has to be written down
+with the bump, not discovered afterwards, and per-version rules imply keeping
+the v1 fold rather than editing it in place.
+
+The second is that `hub-meta` is 1 while the rules are still moving. Changes
+that would normally require a bump (a new drop reason, a change to the signed
+encoding, a new admission rule) are being made at 1 on the grounds that no
+canon exists yet, which is true and has an expiry: the number is free only
+until something writes a tree somebody else might read. The first release that
+ships a writer bumps it, and every change after that pays the full price.
 
 Ordering:
 

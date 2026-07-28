@@ -31,6 +31,7 @@ module HBS2.Hub.Letter
   , maxInlineBody
   , maxTitle
   , maxAttrValue
+  , maxAttrName
   , maxRef
   , maxLabel
   , maxLabels
@@ -128,6 +129,13 @@ maxTitle = 512
 maxAttrValue :: Int
 maxAttrValue = 4 * 1024
 
+-- | And on the name, which is a vocabulary word rather than a value: it is
+-- rendered as a key, matched against a fixed list ('multiValued'), and has no
+-- reason to be long. Sharing the value's bound let a three-kilobyte attribute
+-- name through.
+maxAttrName :: Int
+maxAttrName = 128
+
 -- | And on a git ref, sha or fork locator. These are identifiers, not prose,
 -- and every one of them ends up in canon verbatim.
 maxRef :: Int
@@ -167,7 +175,7 @@ oversizedField = \case
   AReopen _ note _
     | maybe False big note      -> Just "note"
   ASet _ k v _
-    | textSize k > maxAttrValue -> Just "attr"
+    | textSize k > maxAttrName  -> Just "attr"
     | textSize v > maxAttrValue -> Just "value"
   AMerge _ mc into _
     | textSize mc > maxRef      -> Just "merge-commit"

@@ -46,6 +46,7 @@ module HBS2.Hub.Types
   , normalizedAttr
   , PartSecret
   , mkPartSecret
+  , usablePartSecret
   , partSecretBytes
   , hubMetaVersion
   , hubEventVersion
@@ -356,8 +357,17 @@ instance Serialise PartSecret where
 -- type) would produce canon whose attachments never open.
 mkPartSecret :: ByteString -> Maybe PartSecret
 mkPartSecret bs
-  | BS.length bs == (typicalKeyLength :: Int) = Just (PartSecret bs)
-  | otherwise                                 = Nothing
+  | usablePartSecret (PartSecret bs) = Just (PartSecret bs)
+  | otherwise                        = Nothing
+
+-- | The same check, for a secret that arrived already decoded.
+--
+-- 'mkPartSecret' guards the writing side, and 'Serialise' walks straight past
+-- it: canon somebody else wrote can carry anything. A reader cannot refuse the
+-- event over it (the event is fine, the key is not), so the fold reports it as
+-- an anomaly instead, which is the only way @hub verify@ can see it.
+usablePartSecret :: PartSecret -> Bool
+usablePartSecret (PartSecret bs) = BS.length bs == (typicalKeyLength :: Int)
 
 -- | The consensus version of the canon layout and fold rules: the
 -- @(hub-meta N)@ of PEP-19.

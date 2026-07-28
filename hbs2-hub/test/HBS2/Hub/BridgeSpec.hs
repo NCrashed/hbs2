@@ -59,6 +59,12 @@ secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
+-- The secret over messageData, which a reader of a letter always has: it read
+-- the letter with it. Distinct from the parts secret by construction here, as
+-- it must be on the wire (PEP-18).
+msgSecret :: BS.ByteString
+msgSecret = BS.replicate typicalKeyLength 0x42
+
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
@@ -592,8 +598,8 @@ spec = do
                     (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1) noReplyChannel
           withPart = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 []) plain)
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 [part]) withPart)
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 msgSecret []) plain)
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (partsReady secret32 msgSecret [part]) withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
       tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
       tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just secret32
@@ -617,7 +623,7 @@ spec = do
       expectErr (PartNotInMessage part) (accept noParts)
       either outcome (const Decide) (accept noParts) `shouldBe` Discard
       -- Carried but not fetched yet is a wait.
-      let notYet = PartsOf (Just secret32) Nothing (HS.singleton part) HS.empty
+      let notYet = PartsOf (Just secret32) (Just msgSecret) (HS.singleton part) HS.empty
       expectErr (PartNotFetched part) (accept notYet)
       either outcome (const Decide) (accept notYet) `shouldBe` Retry
       -- Here, but with no key to it, and with a key that cannot be one.
@@ -630,7 +636,17 @@ spec = do
       let wrongKey = PartsOf (Just secret32) (Just (partSecretBytes secret32)) here here
       expectErr MessageSecretOffered (accept wrongKey)
       either outcome (const Decide) (accept wrongKey) `shouldBe` Abort
-      _ <- expectRight (accept (partsReady secret32 [part]))
+      -- ...which is why the convenient constructor demands the message secret
+      -- rather than defaulting it away. The owner path has its own, because
+      -- an owner-native event arrived in no message at all.
+      expectErr MessageSecretOffered
+        (accept (partsReady secret32 (partSecretBytes secret32) [part]))
+      _ <- expectRight (accept (partsReady secret32 msgSecret [part]))
+      _ <- expectRight
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownParts secret32 [part])
+           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
+      pure ()
+      _ <- expectRight (accept (partsReady secret32 msgSecret [part]))
       -- ...and the same rules hold for an owner-native event.
       expectErr MissingPartSecret
         (ownerEvent (ctxOf owner) (emptyView repo) 1 (PartsOf Nothing Nothing here here)
@@ -863,7 +879,7 @@ spec = do
                     (Just coords { prBundle = Just bundle }) 1)
                  noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (partsReady secret32 [bundle]) pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (partsReady secret32 msgSecret [bundle]) pr)
       let t = threadOf (foldEvents repo [acEvent acc]) (scopeOf acc)
       fmap psPartSecret (tsPR t) `shouldBe` Just (Just secret32)
 
@@ -937,6 +953,10 @@ spec = do
       outcome (BadLetter (UndecodableContent (fst alice) Undecodable)) `shouldBe` Park
       -- Trailing bytes are not what an honest newer sender produces.
       outcome (BadLetter (UndecodableContent (fst alice) TrailingData)) `shouldBe` Discard
+      -- Nor is a payload signed for another domain, and for a different
+      -- reason than its neighbours: domains are never renumbered, so a newer
+      -- sender fails on its payload, not on the tag.
+      outcome (BadLetter (UndecodableContent (fst alice) WrongDomain)) `shouldBe` Discard
       -- Wiring bugs and an exhausted cursor are neither the letter's fault nor
       -- fixable by another pass: stop, do not delete anything.
       outcome CursorExhausted `shouldBe` Abort
@@ -1014,7 +1034,7 @@ spec = do
                            (ADelegate (fst bob) 1))
       a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (partsReady secret32 [part])
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (partsReady secret32 msgSecret [part])
                            (letter (AComment (scopeOf a2) Nothing Nothing (Just part) 3)))
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noParts
                            (ASet (scopeOf a2) "labels" "bug" 4))

@@ -117,8 +117,10 @@ mangleSig (SignedBox pk bs sig) = SignedBox pk bs (mangle sig)
 -- reproduces it exactly.
 futureBox :: KP -> SignedBox AuthorContent HubScheme
 futureBox (pk,sk) =
-  case makeSignedBox @HubScheme pk sk (12345 :: Word64) of
-    SignedBox p b s -> SignedBox p b s
+  -- Tagged with the author domain, because that is what a real v2 sender
+  -- produces: domains are never renumbered, so what a newer schema changes is
+  -- the payload inside the tag, not the tag.
+  signBare (pk,sk) (Domained (domainOf (Nothing @AuthorContent)) (12345 :: Word64))
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
 -- only that; telling the parts secret from the message secret is what the
@@ -339,6 +341,24 @@ spec = do
       shown (foldEvents repo [e1,e2]) `shouldBe` shown (foldEvents repo [e2,e1])
       reasons (foldEvents repo [e1,e2]) `shouldBe` [DupId]
 
+    it "reports a part-secret that cannot be a key" $ do
+      owner <- kp
+      alice <- kp
+      part <- someHash
+      -- mkPartSecret guards the writing side and Serialise walks straight past
+      -- it, so canon somebody else wrote can carry anything. Dropping the event
+      -- would be wrong (the event is intact, the key is not), which leaves
+      -- reporting it as the only way hub verify can see it.
+      let repo = fst owner
+          stunted = fromMaybe (error "no decode")
+                      (decodeStrict (LBS.toStrict (serialise ("abc" :: ByteString))))
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1)
+                 (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just stunted))
+          fr = foldEvents repo [ev]
+      frDropped fr `shouldBe` []
+      map snd (frAnomalies fr) `shouldBe` [UnusablePartSecret]
+
     it "refuses a signature made for another kind of record" $ do
       owner <- kp
       alice <- kp
@@ -417,9 +437,14 @@ spec = do
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                        (canon 1 (Just 1))
-      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) repo [ev])
-        `shouldBe` Just (CanonTooNew (hubMetaVersion + 1))
-      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion repo [ev])
+      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) hubEventVersion repo [ev])
+        `shouldBe` Just (MetaTooNew (hubMetaVersion + 1))
+      -- ...and separately for the file version, which answers a different
+      -- question: a reader can know the admission rules and still not know the
+      -- shape of the file an event is in.
+      either Just (const Nothing) (foldCanon hubMetaVersion (hubEventVersion + 1) repo [ev])
+        `shouldBe` Just (EventTooNew (hubEventVersion + 1))
+      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion hubEventVersion repo [ev])
         `shouldBe` [eventId ev]
 
     it "keeps a thread's state moving through merge and reopen" $ do
