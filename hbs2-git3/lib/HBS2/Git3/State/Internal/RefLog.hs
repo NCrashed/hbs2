@@ -82,7 +82,10 @@ txList filt mhref = do
            Nothing -> lift refLogRef >>= toMPlus
 
     hxs <- S.toList_ $ walkMerkle @[HashRef] (coerce rv) (getBlock sto) $ \case
-      Left{} -> throwIO (MissedBlockError2 "txList")
+      -- The hash, not the name of the function it happened in. Whoever reads
+      -- this has to fetch the block or explain why it is gone, and "txList"
+      -- tells them neither which block nor which tree it belonged to.
+      Left h -> throwIO (MissedBlockError2 (show (pretty (HashRef h) <+> "in" <+> pretty rv)))
       Right hs -> filterM (lift . lift . filt) hs >>= S.each
 
     S.toList_ $ for_ hxs $ \h -> do

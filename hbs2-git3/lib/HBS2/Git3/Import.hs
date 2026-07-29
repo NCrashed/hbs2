@@ -115,10 +115,18 @@ writeAsGitPack dir href = do
     pure Nothing
 
 
+-- | How many rounds of an unmoving download count as "not moving".
+--
+-- At roughly three seconds a round this is a couple of minutes of patience,
+-- which is generous for a counter that is supposed to change whenever anything
+-- completes, and finite, which is the point.
+maxStuckRounds :: Int
+maxStuckRounds = 40
+
 data ImportStage =
     ImportStart
   | ImportWIP  (Timeout 'Seconds) Int (Maybe HashRef)
-  | ImportWait (Timeout 'Seconds)  (Maybe Int) ImportStage
+  | ImportWait (Timeout 'Seconds)  (Maybe (Int,Int)) ImportStage
   | ImportDone (Maybe HashRef)
 
 {- HLINT ignore "Functor law" -}
@@ -193,10 +201,31 @@ importGitRefLog = do
 
             notice $ "wait-for-download" <+> parens (pretty down)
 
+            -- The count comes from the peer as a whole, not from this import, so
+            -- one download that will never finish (a block nobody has, asked for
+            -- by anything on this node) holds the number at a constant non-zero
+            -- forever. Waiting for it to move was then waiting for good: the
+            -- repository looked broken, and the peer's own queue was empty.
+            --
+            -- Stop waiting once it has not moved for a while and go on. The
+            -- import that follows fetches what it needs and retries with its own
+            -- backoff if a block really is missing, so the cost of giving up too
+            -- early is a slower round, and the cost of not giving up is a
+            -- repository nobody can fetch or push.
             case d of
-              Just n | down /= n || down == 0 -> again next
+              Just (n, _) | down /= n || down == 0 -> again next
 
-              _ -> pause @'Seconds 2.85 >> again (ImportWait (sec*1.10) (Just down) next)
+              Just (_, stuck) | stuck >= maxStuckRounds -> do
+                notice $ "the peer has been downloading" <+> pretty down
+                           <+> "block(s) without progress; going on without waiting"
+                again next
+
+              _ -> do
+                let stuck = case d of
+                              Just (n, s) | n == down -> succ s
+                              _                       -> 0
+                pause @'Seconds 2.85
+                again (ImportWait (sec*1.10) (Just (down, stuck)) next)
 
           ImportStart -> do
 

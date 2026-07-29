@@ -161,8 +161,10 @@ runTop dict s = parseTop s & either (const none) (void . run dict)
 
 
 -- setupTrace :: ContT r IO ()
-setupTrace :: Foldable t => TVar (Maybe (Text, Integer)) -> TVar (t a) -> ContT r IO ()
-setupTrace cp_ refz = do
+setupTrace :: Foldable t
+           => TVar (Maybe (Text, Integer)) -> TVar (t a) -> TVar (Maybe Handle)
+           -> ContT r IO ()
+setupTrace cp_ refz out_ = do
   traceMode <- isJust <$> liftIO (lookupEnv "HBS2TRACE")
   setupTrace_ traceMode
 
@@ -184,6 +186,13 @@ setupTrace cp_ refz = do
 
       liftIO $ hSetBuffering origHandle NoBuffering
       liftIO $ hSetBuffering rStderr    NoBuffering
+
+      -- Kept so that a fatal error can be written where it will survive. Every
+      -- other line goes through the status pump below, which clears the line it
+      -- just wrote; the process then exits and the one line that mattered is
+      -- the one nobody sees. That is how "remote helper aborted session" came
+      -- to be the whole of what a broken repository said.
+      atomically (writeTVar out_ (Just origHandle))
 
       lift $ void $ installHandler sigPIPE Ignore Nothing
 
@@ -264,10 +273,11 @@ main =  flip runContT pure do
 
   cp <- newTVarIO Nothing
   refz <- newTVarIO mempty
+  out <- newTVarIO Nothing
 
   setupLogger
 
-  setupTrace cp refz
+  setupTrace cp refz out
 
   setStatusOn
 
@@ -325,7 +335,16 @@ main =  flip runContT pure do
 
           r <- try @_ @SomeException (runTop dict ("r:"<>inp))
                  >>= \case
-                   Left e -> die (show e)
+                   Left e -> do
+                     -- On the original stderr, not through the status pump: the
+                     -- pump clears each line as it prints the next, and this is
+                     -- the last line this process will ever write.
+                     readTVarIO out >>= \case
+                       Just h  -> liftIO do
+                         hPutDoc h (line <> red "hbs2-git:" <+> viaShow e <> line)
+                         hFlush h
+                       Nothing -> none
+                     die (show e)
                    _ -> none
 
           next Plain

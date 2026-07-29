@@ -448,9 +448,37 @@ nullHash = GitHash (BS.replicate 20 0)
 txImported :: forall m . ( Git3Perks m
                          ) => Git3 m (HashSet HashRef)
 
-txImported = maybe mempty HS.fromList <$> runMaybeT do
-     cp <- lift importedCheckpoint >>= toMPlus
-     fmap fst <$> lift (txListAll (Just cp))
+-- The checkpoint this reads is a local marker of "I have imported up to here",
+-- and the tree it names lives in shared storage, which may not have all of it:
+-- blocks arrive out of order, and an old checkpoint's blocks can be collected
+-- while the marker stays behind. That is an ordinary state, and it used to be
+-- fatal. 'txListAll' throws when the walk meets a block that is not here,
+-- nothing on this path caught it, and the remote helper died on it before
+-- answering git, so every fetch and every push against the repository ended in
+-- "remote helper aborted session" with the reason scrolled off the screen.
+--
+-- So: ask the peer for what is missing, and answer "nothing imported" rather
+-- than throwing. The answer is the safe direction, since the caller uses it to
+-- decide what still needs importing and the worst case is importing again.
+-- A marker that cannot be read has to cost a re-import, never the repository.
+-- Nothing is fetched here on purpose, though the obvious thing to do with a
+-- missing block is to ask for it. The blocks of an OLD checkpoint may be gone
+-- from the network entirely, and a request for one that nobody has sits in the
+-- download queue forever, which the import loop waits on: asking would wedge
+-- the loop this exists to unwedge. The import that follows fetches the blocks
+-- it actually needs, and those are the ones somebody still has.
+txImported = do
+  sto <- getStorage
+
+  runMaybeT (lift importedCheckpoint >>= toMPlus) >>= \case
+    Nothing -> pure mempty
+    Just cp ->
+      try @_ @OperationError (txListAll (Just cp)) >>= \case
+        Right txs -> pure (HS.fromList (fmap fst txs))
+        Left e    -> do
+          notice $ "cannot read the imported checkpoint" <+> pretty cp
+                     <+> parens (viaShow e) <> ", importing again"
+          pure mempty
 
 
 refsFiles :: forall m . (Git3Perks m) => Git3 m [FilePath]
