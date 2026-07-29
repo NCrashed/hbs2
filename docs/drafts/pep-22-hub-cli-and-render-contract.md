@@ -20,12 +20,13 @@ Principle: CLI-first, web as a pure view
 
 The hub is a library plus a CLI. The library is the union of the pieces the
 other PEPs specify: the PEP-18 letter (compose/verify), the PEP-19 canon
-(event boxes, the deterministic fold, the SQLite materialization cache), the
-PEP-20 PR flow, and the PEP-21 moderation controls. The CLI is a thin driver
-over that library. A minimalist Gitea-style web UI is optional and is a pure
-view: it renders the contract below and never folds, decrypts, verifies, or
-writes canon itself. Everything the web can show, the CLI can show; the web
-adds presentation, not capability.
+(event boxes, the deterministic fold, and a read-side store holding what the
+fold produced rather than a position inside it), the PEP-20 PR flow, and the
+PEP-21 moderation controls. The CLI is a thin driver over that library. A
+minimalist Gitea-style web UI is optional and is a pure view: it renders the
+contract below and never folds, decrypts, verifies, or writes canon itself.
+Everything the web can show, the CLI can show; the web adds presentation, not
+capability.
 
 
 Three layers and how data flows
@@ -45,9 +46,9 @@ compose (Tier B)          read (any clone)          maintain / moderate (Tier A)
 
 Writes are one-way into the tiers: compose commands emit PEP-18 letters (Tier
 B), maintain commands emit owner-signed PEP-19 events (Tier A). Reads all go
-through the fold to the materialized cache; the render contract is the
-serialized projection of that. The web view is downstream of the contract and
-writes nothing.
+through the fold, whose result the read-side store holds; the render contract
+is the serialized projection of that. The web view is downstream of the
+contract and writes nothing.
 
 
 CLI surface
@@ -358,7 +359,27 @@ implements most of this shape over a channel and is the starting code:
     mustache/microstache; a mustache-style web templating layer, if wanted,
     is new work, not a port.)
   - The SQLite `object(o,w,k,v)` materialization with last-write-wins is the
-    PEP-19 cache (generalized with comments and a last-applied-`seq` marker).
+    shape of the read-side store, generalized with comments.
+
+    Not its update strategy, though, and this is the one place the port cannot
+    be a port. fixme-new advances a last-applied-`seq` marker and applies what
+    is past it. PEP-19 forbids that: the fold is one pass over the fully sorted
+    set, and a file with a lower `seq` arriving later inserts into the middle
+    and can admit an event that an earlier pass dropped as dangling. A marker
+    would then leave that event dropped for good, in one clone and not in
+    another, with nothing reporting anything. Canon minted by the triage bridge
+    never has that shape, since the bridge will not mint a reply before its
+    thread is in canon; canon written by anything else may, and `hub verify` has
+    to reach a verdict on that canon too.
+
+    So the store holds the OUTPUT of a fold rather than a position inside one.
+    Two keys make it safe to reuse without re-folding, and either is enough on
+    its own: the whole result against the canon tree hash (plus the repository
+    key and the `hub-meta` version, which are the fold's only other inputs), or
+    per file against that file's own content hash, which is the one that stays
+    useful when the tree grows. Measured on this code, parsing the files is 72%
+    of a cold fold and the ordered pass itself is 2.4%, so the per-file key is
+    where the time actually is.
 
 What changes from fixme-new: the channel is Mailbox ingress plus reflog canon
 (not a RefChan), events carry the PEP-19 two-layer signing, and the PR verbs,
