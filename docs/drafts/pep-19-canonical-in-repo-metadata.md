@@ -712,6 +712,33 @@ Ordering:
 With all three keys the fold is deterministic regardless of enumeration order
 or how commits batched the events.
 
+What the fold is a function OF is part of the format, and this is the place to
+say it: the result depends on exactly three things, the set of event files, the
+repository key, and the version of the admission rules. Nothing else. Not the
+wall clock, not local configuration, not which files the reader happened to have
+fetched first, not anything about the folder's own identity. This is true today
+and it is written down because it is easy to break by accident and expensive to
+notice: everything that would want to cache a fold result keys on those three
+and nothing else, so a fourth input added later does not produce a wrong answer,
+it produces a stale one, served silently by a cache that believes it has a hit.
+A clone showing a different issue state than its neighbour, with no error
+anywhere, is the failure this whole section exists to prevent.
+
+A consequence worth stating alongside it: the fold cannot be resumed from a
+prefix. It is one pass over the fully sorted set, and a reply is admitted or
+dropped by what the pass has seen when it reaches that reply, with no second
+pass. A file with a lower `seq` arriving later therefore inserts into the middle
+and can turn an event previously dropped as dangling into an admitted one. Canon
+minted by the triage bridge never contains that shape, since the bridge refuses
+to mint a reply before the thread it names is in canon; but the fold is defined
+over whatever the tree holds, including files this bridge did not write, and
+`hub verify` has to reach a verdict on those. So a saved state after N events is
+not a valid starting point for the next k, and an implementation that wants to
+avoid re-folding must either cache per FILE, keyed by the file's own content
+hash, or memoize the whole result keyed by the tree hash together with the two
+other inputs above. Both are caches over a pure function; neither is a second
+implementation of the rules, and nothing may become one.
+
 A note on the version, since this document says in several places that changing
 any of this bumps `hub-meta` and the number has stayed at 1 through every change
 so far. Both are true and they are not in tension: the rule is about canon that
