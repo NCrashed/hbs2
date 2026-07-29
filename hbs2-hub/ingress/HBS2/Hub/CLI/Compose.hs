@@ -88,7 +88,13 @@ sendLetter ob sender rcpts box reply = do
   h <- putBlock (obStorage ob) (serialise msg)
          >>= orThrowUser "cannot store the message"
 
-  void $ callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) msg
+  -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
+  -- discarding that printed a message hash and left with a zero exit having sent
+  -- nothing at all. The read side spent a whole round being taught not to report
+  -- silence as an answer; on the write side the same mistake is worse, because
+  -- the caller believes a letter is in a mailbox.
+  callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) msg
+    >>= orThrowUser "the peer did not accept the message for delivery"
 
   pure (HashRef h)
 
@@ -107,16 +113,27 @@ composeEntries = do
            , arg "string" "author-key", arg "string" "title" ]
     $ desc ( "Signs the author box with author-key and seals it to"
              <> line <> "recipient-sigil, which is also what says which mailbox"
-             <> line <> "it lands in. The body is read from stdin. Prints the"
-             <> line <> "message hash, which is the letter's identity everywhere"
-             <> line <> "else: the inbox lists it and a folded event carries it"
-             <> line <> "as its origin." )
+             <> line <> "it lands in."
+             <> line
+             <> line <> "The body is read from stdin when stdin is a pipe or a"
+             <> line <> "file, and left empty when it is a terminal: PEP-22 writes"
+             <> line <> "it as optional, and a verb that blocked on an unprompted"
+             <> line <> "read would look like a hang."
+             <> line
+             <> line <> "Prints the message hash, which is the letter's identity"
+             <> line <> "everywhere else (the inbox lists it, a folded event carries"
+             <> line <> "it as its origin), and the event-id the thread will have." )
     $ entry $ bindMatch "hub:issue:new" \case
         [ SignPubKeyLike repo
           , HashLike senderSigil, HashLike rcptSigil
           , SignPubKeyLike author, StringLike title ] -> lift do
 
-          body <- liftIO getContents
+          -- Only when there is something to read. On a terminal this used to
+          -- block with no prompt, which reads as a hang rather than as a
+          -- request for input.
+          body <- liftIO $ hIsTerminalDevice stdin >>= \case
+                    True  -> pure ""
+                    False -> getContents
 
           creds <- runKeymanClientRO (loadCredentials author)
                      >>= orThrowUser ("no credentials for" <+> pretty (AsBase58 author))
@@ -133,7 +150,7 @@ composeEntries = do
                           (bodyOf body) Nothing Nothing now
 
           for_ (oversizedField content) $ \f ->
-            orThrowUser ("over the size limit for a letter:" <+> pretty f) (Nothing @())
+            throwIO (userError (show ("over the size limit for a letter:" <+> pretty f)))
 
           sto <- getStorage
           api <- getClientAPI @MailboxAPI @UNIX
@@ -149,8 +166,11 @@ composeEntries = do
           -- will call the thread, and the sender can compute it now, before any
           -- maintainer has looked (PEP-18 "the sender can compute the thread-id
           -- at send time without any handshake").
-          pure $ mkForm "sent" [ mkForm "message" [mkSym (show (pretty h))]
-                               , mkForm "thread"  [mkSym (show (pretty (authorBoxId box)))]
+          -- Strings, not symbols: a hash is data here, and the argv reader on the
+          -- way back in lexes a bare base58 word as a symbol only by accident of
+          -- it having no punctuation. One convention for hashes across the tool.
+          pure $ mkForm "sent" [ mkForm "message" [mkStr (show (pretty h))]
+                               , mkForm "thread"  [mkStr (show (pretty (authorBoxId box)))]
                                ]
 
         _ -> throwIO (BadFormException @c nil)

@@ -221,9 +221,15 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         # documented in INSTALL.md.
         paths = (map stripPackageToBin (builtins.attrValues
                   (removeAttrs imagePackages [ "bf6-git-hbs2" ]))) ++ [
-          (pkgs.runCommand "git-hbs2-symlink" { } ''
+          (pkgs.runCommand "hbs2-symlinks" { } ''
             mkdir -p $out/bin
             ln -s hbs2-git3 $out/bin/git-hbs2
+            # PEP-22 spells the forge CLI `hub`; the binary is named hbs2-hub
+            # like everything else here, because `hub` is also a widely
+            # installed GitHub tool and claiming that name in PATH is not ours
+            # to do. The symlink offers the documented surface to whoever wants
+            # it, without taking it from anyone who does not.
+            ln -s hbs2-hub $out/bin/hub
           '')
           pkgs.cacert
           pkgs.tzdata

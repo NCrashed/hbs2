@@ -59,6 +59,12 @@ done
 # `git hbs2 ...` works once bin/ is on PATH).
 ln -s hbs2-git3 "${BUNDLE}/bin/git-hbs2"
 
+# hub -> hbs2-hub. PEP-22 spells the forge CLI `hub`; the binary is named
+# hbs2-hub like everything else here, because `hub` is also a widely installed
+# GitHub tool and claiming it in PATH is not ours to do. The symlink gives the
+# documented surface to whoever wants it.
+ln -s hbs2-hub "${BUNDLE}/bin/hub"
+
 echo "==> Bundling dylibs via dylibbundler"
 # dylibbundler walks each binary's dylib closure, copies non-system
 # dylibs into ${BUNDLE}/lib, and rewrites install names (both in the

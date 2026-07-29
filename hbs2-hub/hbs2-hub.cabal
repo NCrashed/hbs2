@@ -95,7 +95,9 @@ library hub-ingress
                     , hbs2-peer
                     , hbs2-cli
                     , hbs2-keyman-direct-lib
+                    , bytestring
                     , serialise
+                    , time
                     , unordered-containers
                     , text
     exposed-modules:

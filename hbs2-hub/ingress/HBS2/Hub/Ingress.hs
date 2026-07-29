@@ -40,19 +40,21 @@ import HBS2.CLI.Prelude
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Merkle (walkMerkle)
 import HBS2.Net.Auth.Credentials
+import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
-import HBS2.Storage
+import HBS2.Storage.Operations.Class (OperationError)
 
 import Codec.Serialise (deserialiseOrFail)
 import Data.Coerce (coerce)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
-import Data.List (sortOn)
-import Data.Maybe (catMaybes)
+import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as LBS
+import Data.List (sort)
 
 -- | What reading an inbox needs from the outside, gathered so the walk below
 -- can be read without knowing how any of it is served.
@@ -60,38 +62,74 @@ import Data.Maybe (catMaybes)
 -- A record rather than a class, following 'ReadMessageServices' next door: this
 -- has exactly one implementation and the alternative is a class with one
 -- instance, which is the same thing with more places to look.
-data Ingress = Ingress
-  { igStorage  :: AnyStorage
-  , igMailbox  :: ServiceCaller MailboxAPI UNIX
+data Ingress m = Ingress
+  { igBlock    :: HashRef -> m (Maybe ByteString)
+    -- | Does the peer hold this mailbox at all? 'Nothing' means it does not.
+    --
+    -- A function rather than the 'ServiceCaller' this used to be, and so is the
+    -- one below. The whole reason the ingress moved out of the executable was
+    -- that its decisions should be testable, and with a service caller in the
+    -- record they were not: the wait loop and every 'OpenError' still needed a
+    -- live peer. The seam stopped one call short of where it had to be.
+  , igStatus   :: HubKey -> m (Maybe ())
+    -- | Ask the peer to fetch a mailbox. Returns nothing: the peer's own answer
+    -- is nothing, since it queues the key and returns before anything is
+    -- fetched, which is the reason 'awaitMailbox' exists.
+  , igFetch    :: HubKey -> m ()
+    -- | The root of the peer's copy of the mailbox tree, right now.
+  , igRoot     :: HubKey -> m (Maybe HashRef)
+    -- | Wait. An effect on the outside world like the others, and here for the
+    -- same reason: with 'pause' written into the loop, the one test that proves
+    -- the wait is bounded had to actually wait, which put twenty seconds into a
+    -- unit suite and made the bound expensive to assert rather than cheap.
+  , igPause    :: Timeout 'Seconds -> m ()
     -- | Whether a letter from this key may be folded at all (PEP-21). Asked
     -- here as well as at accept time, because triage is a queue a human reads
     -- and a banned author's letter should not be in it.
   , igAllowed  :: HubKey -> Bool
-    -- | Resolve the group secret for a message. Separate so a caller can
-    -- supply a fake without a keyman running.
+    -- | Resolve the group secret for a message.
   , igSecret   :: ReadMessageServices HBS2Basic
-  , igTimeout  :: Timeout 'Seconds
   }
 
 -- | Why a message in the mailbox did not become a letter.
 --
--- Four cases and not one, because they call for four different things from
+-- Five cases and not one, because they call for five different things from
 -- whoever is reading the queue, and the difference is not recoverable later.
 -- They were collapsed into a single "malformed payload", which said the wrong
--- thing about three of them: 'MalformedPayload' is a claim about DECRYPTED
--- bytes, and these are the ways of never reaching any.
+-- thing about four of them: 'MalformedPayload' is a claim about DECRYPTED bytes,
+-- and these are the ways of never reaching any.
 data OpenError =
     -- | The message block is not in local storage yet. A wait, not a fault: the
     -- peer downloads mailbox contents on its own schedule and this is the
     -- ordinary state of a mailbox that was just fetched.
     NotFetched
-    -- | The message decrypted to nothing this node holds a key for. Also
-    -- ordinary: a mailbox accepts messages sealed to anybody, and one addressed
-    -- to another maintainer is a line in the queue rather than a problem.
+    -- | No key this node holds appears in the message's group key. Ordinary: a
+    -- mailbox accepts messages sealed to anybody, and one addressed to another
+    -- maintainer is a line in the queue rather than a problem.
   | NotForUs
-    -- | The envelope signature does not verify. This is the one that is an
-    -- accusation, and the one somebody acts on ('hub block'), so it must not
-    -- share a constructor with the two above.
+    -- | A group key this build cannot resolve, because it was passed by
+    -- reference rather than inline and that is not implemented yet (the peer's
+    -- own @TODO: support-groupkey-by-reference@).
+    --
+    -- Not 'NotForUs', which is what this used to report, and the difference is
+    -- the same one this module exists to keep: the letter may well be addressed
+    -- to us, and nothing here has checked. Saying "not sealed to any key this
+    -- node holds" would be a claim about something never examined.
+  | GroupKeyByRef
+    -- | A key WAS found and the ciphertext did not open with it, or opened to
+    -- bytes that are not a payload. Either the message is corrupt or somebody
+    -- built a group key naming this node and put rubbish inside it.
+    --
+    -- Anyone can do that: mailbox recipients' encryption keys are public in
+    -- their sigils, so a sender can produce a group key that resolves here. It
+    -- is therefore a line in the queue and not an exception, which is exactly
+    -- what it used to be: this arrives as 'OperationError', a different type
+    -- from the one the catch named, so it escaped the loop and took the whole
+    -- listing with it. One stranger could close the queue.
+  | Undecipherable
+    -- | The envelope signature does not verify. The one that is an accusation,
+    -- and the one somebody acts on ('hub block'), so it must not share a
+    -- constructor with the others.
   | BadEnvelopeSig
     -- | The envelope opened and the letter inside did not. Carried whole,
     -- because the letter layer already draws the distinctions that matter here
@@ -104,6 +142,8 @@ instance Pretty OpenError where
   pretty = \case
     NotFetched      -> "not fetched yet"
     NotForUs        -> "not sealed to any key this node holds"
+    GroupKeyByRef   -> "group key by reference, which this build cannot resolve"
+    Undecipherable  -> "a key resolved for it and the ciphertext did not open"
     BadEnvelopeSig  -> "the envelope signature does not verify"
     BadLetterHere e -> pretty e
 
@@ -143,7 +183,17 @@ data LetterView = LetterView
 -- returned a list looked complete to everything downstream of it.
 data InboxRead = InboxRead
   { irLetters :: [LetterView]
-  , irMissing :: Int          -- ^ tree blocks the walk could not read
+    -- | Tree blocks the walk could not read, by hash.
+    --
+    -- The hashes and not only a count: a hash is the one thing anybody can act
+    -- on (@hbs2-peer download@ takes one), and the first version of this threw
+    -- them at stderr, the second threw them away to gain a counter. Both.
+  , irMissing :: [HashRef]
+    -- | Whether the peer's copy of the mailbox had stopped changing by the time
+    -- it was read. 'False' means the letters below are a snapshot of something
+    -- still arriving: not an error, and not something to keep quiet about
+    -- either, which is what happened while this was computed and discarded.
+  , irSettled :: Bool
   }
   deriving stock (Eq,Show)
 
@@ -225,41 +275,36 @@ rpcTimeout = 10
 -- completeness (a message can arrive a second later) and is not treated as any:
 -- it is the difference between "read what was there" and "read while it was
 -- arriving".
-awaitMailbox :: MonadUnliftIO m => Ingress -> HubKey -> m (Maybe HashRef, Bool)
+awaitMailbox :: MonadUnliftIO m => Ingress m -> HubKey -> m (Maybe HashRef, Bool)
 awaitMailbox ig mbox = do
   -- The status call first, because it is the one that distinguishes a mailbox
   -- the peer does not have from one that is empty, and fetching a mailbox the
   -- peer does not have is a no-op it will not report.
-  st <- callRpcWaitMay @RpcMailboxGetStatus (igTimeout ig) (igMailbox ig) mbox
-          >>= orThrowUser "cannot reach the peer's mailbox service"
+  igStatus ig mbox >>= \case
+    Nothing -> throwIO (MailboxUnknown mbox)
+    Just () -> pure ()
 
-  case st of
-    Left e         -> orThrowUser ("mailbox service:" <+> viaShow e) (Nothing @())
-    Right Nothing  -> throwIO (MailboxUnknown mbox)
-    Right (Just _) -> pure ()
-
-  void $ callRpcWaitMay @RpcMailboxFetch (igTimeout ig) (igMailbox ig) mbox
+  igFetch ig mbox
 
   go maxFetchRounds Nothing
 
   where
     go 0 seen = pure (seen, False)
     go n seen = do
-      root <- callRpcWaitMay @RpcMailboxGet (igTimeout ig) (igMailbox ig) mbox
-                >>= orThrowUser "cannot reach the peer's mailbox service"
+      root <- igRoot ig mbox
       if root == seen && n < maxFetchRounds
         -- Unchanged across a round, and not the first look: as settled as a
         -- local reader can establish.
         then pure (root, True)
-        else pause fetchRound >> go (n - 1) root
+        else igPause ig fetchRound >> go (n - 1) root
 
 -- | Fetch, walk and read a mailbox: every live message, opened as far as it
 -- will open.
-readInbox :: MonadUnliftIO m => Ingress -> HubKey -> m InboxRead
+readInbox :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
 readInbox ig mbox = do
-  (root, _settled) <- awaitMailbox ig mbox
+  (root, settled) <- awaitMailbox ig mbox
   case root of
-    Nothing   -> pure (InboxRead [] 0)
+    Nothing   -> pure (InboxRead [] [] settled)
     Just tree -> do
       (entries, misses) <- readEntries tree
       -- Sorted explicitly. This used to be HS.toList with a comment claiming it
@@ -267,50 +312,91 @@ readInbox ig mbox = do
       -- property of the container's implementation and not a promise it makes.
       -- A triage queue that reorders itself on a dependency bump is one a
       -- maintainer cannot work through a page at a time.
-      lvs <- mapM readOne (sortOn (show . pretty) (HS.toList (liveMessages entries)))
-      pure (InboxRead lvs misses)
+      lvs <- mapM readOne (sort (HS.toList (liveMessages entries)))
+      pure (InboxRead lvs misses settled)
 
   where
-    sto = igStorage ig
-
     readEntries tree = do
       acc <- newTVarIO []
-      bad <- newTVarIO (0 :: Int)
-      walkMerkle @[HashRef] (coerce tree) (liftIO . getBlock sto) $ \case
-        Left _   -> atomically $ modifyTVar bad succ
+      bad <- newTVarIO []
+      walkMerkle @[HashRef] (coerce tree) (fmap (fmap LBS.fromStrict) . igBlock ig . HashRef) $ \case
+        Left miss -> atomically $ modifyTVar bad (HashRef miss :)
         Right hs -> do
-          es <- forM hs $ \h ->
-                  getBlock sto (coerce h)
-                    <&> (>>= either (const Nothing) Just . deserialiseOrFail @MailboxEntry)
+          es <- forM hs $ \h -> (h,) <$> readEntry h
           -- A block that is here but does not decode as an entry counts as a
-          -- miss too: the effect on the answer is the same as not having it.
+          -- miss too: the effect on the answer is the same as not having it, and
+          -- the hash is equally the only thing to act on.
           atomically do
-            modifyTVar acc (catMaybes es <>)
-            modifyTVar bad (+ length [ () | Nothing <- es ])
-      (,) <$> readTVarIO acc <*> readTVarIO bad
+            modifyTVar acc ([ e | (_, Just e) <- es ] <>)
+            modifyTVar bad ([ h | (h, Nothing) <- es ] <>)
+      (,) <$> readTVarIO acc <*> (sort <$> readTVarIO bad)
+
+    readEntry h = igBlock ig h
+                    <&> (>>= either (const Nothing) Just
+                           . deserialiseOrFail @MailboxEntry . LBS.fromStrict)
 
     readOne mh = do
-      blk <- getBlock sto (coerce mh)
-      case blk >>= either (const Nothing) Just . deserialiseOrFail @(Message HBS2Basic) of
+      blk <- igBlock ig mh
+      case blk >>= either (const Nothing) Just
+                   . deserialiseOrFail @(Message HBS2Basic) . LBS.fromStrict of
         Nothing  -> pure (LetterView mh Nothing (Left NotFetched) Nothing)
         Just msg -> do
-          -- readMessage throws, and which exception it throws is the whole of
-          -- what separates "not addressed to us" from "forged". Catching
-          -- SomeException and reporting one thing threw that away.
-          opened <- try @_ @ReadMessageError (readMessage (igSecret ig) msg)
+          -- The envelope signer is recovered separately from the decryption, and
+          -- that is the point. It is authenticated by this call alone, so on
+          -- every path below except a bad signature the key is KNOWN, and on a
+          -- public mailbox the bulk of the queue is letters sealed to somebody
+          -- else. Taking the key from readMessage's success value left all of
+          -- them anonymous, which is the queue with no key to block by.
+          let envelope = fmap fst
+                           (unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg))
+
+          -- Two exception types, not one, and this is where a stranger could
+          -- close the queue. readMessage's own errors are ReadMessageError, but
+          -- its last step decrypts, and that throws OperationError
+          -- (DecryptionError for ciphertext that does not open, UnsupportedFormat
+          -- for bytes that are not a payload). A catch naming only the first let
+          -- the second escape readOne, mapM and readInbox, so one message with a
+          -- resolvable group key and rubbish inside it printed no queue at all.
+          -- Anyone can send that: recipients' encryption keys are public.
+          opened <- tryOpen msg
           case opened of
-            Left ReadSignCheckFailed  -> pure (LetterView mh Nothing (Left BadEnvelopeSig) Nothing)
-            Left ReadNoGroupKey       -> pure (LetterView mh Nothing (Left NotForUs) Nothing)
-            Left ReadNoGroupKeyAccess -> pure (LetterView mh Nothing (Left NotForUs) Nothing)
-            Right (envelope, _, payload) -> do
+            Left e -> pure (LetterView mh (envelopeFor e envelope) (Left e) Nothing)
+            Right (_, _, payload) -> do
               let md = parsePayload payload
               pure LetterView
                 { lvMessage  = mh
-                , lvEnvelope = Just envelope
-                , lvLetter   = either (Left . BadLetterHere) Right (opened' envelope =<< md)
+                , lvEnvelope = envelope
+                , lvLetter   = case (envelope, md) of
+                    (_, Left e)          -> Left (BadLetterHere e)
+                    -- Unreachable: readMessage succeeding means the same unbox
+                    -- succeeded. Answered rather than asserted, because the one
+                    -- thing this loop must not do is throw.
+                    (Nothing, _)         -> Left BadEnvelopeSig
+                    (Just who, Right md') -> openWith who md'
                 , lvEventId  = either (const Nothing) letterEventId md
                 }
 
-    opened' envelope md = do
-      (_, author, content, _) <- openLetterAs (igAllowed ig) (EnvelopeSigner envelope) md
+    -- A forged envelope names nobody: the signature is what would have
+    -- established the key, and it did not.
+    envelopeFor BadEnvelopeSig _ = Nothing
+    envelopeFor _ k = k
+
+    tryOpen msg =
+      (Right <$> readMessage (igSecret ig) msg)
+        `catch` (pure . Left . readErr)
+        -- Everything the decrypt step can raise, which is a DIFFERENT type from
+        -- the one above. Both of its cases mean the same thing to a reader (a key
+        -- resolved and the bytes behind it are not a message), and neither is a
+        -- reason to stop reading the mailbox.
+        `catch` (\(_ :: OperationError) -> pure (Left Undecipherable))
+
+    readErr = \case
+      ReadSignCheckFailed  -> BadEnvelopeSig
+      ReadNoGroupKey       -> GroupKeyByRef
+      ReadNoGroupKeyAccess -> NotForUs
+
+    openWith who md = do
+      (_, author, content, _) <-
+        either (Left . BadLetterHere) Right
+          (openLetterAs (igAllowed ig) (EnvelopeSigner who) md)
       pure (author, content, classify content)

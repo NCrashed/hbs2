@@ -47,6 +47,29 @@ main = do
         internalEntries
         inboxEntries
         composeEntries
+
+        -- BEFORE helpEntries, because the dictionary is a left-biased union and
+        -- the first binding of a name wins. Overrides the inherited `help`, which prints an "hbs2-cli tool" banner
+        -- and is keyed by the full entry name. Both were wrong here: the banner
+        -- names another tool, and the top-level help offers verbs as `inbox` and
+        -- `issue new`, so `hbs2-hub help inbox` has to be the spelling that
+        -- works. The prefixing goes through the same verbOf, so the two spellings
+        -- cannot drift.
+        entry $ bindMatch "help" $ nil_ \case
+          [] -> liftIO (hubHelp dict)
+          -- A name the dictionary holds arrives already evaluated, as the lambda
+          -- it names carrying its own name. That is the full spelling and needs
+          -- no prefixing.
+          HelpEntryBound what -> helpEntry what
+          -- A name it does not hold arrives as the word itself, which is where
+          -- `inbox` and `issue new` come in: prefixed through the same verbOf the
+          -- command line uses, so the spelling the top-level help prints and the
+          -- spelling help accepts cannot drift apart.
+          ws | Just (ListVal (SymbolVal k : _)) <- verbOf dict (fmap asWord ws) ->
+                 helpEntry k
+             | [StringLike s] <- ws -> helpList False (Just s)
+             | otherwise -> liftIO (hubHelp dict)
+
         helpEntries
         SF.entries
 
@@ -59,8 +82,9 @@ main = do
           [StringLike s]      -> helpList False (Just s)
           _                   -> liftIO (hubHelp dict)
 
-  case verbOf dict argv of
-    Nothing -> runHBS2Cli do
+  case (argv, verbOf dict argv) of
+    -- No arguments: a script on stdin, or the help if there is no stdin either.
+    ([], _) -> runHBS2Cli do
       eof <- liftIO IO.isEOF
       if eof
         then liftIO (hubHelp dict)
@@ -68,11 +92,24 @@ main = do
                >>= either (liftIO . die . show) pure . parseTop
                >>= \what -> recover (run dict what >>= eatNil display) >> silence
 
+    -- Arguments that name nothing. Distinguished from the empty case, which it
+    -- used to share: falling into the stdin branch made a typo exit zero after
+    -- printing the help, and on a terminal or in a pipeline it waited for input
+    -- nobody was going to send.
+    (w:_, Nothing) -> die ("unknown verb: " <> w <> "\ntry: hbs2-hub --help")
+
     -- recover is what probes for the peer socket and builds the RPC clients;
     -- without it every verb that talks to hbs2-peer fails as "not connected".
-    Just form -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
+    (_, Just form) -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
 
   where
+    -- A dictionary name back to the word a user typed, so that `help` can route
+    -- its argument through the same verbOf the command line does.
+    asWord = \case
+      SymbolVal (Id t) -> Text.unpack t
+      LitStrVal t      -> Text.unpack t
+      x                -> show (pretty x)
+
     -- What this tool does, rather than what its interpreter can do.
     hubHelp dict = do
       let named (Id t) = Text.unpack t
@@ -126,14 +163,23 @@ main = do
         plain (c:_) = c `notElem` ("-(\"'[" :: String)
         plain []    = False
 
-    -- One shell word becomes one atom, with its own type preserved: an integer
-    -- stays an integer, a form written as one argument is still parsed as a
-    -- form, and everything else is a string, which every reader in this project
-    -- accepts wherever it accepts a symbol.
-    literal s
-      | any (`isPrefixOf` s) ["(", "["] =
-          case parseTop s of
-            Right [x] -> x
-            _         -> mkStr @C s
-      | Just n <- readMay @Integer s = mkInt n
-      | otherwise = mkStr @C s
+    -- One shell word becomes one atom, lexed by the same parser a script goes
+    -- through. Not a hand-written list of cases: the first version quoted
+    -- everything and lost integers, the second added a case for integers and
+    -- still lost symbols and decimals, and it is symbols that --help and help
+    -- match on to tell "the name of an entry" from "text to search for". A word
+    -- typed at the shell and the same word in a script now get the same type,
+    -- because they go through the same code.
+    --
+    -- Anything that does not lex as exactly one atom is a string, which is the
+    -- only reading left for it.
+    literal s = case parseTop s of
+      Right [x] -> unwrap x
+      _         -> mkStr @C s
+      where
+        -- parseTop makes a list per LINE, so a single atom on a line of its own
+        -- comes back wrapped in one. Unwrapped here: a bare word from argv is an
+        -- atom, not a call with no arguments, and leaving it wrapped is why
+        -- `hbs2-hub help hub:inbox` answered BadFormException (help (hub:inbox)).
+        unwrap (ListVal [x]) = x
+        unwrap x = x

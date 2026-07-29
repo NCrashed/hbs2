@@ -22,12 +22,18 @@ import HBS2.CLI.Run.Internal
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.API.Mailbox
-import HBS2.Peer.RPC.Client (HasClientAPI(..))
+import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
 
+import Data.ByteString.Lazy qualified as LBS
+import Data.Coerce (coerce)
+import Data.List qualified as List
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import Data.Time.Format (defaultTimeLocale,formatTime)
+import Data.Word (Word64)
 import System.Exit (exitWith,ExitCode(..))
 
 -- | @hub inbox@ and friends.
@@ -40,7 +46,7 @@ inboxEntries :: forall c m . ( IsContext c
 inboxEntries = do
 
   brief "list the letters waiting in a hub's ingress mailbox"
-    $ args [arg "string" "mailbox-key"]
+    $ args [arg "string" "[--mailbox] mailbox-key"]
     $ desc ( "Read-only. Waits for the peer's copy of the mailbox to settle,"
              <> line <> "opens every message this node holds a key for, and reports"
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
@@ -50,43 +56,69 @@ inboxEntries = do
              <> line <> "reads as empty forever. Create one with"
              <> line <> "'hbs2-peer mailbox create --key KEY hub'."
              <> line
-             <> line <> "Takes the mailbox key directly. PEP-22 specifies the form"
-             <> line <> "that reads it from the repo manifest instead; that needs a"
-             <> line <> "manifest reader, which does not exist yet, and it is also"
-             <> line <> "what would supply the PEP-21 deny-list that this form has"
-             <> line <> "no source for." )
+             <> line <> "Takes the mailbox key directly, which is the form PEP-22"
+             <> line <> "spells --mailbox. The form that reads the key from the repo"
+             <> line <> "manifest needs a manifest reader, which does not exist yet,"
+             <> line <> "and that manifest is also what would supply the PEP-21"
+             <> line <> "deny-list this form has no source for: a queue read this"
+             <> line <> "way shows letters from banned authors." )
+    -- Both spellings, because PEP-22 specifies the flag: the bare key is what
+    -- the spec calls `--mailbox <key>`, and a form the spec names has to be
+    -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
-        [ SignPubKeyLike mbox ] -> lift do
-          sto <- getStorage
-          api <- getClientAPI @MailboxAPI @UNIX
-          let ig = Ingress { igStorage = sto
-                           , igMailbox = api
-                             -- No deny-list: PEP-21 policy lives in the repo
-                             -- manifest and this verb takes a mailbox key rather
-                             -- than a repo. Allowing everything is honest here,
-                             -- since listing is not accepting; the accept path
-                             -- must not inherit this default.
-                           , igAllowed = const True
-                           , igSecret = ReadMessageServices
-                               (liftIO . runKeymanClientRO . extractGroupKeySecret)
-                           , igTimeout = rpcTimeout
-                           }
-
-          r <- readInbox ig mbox
-
-          liftIO $ mapM_ (print . render) (irLetters r)
-
-          -- A tree read with holes in it is a wrong answer, not a short one, so
-          -- it does not leave through a zero exit. Said once at the end rather
-          -- than per block: the number is what matters, and a page of identical
-          -- warnings buries the letters above it.
-          when (irMissing r > 0) $ liftIO do
-            hPutDoc stderr $ "hub:" <+> pretty (irMissing r)
-              <+> "block(s) of this mailbox tree could not be read;"
-              <+> "the list above is incomplete in both directions" <> line
-            exitWith (ExitFailure 2)
-
+        [ SignPubKeyLike mbox ]                          -> lift (listInbox mbox)
+        [ StringLike "--mailbox", SignPubKeyLike mbox ]   -> lift (listInbox mbox)
         _ -> throwIO (BadFormException @c nil)
+
+  where
+    listInbox mbox = do
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+
+      r <- readInbox (overRpc sto api) mbox
+
+      liftIO $ mapM_ (print . render) (irLetters r)
+
+      -- Two ways the list above can be wrong rather than short, and neither
+      -- leaves through a zero exit. Said once at the end: the counts are what
+      -- matter, and a page of identical warnings buries the letters.
+      liftIO do
+        unless (irSettled r) $
+          hPutDoc stderr $ "hub: the peer's copy of this mailbox was still"
+            <+> "changing after" <+> pretty maxFetchRounds <+> "rounds;"
+            <+> "the list above is a snapshot of something still arriving" <> line
+
+        unless (List.null (irMissing r)) $
+          hPutDoc stderr $ "hub:" <+> pretty (length (irMissing r))
+            <+> "block(s) of this mailbox tree could not be read, so the list"
+            <+> "above is incomplete in both directions."
+            <+> "Missing:" <+> hsep (fmap pretty (irMissing r)) <> line
+
+        unless (irSettled r && List.null (irMissing r)) (exitWith (ExitFailure 2))
+
+    -- The one place the ingress is wired to a peer. Everything above it is a
+    -- function of these five, which is what lets the wait loop and every
+    -- OpenError be tested without one.
+    overRpc sto api = Ingress
+      { igBlock  = \h -> liftIO (getBlock sto (coerce h)) <&> fmap LBS.toStrict
+      , igStatus = \k ->
+          callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
+            >>= orThrowUser "cannot reach the peer's mailbox service"
+            >>= either (\e -> orThrowUser ("mailbox service:" <+> viaShow e) Nothing)
+                       (pure . void)
+      , igFetch  = void . callRpcWaitMay @RpcMailboxFetch rpcTimeout api
+      , igRoot   = \k ->
+          callRpcWaitMay @RpcMailboxGet rpcTimeout api k
+            >>= orThrowUser "cannot reach the peer's mailbox service"
+      , igPause  = pause
+        -- No deny-list: PEP-21 policy lives in the repo manifest and this verb
+        -- takes a mailbox key rather than a repo. Allowing everything is honest
+        -- here, since listing is not accepting; the accept path must not
+        -- inherit this default.
+      , igAllowed = const True
+      , igSecret = ReadMessageServices
+          (liftIO . runKeymanClientRO . extractGroupKeySecret)
+      }
 
 -- One line per letter, in the order the fields matter to somebody deciding what
 -- to do with it.
@@ -106,7 +138,7 @@ render lv = pretty (lvMessage lv) <+> maybe "-" (pretty . AsBase58) (lvEnvelope 
           -- The author's own clock, advisory and unverifiable (PEP-19), which is
           -- why it is shown and not sorted on: sorting the queue by it would let
           -- a sender choose where in the queue they appear.
-          <+> "at" <+> pretty (authorTs content)
+          <+> "at" <+> pretty (utcOf (authorTs content))
           <+> opOf content
           <+> maybe "-" (\t -> "on" <+> pretty t) (authorThread content)
           <+> dispOf disp
@@ -121,3 +153,11 @@ render lv = pretty (lvMessage lv) <+> maybe "-" (pretty . AsBase58) (lvEnvelope 
       FoldsToCanon -> "(folds)"
       RequestOnly  -> "(request)"
       OwnerNative  -> "(owner-only: not acceptable from a letter)"
+
+-- The author's declared time as something a human reads. Epoch milliseconds are
+-- what the field IS (PEP-19) and what any tooling should parse, but a triage
+-- queue is read by a person, and a column of thirteen-digit integers is a column
+-- nobody compares.
+utcOf :: Word64 -> String
+utcOf ms = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
+             (posixSecondsToUTCTime (fromIntegral ms / 1000))
