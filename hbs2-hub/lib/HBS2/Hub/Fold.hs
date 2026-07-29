@@ -337,6 +337,12 @@ data FoldResult = FoldResult
     -- the clock and a second honour mints a second event. Canon records the
     -- provenance either way; this is the fold handing it back.
   , frOrigins :: HashSet HashRef
+    -- | Every request already honoured, by the author box the requester signed.
+    --
+    -- Separate from the origins above because a rewrap gives one request many
+    -- message hashes and exactly one box: dedup by the hash honours the same
+    -- request again under every new envelope.
+  , frHonoured :: HashSet EventId
     -- | The repo this canon belongs to: the owner key the fold was given.
     --
     -- Recorded so a caller cannot end up with a view built for one repo and
@@ -394,8 +400,17 @@ data Stamp = Stamp
 -- canon.
 ghostStamp :: Event -> Maybe (Stamp, Maybe Word64)
 ghostStamp e = case unboxChecked (evCanonBox e) of
-  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccTarget cc), ccNumber cc)
-  Left _        -> Nothing
+  -- The blessing has to be a blessing OF THIS EVENT. A canon box is a separate
+  -- signature over separate bytes, so anyone can staple a maintainer's canon
+  -- box to an author box of their own: the signature verifies, the key is
+  -- authorized, and the stamp used to be spent on the strength of that. What it
+  -- bought was a number recorded from a stranger's file, which the next honest
+  -- open is then accused of duplicating, with the honest maintainer's key
+  -- printed beside it. 'resolve' already calls this IdMismatch on the readable
+  -- path; this is the same rule where the content cannot be read.
+  Right (k, cc) | ccEventId cc == eventId e ->
+    Just (Stamp (ccSeq cc) k (ccTarget cc), ccNumber cc)
+  _ -> Nothing
 
 -- One entry in the ordered pass.
 data Item =
@@ -572,6 +587,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             , sMaxSeq    = 0
             , sMaxNumber = 0
             , sOrigins   = HS.empty
+            , sHonoured  = HS.empty
             , sSeqSeen    = HS.empty
             , sNumbers    = HS.empty
             , sLastNumber = 0
@@ -594,6 +610,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       , frAdmitted  = sSeen s
       , frMaintainers = sMaint s
       , frOrigins   = sOrigins s
+      , frHonoured  = sHonoured s
       , frOwner     = owner
       , frAnomalies = reverse (sAnoms s)
       , frLog       = reverse (sLog s)
@@ -628,7 +645,12 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- not a blessing here at all, and the content it blesses would be dropped
       -- a moment later for a reason that says nothing about why.
       | ccTarget (rCanon r) /= owner = go rest (dropE r WrongTarget s0)
-      | HM.member (rId r) (sSeen s)  = go rest (dropE r DupId s)
+      -- Before the stamp, unlike the refusals below it. A duplicate is already
+      -- in canon under the seq that admitted it, so its seq is spent there and
+      -- nothing needs spending here; counting it as well is how one surviving
+      -- copy of a pre-compaction file, re-stamped near the top of the range,
+      -- sends the cursor to maxBound and stops the repository for good.
+      | HM.member (rId r) (sSeen s0) = go rest (dropE r DupId s0)
       | Just why <- unusable r        = go rest (dropE r why s)
       | otherwise                    = go rest (apply r s)
       where
@@ -868,6 +890,7 @@ data St = S
   , sMaxSeq    :: Word64
   , sMaxNumber :: Word64
   , sOrigins   :: HashSet HashRef
+  , sHonoured  :: HashSet EventId
     -- Anomaly bookkeeping: what has been stamped already, and the last
     -- values seen, so a counter going backwards is visible.
   , sSeqSeen    :: HashSet Word64
@@ -927,6 +950,7 @@ keep scope r s = s
     -- event with a lower stamp lower the floor, and a folder that rebuilt from
     -- canon after a restart then disagreed with the one that had been running.
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
+  , sHonoured  = maybe (sHonoured s) (\o -> HS.insert o (sHonoured s)) (ccHonours (rCanon r))
   , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
   , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num
   , sLastNumber = fromMaybe (sLastNumber s) num

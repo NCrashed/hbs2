@@ -36,10 +36,16 @@ secret32 = fromMaybe (error "bad fixture secret")
 
 canon :: RepoRef -> Word64 -> Maybe Word64 -> Maybe HashRef -> Maybe PartSecret
       -> EventId -> CanonContent
-canon repo sq num origin sec eid = CanonContent repo eid sq num origin sq sec
+canon repo sq num origin sec eid = CanonContent repo eid sq num origin Nothing sq sec
 
 coords :: PRCoords
 coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+
+-- Escape sequences in a rendered file. A canon file's unquoted parts are
+-- base58, base64 and decimal, so a backslash anywhere in one is a backslash
+-- inside a string literal, which is what the reader's own scan counts.
+escapesOf :: Text -> Int
+escapesOf = Text.count "\\"
 
 -- A title nobody would type and anybody can send.
 nasty :: Text
@@ -62,7 +68,7 @@ spec = do
           ev = mkEvent alice owner
                  (AOpen repo HubPR nasty ["bug"] (Just nasty) (Just part) (Just coords) 42)
                  (canon repo 7 (Just 3) (Just origin) (Just secret32))
-      parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)
+      parseEvent (renderEvent ev) `shouldBe` Right (Just hubEventVersion, ev)
       -- One clause per line, one clause of each name. Two answers to the same
       -- question is what 'only' refuses, and the format is declared forever.
       case parseTop (renderEvent ev) of
@@ -95,7 +101,7 @@ spec = do
           evs = [ mkEvent alice owner c (canon repo 1 Nothing Nothing Nothing) | c <- contents ]
              <> [ mkEvent alice owner c (canon repo 2 (Just 5) (Just origin) (Just secret32))
                 | c <- take 1 contents ]
-      mapM_ (\ev -> parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)) evs
+      mapM_ (\ev -> parseEvent (renderEvent ev) `shouldBe` Right (Just hubEventVersion, ev)) evs
 
     it "reads back an event standing on every limit the bridge will mint at" $ do
       owner <- kp
@@ -128,14 +134,45 @@ spec = do
                    (AClose part (Just (filled maxInlineBody)) 44)
                    (canon repo 9 Nothing Nothing Nothing)
       oversizedField full `shouldBe` Nothing     -- the bridge would mint this
-      parseEvent (renderEvent biggest) `shouldBe` Right (hubEventVersion, biggest)
-      parseEvent (renderEvent attrs) `shouldBe` Right (hubEventVersion, attrs)
-      parseEvent (renderEvent note) `shouldBe` Right (hubEventVersion, note)
+      parseEvent (renderEvent biggest) `shouldBe` Right (Just hubEventVersion, biggest)
+      parseEvent (renderEvent attrs) `shouldBe` Right (Just hubEventVersion, attrs)
+      parseEvent (renderEvent note) `shouldBe` Right (Just hubEventVersion, note)
       let escaped = mkEvent alice owner
                       (AOpen repo HubIssue (quoted maxTitle) (replicate maxLabels (quoted maxLabel))
                          (Just (quoted maxInlineBody)) Nothing Nothing 45)
                       (canon repo 10 (Just 4) Nothing Nothing)
-      parseEvent (renderEvent escaped) `shouldBe` Right (hubEventVersion, escaped)
+      parseEvent (renderEvent escaped) `shouldBe` Right (Just hubEventVersion, escaped)
+
+    it "keeps a body of quotes cheap to read, and says where it cut" $ do
+      owner <- kp
+      alice <- kp
+      -- The bound the other two do not imply. Un-escaping costs the parser time
+      -- superlinear in how many escapes the file holds, and a 32 KiB body of
+      -- quotes is inside every limit the letter layer sets: the file was honest,
+      -- the writer wrote it, and reading it back took over a minute. So the
+      -- projection is truncated at the budget rather than the file refused.
+      let repo = fst owner
+          quoted n = Text.replicate n "\""
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue (quoted maxTitle)
+                    (replicate maxLabels (quoted maxLabel))
+                    (Just (quoted maxInlineBody)) Nothing Nothing 45)
+                 (canon repo 1 (Just 1) Nothing Nothing)
+          txt = renderEvent ev
+      -- what the writer emits is inside what the reader will read, which is the
+      -- whole point: the alternative is a build that refuses its own files
+      escapesOf txt `shouldSatisfy` (<= maxEscapes)
+      -- and it is not silently shorter: a reader looking at the file is told
+      Text.isInfixOf "projection truncated" txt `shouldBe` True
+      -- the boxes are untouched, so nothing authoritative was lost
+      parseEvent txt `shouldBe` Right (Just hubEventVersion, ev)
+      -- ...and a file somebody else wrote over the bound is refused, rather than
+      -- read at whatever it costs
+      let over = "(hub-event 1)\n(body \"" <> Text.replicate (maxEscapes + 1) "\\n" <> "\")\n"
+      parseEvent over `shouldBe` Left (TooLarge "escapes")
+      -- exactly at the bound is read, so the two sides are the same boundary
+      let atBound = "(hub-event 1)\n(body \"" <> Text.replicate maxEscapes "\\n" <> "\")\n"
+      parseEvent atBound `shouldBe` Left (MissingClause "author-box")
 
     it "keeps the boxes readable under a title written to break the file" $ do
       owner <- kp
@@ -150,7 +187,7 @@ spec = do
                  (AOpen repo HubIssue hostile [] (Just nasty) Nothing Nothing 1)
                  (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
-      parseEvent file `shouldBe` Right (hubEventVersion, ev)
+      parseEvent file `shouldBe` Right (Just hubEventVersion, ev)
       -- Reading the boxes back is not enough to know the file survived: they
       -- are written first, so a title that ends its string early damages only
       -- what comes after it. What has to hold is that the file still says what
@@ -162,6 +199,33 @@ spec = do
           [ t | List _ [SymbolVal "title", LitStrVal t] <- cs ] `shouldBe` [hostile]
           -- and the clause after it is still a clause, not part of the title
           [ () | List _ (SymbolVal "created" : _) <- cs ] `shouldBe` [()]
+
+    it "keeps a control byte out of the terminal and still reads it back" $ do
+      owner <- kp
+      alice <- kp
+      -- A canon file is read with git show and cat far more often than with
+      -- this module. A raw ESC in a title is a terminal escape sequence: it can
+      -- move the cursor, clear the line and rewrite what a maintainer sees while
+      -- they are deciding whether to sign it. Escaped, the same bytes still come
+      -- back byte for byte.
+      let repo = fst owner
+          -- ESC then a hex digit, which is the case a numeric escape gets wrong
+          -- without the empty escape after it, and a bell for good measure.
+          hostile = "t\ESC5b\a\SOH"
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue hostile [] (Just hostile) Nothing Nothing 1)
+                 (canon repo 1 (Just 1) Nothing Nothing)
+          file = renderEvent ev
+      -- nothing a terminal will act on reaches the file
+      file `shouldSatisfy` (not . Text.any (\c -> c < ' ' && c /= '\n'))
+      parseEvent file `shouldBe` Right (Just hubEventVersion, ev)
+      case parseTop file of
+        Left e      -> expectationFailure ("the file does not re-parse: " <> show e)
+        Right forms -> do
+          let cs = concat [ xs | List _ xs@(List{} : _) <- forms ] <> forms
+          -- exactly the bytes that went in: the '5' is its own character, not
+          -- the tail of the escape before it
+          [ t | List _ [SymbolVal "title", LitStrVal t] <- cs ] `shouldBe` [hostile]
 
     it "keeps the boxes readable under an attribute name written to break the file" $ do
       owner <- kp
@@ -176,7 +240,7 @@ spec = do
           ev = mkEvent alice owner (ASet target name "v" 1)
                  (canon repo 1 Nothing Nothing Nothing)
           file = renderEvent ev
-      parseEvent file `shouldBe` Right (hubEventVersion, ev)
+      parseEvent file `shouldBe` Right (Just hubEventVersion, ev)
       case parseTop file of
         Left e      -> expectationFailure ("the file does not re-parse: " <> show e)
         Right forms -> do
@@ -197,7 +261,14 @@ spec = do
                  (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
           bumped = Text.replace "(hub-event 1)" "(hub-event 4294967295)" file
-      parseEvent bumped `shouldBe` Right (4294967295, ev)
+      parseEvent bumped `shouldBe` Right (Just 4294967295, ev)
+      -- ...nor when it is not a number at all. The clause is unsigned, so a
+      -- veto there is a way to make a signed event go missing by editing one
+      -- line of the file it sits in, and missing is harder to notice than wrong.
+      let garbled = Text.replace "(hub-event 1)" "(hub-event tomorrow)" file
+      parseEvent garbled `shouldBe` Right (Nothing, ev)
+      let absent = Text.replace "(hub-event 1)\n" "" file
+      parseEvent absent `shouldBe` Right (Nothing, ev)
       -- what a newer schema can really do is put content in a box this build
       -- cannot decode, and the fold answers that itself, keeping the stamp
       map drWhy (frDropped (foldEvents repo [ev])) `shouldBe` []
@@ -257,7 +328,7 @@ spec = do
                         (AOpen repo HubIssue "t" [] (Just (Text.replicate 500 "(")) Nothing
                            Nothing 1)
                         (canon repo 1 (Just 1) Nothing Nothing)
-      parseEvent (renderEvent bracketed) `shouldBe` Right (hubEventVersion, bracketed)
+      parseEvent (renderEvent bracketed) `shouldBe` Right (Just hubEventVersion, bracketed)
 
     it "refuses a file with a clause missing, twice over, or misshapen" $ do
       owner <- kp
@@ -268,7 +339,9 @@ spec = do
           file = renderEvent ev
           without name = Text.unlines
             [ l | l <- Text.lines file, not (("(" <> name) `Text.isPrefixOf` l) ]
-      parseEvent (without "hub-event") `shouldBe` Left (MissingClause "hub-event")
+      -- ...but not the version clause, which is reported and never obeyed: see
+      -- "reports a file from a newer schema without obeying it".
+      parseEvent (without "hub-event") `shouldBe` Right (Nothing, ev)
       parseEvent (without "author-box") `shouldBe` Left (MissingClause "author-box")
       parseEvent (without "canon-box") `shouldBe` Left (MissingClause "canon-box")
       -- Two answers and no rule for choosing: refuse rather than pick.
@@ -291,7 +364,7 @@ spec = do
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                  (canon repo 1 (Just 1) Nothing Nothing)
           lied = Text.replace "(seq 1)" "(seq 99)" (renderEvent ev)
-      parseEvent lied `shouldBe` Right (hubEventVersion, ev)
+      parseEvent lied `shouldBe` Right (Just hubEventVersion, ev)
       -- and what the fold reads is still the box
       let fr = foldEvents repo [ev]
       frMaxSeq fr `shouldBe` 1
@@ -343,4 +416,4 @@ spec = do
           got = readEventLog files
       crEvents got `shouldBe` [ev 1, ev 3]
       crBad got `shouldBe` [("threads/a/2", BadClause "author-box")]
-      crVersions got `shouldBe` [("threads/a/1",1),("threads/a/3",1)]
+      crVersions got `shouldBe` [("threads/a/1",Just 1),("threads/a/3",Just 1)]

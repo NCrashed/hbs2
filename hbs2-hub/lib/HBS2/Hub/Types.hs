@@ -87,7 +87,8 @@ import Data.ByteString qualified as BS
 import Data.Char (isAsciiLower,isDigit)
 import Data.Char qualified as Char
 import Data.Maybe (isJust)
-import Data.List (nub,sort)
+import Data.List qualified as List
+import Data.List (sort)
 import Data.Text qualified as Text
 import Data.Int (Int64)
 import Data.Word (Word32,Word64)
@@ -109,7 +110,7 @@ type ThreadId = EventId
 -- | WIRE FORMAT, APPEND ONLY: reachable from 'AuthorContent', so its
 -- encoding is part of what an event-id hashes. See the note there.
 data HubKind = HubIssue | HubPR
-  deriving stock (Eq,Show,Generic)
+  deriving stock (Eq,Ord,Show,Generic)
 
 instance Serialise HubKind
 
@@ -128,7 +129,7 @@ data PRCoords = PRCoords
   , prBase      :: Text           -- ^ merge-base the branch forked from
   , prBundle    :: Maybe HashRef  -- ^ bundle-part, delta path only
   }
-  deriving stock (Eq,Show,Generic)
+  deriving stock (Eq,Ord,Show,Generic)
 
 instance Serialise PRCoords
 
@@ -181,7 +182,7 @@ data AuthorContent =
   | ADelegate RepoRef HubKey Word64
     -- | target, maintainer key withdrawn, ts  (owner-key only, PEP-21)
   | ARevoke RepoRef HubKey Word64
-  deriving stock (Eq,Show,Generic)
+  deriving stock (Eq,Ord,Show,Generic)
 
 instance Serialise AuthorContent
 
@@ -268,6 +269,18 @@ data CanonContent = CanonContent
   , ccSeq        :: Word64           -- ^ globally monotonic order weight
   , ccNumber     :: Maybe Word64     -- ^ human #N, on open only
   , ccOrigin     :: Maybe HashRef    -- ^ Tier B letter hash (absent if owner-native)
+    -- | The author box of the REQUEST this event honours, when it honours one.
+    --
+    -- The origin above is the Mailbox message's hash, and a message can be
+    -- rewrapped: the same inner box under a fresh envelope has a new hash, so
+    -- the origin no longer matches and the request is honoured a second time.
+    -- The thread closes, someone reopens it, and anyone holding the old
+    -- ciphertext closes it again, as often as they like. What does not change
+    -- under a rewrap is the box the requester signed, which is what this is.
+    --
+    -- Absent on an owner-native event and on a folded letter, since a folded
+    -- letter IS its own author box and 'ccEventId' already says so.
+  , ccHonours    :: Maybe EventId
   , ccFoldedTs   :: Word64           -- ^ owner clock at fold, Unix epoch milliseconds
     -- | The group secret for this event's encrypted parts, on events that
     -- reference one.
@@ -336,8 +349,14 @@ eventId = authorBoxId . evAuthorBox
 --
 -- A label containing a comma is not representable and is dropped, since
 -- keeping it would split into two labels on the way back.
+--
+-- Deduplicated by grouping the sorted list rather than by 'nub', which is
+-- quadratic: the input is whatever a letter carried, and the letter layer bounds
+-- how many labels it may carry but nothing bounds how many an owner-side caller
+-- passes.
 encodeLabels :: [Text] -> Text
-encodeLabels = Text.intercalate "," . nub . sort . filter validLabel . fmap Text.strip
+encodeLabels =
+  Text.intercalate "," . map head . List.group . sort . filter validLabel . fmap Text.strip
 
 -- | Read back what 'encodeLabels' wrote.
 decodeLabels :: Text -> [Text]

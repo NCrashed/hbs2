@@ -15,6 +15,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
 import Data.ByteString qualified as BS
+import Data.Text qualified as Text
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import Data.Word (Word8,Word64)
 import Test.Hspec
@@ -39,7 +40,7 @@ futureBox (pk,sk) =
     SignedBox p b s -> SignedBox p b s
 
 canon :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
-canon repo sq num eid = CanonContent repo eid sq num Nothing sq Nothing
+canon repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
 
 threadOf :: FoldResult -> ThreadId -> ThreadState
 threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads fr))
@@ -102,7 +103,7 @@ spec = do
           rc = ReplyTo (fst alice) sig
           sent = makeLetter (fst alice) (snd alice) ac rc
       got <- expectRight (parsePayload (letterPayload sent))
-      (_, who, content, chan) <- expectRight (openLetter got)
+      (_, who, content, chan) <- expectRight (openLetterNoPolicy got)
       who `shouldBe` fst alice
       content `shouldBe` ac
       chan `shouldBe` rc
@@ -113,7 +114,7 @@ spec = do
       let ac = AOpen (fst owner) HubPR "a pull request" [] Nothing Nothing (Just coords) 1
           sent = makeLetter (fst alice) (snd alice) ac noReplyChannel
       got <- expectRight (parsePayload (letterPayload sent))
-      (box, _, content, _) <- expectRight (openLetter got)
+      (box, _, content, _) <- expectRight (openLetterNoPolicy got)
       content `shouldBe` ac
       let ev = bless owner 1 (Just 1) box
           fr = foldEvents (fst owner) [ev]
@@ -128,8 +129,8 @@ spec = do
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
           rec' = AckRecord (fst owner) tid (Just 7) "merged" (Just "cafe") Nothing
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      openAck (\_ _ -> True) (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
-      expectLeft NotALetter (openLetter got)
+      openAckNoPolicy (\_ _ -> True) (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
+      expectLeft NotALetter (openLetterNoPolicy got)
 
     it "refuses an ack whose envelope signer is not a maintainer" $ do
       owner <- kp
@@ -140,8 +141,8 @@ spec = do
           rec' = AckRecord (fst owner) tid (Just 7) "closed" Nothing Nothing
           isMaintainer _ k = k == fst owner
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      openAck isMaintainer (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
-      expectLeft UntrustedAck (openAck isMaintainer (EnvelopeSigner (fst mallory)) got)
+      openAckNoPolicy isMaintainer (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
+      expectLeft UntrustedAck (openAckNoPolicy isMaintainer (EnvelopeSigner (fst mallory)) got)
 
     it "refuses an ack about a thread the reader never submitted" $ do
       mine <- kp
@@ -156,8 +157,8 @@ spec = do
           isMaintainer repo k = k == repo
           isMine repo t = repo == fst mine && t == thr
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
-      -- openAck alone takes it
-      openAck isMaintainer (EnvelopeSigner (fst other)) got `shouldBe` Right rec'
+      -- openAckNoPolicy alone takes it
+      openAckNoPolicy isMaintainer (EnvelopeSigner (fst other)) got `shouldBe` Right rec'
       expectLeft UnrelatedAck (openAckFor isMaintainer isMine (EnvelopeSigner (fst other)) got)
       -- ...and the reader's own ack still passes
       let ours = AckRecord (fst mine) thr (Just 1) "closed" Nothing Nothing
@@ -174,7 +175,7 @@ spec = do
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
       got <- expectRight (parsePayload (letterPayload letter))
-      expectLeft NotAnAck (openAck (\_ _ -> True) (EnvelopeSigner (fst alice)) got)
+      expectLeft NotAnAck (openAckNoPolicy (\_ _ -> True) (EnvelopeSigner (fst alice)) got)
       expectLeft NotAnAck
         (openAckFor (\_ _ -> True) (\_ _ -> True) (EnvelopeSigner (fst alice)) got)
 
@@ -187,10 +188,33 @@ spec = do
         Letter box rc -> do
           let SignedBox pk bs sig = box
               forged = MessageData hubMsgVersion (Letter (SignedBox pk (bs <> "x") sig) rc)
-          expectLeft BadInnerSig (openLetter forged)
+          expectLeft BadInnerSig (openLetterNoPolicy forged)
 
     it "rejects garbage bytes" $
       expectLeft MalformedPayload (parsePayload "not cbor at all")
+
+    it "refuses a payload too large to decode, and reads one at the limit" $ do
+      alice <- kp
+      owner <- kp
+      -- These are the first bytes of a stranger's message this build touches:
+      -- a peer relayed them, nothing has verified anything yet, and the decode
+      -- allocates whatever the length prefix says. The bound is derived from
+      -- what this module will produce, so a letter standing on every field
+      -- limit still parses.
+      expectLeft MalformedPayload
+        (parsePayload (BS.replicate (maxPayloadBytes + 1) 0x41))
+      let biggest = AOpen (fst owner) HubPR (Text.replicate maxTitle "x")
+                      (replicate maxLabels (Text.replicate maxLabel "y"))
+                      (Just (Text.replicate maxInlineBody "z")) Nothing
+                      (Just (PRCoords (Just (Text.replicate maxRef "r"))
+                               (Text.replicate maxRef "r") (Text.replicate maxRef "r")
+                               (Text.replicate maxRef "r") (Text.replicate maxRef "r")
+                               Nothing))
+                      1
+          sent = makeLetter (fst alice) (snd alice) biggest noReplyChannel
+      BS.length (letterPayload sent) `shouldSatisfy` (<= maxPayloadBytes)
+      _ <- expectRight (parsePayload (letterPayload sent))
+      pure ()
 
     it "rejects an older version as unsupported, not as v1" $ do
       alice <- kp
@@ -210,7 +234,7 @@ spec = do
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           future = MessageData (hubMsgVersion + 1)
                      (mdBody (makeLetter (fst alice) (snd alice) ac noReplyChannel))
-      expectLeft (UnsupportedVersion (hubMsgVersion + 1)) (openLetter future)
+      expectLeft (UnsupportedVersion (hubMsgVersion + 1)) (openLetterNoPolicy future)
 
     it "rejects valid cbor with trailing garbage" $ do
       alice <- kp
@@ -338,7 +362,7 @@ spec = do
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
           predicted = letterThreadId letter
       -- ...the owner later folds that very inner box...
-      (box, _, _, _) <- expectRight (openLetter letter)
+      (box, _, _, _) <- expectRight (openLetterNoPolicy letter)
       let ev = bless owner 1 (Just 1) box
           fr = foldEvents (fst owner) [ev]
       -- ...and canon agrees with what the sender predicted, with no handshake.
@@ -350,7 +374,7 @@ spec = do
       owner <- kp
       let ac = AOpen (fst owner) HubIssue "from a stranger" [] Nothing Nothing Nothing 1
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
-      (box, _, _, _) <- expectRight (openLetter letter)
+      (box, _, _, _) <- expectRight (openLetterNoPolicy letter)
       let ev = bless owner 1 (Just 1) box
           fr = foldEvents (fst owner) [ev]
           t = threadOf fr (eventId ev)
@@ -391,8 +415,8 @@ spec = do
       let ac = AOpen (fst owner) HubIssue "with attachments" ["bug","needs triage"]
                      (Just "inline") (Just part) Nothing 7
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
-      (box, _, _, _) <- expectRight (openLetter letter)
-      let cc eid = CanonContent (fst owner) eid 1 (Just 1) (Just origin) 100 (Just secret32)
+      (box, _, _, _) <- expectRight (openLetterNoPolicy letter)
+      let cc eid = CanonContent (fst owner) eid 1 (Just 1) (Just origin) Nothing 100 (Just secret32)
           ev = Event box (signCanon (fst owner) (snd owner) (cc (authorBoxId box)))
           fr = foldEvents (fst owner) [ev]
           t = threadOf fr (eventId ev)
@@ -418,13 +442,13 @@ spec = do
                      (makeLetter (fst alice) (snd alice) acOpen noReplyChannel))) coords2 2
           lOpen = makeLetter (fst alice) (snd alice) acOpen noReplyChannel
           lRev  = makeLetter (fst alice) (snd alice) acRev noReplyChannel
-      (obox,_,_,_) <- expectRight (openLetter lOpen)
-      (rbox,_,_,_) <- expectRight (openLetter lRev)
+      (obox,_,_,_) <- expectRight (openLetterNoPolicy lOpen)
+      (rbox,_,_,_) <- expectRight (openLetterNoPolicy lRev)
       -- Each message has its own per-message group key, so each bundle has
       -- its own secret; carrying the opening one forward would hand a
       -- reader the wrong key for the new bundle.
       let mk s sq box = Event box (signCanon (fst owner) (snd owner)
-                          (CanonContent (fst owner) (authorBoxId box) sq Nothing Nothing sq (Just s)))
+                          (CanonContent (fst owner) (authorBoxId box) sq Nothing Nothing Nothing sq (Just s)))
           fr = foldEvents (fst owner) [mk secretA 1 obox, mk secretB 2 rbox]
           t = threadOf fr (eventId (mk secretA 1 obox))
       fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just b2)
@@ -478,8 +502,8 @@ spec = do
           -- bob read the thread-id from public canon and replies to it
           reply = makeLetter (fst bob) (snd bob)
                     (AComment tid Nothing (Just "me too") Nothing 2) noReplyChannel
-      (obox, _, _, _) <- expectRight (openLetter opening)
-      (rbox, _, _, _) <- expectRight (openLetter reply)
+      (obox, _, _, _) <- expectRight (openLetterNoPolicy opening)
+      (rbox, _, _, _) <- expectRight (openLetterNoPolicy reply)
       let fr = foldEvents (fst owner) [bless owner 1 (Just 1) obox, bless owner 2 Nothing rbox]
           t = threadOf fr tid
       map cAuthor (tsComments t) `shouldBe` [fst bob]

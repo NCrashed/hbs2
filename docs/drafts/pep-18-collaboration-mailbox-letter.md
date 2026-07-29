@@ -178,6 +178,15 @@ encrypted tree) and the inline body left empty. The limit is measured in
 BYTES of UTF-8, not in characters, because what it bounds is what every peer
 relaying the mailbox pays.
 
+Payload size. A reader bounds the whole payload BEFORE decoding it, and this is
+a different rule from the field limits above: those are triage policy applied to
+a letter that has already been decoded, whereas this one stands between "a peer
+relayed some bytes" and "the CBOR decoder allocates whatever the length prefix
+says". Nothing has been verified at that point, so the bound cannot depend on
+anything inside. It is derived from the field limits rather than chosen beside
+them, so a letter standing on every one of them still parses, and a payload over
+it is refused as malformed.
+
 Part size. That rule pushes everything substantial into an attachment, so a
 limit there is what keeps the whole thing bounded: a part a hub folds ends up
 referenced from inside a signed author box, which means every clone that wants

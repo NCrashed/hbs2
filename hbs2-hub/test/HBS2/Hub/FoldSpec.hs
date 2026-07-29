@@ -36,7 +36,7 @@ kp = do
 
 -- A canon box builder: seq, optional number, folded-at time.
 canonAt :: RepoRef -> Word64 -> Maybe Word64 -> Word64 -> EventId -> CanonContent
-canonAt repo sq num folded eid = CanonContent repo eid sq num Nothing folded Nothing
+canonAt repo sq num folded eid = CanonContent repo eid sq num Nothing Nothing folded Nothing
 
 canon :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
 canon repo sq num = canonAt repo sq num sq
@@ -133,6 +133,20 @@ futureBox (pk,sk) =
   -- the payload inside the tag, not the tag.
   signBare (pk,sk) (Domained (domainOf (Nothing @AuthorContent)) (12345 :: Word64))
 
+-- An event from a newer schema: an author box this build cannot decode, and a
+-- canon box that blesses that box's own id.
+--
+-- The binding matters even here, and especially here. The event-id is the hash
+-- of the serialised author box, so it is computable without decoding the box,
+-- and a stamp counted without checking it would let anyone lift a canon box off
+-- one event, staple it to an undecodable box of their own, and spend the seq
+-- it names.
+ghostEvent :: KP -> KP -> (EventId -> CanonContent) -> Event
+ghostEvent alice (cpk,csk) mkCanon =
+  let abox = futureBox alice
+      eid  = HashRef (hashObject (serialise abox))
+  in Event abox (signCanon cpk csk (mkCanon eid))
+
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
 -- only that; telling the parts secret from the message secret is what the
 -- bridge's 'poMessage' is for.
@@ -159,10 +173,10 @@ spec = do
           eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice owner
                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 2)
-                    (\e -> CanonContent repo e 2 (Just 1) (Just origin) 2 (Just secret32))
+                    (\e -> CanonContent repo e 2 (Just 1) (Just origin) Nothing 2 (Just secret32))
           tid = eventId eOpen
           eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
-                   (\e -> CanonContent repo e 3 Nothing (Just origin) 3 Nothing)
+                   (\e -> CanonContent repo e 3 Nothing (Just origin) Nothing 3 Nothing)
           eBad = mkEvent alice alice (AComment tid Nothing (Just "unblessed") Nothing 4)
                    (canon repo 4 Nothing)
           eRed = mkEvent owner owner (ARedact repo (eventId eCmt) 5) (canon repo 5 Nothing)
@@ -286,14 +300,14 @@ spec = do
       -- only place they can be acted on.
       let repo = fst owner
           o1 = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
-                 (\e -> CanonContent repo e 1 (Just 5) (Just origin) 5000 Nothing)
+                 (\e -> CanonContent repo e 1 (Just 5) (Just origin) Nothing 5000 Nothing)
           -- number goes backwards, folded-ts goes backwards, and the same
           -- letter is folded a second time
           o2 = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
-                 (\e -> CanonContent repo e 2 (Just 3) (Just origin) 4000 Nothing)
+                 (\e -> CanonContent repo e 2 (Just 3) (Just origin) Nothing 4000 Nothing)
           -- ...and this one names an encrypted part with no key to it
           o3 = mkEvent alice owner (AOpen repo HubIssue "c" [] Nothing (Just part) Nothing 3)
-                 (\e -> CanonContent repo e 3 (Just 9) Nothing 6000 Nothing)
+                 (\e -> CanonContent repo e 3 (Just 9) Nothing Nothing 6000 Nothing)
           -- an unnormalized multi-valued attribute: the same two labels in
           -- another order are other bytes and so another event-id
           o4 = mkEvent owner owner (ASet (eventId o1) "labels" "ui,bug" 4) (canonAt repo 4 Nothing 7000)
@@ -332,9 +346,9 @@ spec = do
           ePR = mkEvent alice owner
                   (AOpen repo HubPR "pr" [] Nothing (Just body)
                      (Just coords { prBundle = Just bundle }) 1)
-                  (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
+                  (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
           eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just cmt) 2)
-                 (\e -> CanonContent repo e 2 Nothing Nothing 2 (Just secret32))
+                 (\e -> CanonContent repo e 2 Nothing Nothing Nothing 2 (Just secret32))
           fr = foldEvents repo [ePR, eC]
       frDropped fr `shouldBe` []
       frParts fr `shouldBe` HS.fromList [body, cmt, bundle]
@@ -411,8 +425,8 @@ spec = do
         "83001a4842324184078200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a795726605"
       hx (Domained author (AComment h (Just h) (Just "hi") Nothing 7)) `shouldBe`
         "83001a4842324186018200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266816268698007"
-      hx (Domained canonD (CanonContent key h 3 (Just 9) (Just h) 11 (Nothing :: Maybe PartSecret))) `shouldBe`
-        "83001a4842324388008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a79572660b80"
+      hx (Domained canonD (CanonContent key h 3 (Just 9) (Just h) Nothing 11 (Nothing :: Maybe PartSecret))) `shouldBe`
+        "83001a4842324389008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266800b80"
       -- A fully populated open with full coordinates: the two records most
       -- likely to gain a field, and the one place PRCoords is pinned at all.
       hx (Domained author (AOpen key HubPR "title" ["bug","ui"] (Just "body") (Just h) (Just prc) 42))
@@ -453,9 +467,7 @@ spec = do
       -- build reading the result would find two events there with every LWW
       -- attribute between them settled by a hash instead of by time.
       let repo = fst owner
-          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon repo 9 (Just 3))
-          ev = Event (futureBox alice) (evCanonBox real)
+          ev = ghostEvent alice owner (canon repo 9 (Just 3))
           fr = foldEvents repo [ev]
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       -- the seq, and with it the clock; not the number, which is spent on
@@ -468,10 +480,20 @@ spec = do
       frLastFolded fr `shouldBe` 0
       -- ...and nothing is spent when the canon box is not readable either:
       -- then there is no stamp, only bytes claiming to be one.
-      let unreadable = Event (futureBox alice) (mangleSig (evCanonBox real))
+      let unreadable = Event (evAuthorBox ev) (mangleSig (evCanonBox ev))
           fr2 = foldEvents repo [unreadable]
       map drWhy (frDropped fr2) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       cursorFrom fr2 `shouldBe` CanonCursor 1 1
+      -- ...nor when the stamp is real but blesses another event: a canon box
+      -- lifted off a good event and stapled to an undecodable box of one's own
+      -- is the cheapest way to spend a seq, since the id is the hash of the
+      -- author box and cannot be forged to match.
+      let real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                         (canon repo 9 (Just 3))
+          stapled = Event (futureBox alice) (evCanonBox real)
+          fr3 = foldEvents repo [stapled]
+      map drWhy (frDropped fr3) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      cursorFrom fr3 `shouldBe` CanonCursor 1 1
 
     it "counts a dropped event's stamp so it cannot be handed out twice" $ do
       owner <- kp
@@ -543,9 +565,7 @@ spec = do
       -- Silence about the collision is a different thing, and not wanted: the
       -- number was seen, so handing it out again is reportable.
       let repo = fst owner
-          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                   (canon repo 1 (Just 3))
-          ghost = Event (futureBox alice) (evCanonBox real)
+          ghost = ghostEvent alice owner (canon repo 1 (Just 3))
           mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
                    (canon repo 2 (Just 3))
           fr = foldEvents repo [ghost, mine]
@@ -588,9 +608,7 @@ spec = do
           repoC = fst ownerC
           delegB = mkEvent ownerB ownerB (ADelegate repoB (fst bob) 1)
                      (canon repoB 1 Nothing)
-          fromC = mkEvent alice bob (AComment (eventId delegB) Nothing Nothing Nothing 2)
-                    (canon repoC 5000 (Just 9))
-          ghost = Event (futureBox alice) (evCanonBox fromC)
+          ghost = ghostEvent alice bob (canon repoC 5000 (Just 9))
           fr = foldEvents repoB [delegB, ghost]
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       cursorFrom fr `shouldBe` CanonCursor 2 1
@@ -672,9 +690,7 @@ spec = do
       -- in its canon box turned the next honest open into a reported anomaly,
       -- with the honest maintainer's key printed beside it.
       let repo = fst owner
-          real = mkEvent alice mallory (AOpen repo HubIssue "x" [] Nothing Nothing Nothing 1)
-                   (canon repo 1 (Just 7))
-          ghost = Event (futureBox alice) (evCanonBox real)
+          ghost = ghostEvent alice mallory (canon repo 1 (Just 7))
           mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
                    (canon repo 2 (Just 7))
           fr = foldEvents repo [ghost, mine]
@@ -815,7 +831,7 @@ spec = do
       -- put in public canon for an event with nothing to unlock.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1)
-                 (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
+                 (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe` [SecretWithoutPart]
@@ -853,7 +869,7 @@ spec = do
                       (decodeStrict (LBS.toStrict (serialise ("abc" :: ByteString))))
           ev = mkEvent alice owner
                  (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1)
-                 (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just stunted))
+                 (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just stunted))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe` [UnusablePartSecret]
@@ -954,13 +970,13 @@ spec = do
       let repo = fst owner
           ePR = mkEvent alice owner
                   (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords { prBundle = Just bundle }) 1)
-                  (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
+                  (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
           tid = eventId ePR
           eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon repo 2 Nothing)
           -- a revise after the merge is still admitted: PEP-19 has no
           -- terminal state, and the coordinates are the author's to update
           eRev = mkEvent alice owner (ARevise tid coords { prSourceTip = "cccc" } 3)
-                   (\e -> CanonContent repo e 3 Nothing Nothing 3 Nothing)
+                   (\e -> CanonContent repo e 3 Nothing Nothing Nothing 3 Nothing)
           eReopen = mkEvent owner owner (AReopen tid Nothing 4) (canon repo 4 Nothing)
           eRed = mkEvent owner owner (ARedact repo tid 5) (canon repo 5 Nothing)
           fr = foldEvents repo [ePR, eMerge, eRev, eReopen, eRed]

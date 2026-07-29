@@ -9,7 +9,7 @@ import HBS2.Hub.Canon
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
-import HBS2.Data.Types.SignedBox (SignedBox(..))
+import HBS2.Data.Types.SignedBox (SignedBox(..),makeSignedBox)
 
 import Control.Monad ((<=<))
 import Data.ByteString qualified as BS
@@ -67,6 +67,13 @@ data Step =
     -- reach the view a folder mints from, or one file from anyone who can
     -- write to a clone leaves the owner unable to mint even the revoke.
   | StepIntruder Word64
+    -- | An event from a newer schema: an author box this build cannot decode,
+    -- blessed by the owner. The extension path PEP-19 designs for, and the
+    -- opposite of an intruder in the one way that matters: its stamp counts, so
+    -- the seq it names is spent and the next mint has to skip it. Nothing else
+    -- in this script exercises 'ghostStamp' at all, and the ghost path is where
+    -- a spend happens on an event the fold cannot read a word of.
+  | StepGhost Word64
     -- | Throw the accumulated view away and rebuild it from canon, which is
     -- what a restart is. Everything after this mints from the rebuilt one.
   | StepRestart
@@ -101,6 +108,7 @@ instance Arbitrary Step where
     , (1, StepFromDenied <$> genTs)
     , (1, StepCorrupt <$> genTs)
     , (1, StepIntruder <$> genTs)
+    , (1, StepGhost <$> genTs)
     , (2, pure StepRestart)
     ]
 
@@ -126,6 +134,7 @@ instance Arbitrary Step where
     StepFromDenied ts   -> [StepFromDenied ts' | ts' <- shrinkTs ts]
     StepCorrupt ts      -> [StepCorrupt ts' | ts' <- shrinkTs ts]
     StepIntruder ts     -> [StepIntruder ts' | ts' <- shrinkTs ts]
+    StepGhost ts        -> [StepGhost ts' | ts' <- shrinkTs ts]
     StepRestart         -> []
     StepRewrapped ts k  -> [StepRewrapped ts' k | ts' <- shrinkTs ts]
                         <> [StepRewrapped ts HubIssue | k /= HubIssue]
@@ -188,6 +197,7 @@ data Tag =
   | TIntruder        -- ^ a stranger's event was put in the tree by hand
   | TRestart         -- ^ the view was rebuilt from canon mid-run
   | TBigRefused      -- ^ an oversized body was refused rather than minted
+  | TGhost           -- ^ an event from a newer schema spent a seq
   deriving stock (Eq,Show)
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
@@ -258,6 +268,9 @@ data St = St
     -- Events nobody authorized, written straight into the tree. They are canon
     -- in the sense that they are in it, and in no other sense.
   , stIntruders :: [EventId]
+    -- Events from a newer schema, blessed by the owner: dropped like an
+    -- intruder's and spent unlike one.
+  , stGhosts :: [(EventId, HubKey, Word64)]
   }
 
 -- | What one run produced.
@@ -270,6 +283,9 @@ data Run = Run
     -- | Every event a stranger wrote into the tree was refused, and refused
     -- for being unauthorized rather than for anything about its content.
   , rIntruded :: Bool
+    -- | Every ghost was dropped for being unreadable rather than for anything
+    -- else, and its seq was spent all the same.
+  , rGhosted :: Bool
     -- | Re-folding the same canon in another order gives the same everything.
     -- Determinism had three hand-built logs of five events and no property, so
     -- the sort keys were exercised only where somebody thought to.
@@ -307,6 +323,7 @@ spec =
         monitor (cover 5 (TDeniedRefused `elem` rTags r) "turned away a deny-listed author")
         monitor (cover 5 (TCorruptRefused `elem` rTags r) "turned away a forged letter")
         monitor (cover 5 (TIntruder `elem` rTags r) "folded canon a stranger wrote into")
+        monitor (cover 5 (TGhost `elem` rTags r) "spent the seq of an event from a newer schema")
         monitor (cover 5 (TRestart `elem` rTags r) "rebuilt the view from canon mid-run")
         monitor (cover 5 (TBigRefused `elem` rTags r) "refused an oversized body")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
@@ -335,6 +352,7 @@ spec =
               , ("one letter produced two canon events", rOnePer r)
               , ("a mint against a stale view would not have collided", rStaleDup r)
               , ("an intruder's event was not refused as unauthorized", rIntruded r)
+              , ("a ghost was not dropped as unreadable, or its seq was not spent", rGhosted r)
               , ("the fold is not independent of the order it reads", rOrderFree r)
               ]
         monitor (counterexample (unlines [ "FAILED: " <> name | (name,ok) <- invariants, not ok ]))
@@ -367,7 +385,7 @@ runSteps steps = do
         , castMallory = mallory
         , castDelegKey = fst deleg
         }
-      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] []
+      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] [] []
       st  = foldl' (\s sp -> step cast s { stStep = stStep s + 1 } sp) st0 steps
       fr  = foldEvents repo (stEvents st)
       -- Everything a fold produces, so that a field added later is covered
@@ -378,15 +396,15 @@ runSteps steps = do
       same f = whole f == whole (foldEvents repo (rotate (stEvents st)))
       rotate [] = []
       rotate (x:xs) = xs <> [x]
-      intruders = HS.fromList (stIntruders st)
-      -- One canon event per letter: count the origins the events carry. The
-      -- intruders' own events are excluded from both of these: they are in the
-      -- tree, so the fold must see them, and they are nobody's letter.
-      mine  = [ e | e <- stEvents st, not (HS.member (eventId e) intruders) ]
+      -- Both are in the tree, so the fold must see them, and neither is anyone's
+      -- letter: an intruder wrote their own file, and a ghost is a schema this
+      -- build cannot read.
+      notMine = HS.fromList (stIntruders st <> [ e | (e,_,_) <- stGhosts st ])
+      mine  = [ e | e <- stEvents st, not (HS.member (eventId e) notMine) ]
       origs = mapMaybe (ccOrigin <=< canonOf) mine
       live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) mine)
   pure Run
-    { rDropped  = [ d | d <- frDropped fr, not (HS.member (drEvent d) intruders) ]
+    { rDropped  = [ d | d <- frDropped fr, not (HS.member (drEvent d) notMine) ]
     , rAnoms    = frAnomalies fr
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
@@ -395,16 +413,52 @@ runSteps steps = do
     , rIntruded = all (\eid -> [UnauthorizedCanon] ==
                                  [ drWhy d | d <- frDropped fr, drEvent d == eid ])
                       (stIntruders st)
+    , rGhosted  = all (ghostSpent fr) (stGhosts st)
     , rTags     = stTags st
     , rRefused  = stRefused st
     }
+  where
+    -- A ghost is dropped for the one reason it can be dropped for, naming the
+    -- author this build could not read, and its seq is spent all the same. That
+    -- pairing IS the ghost rule, and either half alone would pass for the wrong
+    -- reason: a build that refused to count the stamp would mint into that seq,
+    -- and the newer build reading the result would find two events there with
+    -- every LWW attribute between them settled by a hash instead of by time.
+    ghostSpent fr (eid, author, sq) =
+      [ drWhy d | d <- frDropped fr, drEvent d == eid ]
+        == [UndecodableAuthor author Undecodable]
+      && frMaxSeq fr >= sq
 
--- | The folder's clock, deliberately jumping around: the steps hand it whatever
--- timestamp they were generated with. A real folder's clock can be corrected
--- backwards, and the bridge clamps the stamp to what canon already holds, so a
--- monotonic harness clock here would be testing the harness.
+-- | The folder's clock, deliberately jumping around. A real folder's clock can
+-- be corrected backwards, and the bridge clamps the stamp to what canon already
+-- holds, so a monotonic harness clock here would be testing the harness.
+--
+-- The old walk was seven values a second apart, which exercised the clamp and
+-- nothing else: everything it produced was so far from 'maxFoldedTs' that the
+-- ceiling, and the interaction between the ceiling and the honour path's clock
+-- nudge, could not be reached at all. This one visits four regimes on purpose:
+-- a plausible epoch, a clock corrected backwards, one at the very bottom of the
+-- range, and one close enough to the ceiling that a nudge past it is one step
+-- away.
+--
+-- Not the ceiling itself: 'stampFor' carries the maximum forward, so a single
+-- visit there would pin every later stamp in the run to it and the rest of the
+-- script would fold under one frozen clock.
 clockOf :: St -> Word64
-clockOf st = fromIntegral (stStep st `mod` 7) * 1000
+clockOf st = clocks !! (stStep st `mod` length clocks)
+
+clocks :: [Word64]
+clocks =
+  [ 1700000000000
+  , 1
+  , 1700000000003
+  , 1699999999000        -- corrected backwards, below what canon holds
+  , maxFoldedTs - 4      -- one nudge short of the ceiling
+  , 1700000000007
+  , 2
+  , maxFoldedTs - 1      -- and one where the nudge cannot fit
+  , 1700000000011
+  ]
 
 step :: Cast -> St -> Step -> St
 step cast st = \case
@@ -571,7 +625,7 @@ step cast st = \case
                -- Distinct per step, so that two intruders are two files rather
                -- than one file written twice.
                (AComment thr Nothing (Just (Text.pack (show (stStep st)))) Nothing ts)
-               (\e -> CanonContent (castRepo cast) e (maxBound - 1) Nothing Nothing ts Nothing)
+               (\e -> CanonContent (castRepo cast) e (maxBound - 1) Nothing Nothing Nothing ts Nothing)
     in st { stEvents = ev : stEvents st
           , stIntruders = eventId ev : stIntruders st
           , stTags = TIntruder : stTags st
@@ -581,6 +635,40 @@ step cast st = \case
   -- view comes back out of the fold. Every later step mints from that one, so a
   -- field the accumulated view keeps and the rebuilt one does not shows up as a
   -- refusal or a bad mint rather than as a quiet difference at the end.
+  -- Blessed by the owner, so unlike an intruder the stamp counts and the seq is
+  -- spent. The view is rebuilt in the same step, which is what a folder does
+  -- when a file it did not write turns up in the tree: without it the next mint
+  -- would land on the spent seq, and the collision would be the harness's doing
+  -- rather than the bridge's.
+  StepGhost ts ->
+    let (opk,osk) = tcCanon (castOwner cast)
+        (apk,ask) = castAlice cast
+        -- A correctly signed box whose content this build cannot decode, which
+        -- is what an op added by a newer schema looks like from here. Tagged
+        -- with the author domain, as a real newer sender's box is: domains are
+        -- never renumbered, so what a newer schema changes is the payload
+        -- inside the tag, not the tag. SignedBox is phantom in its payload type,
+        -- so signing another type and re-tagging it reproduces that exactly.
+        abox :: SignedBox AuthorContent HubScheme
+        abox = case makeSignedBox @HubScheme apk ask
+                      (Domained (domainOf (Nothing @AuthorContent))
+                         (fromIntegral (stStep st) :: Word64)) of
+                 SignedBox p b s -> SignedBox p b s
+        -- The id is the hash of the author box, which is computable without
+        -- decoding it. Binding the canon box to it is what makes this a ghost
+        -- rather than a stamp stapled to somebody else's bytes.
+        eid = authorBoxId abox
+        sq = ccrNextSeq (cvCursor (stView st))
+        cbox = signCanon opk osk
+                 (CanonContent (castRepo cast) eid sq Nothing Nothing Nothing ts Nothing)
+        ev = Event abox cbox
+        events' = ev : stEvents st
+    in st { stEvents = events'
+          , stView = viewOf (foldEvents (castRepo cast) events')
+          , stGhosts = (eid, apk, sq) : stGhosts st
+          , stTags = TGhost : stTags st
+          }
+
   StepRestart ->
     let rebuilt = viewOf (foldEvents (castRepo cast) (stEvents st))
     in if rebuilt /= stView st && null (stIntruders st)
@@ -650,7 +738,7 @@ step cast st = \case
     checked acc
       | Just (acSeq acc) /= fmap ccSeq (canonOf (acEvent acc)) =
           error ("acSeq disagrees with the canon box: " <> show acc)
-      | parseEvent (renderEvent (acEvent acc)) /= Right (hubEventVersion, acEvent acc) =
+      | parseEvent (renderEvent (acEvent acc)) /= Right (Just hubEventVersion, acEvent acc) =
           error ("event does not survive the canon file: " <> show acc)
       | otherwise = acc
 

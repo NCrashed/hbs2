@@ -166,9 +166,22 @@ floating as bare canon fields.
 Canon box, who blessed it and where it sits. A `SignedBox` over the fields
 the owner assigns at fold time, which the author could not have known: the
 event-id (the author box's content hash), the canonical order weight `seq`,
-the human issue `number`, the folded-at time, the `origin` letter hash, and,
-for events with encrypted attachments, the message group secret (see
-Attachments in public canon). Signed by an authorized canon key.
+the human issue `number`, the folded-at time, the `origin` letter hash, the
+`honours` request box, and, for events with encrypted attachments, the message
+group secret (see Attachments in public canon). Signed by an authorized canon
+key.
+
+Honouring a request re-authors it under the owner's clock, which means two
+different requests honoured on one tick can produce identical bytes, and so one
+event-id: the declared time is overwritten and the signature is deterministic. A
+close, a reopen and a close again on one tick do the same. A loop that reads its
+clock once per batch is the ordinary implementation and not a bug to report, so
+the honour path walks the stamp forward a millisecond at a time until the bytes
+are new, up to a small bound. The alternative was refusing, which meant either
+deleting a letter whose request was never carried out or stopping the loop over
+a millisecond. What it will not do is walk past the `folded-ts` ceiling: at the
+top of the range there is no millisecond to move to, and minting one past it
+would produce an event the fold drops.
 
 Threading needs no canon-box normalization: a thread id and a reply-to are
 canonical event-ids, and an event-id is the hash of an author box, which the
@@ -208,9 +221,19 @@ PR coordinates are a product, in this order: `source`, `source-ref`,
 
 The canon payload is frozen too, and it is the one it is easiest to forget,
 since no event-id covers it: every canon signature ever made does. Its fields
-are `target`, `event-id`, `seq`, `number`, `origin`, `folded-ts`, `part-secret`,
-with `number`, `origin` and `part-secret` optional. The `part-secret` is raw key
-bytes, not a serialised key type, for the reason given under Attachments.
+are `target`, `event-id`, `seq`, `number`, `origin`, `honours`, `folded-ts`,
+`part-secret`, with `number`, `origin`, `honours` and `part-secret` optional. The
+`part-secret` is raw key bytes, not a serialised key type, for the reason given
+under Attachments.
+
+`honours` is the author box of the request this event carries out, when it
+carries one out, and it is the identity a rewrap cannot change. `origin` names
+the message, and re-encrypting the identical request to the same mailbox
+produces a new message with a new hash; the box inside is signed and is the same
+in every envelope. Without `honours` in canon, a restart forgets which requests
+have already been honoured in the only way that survives a rewrap, and anyone
+holding the old ciphertext could have the same close applied again on every
+resend. See "Replay, rewrap, and deduplication".
 
 The `target` there is the repository the BLESSING is for, and it is first
 because it is the first thing a reader has to ask. The author box saying which
@@ -350,6 +373,9 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   owner-authored event that honours a
                                    ;   request (the letter is its provenance).
                                    ;   Absent only when nothing prompted it.
+(honours   <event-id>)             ; on an event that carries out a request: the
+                                   ;   author box the requester signed. Survives
+                                   ;   a rewrap, which (origin) does not.
 (folded-ts <word64>)               ; Unix epoch milliseconds, UTC, owner's clock at fold
                                    ;   refused above 4102444800000 (2100-01-01Z):
                                    ;   the next stamp is clamped to be no lower
@@ -394,10 +420,31 @@ quote does not spoil a display line, it ends the string early and everything
 after it is re-read as whatever it happens to look like, in a file that has two
 valid signatures in it and can never be rewritten.
 
-A reader un-escapes the same five and no others, which is the half of that rule
-a writer cannot state alone: escaping is only a round trip if both sides agree
-on the alphabet. Anything else after a backslash is malformed rather than
-interesting, and a reader is free to refuse the file.
+Every other control character is written `\xNN` followed by the empty escape
+`\&`. That one is not about parsing, it is about the terminal: a canon file is
+read with `git show` and `cat` far more often than with a parser, and a raw ESC
+in a body is a terminal escape sequence, so a title could reposition the cursor
+and rewrite what a maintainer sees while they decide whether to sign it. The
+trailing `\&` is load-bearing: a numeric escape swallows any hex digit that
+follows it, so ESC followed by `5` would otherwise read back as one character.
+
+A reader un-escapes those and no others, which is the half of the rule a writer
+cannot state alone: escaping is only a round trip if both sides agree on the
+alphabet. Anything else after a backslash is malformed rather than interesting,
+and a reader is free to refuse the file.
+
+A writer bounds how many escape sequences it emits, and truncates the projection
+when it would exceed the bound. Un-escaping costs a parser time superlinear in
+how many escapes a file holds: on a file shaped like a real event it is 0.06 s
+at 512 escapes, 0.19 s at 1024, 0.76 s at 2048, 3.0 s at 4096, and at the file
+size bound, where every other byte of the body is a backslash, eighty seconds.
+That last file is HONEST: a 32 KiB body is inside every limit PEP-18 sets, and a
+body of newlines is what a code block is. So the bound cannot be a refusal on
+the reading side alone; the writer has to stay under it, and it can, because the
+projection is never read back and the boxes above it carry the content in full.
+A truncated projection says so, in a marker that carries no escape of its own.
+The bound is 1024 escapes per file, which is where the measured cost crosses two
+tenths of a second and which a fold pays once per event.
 
 Every hash-shaped field an event carries has to be a hash: a thread, a
 `reply-to`, a `body-part`, a `bundle-part`, a redact target. A hash reference is
@@ -411,6 +458,12 @@ again, with the bytes inside the signature and inside the event-id where nothing
 can reach them. It is one rule over all of them rather than a list of
 exceptions, and the box-size budget below assumes it: four kilobytes of slack
 covers a handful of hashes only while a hash is a hash.
+
+The same rule covers the repository an op names (`target`, on open, redact,
+delegate and revoke), because a key is a byte string on the wire too. Those four
+are the ops whose target the fold compares against the owner, so a wrong-length
+one merely fails to match there, which is a drop and not a refusal, and by then
+the file is already written.
 
 The bridge refuses to mint an event whose text is over a limit, and canon does
 not care what those limits are: they are triage policy, so two hubs may draw
@@ -451,8 +504,12 @@ stop it counting anything after that. Counting lines as well as brackets
 double-counts an honest file, which a bound can afford: a real event is a dozen
 or so lines against a limit of a hundred and twenty-eight.
 
-And all three are DERIVED from the limits the bridge mints under, not chosen
-beside them. A reader bound picked on its own is a reader that refuses what its
+The third bound is the escape count, and it is the one the other two do not
+imply: see "Strings are escaped so that they read back" above for the
+measurements and for why the writer, not only the reader, has to respect it.
+
+And the size bounds are DERIVED from the limits the bridge mints under, not
+chosen beside them. A reader bound picked on its own is a reader that refuses what its
 own writer produced, which is what happened here: with a token capped at 4 KiB
 the bridge would mint the 32 KiB inline body this document promises, write the
 file, and answer "too large" on reading it back. The derivation is: a box is the
@@ -474,7 +531,10 @@ file. Not the tree, because the clause is unsigned text and one line saying
 clone, permanently and for free. And not the file either: the two boxes are
 self-describing CBOR, so a version this reader does not know does not make them
 unreadable, and refusing over it would throw away a `seq` the reader could see
-perfectly well. What a newer schema can really do is put content inside a box
+perfectly well. The same holds when the clause is missing or is not a number at
+all: the file is read and the version is reported as unknown. A veto there is a
+way to make a signed event go missing by editing one unsigned line of the file
+it sits in, and missing is harder to notice than wrong. What a newer schema can really do is put content inside a box
 that an older build cannot decode, and the fold answers that itself, by dropping
 the event and keeping its stamp. The tree's own `(hub-meta N)` is the one that
 governs everything, because it names the admission rules that produced the
@@ -574,6 +634,15 @@ reuses every existing object, which is where the git3 dedup pays off.
 `index/number.sexp` is a convenience map from human `#N` to `thread-id`; it
 is regenerable from the surviving `open` events (which compaction never
 drops, see Retention) and is never trusted over them.
+
+Its reader has bounds of its own, and they are not the event file's: the index
+has an entry per thread, so an event's clause bound would cap a repository at
+128 issues, and a reader hands the parser one line at a time rather than the
+whole file, so the cost stays linear. A writer stops at the same bounds instead
+of writing past them, since a file this build refuses to read back is worse than
+a shorter one: a truncated index is a prefix of the full one and is still
+correct for every number it holds, and refusing an index is not refusing the
+repository.
 
 There is no materialized issue view stored in the tree. Canon is the event
 log; the view is recomputed (see Read contract). This keeps canon minimal
@@ -967,9 +1036,16 @@ an origin in canon (that is how a triage loop re-reading a mailbox after a
 restart avoids folding the same letter twice). A letter that produced two
 events would make that check ambiguous, since only one of the two could
 carry the origin. Honouring a request (`close`, `reopen`, `label`) is the
-same rule: the owner-authored event that results carries the requesting
-letter's hash as its origin, and a second honour of the same letter is
-refused. A
+same rule and one more: the owner-authored event that results carries the
+requesting letter's hash as its `origin` AND the requester's own author box as
+its `honours`, and a second honour is refused on either. Both are needed because
+they catch different resends. The message hash catches a triage loop re-reading
+the mailbox after a restart. The box catches a rewrap: re-encrypting the
+identical request produces a new message with a new hash, so the origin does not
+see it, and honouring re-authors the content under the owner's clock, so the
+event-id does not either. Only the second is an attack, and without it anyone
+who kept the ciphertext could have the same close applied again on every resend,
+forever. A
 PEP-18 letter carries a nested inner `SignedBox` over its plaintext payload
 (distinct from the Mailbox transport signature, which covers the encrypted
 envelope); that inner box is what the owner extracts on decrypt and stores as

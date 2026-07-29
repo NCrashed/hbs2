@@ -1290,11 +1290,14 @@ spec = do
       frDropped (foldEvents repo (map acEvent [aDel,aOpen,aClose])) `shouldBe` []
       aRev <- expectRight
         (ownerEvent (ctxOf owner) (acView aClose) 4 noOwnAttachments (ARevoke repo (fst bob) 4))
+      -- a second request, because the first one has been honoured and a
+      -- request is honoured once whatever envelope carries it
+      let ask2 = letter (AReopen (scopeOf aOpen) Nothing 5)
       expectErr UnauthorizedForRepo
-        (honourRequest (ctxAs bob repo) env (acView aRev) 5 req2 ask)
+        (honourRequest (ctxAs bob repo) env (acView aRev) 5 req2 ask2)
       -- another folder can still take it, which is why this is a Retry
       outcome UnauthorizedForRepo `shouldBe` Retry
-      _ <- expectRight (honourRequest (ctxOf owner) env (acView aRev) 5 req2 ask)
+      _ <- expectRight (honourRequest (ctxOf owner) env (acView aRev) 5 req2 ask2)
       pure ()
 
     it "carries a reopen request through triage and back into canon" $ do
@@ -1504,9 +1507,11 @@ spec = do
       req3 <- someHash
       -- close, reopen, close on one tick: the third re-authors to the bytes of
       -- the first, and so to its id. A loop that takes its clock once per batch
-      -- is the ordinary implementation. Answering that by discarding would
-      -- delete the letter, leave the thread open, and tell triage it had closed
-      -- it; it is the caller's clock that is wrong, not the letter.
+      -- is the ordinary implementation, not a bug to report. Refusing meant
+      -- either deleting a letter whose request was never carried out or stopping
+      -- the loop over a millisecond, so the stamp moves forward instead: it is
+      -- the caller's clock that is short, and one millisecond later is still the
+      -- owner's own clock.
       let repo = fst owner
           env = EnvelopeSigner (fst alice)
           letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
@@ -1518,15 +1523,123 @@ spec = do
         (honourRequest (ctxOf owner) env (acView aOpen) 9 req1 (letter (AClose thr Nothing 2)))
       a2 <- expectRight
         (honourRequest (ctxOf owner) env (acView a1) 9 req2 (letter (AReopen thr Nothing 3)))
-      expectErr (Composed AlreadyInCanon)
+      a3 <- expectRight
         (honourRequest (ctxOf owner) env (acView a2) 9 req3 (letter (AClose thr Nothing 4)))
-      either outcome (const Decide)
-        (honourRequest (ctxOf owner) env (acView a2) 9 req3 (letter (AClose thr Nothing 4)))
-        `shouldBe` Abort
-      -- one tick later it is an ordinary close
-      _ <- expectRight
-        (honourRequest (ctxOf owner) env (acView a2) 10 req3 (letter (AClose thr Nothing 4)))
+      -- the third is a distinct event, stamped one millisecond on
+      acSeq a3 `shouldBe` 4
+      -- and all three fold, in the order they were minted, with the thread
+      -- ending closed: the whole point of not discarding the third
+      let fr = foldEvents repo (map acEvent [aOpen,a1,a2,a3])
+      frDropped fr `shouldBe` []
+      frLastFolded fr `shouldBe` 10
+      map anWhat (frAnomalies fr) `shouldBe` []
+      fmap (HM.lookup "status" . tsAttrs) (HM.lookup thr (frThreads fr))
+        `shouldBe` Just (Just "closed")
       pure ()
+
+    it "will not nudge the clock past the ceiling to make room" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      req1 <- someHash
+      req2 <- someHash
+      -- The nudge above runs AFTER 'requireCanon' has judged the clock, so it
+      -- walks past a gate it then has to keep itself. At the ceiling there is no
+      -- room: a stamp one millisecond on is one the fold drops, and the bridge
+      -- would have minted it. Refusing is right here and only here, because the
+      -- clock genuinely has nowhere to go and an operator has to be told.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) maxFoldedTs origin noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+      let thr = scopeOf aOpen
+      a1 <- expectRight
+        (honourRequest (ctxOf owner) env (acView aOpen) maxFoldedTs req1
+           (letter (AClose thr Nothing 2)))
+      a2 <- expectRight
+        (honourRequest (ctxOf owner) env (acView a1) maxFoldedTs req2
+           (letter (AReopen thr Nothing 3)))
+      -- the third would re-author to the first's bytes, and there is no
+      -- millisecond left to move to
+      req3 <- someHash
+      expectErr StampOutOfRange
+        (honourRequest (ctxOf owner) env (acView a2) maxFoldedTs req3
+           (letter (AClose thr Nothing 4)))
+      -- an operator's to fix, so the loop stops rather than deleting the letter
+      outcome StampOutOfRange `shouldBe` Abort
+      -- and what did get minted is inside the ceiling, so the fold takes it all
+      let fr = foldEvents repo (map acEvent [aOpen,a1,a2])
+      frDropped fr `shouldBe` []
+      frLastFolded fr `shouldBe` maxFoldedTs
+
+    it "honours a request once, however many envelopes carry it" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      req1 <- someHash
+      req2 <- someHash
+      -- A rewrap: the identical request re-encrypted to the same mailbox is a
+      -- new message with a new hash, so the origin does not catch it, and
+      -- honouring re-authors under the owner's clock, so the event-id does not
+      -- either. Without the box, anyone who kept the ciphertext could have the
+      -- close applied again on every resend, and a triage loop would show it as
+      -- a fresh request every time.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+      let ask = letter (AClose (scopeOf aOpen) Nothing 2)
+      aClose <- expectRight
+        (honourRequest (ctxOf owner) env (acView aOpen) 2 req1 ask)
+      -- resent under a different message hash, and a later clock, so nothing
+      -- but the requester's own box ties the two together
+      expectErr AlreadyHonoured
+        (honourRequest (ctxOf owner) env (acView aClose) 99 req2 ask)
+      -- triage refuses it too, so the maintainer is never shown it
+      expectErr AlreadyHonoured
+        (acceptLetter (ctxOf owner) env (acView aClose) 99 req2 noParts ask)
+      -- and the refusal survives a restart, because canon carries it: a view
+      -- rebuilt from the fold knows as much as the accumulated one
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aOpen,aClose]))
+      expectErr AlreadyHonoured
+        (honourRequest (ctxOf owner) env rebuilt 99 req2 ask)
+      -- Discard, because the request has been carried out: deleting the resent
+      -- copy is the correct thing to do with it
+      outcome AlreadyHonoured `shouldBe` Discard
+
+    it "refuses an owner event lifted back out of canon" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      replay <- someHash
+      -- Canon is public. Anyone can lift the owner's own signed close out of an
+      -- event file, wrap it in a message under their own envelope key, and send
+      -- it: the signature is genuine, the author IS the owner, and every check
+      -- about the content passes. Triage would then show a maintainer their own
+      -- past decision as a fresh request, once per resend, forever.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+      aClose <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments
+           (AClose (scopeOf aOpen) Nothing 2))
+      -- the owner's box, verbatim, in a letter a stranger's envelope carries
+      let lifted = MessageData hubMsgVersion
+                     (Letter (evAuthorBox (acEvent aClose)) noReplyChannel)
+      expectErr AlreadyInCanon
+        (acceptLetter (ctxOf owner) env (acView aClose) 3 replay noParts lifted)
+      -- and after a restart, from canon rather than from the accumulated view
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aOpen,aClose]))
+      expectErr AlreadyInCanon
+        (acceptLetter (ctxOf owner) env rebuilt 3 replay noParts lifted)
+      outcome AlreadyInCanon `shouldBe` Discard
 
     it "refuses to mint a redaction for another repository" $ do
       owner <- kp

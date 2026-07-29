@@ -34,6 +34,7 @@ module HBS2.Hub.Manifest
   ) where
 
 import HBS2.Hub.Types (HubKey)
+import HBS2.Hub.Letter (sexpStr)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..),pattern HashLike)
@@ -138,10 +139,17 @@ mailboxClause (HubMailbox k role tier) =
 -- tier bare. The leading-letter rule is what keeps the round trip honest: a
 -- value starting with a digit would lex back as a number, and one containing
 -- a space would lex back as two atoms.
+--
+-- The string branch escapes, and for the same reason every other projection in
+-- this project does: 'mkStr' hands the printer a literal it wraps in quotes and
+-- nothing more, so a role with a quote in it would close the string early and
+-- the rest of the manifest would read back as whatever it happened to look
+-- like. The manifest is the owner's own file, but a role reaches it from
+-- wherever the owner copied it, and this is the last place that can be true.
 atom :: Text -> Syntax C
 atom t = case Text.uncons t of
   Just (c,rest) | isAlpha c, Text.all plain rest -> mkSym (Text.unpack t)
-  _                                              -> mkStr (Text.unpack t)
+  _                                              -> sexpStr t
   where
     plain ch = isAlphaNum ch || ch `elem` ("-_.:/" :: String)
 

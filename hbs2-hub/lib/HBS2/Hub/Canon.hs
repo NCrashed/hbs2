@@ -19,12 +19,14 @@
 -- stamp. Refusing here instead would throw the stamp away one floor higher up,
 -- which is the same mistake the tree-wide veto was.
 --
--- Both bounds a reader needs are checked before the parser runs, because
--- reading is what a hostile file attacks. See 'maxEventBytes'.
+-- All three bounds a reader needs (bytes, clauses, escapes) are checked before
+-- the parser runs, because reading is what a hostile file attacks. See
+-- 'maxEventBytes' and 'maxEscapes'.
 module HBS2.Hub.Canon
   ( CanonError(..)
   , maxEventBytes
   , maxClauses
+  , maxEscapes
   , maxTokenBytes
   , renderEvent
   , parseEvent
@@ -52,6 +54,7 @@ import Codec.Serialise (Serialise,serialise)
 import Data.ByteString.Base64 qualified as B64
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
+import Data.List (mapAccumL)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -76,9 +79,9 @@ data CanonError =
 instance Pretty CanonError where
   pretty = \case
     NotAnEvent e    -> "not an s-expression:" <+> pretty (safeText e)
-    MissingClause c -> "missing clause" <+> pretty c
+    MissingClause c -> "missing clause" <+> pretty (safeText c)
     BadClause c     -> "malformed clause" <+> pretty (safeText c)
-    TooLarge what   -> "over the bound this reader will read:" <+> pretty what
+    TooLarge what   -> "over the bound this reader will read:" <+> pretty (safeText what)
 
 -- | What a reader will look at before deciding the file is an attack.
 --
@@ -95,6 +98,24 @@ maxTokenBytes, maxEventBytes, maxClauses :: Int
 maxTokenBytes = encodedBytes maxBoxBytes
 maxEventBytes = 2 * maxTokenBytes + 2 * maxBoxBytes + 8192
 maxClauses    = 128
+
+-- | The most escape sequences a canon file may carry.
+--
+-- The third bound, and the one the other two do not imply. Un-escaping a string
+-- literal costs the parser time superlinear in how many escapes the file holds:
+-- measured on a file shaped like a real event (two tokens at the bound, a
+-- projected body) it is 0.06 s at 512 escapes, 0.19 s at 1024, 0.76 s at 2048
+-- and 3.0 s at 4096, and at the byte bound, where every other byte of the body
+-- is a backslash, eighty seconds. That last one is an HONEST file: a 32 KiB
+-- body is inside every limit the letter layer sets, and a body of newlines is
+-- what a code block is. So this is not only a bound on an attacker; it is the
+-- reason 'capEscapes' truncates the projection the writer emits, rather than a
+-- reader refusing what its own writer produced.
+--
+-- 1024 rather than something rounder because that is where the measured cost
+-- crosses two tenths of a second, and a fold pays it once per event file.
+maxEscapes :: Int
+maxEscapes = 1024
 
 -- | Base64, and the choice is load-bearing rather than a taste in alphabets.
 --
@@ -154,8 +175,12 @@ renderEvent e = Text.unlines (fmap render clauses)
       , mkForm "author-box" [b64 (boxBytes (evAuthorBox e))]
       , mkForm "canon-box"  [b64 (boxBytes (evCanonBox e))]
       ]
-      <> concat [ mkForm "author" [b58key k] : contentSyntax ac | Just (k,ac) <- [author] ]
-      <> concat [ canonClauses k cc | Just (k,cc) <- [canonOf] ]
+      -- Only the projection is capped, and only the projection can be: the two
+      -- boxes above are base64 and carry no escape at all, and they are the
+      -- authoritative copy of everything the cap may cut.
+      <> capEscapes maxEscapes
+           (  concat [ mkForm "author" [b58key k] : contentSyntax ac | Just (k,ac) <- [author] ]
+           <> concat [ canonClauses k cc | Just (k,cc) <- [canonOf] ] )
 
     author  = ok (unboxChecked (evAuthorBox e))
     canonOf = ok (unboxChecked (evCanonBox e))
@@ -183,6 +208,50 @@ renderEvent e = Text.unlines (fmap render clauses)
     boxBytes :: Serialise a => a -> LBS.ByteString
     boxBytes = serialise
 
+-- Spend an escape budget across a projection, truncating the strings that
+-- overrun it.
+--
+-- Not a refusal, because there is nothing to refuse: the content is inside a
+-- signed box that this same file carries in full, the letter layer already
+-- accepted it, and the projection exists so that @git show@ is worth running.
+-- What it costs a reader is the parser's, and the parser is the thing the
+-- budget protects (see 'maxEscapes').
+--
+-- Truncation is at an escape boundary, in the ALREADY-escaped text: the strings
+-- here come from 'sexpStr', which escapes and then hands the printer something
+-- it wraps in quotes and nothing more, so cutting mid-sequence would leave a
+-- trailing backslash that swallows the closing quote. The marker is added after
+-- the cut and contains no escape of its own.
+capEscapes :: Int -> [Syntax C] -> [Syntax C]
+capEscapes budget0 = snd . mapAccumL go budget0
+  where
+    go budget = \case
+      List a xs -> let (b', ys) = mapAccumL go budget xs in (b', List a ys)
+      s@(LitStrVal t)
+        | escapesIn t <= budget -> (budget - escapesIn t, s)
+        | otherwise             -> (0, mkStr @C (cut budget t <> truncationMark))
+      s -> (budget, s)
+
+    escapesIn = Text.foldl' (\n c -> if c == '\\' then n + 1 else n) (0 :: Int)
+
+    -- Walk to where the budget runs out. The state is (escapes left, is this
+    -- character the second half of an escape sequence).
+    cut n t = Text.take (stop 0 n False) t
+      where
+        stop i left inEsc = case Text.compareLength t i of
+          LT -> i
+          EQ -> i
+          GT | inEsc              -> stop (i + 1) left False
+             | Text.index t i /= '\\' -> stop (i + 1) left False
+             | left <= 0          -> i
+             | otherwise          -> stop (i + 1) (left - 1) True
+
+-- What a truncated projection says about itself, in a form that costs nothing
+-- to parse and cannot be mistaken for the content: no escape, no quote, and the
+-- authoritative copy is in the box a few lines above it.
+truncationMark :: Text
+truncationMark = " [projection truncated: see the author box]"
+
 -- | Read one event file back.
 --
 -- Returns the file's declared version alongside the event, because a caller
@@ -193,10 +262,16 @@ renderEvent e = Text.unlines (fmap render clauses)
 -- Only the two box clauses are read. The projection is ignored entirely: it is
 -- unsigned, so believing any of it would mean believing whoever last wrote the
 -- file about what the boxes say.
-parseEvent :: Text -> Either CanonError (Word32, Event)
+--
+-- 'Nothing' for the version when the clause is missing or is not a number.
+-- The version is reported and never obeyed, so it has no vote on whether the
+-- file is readable: refusing on it let anybody who can write into a clone hide
+-- a signed event by editing one unsigned line, and the event would go missing
+-- rather than come back wrong, which is the harder failure to notice.
+parseEvent :: Text -> Either CanonError (Maybe Word32, Event)
 parseEvent txt = do
   cs <- clausesOf txt
-  version <- word32 "hub-event" =<< only "hub-event" cs
+  let version = either (const Nothing) Just (word32 "hub-event" =<< only "hub-event" cs)
   abox <- box "author-box" =<< only "author-box" cs
   cbox <- box "canon-box" =<< only "canon-box" cs
   pure (version, Event abox cbox)
@@ -221,10 +296,15 @@ parseEvent txt = do
 -- it appends: a file this build could not read at all, named by its path since
 -- that is the only identity an unreadable file has, and the version every file
 -- declared, including the ones that read fine.
+--
+-- 'Nothing' in the third list is a file whose boxes read but whose version
+-- clause did not: readable, and worth saying so, since a writer appending to
+-- that tree is about to rewrite the file and would otherwise silently stamp its
+-- own version onto it.
 data CanonRead = CanonRead
   { crEvents   :: [Event]
   , crBad      :: [(FilePath, CanonError)]
-  , crVersions :: [(FilePath, Word32)]
+  , crVersions :: [(FilePath, Maybe Word32)]
   }
   deriving stock (Eq,Show)
 
@@ -270,10 +350,29 @@ parseMeta txt = do
 -- Regenerable from the @open@ events, which compaction never drops, and never
 -- trusted over them: it is written for a reader that wants @#42@ without
 -- folding, and read only as a hint.
+-- Bounded by the same three numbers its reader is, because a file written past
+-- them is a file this build refuses to read back: the index is a cache, and one
+-- nobody reads is worse than a shorter one, which is still correct for every
+-- number it does hold. A line over the line bound is dropped rather than
+-- truncated, since half a thread-id would resolve to nothing or, worse, to
+-- something else.
+--
+-- Entries stay in the caller's order, so a truncated index is a prefix of the
+-- full one rather than a sample of it.
 renderNumberIndex :: [(Word64, ThreadId)] -> Text
-renderNumberIndex ns = Text.unlines
-  [ render (mkForm  "number" [mkInt n, mkSym  (show (pretty t))])
-  | (n,t) <- ns ]
+renderNumberIndex ns = Text.unlines (go 0 maxIndexEntries lines')
+  where
+    lines' = [ l | (n,t) <- ns
+             , let l = render (mkForm "number" [mkInt n, mkSym (show (pretty t))])
+             , utf8Length l <= maxIndexLineBytes ]
+
+    go _ _ [] = []
+    go used left (l:rest)
+      | left <= 0            = []
+      -- +1 for the newline 'Text.unlines' adds, which the reader counts too.
+      | used + w > maxIndexBytes = []
+      | otherwise            = l : go (used + w) (left - 1) rest
+      where w = utf8Length l + 1
 
 -- One line at a time, with bounds of its own, and neither is the event file's.
 --
@@ -336,16 +435,18 @@ clausesOf = clausesWith maxEventBytes maxClauses
 
 clausesWith :: Int -> Int -> Text -> Either CanonError [Syntax C]
 clausesWith byteLimit formLimit txt = do
-  -- Both bounds are checked before the parser runs, and both are counted in
-  -- one pass over the text, because the parser is what they are protecting.
-  -- Reading a canon file is the first thing anyone does with a tree and the
-  -- last thing they can refuse to do, so the cost of a file has to be bounded
-  -- by something cheaper than parsing it. It is superlinear in the number of
-  -- forms, so a file of forty thousand empty clauses costs a minute of CPU,
-  -- and one file that anybody with write access can drop into a tree would
-  -- then stop every fold and every verify in every clone.
+  -- All three bounds are checked before the parser runs, and all three are
+  -- counted in one pass over the text, because the parser is what they are
+  -- protecting. Reading a canon file is the first thing anyone does with a tree
+  -- and the last thing they can refuse to do, so the cost of a file has to be
+  -- bounded by something cheaper than parsing it. It is superlinear in the
+  -- number of forms, so a file of forty thousand empty clauses costs a minute
+  -- of CPU, and one file that anybody with write access can drop into a tree
+  -- would then stop every fold and every verify in every clone.
   _ <- bounded (utf8Length txt) byteLimit "file"
-  _ <- bounded (countForms txt) formLimit "clauses"
+  let (forms, escapes) = scanText txt
+  _ <- bounded forms formLimit "clauses"
+  _ <- bounded escapes maxEscapes "escapes"
   case parseTop txt of
     Left e     -> Left (NotAnEvent (Text.pack (show e)))
     Right tops -> Right (concatMap flatten tops)
@@ -357,33 +458,37 @@ clausesWith byteLimit formLimit txt = do
       List _ xs -> xs
       _         -> []
 
--- How many forms a text opens, counting only the parentheses the parser will
--- see as parentheses.
+-- How many forms a text opens and how many escape sequences it contains,
+-- counting only the parentheses the parser will see as parentheses.
 --
 -- Counting every '(' in the file was a bound on the CONTRIBUTOR rather than on
 -- the attacker: a body is a string literal, code in a body has brackets, and
 -- 115 of them anywhere in an issue made the file unreadable for good. The
 -- escape rule is the one the writer emits and the reader honours, so a quote
 -- inside a string does not end it.
-countForms :: Text -> Int
-countForms = seen . Text.foldl' step (0 :: Int, Plain)
+--
+-- The escapes are counted in the same pass because the same state machine
+-- already has to know where they are, and because they are the other half of
+-- the cost: see 'maxEscapes'.
+scanText :: Text -> (Int, Int)
+scanText = seen . Text.foldl' step (0 :: Int, 0 :: Int, Plain)
   where
-    seen (n,_) = n
+    seen (n,e,_) = (n,e)
 
-    step (n, st) c = case st of
-      InComment | c == '\n'   -> (n + 1, Plain)
-                | otherwise   -> (n, InComment)
-      InEscape                -> (n, InString)
-      InString  | c == '\\'   -> (n, InEscape)
-                | c == '"'    -> (n, Plain)
-                | otherwise   -> (n, InString)
-      Plain     | c == '"'    -> (n, InString)
+    step (n, e, st) c = case st of
+      InComment | c == '\n'   -> (n + 1, e, Plain)
+                | otherwise   -> (n, e, InComment)
+      InEscape                -> (n, e, InString)
+      InString  | c == '\\'   -> (n, e + 1, InEscape)
+                | c == '"'    -> (n, e, Plain)
+                | otherwise   -> (n, e, InString)
+      Plain     | c == '"'    -> (n, e, InString)
                 -- A comment is tracked for one reason: a quote inside one
                 -- would otherwise put this counter into a string it is not in,
                 -- and everything after it would go uncounted.
-                | c == ';'    -> (n, InComment)
-                | opens c     -> (n + 1, Plain)
-                | otherwise   -> (n, Plain)
+                | c == ';'    -> (n, e, InComment)
+                | opens c     -> (n + 1, e, Plain)
+                | otherwise   -> (n, e, Plain)
 
     -- Every character that opens a form, and a newline is one of them.
     --
@@ -400,7 +505,7 @@ countForms = seen . Text.foldl' step (0 :: Int, Plain)
     -- lines against a limit of a hundred and twenty-eight.
     opens c = c `elem` ("([{'`,\n" :: String)
 
--- Where a scan of the text is, for 'countForms'.
+-- Where a scan of the text is, for 'scanText'.
 data Scan = Plain | InString | InEscape | InComment
 
 -- Exactly one clause of this name, because two would mean two answers and no

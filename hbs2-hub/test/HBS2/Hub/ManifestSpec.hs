@@ -77,6 +77,22 @@ spec = do
         Left e    -> expectationFailure (show e)
         Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole (Just "known good")]
 
+    it "keeps a tier written to break the manifest intact" $ do
+      k <- kp
+      -- The quoted branch used to hand the printer the text unchanged, and the
+      -- printer wraps a literal in quotes and does nothing else. A tier with a
+      -- quote in it would close the string early and everything after it in the
+      -- manifest would read back as whatever it looked like, including the
+      -- mailbox clauses that say where submissions go.
+      let nasty = "a\"b\\c\nd"
+          emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just nasty))))
+      case parseTop emitted of
+        Left e    -> expectationFailure (show e)
+        Right syn -> do
+          -- one clause, not two, and the tier comes back exactly as it went in
+          length (syn :: [Syntax C]) `shouldBe` 1
+          hubMailboxes syn `shouldBe` [HubMailbox k hubRole (Just nasty)]
+
     it "accepts string literals as well as symbols" $ do
       k <- kp
       let b58 = show (pretty (AsBase58 k))

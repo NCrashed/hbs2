@@ -84,7 +84,7 @@ module HBS2.Hub.Bridge
     -- The fields are readable, and updatable, which is an escape hatch a test
     -- or a tool can still use knowingly rather than by reaching for the
     -- nearest constructor.
-  , CanonView( cvCursor, cvThreads, cvEvents, cvMaintainers, cvOrigins
+  , CanonView( cvCursor, cvThreads, cvEvents, cvMaintainers, cvOrigins, cvHonoured
              , cvLastFolded, cvRepo )
   , Accepted(..)
   , ackFor
@@ -195,6 +195,13 @@ data CanonView = CanonView
     -- | Letters already folded, so a triage loop re-reading the mailbox
     -- after a restart does not honour the same request twice.
   , cvOrigins :: HashSet HashRef
+    -- | Requests already honoured, keyed by the author box the requester
+    -- signed rather than by the message that carried it. A rewrap gives one
+    -- request a new message hash and so a new 'cvOrigins' entry, but not a new
+    -- box: without this, anyone holding the old ciphertext could have the same
+    -- close, reopen or set applied again under a fresh envelope, for as long as
+    -- they cared to resend it.
+  , cvHonoured :: HashSet EventId
     -- | The @folded-ts@ of the last event in canon, so the next stamp cannot
     -- go below it. Like the cursor, it comes from canon rather than from the
     -- folder's own state: an honest maintainer whose clock is corrected
@@ -216,7 +223,7 @@ data CanonView = CanonView
 -- accumulated view is a cache of what the fold would say.
 emptyView :: RepoRef -> CanonView
 emptyView repo =
-  CanonView initialCursor HM.empty HM.empty (HS.singleton repo) HS.empty 0 repo
+  CanonView initialCursor HM.empty HM.empty (HS.singleton repo) HS.empty HS.empty 0 repo
 
 -- | May this key bless events for this repo right now?
 --
@@ -239,6 +246,7 @@ viewOf fr = CanonView
   , cvEvents  = frAdmitted fr
   , cvMaintainers = frMaintainers fr
   , cvOrigins = frOrigins fr
+  , cvHonoured = frHonoured fr
   , cvLastFolded = frLastFolded fr
   , cvRepo = frOwner fr
   }
@@ -385,7 +393,15 @@ data TriageError =
     -- exists to prevent. The bridge will not normalize it silently: what the
     -- owner signs must be what the caller meant to sign.
   | UnnormalizedValue Text
-  deriving stock (Eq,Show)
+    -- Ord so a triage loop can count and group refusals the way @hub verify@
+    -- already groups 'DropReason' and 'Anomaly': without it the only way to
+    -- tally a run was to Show each one, which is exactly the string the Show
+    -- instances below are written to keep a body out of.
+    --
+    -- The order itself means nothing: it is the constructor order, and the
+    -- constructor order is a reading order, not a severity. 'outcome' is the
+    -- function that ranks a refusal.
+  deriving stock (Eq,Ord,Show)
 
 -- | What a triage loop should do with a refusal.
 --
@@ -415,7 +431,7 @@ data Outcome =
     -- | The caller is wired wrong. Not about the letter at all: leave it
     -- alone, stop the loop, and fix the caller.
   | Abort
-  deriving stock (Eq,Show)
+  deriving stock (Eq,Ord,Show)
 
 -- | A request the maintainer has to rule on, already opened.
 --
@@ -427,7 +443,7 @@ data Pending = Pending
   , pdContent :: AuthorContent
   , pdReply   :: ReplyChannel
   }
-  deriving stock (Eq)
+  deriving stock (Eq,Ord)
 
 -- Deliberately partial, for the same reason 'Accepted' is: this sits inside
 -- 'TriageError', which callers log, and a derived instance would print the
@@ -480,9 +496,9 @@ instance Pretty TriageError where
     PartTooLarge h        -> "an attachment over what this hub carries:" <+> pretty h
     BadPartSecret         -> "the part secret cannot be a key"
     MessageSecretOffered  -> "the parts secret offered is the message secret"
-    BodyTooLarge f        -> "field" <+> pretty f <+> "is over what triage carries inline"
+    BodyTooLarge f        -> "field" <+> pretty (safeText f) <+> "is over what triage carries inline"
     -- The field NAMES above are ours; only the attribute name is a stranger's.
-    MalformedRef f        -> "field" <+> pretty f <+> "is not a hash"
+    MalformedRef f        -> "field" <+> pretty (safeText f) <+> "is not a hash"
     OwnerKeyRequired      -> "only the owner key may do this"
     NeedsReview           -> "carries words the owner would be signing as their own"
     UnnormalizedValue k   -> "attribute" <+> pretty (safeText k) <+> "is not in canonical form"
@@ -594,14 +610,23 @@ seenAlready view eid
   | HM.member eid (cvEvents view) = Left AlreadyInCanon
   | otherwise                     = Right ()
 
--- Refuse a letter whose message has already been folded. 'seenAlready' does
--- not cover this: honouring a request re-authors it under the owner's clock,
--- so the same letter honoured twice yields two different event-ids, and only
--- the origin ties them back to one message.
-honouredAlready :: CanonView -> HashRef -> Either TriageError ()
-honouredAlready view origin
-  | HS.member origin (cvOrigins view) = Left AlreadyHonoured
-  | otherwise                         = Right ()
+-- Refuse a request that has already been honoured. 'seenAlready' does not cover
+-- this: honouring re-authors the content under the owner's clock, so the same
+-- request honoured twice yields two different event-ids, and nothing the owner
+-- signs ties them together.
+--
+-- Two identities, because a request has two and they catch different resends.
+-- The message hash catches a triage loop re-reading the mailbox after a
+-- restart. The requester's box catches a rewrap: re-encrypting the identical
+-- request to the same mailbox produces a new message and so a new hash, but
+-- the box inside is signed and cannot be altered, so it is the same in every
+-- envelope. Only the second is an attack; both are refused the same way,
+-- because the caller's response is the same.
+honouredAlready :: CanonView -> HashRef -> EventId -> Either TriageError ()
+honouredAlready view origin asked
+  | HS.member origin (cvOrigins view)  = Left AlreadyHonoured
+  | HS.member asked (cvHonoured view)  = Left AlreadyHonoured
+  | otherwise                          = Right ()
 
 -- | What the caller can vouch for about an event's encrypted attachments.
 --
@@ -952,8 +977,9 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
 
   -- Before anything that asks a human: a triage loop re-reading the mailbox
   -- after a restart must not raise a decision on a letter whose request was
-  -- already honoured, only to have 'honourRequest' refuse it afterwards.
-  honouredAlready view origin
+  -- already honoured, only to have 'honourRequest' refuse it afterwards. Under
+  -- both identities, for the same reason it is checked under both there.
+  honouredAlready view origin (authorBoxId box)
 
   -- Before the request prompt as well: an oversized closing note is refused
   -- whoever wrote it, and raising it as a decision first would put a letter in
@@ -974,6 +1000,15 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- attention: otherwise a close naming an unfolded thread would raise a
   -- decision that 'honourRequest' then refuses, while a comment naming the
   -- same thread correctly waits in the mailbox.
+  -- Before the request prompt, and this is the whole of what stops a replay out
+  -- of canon. Canon is public: anyone can lift the owner's own signed close out
+  -- of an event file, wrap it in a message under their own envelope key, and
+  -- send it. Every check downstream passes, because the signature is genuine
+  -- and the author IS the owner, so triage would show a maintainer their own
+  -- past decision as a fresh request, once per resend, forever. An author box
+  -- canon already holds is never a request; it is a copy.
+  seenAlready view (authorBoxId box)
+
   case classify content of
     FoldsToCanon -> Right ()
     RequestOnly
@@ -983,7 +1018,6 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
     other         -> Left (NotAcceptable other)
 
   requireStamp view content
-  seenAlready view (authorBoxId box)
 
   thread <- case content of
     AOpen target kind _ _ _ _ coords _
@@ -1017,7 +1051,7 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- missing key.
   requireParts parts content
 
-  Right (accepted canonKp repo view folded (Just origin) (poSecret parts) content box author
+  Right (accepted canonKp repo view folded (Just origin) Nothing (poSecret parts) content box author
            (ThreadScope thread) reply)
   where
     known thr
@@ -1047,9 +1081,9 @@ honourRequest
   -> MessageData
   -> Either TriageError Accepted
 honourRequest ctx envelopeSigner view folded origin md = do
-  (_box, _author, content, reply) <-
+  (box, _author, content, reply) <-
     either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
-  honourOpened Verbatim (tcCanon ctx) (tcRepo ctx) view folded origin content content reply
+  honourOpened Verbatim (tcCanon ctx) (tcRepo ctx) view folded origin box content content reply
 
 -- | Honour a request, but sign content the maintainer has looked at and
 -- possibly edited.
@@ -1070,9 +1104,9 @@ honourWith
   -> MessageData                        -- ^ the request being honoured
   -> Either TriageError Accepted
 honourWith ctx envelopeSigner view folded origin content0 md = do
-  (_box, _author, asked, reply) <-
+  (box, _author, asked, reply) <-
     either (Left . BadLetter) Right (openLetterAs (tcAllowed ctx) envelopeSigner md)
-  honourOpened Reviewed (tcCanon ctx) (tcRepo ctx) view folded origin asked content0 reply
+  honourOpened Reviewed (tcCanon ctx) (tcRepo ctx) view folded origin box asked content0 reply
 
 -- Which of the two honour paths this is.
 --
@@ -1091,18 +1125,22 @@ honourOpened
   -> CanonView
   -> Word64
   -> HashRef
+  -> SignedBox AuthorContent HubScheme  -- ^ the request's own box
   -> AuthorContent    -- ^ what the letter asked for
   -> AuthorContent    -- ^ what the owner signs, possibly edited
   -> ReplyChannel
   -> Either TriageError Accepted
-honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply = do
+honourOpened path canonKp@(pk,sk) repo view folded origin askedBox asked content0 reply = do
   requireCanon repo view folded pk
 
-  -- A re-authored request gets a fresh id from the clock, so only the
-  -- origin can tell that this very letter was honoured before. Without it a
-  -- triage loop that restarts and re-reads the mailbox closes the thread
-  -- twice and duplicates the note.
-  honouredAlready view origin
+  -- A re-authored request gets a fresh id from the clock, so nothing the owner
+  -- signs can tell that this very request was honoured before. Two things can:
+  -- the message that carried it, and the box the requester signed. Both are
+  -- checked, because neither covers the other. Without the message hash a
+  -- triage loop that restarts and re-reads the mailbox closes the thread twice
+  -- and duplicates the note; without the box, a rewrap under a fresh envelope
+  -- has the same request honoured again by anyone who kept the ciphertext.
+  honouredAlready view origin askedId
 
   -- After those two, deliberately. Both are reasons this letter must not
   -- reach a human at all: a view wired to another repo is a bug to stop on,
@@ -1152,23 +1190,55 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
     Nothing -> Left (Composed BadContent)
 
   -- Re-author: a new box signed by the owner, carrying the owner's clock.
-  -- Honouring the same request twice at the same clock produces the same
-  -- bytes and so the same id, which the fold would drop as a duplicate.
   -- No requireStamp here: a RequestOnly op never mints a number, which
   -- 'classify' above has already established.
-  let content = withAuthorTs folded content0
-      box = signAuthor pk sk content
-  -- Composed, because this one is about the CLOCK the caller passed. A close, a
-  -- reopen and a close again on one tick re-author to the same bytes and so to
-  -- the same id, and answering that by discarding would delete the letter, leave
-  -- the thread open, and tell triage it had closed it. The caller has to vary
-  -- something; the letter has done nothing wrong.
-  composed (seenAlready view (authorBoxId box))
+  --
+  -- The clock is nudged forward until the bytes are new, rather than refused
+  -- when they are not. Two different letters honoured on one tick re-author to
+  -- the same bytes (the declared time is overwritten and the signature is
+  -- deterministic), and so does a close, a reopen and a close again; a loop that
+  -- reads the clock once per batch is the ordinary implementation, not a bug to
+  -- report. Refusing meant either deleting a letter whose request was never
+  -- carried out or stopping the loop over a millisecond. A stamp one
+  -- millisecond later is still the owner's own clock, and the search is bounded
+  -- because each step changes the bytes.
+  (content, box, folded') <- vary folded
 
   -- No requireParts: 'classify' has established that this is a close, reopen
   -- or set, none of which can reference a part.
-  Right (accepted canonKp repo view folded (Just origin) Nothing content box pk
-           (ThreadScope thread) reply)
+  --
+  -- 'ccHonours' is the request's own box, which is what a rewrap cannot change:
+  -- dedup by the message hash alone let anyone holding the old ciphertext have
+  -- the same request honoured again under a fresh envelope, for as long as they
+  -- cared to resend it.
+  Right (accepted canonKp repo view folded' (Just origin) (Just askedId) Nothing
+           content box pk (ThreadScope thread) reply)
+
+  where
+    askedId = authorBoxId askedBox
+
+    vary t0 = go (0 :: Int) t0
+      where
+        go n t
+          -- The nudge happens AFTER 'requireCanon' has judged the clock, so it
+          -- has to keep the gate it walked past: a mint one millisecond over
+          -- the ceiling is one the fold drops as 'FoldedTsAboveCeiling', which
+          -- is the whole class of bug this module exists to not have.
+          | stampFor t view > maxFoldedTs = Left StampOutOfRange
+          | otherwise =
+              let content = withAuthorTs t content0
+                  box     = signAuthor pk sk content
+              in case seenAlready view (authorBoxId box) of
+                   Right () -> Right (content, box, t)
+                   Left e
+                     | n >= maxClockNudge -> Left (Composed e)
+                     | otherwise          -> go (succ n) (t + 1)
+
+-- | How far the honour path may walk the clock forward looking for bytes canon
+-- does not already hold. Small: each step changes the id, so one or two is the
+-- realistic case and anything past that is a caller minting in a loop.
+maxClockNudge :: Int
+maxClockNudge = 8
 
 -- | An owner-native event: the owner is both author and canon (PEP-19).
 -- Used for status changes, merges, redactions and delegation, none of which
@@ -1258,7 +1328,7 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
 
   requireParts parts content
 
-  Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)
+  Right (accepted kp repo view folded Nothing Nothing (poSecret parts) content box pk scope NoReply)
   where
     coordsOK = \case
       ARevise _ c _ -> reachableCoords c
@@ -1301,6 +1371,7 @@ accepted
   -> CanonView
   -> Word64
   -> Maybe HashRef
+  -> Maybe EventId                     -- ^ the request this honours, if it honours one
   -> Maybe PartSecret
   -> AuthorContent
   -> SignedBox AuthorContent HubScheme
@@ -1308,7 +1379,7 @@ accepted
   -> EventScope
   -> ReplyChannel
   -> Accepted
-accepted (pk,sk) repo view folded origin secret content box authorOf scope reply =
+accepted (pk,sk) repo view folded origin honours secret content box authorOf scope reply =
   Accepted { acEvent = Event box canonBox
            , acView = view'
            , acScope = scope
@@ -1340,6 +1411,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
       , ccSeq        = ccrNextSeq cur
       , ccNumber     = mintedNumber content cur
       , ccOrigin     = origin
+      , ccHonours    = honours
       , ccFoldedTs   = stamped
       , ccPartSecret = secret'
       }
@@ -1374,6 +1446,7 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
           ARevoke _ k _ | k /= repo -> HS.delete k (cvMaintainers view)
           _                       -> cvMaintainers view
       , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
+      , cvHonoured = maybe (cvHonoured view) (`HS.insert` cvHonoured view) honours
       , cvLastFolded = stamped
       }
 

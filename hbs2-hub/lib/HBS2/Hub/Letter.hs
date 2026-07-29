@@ -37,6 +37,7 @@ module HBS2.Hub.Letter
   , maxInlineBody
   , maxPartBytes
   , maxBoxBytes
+  , maxPayloadBytes
   , maxTitle
   , maxAttrValue
   , maxAttrName
@@ -51,9 +52,9 @@ module HBS2.Hub.Letter
   , makeAck
   , letterPayload
   , parsePayload
-  , openLetter
+  , openLetterNoPolicy
   , openLetterAs
-  , openAck
+  , openAckNoPolicy
   , openAckFor
   , letterEventId
   , letterThreadId
@@ -84,6 +85,8 @@ import Data.Maybe (fromMaybe,listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Char qualified as Char
+import Numeric (showHex)
 import Data.Word (Word32,Word64)
 import GHC.Generics (Generic)
 
@@ -197,6 +200,26 @@ maxBoxBytes = maxTitle + maxLabels * maxLabel + maxInlineBody + 6 * maxRef
             + maxAttrName + maxAttrValue
             + 4096
 
+-- | The largest payload this reader will decode, derived like 'maxBoxBytes'
+-- rather than chosen beside it.
+--
+-- A payload is the envelope, the inner box, and the reply channel. The inner box
+-- is all of it that can be large; the rest is a version word, a key, a hash and
+-- framing. The slack is generous on purpose, for the same reason it is generous
+-- there: being exact would have to be recomputed every time a constructor
+-- changes, and being generous costs a reader nothing.
+maxPayloadBytes :: Int
+maxPayloadBytes = maxBoxBytes + 4096
+
+-- Refuse a payload over it before anything decodes it. 'MalformedPayload'
+-- rather than a size of its own: to the sender it means the same thing, the
+-- caller does the same thing with it, and a distinct constructor here would be
+-- one more shape for a triage loop to route with nothing different to say.
+boundedPayload :: Int -> Either LetterError ()
+boundedPayload n
+  | n > maxPayloadBytes = Left MalformedPayload
+  | otherwise           = Right ()
+
 -- | The size of a text field as it costs on the wire: UTF-8 bytes, not
 -- characters. A limit about payload size has to be measured in payload.
 textSize :: Text -> Int
@@ -269,9 +292,15 @@ oversizedField = \case
 -- redact target), so a wrong-length one merely fails to match; @reply-to@ is
 -- deliberately compared against nothing, which is what left it open, and one
 -- rule over all of them is easier to keep true than a list of exceptions.
+-- The repository an op names is checked with the same rule, and for the same
+-- reason: it is a key, keys take any length on the wire too, and the four ops
+-- that carry one are the four whose target the fold compares against the owner.
+-- A wrong-length one merely fails to match there, which would be a drop rather
+-- than a refusal, and the file would already be written.
 malformedRef :: AuthorContent -> Maybe Text
 malformedRef = \case
-  AOpen _ _ _ _ _ part coords _ -> named "body-part" part
+  AOpen target _ _ _ _ part coords _ -> key "target" target
+                               <|> named "body-part" part
                                <|> (coordsRefs =<< coords)
   AComment thr replyto _ part _ -> bad "thread" thr
                                <|> named "reply-to" replyto
@@ -281,9 +310,9 @@ malformedRef = \case
   AClose thr _ _                -> bad "thread" thr
   AReopen thr _ _               -> bad "thread" thr
   AMerge thr _ _ _              -> bad "thread" thr
-  ARedact _ target _            -> bad "redacts" target
-  ADelegate _ k _               -> key "delegate" k
-  ARevoke _ k _                 -> key "revoke" k
+  ARedact target e _            -> key "target" target <|> bad "redacts" e
+  ADelegate target k _          -> key "target" target <|> key "delegate" k
+  ARevoke target k _            -> key "target" target <|> key "revoke" k
   where
     key name k | validHubKey k = Nothing
                | otherwise     = Just name
@@ -309,8 +338,11 @@ malformedRef = \case
 data ReplyChannel =
     NoReply
   | ReplyTo HubKey HashRef   -- ^ mailbox key + a sigil resolving its encryption key
-  deriving stock (Eq,Generic)
+  deriving stock (Eq,Ord,Generic)
 
+-- Ord is derived and prints nothing: it exists so a refusal carrying one can
+-- be put in a map, and comparing two keys reveals neither.
+--
 -- Deliberately partial, for the reason this type exists: it holds a
 -- contributor's personal mailbox key and sigil, which are kept out of the
 -- signed letter precisely so they never reach canon. A derived instance puts
@@ -329,7 +361,7 @@ noReplyChannel = NoReply
 -- | A courtesy notification from the owner to a contributor: the number and
 -- status the contributor could not compute themselves. Not canon, carries no
 -- inner box, never folded. Trust comes from checking the envelope signer
--- against the repo's maintainer set ('openAck'); the authoritative status is
+-- against the repo's maintainer set ('openAckNoPolicy'); the authoritative status is
 -- always in canon.
 data AckRecord = AckRecord
   { akTarget      :: RepoRef
@@ -396,7 +428,7 @@ data LetterError =
     -- | The ack is signed by a maintainer of the repo it names, but that
     -- (repo, thread) pair is not one this reader submitted. See 'openAckFor'.
   | UnrelatedAck
-  deriving stock (Eq,Show)
+  deriving stock (Eq,Ord,Show)
 
 -- | What a triage loop says about a letter it would not open.
 instance Pretty LetterError where
@@ -419,7 +451,7 @@ data Disposition =
     FoldsToCanon   -- ^ open/comment/revise: becomes canon as the sender's own
   | RequestOnly    -- ^ close/reopen/label(set): a request the owner may honour
   | OwnerNative    -- ^ merge/redact/delegate/revoke: never arrives as a letter
-  deriving stock (Eq,Show)
+  deriving stock (Eq,Ord,Show)
 
 -- | Classify by op. The fold enforces the same split by key (a stranger's
 -- 'RequestOnly' event is dropped unless an authorized key authored it); this
@@ -482,6 +514,12 @@ letterPayload (MessageData v b) =
 -- does not know rather than reporting it as malformed.
 parsePayload :: ByteString -> Either LetterError MessageData
 parsePayload bs = do
+  -- Before the decode, because the decode is what the bound protects. These are
+  -- the first bytes of a stranger's message that this build touches, and until
+  -- now nothing stood between "a peer relayed a payload" and "CBOR allocates
+  -- whatever the length prefix says". The bound is the letter layer's own
+  -- ('maxPayloadBytes'), so it admits everything this module will produce.
+  boundedPayload (BS.length bs)
   Envelope v body <- strictDecode bs
   -- Version first: a newer schema is reported as such even when its body is
   -- something this reader cannot decode at all. Any version other than the
@@ -504,12 +542,18 @@ strictDecode = maybe (Left MalformedPayload) Right . decodeStrict
 -- bridge must store it verbatim as the canon author box (re-signing would
 -- change the event-id and destroy the authorship proof).
 --
--- This is the plain form, with no policy applied; triage should prefer
--- 'openLetterAs'.
-openLetter
+-- The signature is checked here; nothing else is. The deny-list and the
+-- reply-channel rule live in 'openLetterAs', and a caller that reaches for this
+-- one gets a verified letter that policy has never seen: a banned author's box
+-- rewrapped under a fresh envelope opens fine, and a reply channel naming a
+-- stranger's mailbox comes back as though the sender owned it.
+--
+-- Named for what it is missing rather than for what it does, because the name
+-- is the only thing between a caller and that. Triage wants 'openLetterAs'.
+openLetterNoPolicy
   :: MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
-openLetter md
+openLetterNoPolicy md
   -- The constructor is exported, so a MessageData can reach here without
   -- passing parsePayload; check the version rather than trust that it did.
   | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
@@ -538,7 +582,7 @@ openLetterAs
   -> MessageData
   -> Either LetterError (SignedBox AuthorContent HubScheme, HubKey, AuthorContent, ReplyChannel)
 openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
-  case openLetter md of
+  case openLetterNoPolicy md of
     -- The version is checked before the body, so for a letter from a schema
     -- this build cannot parse there is no inner author to ban: the only key
     -- in hand is the envelope's. PEP-21 is right that an envelope ban is
@@ -584,12 +628,12 @@ openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
 -- while naming a thread in someone else's. Prefer 'openAckFor', which closes
 -- that. Note also that an ack carries no clock and no counter, so an old one
 -- replays verbatim; nothing here dedups, and canon is what decides status.
-openAck
+openAckNoPolicy
   :: (RepoRef -> HubKey -> Bool)  -- ^ is this key a maintainer of that repo?
   -> EnvelopeSigner               -- ^ who signed the Mailbox envelope
   -> MessageData
   -> Either LetterError AckRecord
-openAck isMaintainer (EnvelopeSigner envelopeSigner) md
+openAckNoPolicy isMaintainer (EnvelopeSigner envelopeSigner) md
   | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
   | otherwise = case mdBody md of
       Letter{} -> Left NotAnAck
@@ -610,16 +654,33 @@ openAck isMaintainer (EnvelopeSigner envelopeSigner) md
 -- The escapes are the ones the reader understands (it un-escapes with
 -- 'Prelude.readLitChar'), so this is the inverse of the parse, not a
 -- best-effort sanitizer: nothing is dropped and nothing is replaced.
+--
+-- Every other control byte is escaped too, and that one is not about parsing.
+-- A canon file is read with @git show@ and @cat@ far more often than with this
+-- module, and a raw ESC in a body is a terminal escape sequence: a title can
+-- reposition the cursor, clear the line, and rewrite what a maintainer thinks
+-- they are looking at while they decide whether to sign it. Written as @\\xNN@
+-- the same bytes still read back byte for byte and print as themselves.
+--
+-- The trailing @\\&@ is the empty escape, and it is load-bearing: a numeric
+-- escape swallows any hex digit that follows it, so a body of @ESC@ then @5@
+-- would otherwise read back as one character U+1B5 and the file would say
+-- something the letter did not.
 sexpStr :: Text -> Syntax C
 sexpStr = mkStr @C . Text.unpack . Text.concatMap esc
   where
     esc = \case
       '\\' -> "\\\\"
       '"'  -> "\\\""
+      -- The three that have a short spelling keep it: they are most of what a
+      -- body contains, and a mnemonic escape cannot run into what follows it.
       '\n' -> "\\n"
       '\r' -> "\\r"
       '\t' -> "\\t"
-      c    -> Text.singleton c
+      c | Char.isControl c -> hex c
+        | otherwise        -> Text.singleton c
+
+    hex c = "\\x" <> Text.justifyRight 2 '0' (Text.pack (showHex (Char.ord c) "")) <> "\\&"
 
 -- Shared by both projections below.
 b58 :: HubKey -> Syntax C
@@ -643,7 +704,7 @@ tsym = sexpStr
 
 -- | Open an ack and bind it to something this reader actually sent.
 --
--- The second predicate answers what 'openAck' cannot: is this (repo, thread)
+-- The second predicate answers what 'openAckNoPolicy' cannot: is this (repo, thread)
 -- pair mine? The thread-id is the hash of an author box, so nothing in the ack
 -- proves which repo the thread was opened against, and a reader correlating by
 -- thread alone would show a stranger's status on its own submission
@@ -656,7 +717,7 @@ openAckFor
   -> MessageData
   -> Either LetterError AckRecord
 openAckFor isMaintainer isMine signer md = do
-  a <- openAck isMaintainer signer md
+  a <- openAckNoPolicy isMaintainer signer md
   if isMine (akTarget a) (akThread a) then Right a else Left UnrelatedAck
 
 -- | The readable S-expression projection of an acknowledgement (PEP-18
