@@ -67,7 +67,7 @@ bless (opk,osk) sq num box =
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- kp
-  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
@@ -315,8 +315,8 @@ spec = do
       classify (ASet tid "labels" "bug" 1) `shouldBe` RequestOnly
       classify (AMerge tid "a" "b" 1) `shouldBe` OwnerNative
       classify (ARedact tid 1) `shouldBe` OwnerNative
-      classify (ADelegate (fst owner) 1) `shouldBe` OwnerNative
-      classify (ARevoke (fst owner) 1) `shouldBe` OwnerNative
+      classify (ADelegate (fst owner) (fst owner) 1) `shouldBe` OwnerNative
+      classify (ARevoke (fst owner) (fst owner) 1) `shouldBe` OwnerNative
 
     it "keeps a contributor's reply channel out of a log" $ do
       alice <- kp

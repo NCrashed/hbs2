@@ -156,10 +156,16 @@ data AuthorContent =
   | AMerge ThreadId Text Text Word64
     -- | redacts (target event-id), ts  (owner)
   | ARedact EventId Word64
-    -- | maintainer key authorized, ts  (owner-key only, PEP-21)
-  | ADelegate HubKey Word64
-    -- | maintainer key withdrawn, ts  (owner-key only, PEP-21)
-  | ARevoke HubKey Word64
+    -- | target, maintainer key authorized, ts  (owner-key only, PEP-21)
+    --
+    -- The repo is named here for the reason it is named on an open: an author
+    -- box is signed for one repository, and without saying which, an owner who
+    -- has two of them signs a delegation that is equally valid in the other.
+    -- Only publication stands between that and a maintainer set nobody agreed
+    -- to, and publication is the guarantee PEP-19 says not to lean on.
+  | ADelegate RepoRef HubKey Word64
+    -- | target, maintainer key withdrawn, ts  (owner-key only, PEP-21)
+  | ARevoke RepoRef HubKey Word64
   deriving stock (Eq,Show,Generic)
 
 instance Serialise AuthorContent
@@ -183,8 +189,8 @@ authorTs = \case
   AReopen _ _ t       -> t
   AMerge _ _ _ t      -> t
   ARedact _ t         -> t
-  ADelegate _ t       -> t
-  ARevoke _ t         -> t
+  ADelegate _ _ t     -> t
+  ARevoke _ _ t       -> t
 
 -- | Replace the declared timestamp.
 --
@@ -201,8 +207,8 @@ withAuthorTs t = \case
   AReopen a b _         -> AReopen a b t
   AMerge a b c _        -> AMerge a b c t
   ARedact a _           -> ARedact a t
-  ADelegate a _         -> ADelegate a t
-  ARevoke a _           -> ARevoke a t
+  ADelegate a b _       -> ADelegate a b t
+  ARevoke a b _         -> ARevoke a b t
 
 -- | The thread a reply-class event targets. 'Nothing' for 'AOpen' (its own
 -- id is the thread) and for the repo-scope ops 'ARedact'/'ADelegate'/'ARevoke'.

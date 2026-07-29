@@ -57,6 +57,7 @@ common shared-properties
       , unordered-containers
       , text
       , prettyprinter
+      , base64-bytestring
 
 library
     import:           shared-properties

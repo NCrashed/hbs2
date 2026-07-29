@@ -3,6 +3,7 @@ module HBS2.Hub.CanonSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Canon
 import HBS2.Hub.Fold
+import HBS2.Hub.Letter (oversizedField,maxTitle,maxLabel,maxLabels,maxInlineBody,maxRef,maxAttrName,maxAttrValue)
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
@@ -27,7 +28,7 @@ kp = do
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- kp
-  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
 secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
@@ -88,13 +89,44 @@ spec = do
             , AReopen target Nothing 6
             , AMerge target "cafe" "refs/heads/master" 7
             , ARedact target 8
-            , ADelegate (fst alice) 9
-            , ARevoke (fst alice) 10
+            , ADelegate repo (fst alice) 9
+            , ARevoke repo (fst alice) 10
             ]
           evs = [ mkEvent alice owner c (canon 1 Nothing Nothing Nothing) | c <- contents ]
              <> [ mkEvent alice owner c (canon 2 (Just 5) (Just origin) (Just secret32))
                 | c <- take 1 contents ]
       mapM_ (\ev -> parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)) evs
+
+    it "reads back an event standing on every limit the bridge will mint at" $ do
+      owner <- kp
+      alice <- kp
+      part <- someHash
+      -- The gap this closes was invisible for the plainest reason: every body in
+      -- every fixture was one character long. The bridge would mint a 32 KiB
+      -- body, this module would write the file, and the same build would answer
+      -- TooLarge when asked to read it back. A reader bound has to be derived
+      -- from what the writer admits, and the test for that has to stand on the
+      -- limits rather than near them.
+      let repo = fst owner
+          filled n = Text.replicate n "x"
+          full = AOpen repo HubPR (filled maxTitle)
+                   (replicate maxLabels (filled maxLabel))
+                   (Just (filled maxInlineBody)) (Just part)
+                   (Just (PRCoords (Just (filled maxRef)) (filled maxRef) (filled maxRef)
+                            (filled maxRef) (filled maxRef) (Just part)))
+                   42
+          biggest = mkEvent alice owner full (canon 7 (Just 3) Nothing (Just secret32))
+          attrs = mkEvent owner owner
+                    (ASet part (Text.replicate maxAttrName "a")
+                       (Text.replicate maxAttrValue "v") 43)
+                    (canon 8 Nothing Nothing Nothing)
+          note = mkEvent owner owner
+                   (AClose part (Just (filled maxInlineBody)) 44)
+                   (canon 9 Nothing Nothing Nothing)
+      oversizedField full `shouldBe` Nothing     -- the bridge would mint this
+      parseEvent (renderEvent biggest) `shouldBe` Right (hubEventVersion, biggest)
+      parseEvent (renderEvent attrs) `shouldBe` Right (hubEventVersion, attrs)
+      parseEvent (renderEvent note) `shouldBe` Right (hubEventVersion, note)
 
     it "keeps the boxes readable under a title written to break the file" $ do
       owner <- kp
@@ -172,13 +204,21 @@ spec = do
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                  (canon 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
-      parseEvent (file <> Text.replicate 200000 " ") `shouldBe` Left (TooLarge "file")
-      parseEvent (file <> Text.replicate 4000 "()") `shouldBe` Left (TooLarge "clauses")
+      parseEvent (file <> Text.replicate maxEventBytes " ") `shouldBe` Left (TooLarge "file")
+      parseEvent (file <> Text.replicate (maxClauses + 1) "()")
+        `shouldBe` Left (TooLarge "clauses")
       parseEvent (Text.unlines
         [ "(hub-event 1)"
-        , "(author-box " <> Text.replicate 5000 "z" <> ")"
+        , "(author-box " <> Text.replicate (maxTokenBytes + 1) "z" <> ")"
         , "(canon-box zzz)"
         ]) `shouldBe` Left (TooLarge "author-box")
+      -- ...and a body full of brackets is a contributor, not an attack: counting
+      -- every parenthesis in the file capped an issue at 114 of them.
+      let bracketed = mkEvent alice owner
+                        (AOpen repo HubIssue "t" [] (Just (Text.replicate 500 "(")) Nothing
+                           Nothing 1)
+                        (canon 1 (Just 1) Nothing Nothing)
+      parseEvent (renderEvent bracketed) `shouldBe` Right (hubEventVersion, bracketed)
 
     it "refuses a file with a clause missing, twice over, or misshapen" $ do
       owner <- kp
@@ -232,3 +272,28 @@ spec = do
       parseNumberIndex (renderNumberIndex ns) `shouldBe` Right ns
       parseNumberIndex "" `shouldBe` Right []
       parseNumberIndex "(number 1)" `shouldBe` Left (BadClause "number")
+      -- Its own bounds, and not the event file's: an index has an entry per
+      -- thread, so an event's clause bound would have capped a repository at
+      -- 128 issues and returned a hard error on the 129th.
+      let many' = [ (fromIntegral n, a) | n <- [1 .. 500 :: Int] ]
+      parseNumberIndex (renderNumberIndex many') `shouldBe` Right many'
+
+    it "reads a whole tree, keeping what parsed and naming what did not" $ do
+      owner <- kp
+      alice <- kp
+      -- The seam both hub sync and hub verify go through, so that there is one
+      -- of them: a file that cannot be read has no identity but its path, and
+      -- the version of every file is what an operator is owed even when the
+      -- file read fine.
+      let repo = fst owner
+          ev n = mkEvent alice owner
+                   (AOpen repo HubIssue (Text.pack (show n)) [] Nothing Nothing Nothing n)
+                   (canon n (Just n) Nothing Nothing)
+          files = [ ("threads/a/1", renderEvent (ev 1))
+                  , ("threads/a/2", "(hub-event 1)\n(author-box zz)\n")
+                  , ("threads/a/3", renderEvent (ev 3))
+                  ]
+          got = readEventLog files
+      crEvents got `shouldBe` [ev 1, ev 3]
+      crBad got `shouldBe` [("threads/a/2", BadClause "author-box")]
+      crVersions got `shouldBe` [("threads/a/1",1),("threads/a/3",1)]

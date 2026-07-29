@@ -195,7 +195,8 @@ and there is no repair afterwards, because an event-id hashes the bytes.
 The author payload is a sum, encoded with its constructor's position as the tag,
 in this order: `open`, `comment`, `revise`, `set`, `close`, `reopen`, `merge`,
 `redact`, `delegate`, `revoke`. New ops are appended and none is ever reordered
-or removed. The fields of each are in the order the schema below lists them.
+or removed. The fields of each are in the order the schema below lists them, and
+`delegate` and `revoke` begin with their target repository like an `open` does.
 
 PR coordinates are a product, in this order: `source`, `source-ref`,
 `source-tip`, `onto`, `base`, `bundle-part`, with the first and last optional.
@@ -295,8 +296,8 @@ signed boxes; the remaining clauses are the readable projection.
 (hub-event 1)
 
 ;; --- authoritative signed boxes (verification operates on these) ---
-(author-box <base58 of serialised SignedBox>)   ; signed by the author
-(canon-box  <base58 of serialised SignedBox>)    ; signed by a canon key
+(author-box <base64 of serialised SignedBox>)   ; signed by the author
+(canon-box  <base64 of serialised SignedBox>)    ; signed by a canon key
 
 ;; --- readable projection of the AUTHOR box (regenerated, not trusted) ---
 (author    <sign-pubkey-b58>)
@@ -322,6 +323,8 @@ signed boxes; the remaining clauses are the readable projection.
 (redacts   <event-id>)             ; on redact: the target event
 (delegate  <sign-pubkey-b58>)      ; on delegate: the maintainer key authorized
 (revoke    <sign-pubkey-b58>)      ; on revoke: the maintainer key withdrawn
+                                   ;   both carry (target) too: a delegation is
+                                   ;   for ONE repository
 
 ;; --- readable projection of the CANON box (regenerated, not trusted) ---
 (seq       <word64>)               ; globally monotonic order weight
@@ -590,10 +593,13 @@ altering state:
      op: it is a canon-box field on the `open` event, so it is owner-signed
      by construction.)
   4a. Payload rules that are admission rules, and so are consensus like the
-     rest of this list. An `open` names THIS repository (the owner key its
-     author box was signed for): otherwise an open authored for another repo
-     could be lifted out of that repo's canon and replayed here, arriving with
-     a valid signature and somebody else's words. A `pr` open carries
+     rest of this list. An `open`, a `delegate` and a `revoke` name THIS
+     repository (the owner key their author box was signed for): otherwise an
+     event authored for another repo could be lifted out of that repo's canon
+     and replayed here with a valid signature. For an `open` that means
+     somebody else's words appearing here; for a `delegate` it means an owner
+     who has two repositories signing, in one of them, a maintainer set for
+     both. A `pr` open carries
      coordinates and an `issue` open does not. A PR's coordinates, on an `open`
      and on every `revise`, name at least one of a fork to pull from or a
      bundle to fetch. A `revise` and a `merge` are PR-only, so both are dropped
@@ -1126,11 +1132,19 @@ a round trip through the publisher, which is only worth it for a repo that
 actually runs several maintainers. Left as an option; until then the rule is
 one publisher per repo, checked by audit rather than enforced by the types.
 
-Note the related case: `seq` is minted as the maximum admitted plus one, so
-an event that was minted and then dropped by the fold leaves its `seq` free
-to be reused, and canon can end up with two events sharing one. Determinism
-is unaffected for the same reason, and the bridge avoids minting doomed
-events in the first place, but the audit reports it if it happens.
+Note the related case: canon can hold two files at one `seq` when one of them
+is refused, since the stamp rules above spend a `seq` only for a canon box an
+authorized key signed. Determinism is unaffected for the same reason as above,
+and the bridge avoids minting doomed events in the first place.
+
+What the audit says about it is worth being exact about, because the two halves
+are reported differently and on purpose. The duplicate-`seq` anomaly is about
+two ADMITTED events, which is a publisher having minted twice; a refused file
+sharing a `seq` with an admitted one is not an anomaly of anybody's event, and
+attributing it to the admitted one would let a stranger who dropped a file into
+a clone put a warning on somebody else's work. It appears in the drop report
+instead, which carries the `seq` and the key that signed it, so an operator sees
+both entries at that `seq` and can tell which is which.
 
 A repo names the consensus channel with the optional manifest clause from
 PEP-17:

@@ -1145,10 +1145,12 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
 
     -- Only the owner key may delegate (PEP-19 rule 5): a delegate signing
     -- one would be dropped, so refuse before minting.
-    ADelegate{} | pk /= repo -> Left OwnerKeyRequired
-                | otherwise  -> Right RepoScope
-    ARevoke{}   | pk /= repo -> Left OwnerKeyRequired
-                | otherwise  -> Right RepoScope
+    ADelegate target _ _ | target /= repo -> Left WrongRepo
+                         | pk /= repo     -> Left OwnerKeyRequired
+                         | otherwise      -> Right RepoScope
+    ARevoke target _ _   | target /= repo -> Left WrongRepo
+                         | pk /= repo     -> Left OwnerKeyRequired
+                         | otherwise      -> Right RepoScope
 
     AOpen target kind _ _ _ _ coords _
       | target /= repo                    -> Left WrongRepo
@@ -1287,8 +1289,8 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
         -- withdrawn either. Deleting it here would leave the accumulated
         -- view disagreeing with the rebuilt one about a legitimate event.
       , cvMaintainers = case content of
-          ADelegate k _           -> HS.insert k (cvMaintainers view)
-          ARevoke k _ | k /= repo -> HS.delete k (cvMaintainers view)
+          ADelegate _ k _           -> HS.insert k (cvMaintainers view)
+          ARevoke _ k _ | k /= repo -> HS.delete k (cvMaintainers view)
           _                       -> cvMaintainers view
       , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
       , cvLastFolded = stamped

@@ -36,6 +36,7 @@ module HBS2.Hub.Letter
   , hubMsgVersion
   , maxInlineBody
   , maxPartBytes
+  , maxBoxBytes
   , maxTitle
   , maxAttrValue
   , maxAttrName
@@ -173,6 +174,26 @@ maxLabel = 128
 
 maxLabels :: Int
 maxLabels = 32
+
+-- | The largest a signed box can get, given every limit above.
+--
+-- Derived, not chosen, and that is the whole point of it being here rather than
+-- next to the reader that needs it. A reader has to bound what it will decode,
+-- and a bound picked independently of the writer's limits is a reader that
+-- refuses what its own writer produced: with a token bound of 4 KiB the bridge
+-- minted a 32 KiB body, wrote the file, and then could not read it back, which
+-- nothing found because every body in the fixtures was one character long.
+--
+-- The sum is deliberately loose. It adds the widest open (title, the full label
+-- list, an inline body, coordinates) to the two fields only a @set@ carries,
+-- rather than taking a maximum over the ops, and then adds four kilobytes for
+-- the key, the signature, the domain tag, the hashes and the CBOR framing.
+-- Being generous costs a reader nothing and being exact would have to be
+-- recomputed every time a constructor changes.
+maxBoxBytes :: Int
+maxBoxBytes = maxTitle + maxLabels * maxLabel + maxInlineBody + 6 * maxRef
+            + maxAttrName + maxAttrValue
+            + 4096
 
 -- | The size of a text field as it costs on the wire: UTF-8 bytes, not
 -- characters. A limit about payload size has to be measured in payload.
@@ -685,8 +706,10 @@ contentSyntax = body
       ARedact target ts ->
         [ op "redact", mkForm "redacts" [href target], mkForm "created" [mkInt ts] ]
 
-      ADelegate k ts ->
-        [ op "delegate", mkForm "delegate" [b58 k], mkForm "created" [mkInt ts] ]
+      ADelegate target k ts ->
+        [ op "delegate", mkForm "target" [b58 target]
+        , mkForm "delegate" [b58 k], mkForm "created" [mkInt ts] ]
 
-      ARevoke k ts ->
-        [ op "revoke", mkForm "revoke" [b58 k], mkForm "created" [mkInt ts] ]
+      ARevoke target k ts ->
+        [ op "revoke", mkForm "target" [b58 target]
+        , mkForm "revoke" [b58 k], mkForm "created" [mkInt ts] ]

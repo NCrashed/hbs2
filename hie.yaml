@@ -1,2 +1,18 @@
 cradle:
   cabal:
+    - path: "hbs2-core/lib"
+      component: "lib:hbs2-core"
+    - path: "hbs2-hub/lib"
+      component: "lib:hbs2-hub"
+    - path: "hbs2-hub/test"
+      component: "hbs2-hub:test:spec"
+    - path: "hbs2-peer/lib"
+      component: "lib:hbs2-peer"
+    - path: "hbs2-git3/lib"
+      component: "lib:hbs2-git3"
+    - path: "hbs2-storage-simple/lib"
+      component: "lib:hbs2-storage-simple"
+    - path: "hbs2-keyman/lib"
+      component: "lib:hbs2-keyman"
+    - path: "."
+      component: "lib:hbs2-core"

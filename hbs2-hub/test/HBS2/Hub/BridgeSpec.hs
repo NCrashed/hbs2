@@ -33,7 +33,7 @@ kp = do
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- kp
-  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
 threadOf :: FoldResult -> ThreadId -> ThreadState
 threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads fr))
@@ -454,11 +454,11 @@ spec = do
       let repo = fst owner
           letter n = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) noReplyChannel
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
       -- while delegated, bob may fold
       aOk <- expectRight
         (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin noParts (letter "ok"))
-      aRev <- expectRight (ownerEvent (ctxOf owner) (acView aOk) 3 noOwnAttachments (ARevoke (fst bob) 3))
+      aRev <- expectRight (ownerEvent (ctxOf owner) (acView aOk) 3 noOwnAttachments (ARevoke repo (fst bob) 3))
       -- the view is rebuilt from canon, fully up to date, and bob is out
       let rebuilt = viewOf (foldEvents repo (map acEvent [aDel, aOk, aRev]))
       expectErr UnauthorizedForRepo
@@ -478,7 +478,7 @@ spec = do
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
       aOpen <- expectRight
         (acceptLetter (ctxAs bob repo) (EnvelopeSigner (fst alice)) (acView aDel) 2 origin noParts letter)
       aSet <- expectRight
@@ -494,15 +494,15 @@ spec = do
       carol <- kp
       -- bob is a real maintainer here, so this exercises the root-of-trust
       -- guard rather than the general authority check.
-      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst bob) 1))
+      aDel <- expectRight (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
       authorizedCanon (acView aDel) (fst bob) `shouldBe` True
       expectOwn OwnerKeyRequired
-        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noOwnAttachments (ADelegate (fst carol) 2))
+        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noOwnAttachments (ADelegate (fst owner) (fst carol) 2))
       expectOwn OwnerKeyRequired
-        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noOwnAttachments (ARevoke (fst bob) 2))
+        (ownerEvent (ctxAs bob (fst owner)) (acView aDel) 2 noOwnAttachments (ARevoke (fst owner) (fst bob) 2))
       -- the owner still may
       acc <- expectRight
-        (ownerEvent (ctxOf owner) (acView aDel) 2 noOwnAttachments (ADelegate (fst carol) 2))
+        (ownerEvent (ctxOf owner) (acView aDel) 2 noOwnAttachments (ADelegate (fst owner) (fst carol) 2))
       acScope acc `shouldBe` RepoScope
 
     it "refuses a stranger's delegate too" $ do
@@ -511,13 +511,13 @@ spec = do
       -- A stranger is not authorized to bless anything at all, so this stops
       -- at the general authority check and never reaches the owner-only rule.
       expectOwn UnauthorizedForRepo
-        (ownerEvent (ctxAs bob (fst owner)) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst bob) 1))
+        (ownerEvent (ctxAs bob (fst owner)) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
 
     it "puts a redact of a repo-scope event under repo scope" $ do
       owner <- kp
       bob <- kp
       aDel <- expectRight
-        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst bob) 1))
+        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
       aRed <- expectRight
         (ownerEvent (ctxOf owner) (acView aDel) 2 noOwnAttachments
            (ARedact (eventId (acEvent aDel)) 2))
@@ -877,7 +877,7 @@ spec = do
       aOpen <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       aDel <- expectRight
-        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (ADelegate (fst bob) 2))
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (ADelegate repo (fst bob) 2))
       eventPath aOpen `shouldBe`
         threadDir (scopeOf aOpen) <> "/" <> eventFileName 1 (eventId (acEvent aOpen))
       eventPath aDel `shouldSatisfy` \p -> take 5 p == "repo/"
@@ -1162,7 +1162,7 @@ spec = do
       -- ...and the owner path is gated by the same function.
       expectOwn StampOutOfRange
         (ownerEvent (ctxOf owner) (emptyView repo) (maxFoldedTs + 1) noOwnAttachments
-           (ADelegate (fst alice) 1))
+           (ADelegate repo (fst alice) 1))
 
     it "will not build a secret that cannot be a key" $ do
       -- Length is the only thing bytes can be checked for, and a writer that
@@ -1278,7 +1278,7 @@ spec = do
           env = EnvelopeSigner (fst alice)
           letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
       aDel <- expectRight
-        (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments (ADelegate (fst bob) 1))
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments (ADelegate repo (fst bob) 1))
       aOpen <- expectRight
         (acceptLetter (ctxAs bob repo) env (acView aDel) 2 origin noParts
            (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)))
@@ -1288,7 +1288,7 @@ spec = do
       -- what the delegate blessed is admitted
       frDropped (foldEvents repo (map acEvent [aDel,aOpen,aClose])) `shouldBe` []
       aRev <- expectRight
-        (ownerEvent (ctxOf owner) (acView aClose) 4 noOwnAttachments (ARevoke (fst bob) 4))
+        (ownerEvent (ctxOf owner) (acView aClose) 4 noOwnAttachments (ARevoke repo (fst bob) 4))
       expectErr UnauthorizedForRepo
         (honourRequest (ctxAs bob repo) env (acView aRev) 5 req2 ask)
       -- another folder can still take it, which is why this is a Retry
@@ -1491,7 +1491,7 @@ spec = do
       acView aMerge `shouldBe` viewOf fr
       -- an event that belongs to no thread acknowledges nothing
       aDel <- expectRight
-        (ownerEvent (ctxOf owner) (acView aMerge) 4 noOwnAttachments (ADelegate (fst alice) 4))
+        (ownerEvent (ctxOf owner) (acView aMerge) 4 noOwnAttachments (ADelegate repo (fst alice) 4))
       ackFor aDel `shouldBe` Nothing
 
     it "will not let one tick of the clock swallow a request" $ do
@@ -1689,7 +1689,7 @@ spec = do
           env = fst alice
           letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
       a1 <- expectRight (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
-                           (ADelegate (fst bob) 1))
+                           (ADelegate repo (fst bob) 1))
       a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
       a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments secret32 msgSecret [here part])
@@ -1699,12 +1699,12 @@ spec = do
       a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 noOwnAttachments
                            (ARedact (eventId (acEvent a4)) 5))
       a6 <- expectRight (ownerEvent (ctxOf owner) (acView a5) 6 noOwnAttachments
-                           (ADelegate (fst carol) 6))
+                           (ADelegate repo (fst carol) 6))
       a7 <- expectRight (ownerEvent (ctxOf owner) (acView a6) 7 noOwnAttachments
-                           (ARevoke (fst bob) 7))
+                           (ARevoke repo (fst bob) 7))
       -- including the case the fold treats as a no-op
       a8 <- expectRight (ownerEvent (ctxOf owner) (acView a7) 8 noOwnAttachments
-                           (ARevoke repo 8))
+                           (ARevoke repo repo 8))
       let evs = map acEvent [a1,a2,a3,a4,a5,a6,a7,a8]
           fr = foldEvents repo evs
       frDropped fr `shouldBe` []

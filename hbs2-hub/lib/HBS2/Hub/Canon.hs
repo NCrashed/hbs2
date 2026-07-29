@@ -4,8 +4,9 @@
 -- what turns an 'Event' into those bytes and back. It is deliberately separate
 -- from the fold: the fold decides what canon MEANS, this decides what canon IS.
 --
--- Two clauses in an event file are authoritative, the base58 of the two signed
--- boxes. Everything else in the file is a projection regenerated from them,
+-- Two clauses in an event file are authoritative, the base64 of the two signed
+-- boxes (see 'encodedBytes' for why that encoding and not the base58 the rest
+-- of this project uses). Everything else in the file is a projection regenerated from them,
 -- never read back and never trusted: a reader that believed @(seq 5)@ over the
 -- canon box would be trusting an unsigned line of text.
 --
@@ -22,18 +23,23 @@
 -- reading is what a hostile file attacks. See 'maxEventBytes'.
 module HBS2.Hub.Canon
   ( CanonError(..)
+  , maxEventBytes
+  , maxClauses
+  , maxTokenBytes
   , renderEvent
   , parseEvent
   , renderMeta
   , parseMeta
   , renderNumberIndex
   , parseNumberIndex
+  , CanonRead(..)
+  , readEventLog
   ) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Letter (contentSyntax)
+import HBS2.Hub.Letter (contentSyntax,maxBoxBytes)
 
-import HBS2.Base58 (AsBase58(..),fromBase58)
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Prelude.Plated (Pretty(..),fromStringMay)
 
@@ -43,6 +49,8 @@ import Prettyprinter (defaultLayoutOptions,layoutPageWidth,layoutPretty,PageWidt
 import Prettyprinter.Render.Text (renderStrict)
 
 import Codec.Serialise (Serialise,serialise)
+import Data.ByteString.Base64 qualified as B64
+import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -66,14 +74,34 @@ data CanonError =
 
 -- | What a reader will look at before deciding the file is an attack.
 --
--- An event file is two base58 boxes, a version, and a projection of at most a
--- couple of dozen clauses; the one part that can be legitimately large is an
--- inline body, bounded elsewhere at 32 KiB. These are all far above anything a
--- writer here produces and far below what costs a reader anything.
-maxEventBytes, maxClauses, maxTokenBytes :: Int
-maxEventBytes = 128 * 1024
+-- DERIVED from the bounds the bridge mints under ('maxBoxBytes'), and this is
+-- the second half of that rule rather than a separate opinion. A reader bound
+-- chosen on its own is a reader that refuses what its own writer produced: at
+-- one point the bridge would mint an event with a 32 KiB body, write the file,
+-- and answer 'TooLarge' when asked to read it back, on the same build.
+--
+-- A token is one encoded box; a file is two of those plus the projection, which
+-- repeats the same text and can double under escaping, plus room for the rest
+-- of the clauses.
+maxTokenBytes, maxEventBytes, maxClauses :: Int
+maxTokenBytes = encodedBytes maxBoxBytes
+maxEventBytes = 2 * maxTokenBytes + 2 * maxBoxBytes + 8192
 maxClauses    = 128
-maxTokenBytes = 4 * 1024
+
+-- | Base64, and the choice is load-bearing rather than a taste in alphabets.
+--
+-- Base58 is what this project uses for keys and hashes, where it earns its
+-- keep: those are short and get read aloud and copied by hand. A box is
+-- kilobytes, and base58 is a base conversion over a big integer, so decoding it
+-- is quadratic in the length: measured on this code, 4 KiB takes 12 ms, 16 KiB
+-- takes 213 ms, and 64 KiB takes two and a half seconds. Every fold of every
+-- clone pays that for every event. Base64 is linear and denser, and the
+-- alphabet does not matter here because nobody reads a box.
+--
+-- The number this costs is one third on top of the bytes; the number it saves
+-- is the difference between reading a repository and not.
+encodedBytes :: Int -> Int
+encodedBytes n = 4 * ((n + 2) `div` 3)
 
 bounded :: Int -> Int -> Text -> Either CanonError ()
 bounded got limit what
@@ -100,8 +128,8 @@ renderEvent e = Text.unlines (fmap render clauses)
     -- file, and 'only' refuses a clause that appears twice.
     clauses =
       [ mkForm "hub-event" [mkInt hubEventVersion]
-      , mkForm "author-box" [b58 (boxBytes (evAuthorBox e))]
-      , mkForm "canon-box"  [b58 (boxBytes (evCanonBox e))]
+      , mkForm "author-box" [b64 (boxBytes (evAuthorBox e))]
+      , mkForm "canon-box"  [b64 (boxBytes (evCanonBox e))]
       ]
       <> concat [ mkForm "author" [b58key k] : contentSyntax ac | Just (k,ac) <- [author] ]
       <> concat [ canonClauses k cc | Just (k,cc) <- [canonOf] ]
@@ -117,9 +145,12 @@ renderEvent e = Text.unlines (fmap render clauses)
       <> [ mkForm "folded-ts" [mkInt (ccFoldedTs cc)]
          , mkForm "canon-by" [b58key k]
          ]
-      <> [ mkForm "part-secret" [b58 (partSecretBytes s)] | Just s <- [ccPartSecret cc] ]
+      <> [ mkForm "part-secret" [mkSym @C (show (pretty (AsBase58 (partSecretBytes s))))]
+         | Just s <- [ccPartSecret cc] ]
 
-    b58 bs = mkSym @C (show (pretty (AsBase58 bs)))
+    -- The two boxes are base64 and everything else base58: see "encodedBytes"
+    -- for why they are not the same encoding.
+    b64 bs = mkSym @C (B8.unpack (B64.encode (LBS.toStrict bs)))
     b58key k = mkSym @C (show (pretty (AsBase58 k)))
     href h = mkSym @C (show (pretty h))
 
@@ -153,9 +184,43 @@ parseEvent txt = do
       -- verifies signatures afterwards never gets that far. A box is a few
       -- hundred bytes; anything past 'maxTokenBytes' is not a late one.
       _ <- bounded (Text.length sym) maxTokenBytes name
-      raw <- maybe (Left (BadClause name)) Right
-               (fromBase58 (Text.encodeUtf8 sym))
+      raw <- either (const (Left (BadClause name))) Right
+               (B64.decode (Text.encodeUtf8 sym))
       either (const (Left (BadClause name))) Right (decodeChecked raw)
+
+-- | What reading a whole canon tree produced.
+--
+-- Three lists rather than a list of events, because two of them are what
+-- @hub verify@ exists to print (PEP-22) and what a writer has to look at before
+-- it appends: a file this build could not read at all, named by its path since
+-- that is the only identity an unreadable file has, and the version every file
+-- declared, including the ones that read fine.
+data CanonRead = CanonRead
+  { crEvents   :: [Event]
+  , crBad      :: [(FilePath, CanonError)]
+  , crVersions :: [(FilePath, Word32)]
+  }
+  deriving stock (Eq,Show)
+
+-- | Read every file of a canon tree.
+--
+-- The seam between the tree and the fold, and it is here so that there is one
+-- of it: @hub sync@ and @hub verify@ both need "parse these files, keep what
+-- parsed, report what did not", and two copies of that would disagree about
+-- which files count on the day one of them grew a special case. The IO that
+-- lists the tree stays outside; this is the whole of the decision.
+--
+-- Order is the caller's: hand the paths in lexical order and the events arrive
+-- in the fold's own order for the @seq@ prefix, which costs the fold nothing
+-- (it sorts anyway) and makes a truncated read a prefix rather than a sample.
+readEventLog :: [(FilePath, Text)] -> CanonRead
+readEventLog = foldr one (CanonRead [] [] [])
+  where
+    one (path, txt) acc = case parseEvent txt of
+      Left err -> acc { crBad = (path, err) : crBad acc }
+      Right (v, e) -> acc { crEvents = e : crEvents acc
+                          , crVersions = (path, v) : crVersions acc
+                          }
 
 -- | The tree's @version@ file: the consensus version of the whole canon.
 --
@@ -184,17 +249,37 @@ renderNumberIndex ns = Text.unlines
   [ render (mkForm  "number" [mkInt n, mkSym  (show (pretty t))])
   | (n,t) <- ns ]
 
+-- One line at a time, with bounds of its own, and neither is the event file's.
+--
+-- The index has an entry per thread, so an event file's clause bound would cap
+-- a repository at 128 issues; and the parser is superlinear in the number of
+-- forms, so handing it a whole index at once is the cost this reader is
+-- otherwise so careful about. A line is a form, the file is a list of lines,
+-- and the work is linear in the file either way.
 parseNumberIndex :: Text -> Either CanonError [(Word64, ThreadId)]
 parseNumberIndex txt = do
-  cs <- clausesOf txt
-  traverse entry [ c | c@(List _ (SymbolVal "number" : _)) <- cs ]
+  let ls = [ l | l <- Text.lines txt, not (Text.null (Text.strip l)) ]
+  _ <- bounded (length ls) maxIndexEntries "index"
+  traverse line ls
   where
+    line l = do
+      _ <- bounded (Text.length l) maxIndexLineBytes "index-line"
+      cs <- clausesWith maxIndexLineBytes 4 l
+      entry =<< only "number" cs
+
     entry = \case
       List _ [SymbolVal "number", LitIntVal n, SymbolVal t]
         | n >= 0 -> case fromStringMay (Text.unpack (idText t)) of
             Just h  -> Right (fromIntegral n, HashRef h)
             Nothing -> Left (BadClause "number")
       _ -> Left (BadClause "number")
+
+-- | A number and a thread id per line, so the whole of a line's bound is one
+-- integer and one base58 hash with room to spare; and a repository with more
+-- threads than this has other problems.
+maxIndexLineBytes, maxIndexEntries :: Int
+maxIndexLineBytes = 256
+maxIndexEntries   = 1000000
 
 -- The clauses of a file, however the writer laid them out.
 --
@@ -203,7 +288,10 @@ parseNumberIndex txt = do
 -- the layout is not part of the format and a file may have been re-flowed by
 -- anything.
 clausesOf :: Text -> Either CanonError [Syntax C]
-clausesOf txt = do
+clausesOf = clausesWith maxEventBytes maxClauses
+
+clausesWith :: Int -> Int -> Text -> Either CanonError [Syntax C]
+clausesWith byteLimit formLimit txt = do
   -- Both bounds are checked before the parser runs, and both are counted in
   -- one pass over the text, because the parser is what they are protecting.
   -- Reading a canon file is the first thing anyone does with a tree and the
@@ -212,8 +300,8 @@ clausesOf txt = do
   -- forms, so a file of forty thousand empty clauses costs a minute of CPU,
   -- and one file that anybody with write access can drop into a tree would
   -- then stop every fold and every verify in every clone.
-  _ <- bounded (Text.length txt) maxEventBytes "file"
-  _ <- bounded (Text.count "(" txt) maxClauses "clauses"
+  _ <- bounded (Text.length txt) byteLimit "file"
+  _ <- bounded (countForms txt) formLimit "clauses"
   case parseTop txt of
     Left e     -> Left (NotAnEvent (Text.pack (show e)))
     Right tops -> Right (concatMap flatten tops)
@@ -224,6 +312,27 @@ clausesOf txt = do
     listOf = \case
       List _ xs -> xs
       _         -> []
+
+-- How many forms a text opens, counting only the parentheses the parser will
+-- see as parentheses.
+--
+-- Counting every '(' in the file was a bound on the CONTRIBUTOR rather than on
+-- the attacker: a body is a string literal, code in a body has brackets, and
+-- 115 of them anywhere in an issue made the file unreadable for good. The
+-- escape rule is the one the writer emits and the reader honours, so a quote
+-- inside a string does not end it.
+countForms :: Text -> Int
+countForms = seen . Text.foldl' step (0 :: Int, False, False)
+  where
+    seen (n,_,_) = n
+    step (n, inStr, esc) c
+      | inStr && esc      = (n, True, False)
+      | inStr && c == '\\' = (n, True, True)
+      | inStr && c == '"' = (n, False, False)
+      | inStr             = (n, True, False)
+      | c == '"'          = (n, True, False)
+      | c == '('          = (n + 1, False, False)
+      | otherwise         = (n, False, False)
 
 -- Exactly one clause of this name, because two would mean two answers and no
 -- rule for picking between them.

@@ -453,8 +453,8 @@ step cast st = \case
                    []    -> originOf (stStep st)  -- not an event id at all
     in mint TRedact (ARedact target ts) ts
 
-  StepDelegate ts -> mint TDelegate (ADelegate (castDelegKey cast) ts) ts
-  StepRevoke ts   -> mint TRevoke (ARevoke (castDelegKey cast) ts) ts
+  StepDelegate ts -> mint TDelegate (ADelegate repo (castDelegKey cast) ts) ts
+  StepRevoke ts   -> mint TRevoke (ARevoke repo (castDelegKey cast) ts) ts
 
   -- Mint against a view from earlier in the run and then throw the result
   -- away, which is what a caller must do when the write fails: the event
@@ -663,7 +663,7 @@ newKp = do
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- newKp
-  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
 -- The canon content of an event, if this build can read it.
 canonOf :: Event -> Maybe CanonContent

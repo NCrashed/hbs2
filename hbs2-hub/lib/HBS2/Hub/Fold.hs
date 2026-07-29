@@ -624,7 +624,12 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 
     apply r s = case rContent r of
 
-      ADelegate k _
+      ADelegate target k _
+        -- The repo binding, exactly as on an open: an author box is signed for
+        -- one repository, so a delegation cannot be lifted out of another one's
+        -- canon and replayed here, which an owner of two repos would otherwise
+        -- sign for both at once.
+        | target /= owner -> dropE r WrongTarget s
         | ownerOnly r -> keep repoScope r s { sMaint = HS.insert k (sMaint s)
                                             , sEver  = HS.insert k (sEver s)
                                             }
@@ -632,7 +637,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
 
       -- Revoking the owner key is a no-op: it is the root of trust and
       -- cannot be delegated away, so it cannot be withdrawn either.
-      ARevoke k _
+      ARevoke target k _
+        | target /= owner   -> dropE r WrongTarget s
         | not (ownerOnly r) -> dropE r UnauthorizedDelegate s
         | k == owner        -> keep repoScope r s
         | otherwise         -> keep repoScope r s { sMaint = HS.delete k (sMaint s) }

@@ -88,7 +88,7 @@ threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads 
 someHash :: IO HashRef
 someHash = do
   (pk,sk) <- kp
-  pure (authorBoxId (signAuthor pk sk (ARevoke pk 0)))
+  pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
 -- Sign a payload the way everything OUTSIDE this package does: no domain tag,
 -- because nothing else knows about one. This is what a signature lifted from
@@ -155,7 +155,7 @@ spec = do
       -- that produces drops, anomalies, parts and a redaction, so a field
       -- added later is covered without anyone remembering to add it.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice owner
                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 2)
                     (\e -> CanonContent e 2 (Just 1) (Just origin) 2 (Just secret32))
@@ -417,10 +417,10 @@ spec = do
         `shouldBe` "83001a4842324189008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8101657469746c659f63627567627569ff8164626f6479818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818700816968627332333a2f2f666c726566732f68656164732f66646161616171726566732f68656164732f6d61737465726462626262818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266182a"
       -- ...and the two tags at the end of the sum, where a reordering would
       -- otherwise be invisible.
-      hx (Domained author (ADelegate key 3)) `shouldBe`
-        "83001a4842324183088200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf03"
-      hx (Domained author (ARevoke key 4)) `shouldBe`
-        "83001a4842324183098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
+      hx (Domained author (ADelegate key key 3)) `shouldBe`
+        "83001a4842324184088200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf03"
+      hx (Domained author (ARevoke key key 4)) `shouldBe`
+        "83001a4842324184098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
 
     it "refuses a folded-ts past the ceiling" $ do
       owner <- kp
@@ -550,6 +550,33 @@ spec = do
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       map anWhat (frAnomalies fr) `shouldBe` [DupNumber 3]
 
+    it "refuses a delegation authored for another repository" $ do
+      owner <- kp
+      bob <- kp
+      other <- kp
+      -- An owner with two repositories signs a delegation naming one of them.
+      -- Without the target inside the signed content, the same author box is a
+      -- valid delegation in the other, and the only thing standing between that
+      -- and a maintainer set nobody agreed to is who may write to the tree,
+      -- which is exactly the guarantee this document says not to lean on.
+      let repo = fst owner
+          elsewhere = mkEvent owner owner (ADelegate (fst other) (fst bob) 1)
+                        (canon 1 Nothing)
+          here = mkEvent owner owner (ADelegate repo (fst bob) 2) (canon 2 Nothing)
+      reasons (foldEvents repo [elsewhere]) `shouldBe` [WrongTarget]
+      HS.member (fst bob) (frMaintainers (foldEvents repo [elsewhere]))
+        `shouldBe` False
+      -- ...and the one that names this repo does what it says
+      reasons (foldEvents repo [here]) `shouldBe` []
+      HS.member (fst bob) (frMaintainers (foldEvents repo [here])) `shouldBe` True
+      -- the same for a revoke, which is the half that would be silently
+      -- ineffective rather than silently effective
+      let revElsewhere = mkEvent owner owner (ARevoke (fst other) (fst bob) 3)
+                           (canon 3 Nothing)
+      reasons (foldEvents repo [here, revElsewhere]) `shouldBe` [WrongTarget]
+      HS.member (fst bob) (frMaintainers (foldEvents repo [here, revElsewhere]))
+        `shouldBe` True
+
     it "does not spend a number on an event it refused" $ do
       owner <- kp
       alice <- kp
@@ -578,10 +605,10 @@ spec = do
       -- have stranded the cursor while its delegation stood anyway, so nothing
       -- is conceded by counting it now.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
                     (canon 2 (Just 1))
-          eRev = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
+          eRev = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon 3 Nothing)
           eLate = mkEvent alice bob (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
                     (canon 9 Nothing)
           fr = foldEvents repo [eDel, eOpen, eRev, eLate]
@@ -606,7 +633,7 @@ spec = do
       -- order, and the events that leave no visible trace (a set, a merge, a
       -- note-less close, a delegate) appear in no other view at all.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
                     (canon 2 (Just 1))
           tid = eventId eOpen
@@ -622,7 +649,7 @@ spec = do
       map lgCanonBy (frLog fr) `shouldBe` [fst owner, fst bob, fst owner, fst owner]
       map lgAuthor (frLog fr) `shouldBe` [fst owner, fst alice, fst owner, fst owner]
       map lgContent (frLog fr) `shouldBe`
-        [ ADelegate (fst bob) 1
+        [ ADelegate repo (fst bob) 1
         , AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2
         , ASet tid "labels" "bug" 3
         , AClose tid Nothing 4
@@ -826,7 +853,7 @@ spec = do
       -- reviewer is looking at may have been chosen by somebody other than the
       -- author the thread is displayed under.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           ePR = mkEvent alice owner (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)
                   (canon 2 (Just 1))
           tid = eventId ePR
@@ -880,7 +907,7 @@ spec = do
       -- Under a delegation the events of one thread are blessed by different
       -- keys, so the provenance PEP-22 renders is per item, not per thread.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 1))
           tid = eventId eOpen
@@ -1091,11 +1118,11 @@ spec = do
       dave  <- kp     -- bob illegally tries to delegate dave
       erin  <- kp     -- dave illegally tries to bless erin's open
       let repo = fst owner
-          eDelBob = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDelBob = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           eOpenC  = mkEvent carol bob (AOpen repo HubIssue "ok" [] Nothing Nothing Nothing 100)
                             (canon 2 (Just 1))
           tidC    = eventId eOpenC
-          eDelDave = mkEvent bob bob (ADelegate (fst dave) 3) (canon 3 Nothing)
+          eDelDave = mkEvent bob bob (ADelegate repo (fst dave) 3) (canon 3 Nothing)
           eOpenE  = mkEvent erin dave (AOpen repo HubIssue "bad" [] Nothing Nothing Nothing 400)
                             (canon 4 (Just 2))
           tidE    = eventId eOpenE
@@ -1110,12 +1137,12 @@ spec = do
       bob   <- kp
       alice <- kp
       let repo = fst owner
-          eDel  = mkEvent owner owner (ADelegate (fst bob) 1) (canon 1 Nothing)
+          eDel  = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
           -- bob blesses this while authorized: must survive the later revoke
           eOk   = mkEvent alice bob (AOpen repo HubIssue "before" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 1))
           tidOk = eventId eOk
-          eRev  = mkEvent owner owner (ARevoke (fst bob) 3) (canon 3 Nothing)
+          eRev  = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon 3 Nothing)
           -- after the revoke bob may no longer bless
           eBad  = mkEvent alice bob (AOpen repo HubIssue "after" [] Nothing Nothing Nothing 4)
                           (canon 4 (Just 2))
@@ -1129,7 +1156,7 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eSelf = mkEvent owner owner (ARevoke (fst owner) 1) (canon 1 Nothing)
+          eSelf = mkEvent owner owner (ARevoke (fst owner) (fst owner) 1) (canon 1 Nothing)
           eOpen = mkEvent alice owner (AOpen repo HubIssue "still works" [] Nothing Nothing Nothing 2)
                           (canon 2 (Just 1))
           tid = eventId eOpen

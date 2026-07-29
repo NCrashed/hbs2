@@ -193,12 +193,21 @@ Shape (JSON projection of a thread):
                                       //   let a stranger label their own issue
   "comments": [
     { "event_id": "...", "author": "<sign-key>", "canon_by": "<sign-key>",
-      "ts": 1737766800000, "body": "...", "redacted": false,
+      "ts": 1737766800000,              // folded-ts: trusted, and what orders
+                                        //   the list. The name is historical;
+                                        //   it is the same clock as created_at
+      "declared_at": 1737766700000,     // author-ts: advisory, shown, never
+                                        //   ordered by, exactly as on a thread
+      "body": "...", "redacted": false,
       "body_part": "<hashref|null>", "part_secret": "<b58|null>" }
   ],
   "pr": {                             // present when kind == pr
     "onto": "refs/heads/master",
     "base": "<sha1>", "tip": "<sha1>",      // latest surviving open/revise (PEP-20)
+    "source": "hbs23://<fork-key>|null",    // the fork to pull from, on that path
+    "source_ref": "refs/heads/topic",       // the branch inside it
+    "bundle_part": "<hashref|null>",        // or the bundle, on the delta path
+    "part_secret": "<b58|null>",            //   and the key that opens it
     "merge_commit": "<sha1|null>",
     "coords_author": "<sign-key>",          // who supplied THESE coordinates: a
     "coords_canon_by": "<sign-key>",        //   maintainer may revise a PR, so
@@ -209,6 +218,21 @@ Shape (JSON projection of a thread):
   }
 }
 ```
+
+A renderer sanitizes control characters before it prints. Every text field here
+comes from whoever sent the letter, the canon file escapes only what its own
+grammar needs (a backslash, a quote, and the three whitespace characters), and
+everything else travels verbatim, as it must: canon carries what was signed. So
+a title with an ESC in it is a title with an ESC in it, and printing that to a
+terminal hands a stranger the terminal. Strip or escape C0 on the way out, in
+every renderer, including the plain-text one.
+
+A triage loop checks its own key against the maintainer set ONCE before a pass,
+not per letter. `UnauthorizedForRepo` is a retry, because in a repo with several
+maintainers another folder can do what this one cannot; for a single folder
+whose delegation has been withdrawn it is the same answer for every letter
+forever, and a loop that only reads the per-letter refusal will spin over the
+whole mailbox on every pass and fold nothing.
 
 A renderer must tolerate a `reply-to` that names no event it can see, or one
 that belongs to another thread. Nothing validates it, deliberately: the
