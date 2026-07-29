@@ -34,11 +34,11 @@ kp = do
   pure (_peerSignPk c, _peerSignSk c)
 
 -- A canon box builder: seq, optional number, folded-at time.
-canonAt :: Word64 -> Maybe Word64 -> Word64 -> EventId -> CanonContent
-canonAt sq num folded eid = CanonContent eid sq num Nothing folded Nothing
+canonAt :: RepoRef -> Word64 -> Maybe Word64 -> Word64 -> EventId -> CanonContent
+canonAt repo sq num folded eid = CanonContent repo eid sq num Nothing folded Nothing
 
-canon :: Word64 -> Maybe Word64 -> EventId -> CanonContent
-canon sq num = canonAt sq num sq
+canon :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
+canon repo sq num = canonAt repo sq num sq
 
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
@@ -155,16 +155,16 @@ spec = do
       -- that produces drops, anomalies, parts and a redaction, so a field
       -- added later is covered without anyone remembering to add it.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice owner
                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 2)
-                    (\e -> CanonContent e 2 (Just 1) (Just origin) 2 (Just secret32))
+                    (\e -> CanonContent repo e 2 (Just 1) (Just origin) 2 (Just secret32))
           tid = eventId eOpen
           eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
-                   (\e -> CanonContent e 3 Nothing (Just origin) 3 Nothing)
+                   (\e -> CanonContent repo e 3 Nothing (Just origin) 3 Nothing)
           eBad = mkEvent alice alice (AComment tid Nothing (Just "unblessed") Nothing 4)
-                   (canon 4 Nothing)
-          eRed = mkEvent owner owner (ARedact (eventId eCmt) 5) (canon 5 Nothing)
+                   (canon repo 4 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId eCmt) 5) (canon repo 5 Nothing)
           evs = [eDel, eOpen, eCmt, eBad, eRed]
           full fr = ( summary fr, frDropped fr, frAnomalies fr
                     , frRedacted fr, frParts fr, frMaxSeq fr, frMaxNumber fr
@@ -181,12 +181,12 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "hello" [] Nothing Nothing Nothing 100)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid   = eventId eOpen
           eCmt  = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 200)
-                          (canon 2 Nothing)
+                          (canon repo 2 Nothing)
           eSet  = mkEvent owner owner (AClose tid Nothing 300)
-                          (canon 3 Nothing)
+                          (canon repo 3 Nothing)
           fwd = foldEvents repo [eOpen, eCmt, eSet]
           rev = foldEvents repo [eSet, eCmt, eOpen]
       summary fwd `shouldBe` summary rev
@@ -198,9 +198,9 @@ spec = do
       let repo = fst owner
           other = fst alice           -- a different repo key
           bad1 = mkEvent alice owner (AOpen other HubIssue "x" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just 1))
+                         (canon repo 1 (Just 1))
           bad2 = mkEvent alice owner (AOpen other HubIssue "y" [] Nothing Nothing Nothing 2)
-                         (canon 2 (Just 2))
+                         (canon repo 2 (Just 2))
           a = frDropped (foldEvents repo [bad1, bad2])
           b = frDropped (foldEvents repo [bad2, bad1])
       a `shouldBe` b
@@ -212,7 +212,7 @@ spec = do
       -- maxBound bucket; that bucket must still be ordered by event-id.
       let repo = fst owner
           mk n = mkEvent alice owner
-                   (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) (canon 1 (Just 1))
+                   (AOpen repo HubIssue n [] Nothing Nothing Nothing 1) (canon repo 1 (Just 1))
           forged1 = Event (evAuthorBox (mk "a1")) (evCanonBox (mk "a2"))  -- IdMismatch
           forged2 = Event (evAuthorBox (mk "b1")) (evCanonBox (mk "b2"))  -- IdMismatch
           x = frDropped (foldEvents repo [forged1, forged2])
@@ -226,10 +226,10 @@ spec = do
       let repo = fst owner
           -- a real, well-formed open that we deliberately never fold
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           orphan = eventId eOpen
           eCmt = mkEvent alice owner (AComment orphan Nothing (Just "orphan") Nothing 2)
-                         (canon 2 Nothing)
+                         (canon repo 2 Nothing)
           fr = foldEvents repo [eCmt]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadThread]
@@ -239,16 +239,16 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "oops, a secret") Nothing 2)
-                         (canon 2 Nothing)
+                         (canon repo 2 Nothing)
           cid = eventId eCmt
-          eRed = mkEvent owner owner (ARedact cid 3) (canon 3 Nothing)
+          eRed = mkEvent owner owner (ARedact cid 3) (canon repo 3 Nothing)
           -- a redact naming an event that was never admitted
           ghost = mkEvent alice owner (AComment tid Nothing (Just "never folded") Nothing 4)
-                          (canon 4 Nothing)
-          eGhost = mkEvent owner owner (ARedact (eventId ghost) 5) (canon 5 Nothing)
+                          (canon repo 4 Nothing)
+          eGhost = mkEvent owner owner (ARedact (eventId ghost) 5) (canon repo 5 Nothing)
           fr = foldEvents repo [eOpen, eCmt, eRed, eGhost]
           t = threadOf fr tid
       HS.member cid (frRedacted fr) `shouldBe` True
@@ -264,13 +264,13 @@ spec = do
       -- as a triage bridge blessed the letter it arrived in.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 2)
-                         (canon 2 Nothing)
+                         (canon repo 2 Nothing)
           cid = eventId eCmt
           -- authored by alice, blessed by the owner
-          eRed = mkEvent alice owner (ARedact cid 3) (canon 3 Nothing)
+          eRed = mkEvent alice owner (ARedact cid 3) (canon repo 3 Nothing)
           fr = foldEvents repo [eOpen, eCmt, eRed]
       HS.member cid (frRedacted fr) `shouldBe` False
       reasons fr `shouldBe` [UnauthorizedCanon]
@@ -285,17 +285,17 @@ spec = do
       -- only place they can be acted on.
       let repo = fst owner
           o1 = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
-                 (\e -> CanonContent e 1 (Just 5) (Just origin) 5000 Nothing)
+                 (\e -> CanonContent repo e 1 (Just 5) (Just origin) 5000 Nothing)
           -- number goes backwards, folded-ts goes backwards, and the same
           -- letter is folded a second time
           o2 = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
-                 (\e -> CanonContent e 2 (Just 3) (Just origin) 4000 Nothing)
+                 (\e -> CanonContent repo e 2 (Just 3) (Just origin) 4000 Nothing)
           -- ...and this one names an encrypted part with no key to it
           o3 = mkEvent alice owner (AOpen repo HubIssue "c" [] Nothing (Just part) Nothing 3)
-                 (\e -> CanonContent e 3 (Just 9) Nothing 6000 Nothing)
+                 (\e -> CanonContent repo e 3 (Just 9) Nothing 6000 Nothing)
           -- an unnormalized multi-valued attribute: the same two labels in
           -- another order are other bytes and so another event-id
-          o4 = mkEvent owner owner (ASet (eventId o1) "labels" "ui,bug" 4) (canonAt 4 Nothing 7000)
+          o4 = mkEvent owner owner (ASet (eventId o1) "labels" "ui,bug" 4) (canonAt repo 4 Nothing 7000)
           fr = foldEvents repo [o1,o2,o3,o4]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe`
@@ -311,9 +311,9 @@ spec = do
       alice <- kp
       let repo = fst owner
           a = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
-                (canon 1 (Just 1))
+                (canon repo 1 (Just 1))
           b = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
-                (canon 1 (Just 1))
+                (canon repo 1 (Just 1))
           fr = foldEvents repo [a,b]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldSatisfy` \as ->
@@ -331,9 +331,9 @@ spec = do
           ePR = mkEvent alice owner
                   (AOpen repo HubPR "pr" [] Nothing (Just body)
                      (Just coords { prBundle = Just bundle }) 1)
-                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
+                  (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
           eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just cmt) 2)
-                 (\e -> CanonContent e 2 Nothing Nothing 2 (Just secret32))
+                 (\e -> CanonContent repo e 2 Nothing Nothing 2 (Just secret32))
           fr = foldEvents repo [ePR, eC]
       frDropped fr `shouldBe` []
       frParts fr `shouldBe` HS.fromList [body, cmt, bundle]
@@ -351,9 +351,10 @@ spec = do
     it "names an event file so a lexical listing is the fold order" $ do
       owner <- kp
       alice <- kp
-      let ac n = AOpen (fst owner) HubIssue n [] Nothing Nothing Nothing 1
-          e1 = mkEvent alice owner (ac "a") (canon 1 (Just 1))
-          e2 = mkEvent alice owner (ac "b") (canon 10 (Just 2))
+      let repo = fst owner
+          ac n = AOpen repo HubIssue n [] Nothing Nothing Nothing 1
+          e1 = mkEvent alice owner (ac "a") (canon repo 1 (Just 1))
+          e2 = mkEvent alice owner (ac "b") (canon repo 10 (Just 2))
       -- The padding is the point: "10" must not sort before "2".
       eventFileName 1 (eventId e1) `shouldSatisfy` (< eventFileName 10 (eventId e2))
       -- ...which needs the prefix to be fixed width. The name as a whole is
@@ -371,8 +372,8 @@ spec = do
       -- all of it lives in the canon box.
       let repo = fst owner
           ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
-          e1 = mkEvent alice owner ac (canonAt 1 (Just 1) 1111)
-          e2 = mkEvent alice owner ac (canonAt 1 (Just 7) 2222)
+          e1 = mkEvent alice owner ac (canonAt repo 1 (Just 1) 1111)
+          e2 = mkEvent alice owner ac (canonAt repo 1 (Just 7) 2222)
           tid = eventId e1
           shown fr = ( fmap tsNumber (HM.lookup tid (frThreads fr))
                      , fmap tsCreated (HM.lookup tid (frThreads fr))
@@ -396,6 +397,10 @@ spec = do
           hx = B8.unpack . B16.encode . LBS.toStrict . serialise
           author = domainOf (Nothing @AuthorContent)
           canonD = domainOf (Nothing @CanonContent)
+          key = fromMaybe (error "fixture key")
+                  (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
+          prc = PRCoords (Just "hbs23://f") "refs/heads/f" "aaaa"
+                         "refs/heads/master" "bbbb" (Just h)
       -- The fixture hash itself, so a change in the hashing is caught here
       -- rather than as an unexplained diff in the bytes below.
       show (pretty h) `shouldBe` "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
@@ -405,14 +410,10 @@ spec = do
         "83001a4842324183078200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a795726605"
       hx (Domained author (AComment h (Just h) (Just "hi") Nothing 7)) `shouldBe`
         "83001a4842324186018200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266816268698007"
-      hx (Domained canonD (CanonContent h 3 (Just 9) (Just h) 11 (Nothing :: Maybe PartSecret))) `shouldBe`
-        "83001a4842324387008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a79572660b80"
+      hx (Domained canonD (CanonContent key h 3 (Just 9) (Just h) 11 (Nothing :: Maybe PartSecret))) `shouldBe`
+        "83001a4842324388008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a79572660b80"
       -- A fully populated open with full coordinates: the two records most
       -- likely to gain a field, and the one place PRCoords is pinned at all.
-      let key = fromMaybe (error "fixture key")
-                  (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
-          prc = PRCoords (Just "hbs23://f") "refs/heads/f" "aaaa"
-                         "refs/heads/master" "bbbb" (Just h)
       hx (Domained author (AOpen key HubPR "title" ["bug","ui"] (Just "body") (Just h) (Just prc) 42))
         `shouldBe` "83001a4842324189008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8101657469746c659f63627567627569ff8164626f6479818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818700816968627332333a2f2f666c726566732f68656164732f66646161616171726566732f68656164732f6d61737465726462626262818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266182a"
       -- ...and the two tags at the end of the sum, where a reordering would
@@ -433,7 +434,7 @@ spec = do
       -- bounds it is a ceiling.
       let repo = fst owner
           at t = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                   (canonAt 1 (Just 1) t)
+                   (canonAt repo 1 (Just 1) t)
       reasons (foldEvents repo [at maxBound]) `shouldBe` [BadStamp]
       reasons (foldEvents repo [at (maxFoldedTs + 1)]) `shouldBe` [BadStamp]
       -- and the ceiling itself is admitted, so the bridge's gate and this one
@@ -452,7 +453,7 @@ spec = do
       -- attribute between them settled by a hash instead of by time.
       let repo = fst owner
           real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon 9 (Just 3))
+                         (canon repo 9 (Just 3))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
@@ -481,11 +482,11 @@ spec = do
       -- them settled by a hash instead of by time.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           -- a comment on a thread this fold has not got (yet)
           eDangling = mkEvent alice owner
                         (AComment (eventId eOpen) Nothing (Just "early") Nothing 2)
-                        (canon 9 Nothing)
+                        (canon repo 9 Nothing)
           fr = foldEvents repo [eDangling]
       reasons fr `shouldBe` [BadThread]
       -- the dropped event's seq is spent: the next mint is 10, not 1
@@ -502,10 +503,10 @@ spec = do
       -- then be unable to mint even the revoke that would stop it.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           intruder = mkEvent alice mallory
                        (AComment (eventId eOpen) Nothing (Just "hello") Nothing 2)
-                       (canonAt (maxBound - 1) Nothing 2)
+                       (canonAt repo (maxBound - 1) Nothing 2)
           fr = foldEvents repo [eOpen, intruder]
       reasons fr `shouldBe` [UnauthorizedCanon]
       cursorFrom fr `shouldBe` CanonCursor 2 2
@@ -521,13 +522,13 @@ spec = do
       -- in the repository to the year 2100.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                    (canonAt 1 (Just 1) 5000)
+                    (canonAt repo 1 (Just 1) 5000)
           tid = eventId eOpen
           -- refused: nobody authorized this key
           eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 2)
-                   (canonAt 2 Nothing maxFoldedTs)
+                   (canonAt repo 2 Nothing maxFoldedTs)
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "yes") Nothing 3)
-                   (canonAt 3 Nothing 6000)
+                   (canonAt repo 3 Nothing 6000)
           fr = foldEvents repo [eOpen, eBad, eCmt]
       reasons fr `shouldBe` [UnauthorizedCanon]
       map anWhat (frAnomalies fr) `shouldBe` []
@@ -542,13 +543,53 @@ spec = do
       -- number was seen, so handing it out again is reportable.
       let repo = fst owner
           real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                   (canon 1 (Just 3))
+                   (canon repo 1 (Just 3))
           ghost = Event (futureBox alice) (evCanonBox real)
           mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
-                   (canon 2 (Just 3))
+                   (canon repo 2 (Just 3))
           fr = foldEvents repo [ghost, mine]
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       map anWhat (frAnomalies fr) `shouldBe` [DupNumber 3]
+
+    it "does not spend a stamp blessed for another repository" $ do
+      ownerB <- kp
+      ownerC <- kp
+      bob <- kp
+      alice <- kp
+      -- One person delegated in two repositories is ordinary, and a file they
+      -- signed in one is byte-for-byte valid in the other: both signatures
+      -- verify and the canon box references its own author box, so the stamp
+      -- used to be spent before anything noticed the content belonged
+      -- elsewhere. That handed C's high-water mark to B, and a hostile version
+      -- of it hands over maxBound, after which B can mint nothing at all.
+      let repoB = fst ownerB
+          repoC = fst ownerC
+          delegB = mkEvent ownerB ownerB (ADelegate repoB (fst bob) 1) (canon repoB 1 Nothing)
+          -- bob's event in C, blessed by bob, dropped into B's tree verbatim
+          fromC = mkEvent alice bob
+                    (AComment (eventId delegB) Nothing (Just "elsewhere") Nothing 2)
+                    (canon repoC (maxBound - 99) Nothing)
+          fr = foldEvents repoB [delegB, fromC]
+      reasons fr `shouldBe` [WrongTarget]
+      cursorFrom fr `shouldBe` CanonCursor 2 1
+
+    it "does not remember a number from a stamp it will not count" $ do
+      owner <- kp
+      alice <- kp
+      mallory <- kp
+      -- The seq has always been recorded only for stamps that count. The
+      -- number was not, so one file with an unreadable author box and a number
+      -- in its canon box turned the next honest open into a reported anomaly,
+      -- with the honest maintainer's key printed beside it.
+      let repo = fst owner
+          real = mkEvent alice mallory (AOpen repo HubIssue "x" [] Nothing Nothing Nothing 1)
+                   (canon repo 1 (Just 7))
+          ghost = Event (futureBox alice) (evCanonBox real)
+          mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
+                   (canon repo 2 (Just 7))
+          fr = foldEvents repo [ghost, mine]
+      map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      map anWhat (frAnomalies fr) `shouldBe` []
 
     it "refuses a delegation authored for another repository" $ do
       owner <- kp
@@ -561,8 +602,8 @@ spec = do
       -- which is exactly the guarantee this document says not to lean on.
       let repo = fst owner
           elsewhere = mkEvent owner owner (ADelegate (fst other) (fst bob) 1)
-                        (canon 1 Nothing)
-          here = mkEvent owner owner (ADelegate repo (fst bob) 2) (canon 2 Nothing)
+                        (canon repo 1 Nothing)
+          here = mkEvent owner owner (ADelegate repo (fst bob) 2) (canon repo 2 Nothing)
       reasons (foldEvents repo [elsewhere]) `shouldBe` [WrongTarget]
       HS.member (fst bob) (frMaintainers (foldEvents repo [elsewhere]))
         `shouldBe` False
@@ -572,7 +613,7 @@ spec = do
       -- the same for a revoke, which is the half that would be silently
       -- ineffective rather than silently effective
       let revElsewhere = mkEvent owner owner (ARevoke (fst other) (fst bob) 3)
-                           (canon 3 Nothing)
+                           (canon repo 3 Nothing)
       reasons (foldEvents repo [here, revElsewhere]) `shouldBe` [WrongTarget]
       HS.member (fst bob) (frMaintainers (foldEvents repo [here, revElsewhere]))
         `shouldBe` True
@@ -588,7 +629,7 @@ spec = do
       let repo = fst owner
           foreign' = mkEvent alice owner
                        (AOpen (fst other) HubIssue "elsewhere" [] Nothing Nothing Nothing 1)
-                       (canon 1 (Just (maxBound - 1)))
+                       (canon repo 1 (Just (maxBound - 1)))
           fr = foldEvents repo [foreign']
       reasons fr `shouldBe` [WrongTarget]
       -- the seq is spent, since the file sits at it; the number is not
@@ -605,12 +646,12 @@ spec = do
       -- have stranded the cursor while its delegation stood anyway, so nothing
       -- is conceded by counting it now.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
-                    (canon 2 (Just 1))
-          eRev = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon 3 Nothing)
+                    (canon repo 2 (Just 1))
+          eRev = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon repo 3 Nothing)
           eLate = mkEvent alice bob (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
-                    (canon 9 Nothing)
+                    (canon repo 9 Nothing)
           fr = foldEvents repo [eDel, eOpen, eRev, eLate]
       reasons fr `shouldBe` [UnauthorizedCanon]
       cursorFrom fr `shouldBe` CanonCursor 10 2
@@ -620,7 +661,7 @@ spec = do
       -- nothing left to answer a mutiny with but compaction.
       let eMutiny = mkEvent alice bob
                       (AComment (eventId eOpen) Nothing (Just "mutiny") Nothing 5)
-                      (canonAt (maxBound - 1) Nothing 5)
+                      (canonAt repo (maxBound - 1) Nothing 5)
           fr2 = foldEvents repo [eDel, eOpen, eRev, eMutiny]
       reasons fr2 `shouldBe` [UnauthorizedCanon]
       cursorFrom fr2 `shouldBe` CanonCursor 4 2
@@ -633,15 +674,15 @@ spec = do
       -- order, and the events that leave no visible trace (a set, a merge, a
       -- note-less close, a delegate) appear in no other view at all.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
-                    (canon 2 (Just 1))
+                    (canon repo 2 (Just 1))
           tid = eventId eOpen
-          eSet = mkEvent owner owner (ASet tid "labels" "bug" 3) (canon 3 Nothing)
-          eClose = mkEvent owner owner (AClose tid Nothing 4) (canon 4 Nothing)
+          eSet = mkEvent owner owner (ASet tid "labels" "bug" 3) (canon repo 3 Nothing)
+          eClose = mkEvent owner owner (AClose tid Nothing 4) (canon repo 4 Nothing)
           -- refused, so it is in the drop report and not here
           eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 5)
-                   (canon 5 Nothing)
+                   (canon repo 5 Nothing)
           fr = foldEvents repo [eSet, eBad, eClose, eOpen, eDel]
       map lgSeq (frLog fr) `shouldBe` [1,2,3,4]
       map lgEvent (frLog fr) `shouldBe` map eventId [eDel, eOpen, eSet, eClose]
@@ -663,7 +704,7 @@ spec = do
       -- put in public canon for an event with nothing to unlock.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1)
-                 (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
+                 (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe` [SecretWithoutPart]
@@ -701,7 +742,7 @@ spec = do
                       (decodeStrict (LBS.toStrict (serialise ("abc" :: ByteString))))
           ev = mkEvent alice owner
                  (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1)
-                 (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just stunted))
+                 (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just stunted))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe` [UnusablePartSecret]
@@ -718,7 +759,7 @@ spec = do
           -- byte for byte serialise (ARedact target 5) before the tag existed
           lookalike = signBare owner ((7 :: Word64), target, (5 :: Word64))
           real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just 1))
+                         (canon repo 1 (Just 1))
           ev = Event lookalike (evCanonBox real)
       case unboxChecked (evAuthorBox ev) of
         Left (BoxUndecodable k why) -> do
@@ -750,7 +791,7 @@ spec = do
       -- replacement (PEP-13) has to as well.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                       (canon 1 (Just 1))
+                       (canon repo 1 (Just 1))
       unboxChecked (mangleSig (evAuthorBox ev)) `shouldSatisfy` \case
         Left BoxBadSig -> True
         _              -> False
@@ -766,7 +807,7 @@ spec = do
       let repo = fst owner
           content = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
           padded = rawBox alice (domainedBytes content <> "!")
-          real = mkEvent alice owner content (canon 1 (Just 1))
+          real = mkEvent alice owner content (canon repo 1 (Just 1))
       case unboxChecked padded of
         Left (BoxUndecodable k why) -> do
           k `shouldBe` fst alice
@@ -783,7 +824,7 @@ spec = do
       -- with every up-to-date clone.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                       (canon 1 (Just 1))
+                       (canon repo 1 (Just 1))
       either Just (const Nothing) (foldCanon (hubMetaVersion + 1) repo [ev])
         `shouldBe` Just (MetaTooNew (hubMetaVersion + 1))
       either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion repo [ev])
@@ -802,15 +843,15 @@ spec = do
       let repo = fst owner
           ePR = mkEvent alice owner
                   (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords { prBundle = Just bundle }) 1)
-                  (\e -> CanonContent e 1 (Just 1) Nothing 1 (Just secret32))
+                  (\e -> CanonContent repo e 1 (Just 1) Nothing 1 (Just secret32))
           tid = eventId ePR
-          eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon 2 Nothing)
+          eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon repo 2 Nothing)
           -- a revise after the merge is still admitted: PEP-19 has no
           -- terminal state, and the coordinates are the author's to update
           eRev = mkEvent alice owner (ARevise tid coords { prSourceTip = "cccc" } 3)
-                   (\e -> CanonContent e 3 Nothing Nothing 3 Nothing)
-          eReopen = mkEvent owner owner (AReopen tid Nothing 4) (canon 4 Nothing)
-          eRed = mkEvent owner owner (ARedact tid 5) (canon 5 Nothing)
+                   (\e -> CanonContent repo e 3 Nothing Nothing 3 Nothing)
+          eReopen = mkEvent owner owner (AReopen tid Nothing 4) (canon repo 4 Nothing)
+          eRed = mkEvent owner owner (ARedact tid 5) (canon repo 5 Nothing)
           fr = foldEvents repo [ePR, eMerge, eRev, eReopen, eRed]
           t = threadOf fr tid
       frDropped fr `shouldBe` []
@@ -832,13 +873,13 @@ spec = do
       -- while the redact reported success.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           keep' = mkEvent alice owner (AComment tid Nothing (Just "fine") Nothing 2)
-                    (canon 2 Nothing)
+                    (canon repo 2 Nothing)
           gone = mkEvent alice owner (AComment tid Nothing (Just "abuse") Nothing 3)
-                   (canon 3 Nothing)
-          eRed = mkEvent owner owner (ARedact (eventId gone) 4) (canon 4 Nothing)
+                   (canon repo 3 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId gone) 4) (canon repo 4 Nothing)
           fr = foldEvents repo [eOpen, keep', gone, eRed]
           t = threadOf fr tid
       frDropped fr `shouldBe` []
@@ -853,12 +894,12 @@ spec = do
       -- reviewer is looking at may have been chosen by somebody other than the
       -- author the thread is displayed under.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           ePR = mkEvent alice owner (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)
-                  (canon 2 (Just 1))
+                  (canon repo 2 (Just 1))
           tid = eventId ePR
           eRev = mkEvent bob bob (ARevise tid coords { prSource = Just "hbs23://elsewhere" } 3)
-                   (canon 3 Nothing)
+                   (canon repo 3 Nothing)
           fr = foldEvents repo [eDel, ePR, eRev]
           t = threadOf fr tid
       frDropped fr `shouldBe` []
@@ -874,7 +915,7 @@ spec = do
       -- it cannot decode is a newer publisher.
       let repo = fst owner
           real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just 1))
+                         (canon repo 1 (Just 1))
           futureCanon = signBare owner
                           (Domained (domainOf (Nothing @CanonContent)) (12345 :: Word64))
           ev = Event (evAuthorBox real) futureCanon
@@ -889,7 +930,7 @@ spec = do
       -- newer, honest sender of forgery.
       let repo = fst owner
           real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just 1))
+                         (canon repo 1 (Just 1))
           ev = Event (futureBox alice) (evCanonBox real)
           fr = foldEvents repo [ev]
       map drEvent (frDropped fr) `shouldBe` [eventId ev]
@@ -907,12 +948,12 @@ spec = do
       -- Under a delegation the events of one thread are blessed by different
       -- keys, so the provenance PEP-22 renders is per item, not per thread.
       let repo = fst owner
-          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
-                          (canon 2 (Just 1))
+                          (canon repo 2 (Just 1))
           tid = eventId eOpen
           eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
-                         (canon 3 Nothing)
+                         (canon repo 3 Nothing)
           fr = foldEvents repo [eDel, eOpen, eCmt]
           t = threadOf fr tid
       frDropped fr `shouldBe` []
@@ -929,14 +970,14 @@ spec = do
       -- and the event-id covers it.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           eC1 = mkEvent alice owner (AComment tid Nothing (Just "first") Nothing 2)
-                        (canon 2 Nothing)
+                        (canon repo 2 Nothing)
           eC2 = mkEvent alice owner (AComment tid (Just (eventId eC1)) (Just "answer") Nothing 3)
-                        (canon 3 Nothing)
+                        (canon repo 3 Nothing)
           eC3 = mkEvent alice owner (AComment tid (Just ghost) (Just "dangling") Nothing 4)
-                        (canon 4 Nothing)
+                        (canon repo 4 Nothing)
           fr = foldEvents repo [eOpen, eC1, eC2, eC3]
       frDropped fr `shouldBe` []
       map cReplyTo (tsComments (threadOf fr tid))
@@ -949,11 +990,11 @@ spec = do
       -- must not show it as untouched since before the redaction.
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "spam") Nothing 2)
-                         (canon 2 Nothing)
-          eRed = mkEvent owner owner (ARedact (eventId eCmt) 3) (canonAt 3 Nothing 9000)
+                         (canon repo 2 Nothing)
+          eRed = mkEvent owner owner (ARedact (eventId eCmt) 3) (canonAt repo 3 Nothing 9000)
           fr = foldEvents repo [eOpen, eCmt, eRed]
       frDropped fr `shouldBe` []
       tsUpdated (threadOf fr tid) `shouldBe` 9000
@@ -963,13 +1004,13 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
           -- a comment stamped with a number: nothing mints these, but a
           -- wrong or hostile maintainer could, and it would raise the
           -- number high-water mark for everyone.
           eCmt = mkEvent alice owner (AComment tid Nothing (Just "hi") Nothing 2)
-                         (canon 2 (Just 99))
+                         (canon repo 2 (Just 99))
           fr = foldEvents repo [eOpen, eCmt]
       reasons fr `shouldBe` [BadStamp]
       frMaxNumber fr `shouldBe` 1
@@ -981,9 +1022,9 @@ spec = do
       -- wrap the cursor to zero and poison the repo permanently.
       let repo = fst owner
           eMax = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                         (canon maxBound (Just 1))
+                         (canon repo maxBound (Just 1))
           eNum = mkEvent alice owner (AOpen repo HubIssue "u" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just maxBound))
+                         (canon repo 1 (Just maxBound))
           fr = foldEvents repo [eMax, eNum]
       reasons fr `shouldBe` [BadStamp, BadStamp]
       HM.null (frThreads fr) `shouldBe` True
@@ -1001,7 +1042,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           e = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                      (canon 1 (Just 1))
+                      (canon repo 1 (Just 1))
           SignedBox pk bs sig = evAuthorBox e
           tampered = e { evAuthorBox = SignedBox pk (bs <> "x") sig }
           fr = foldEvents repo [tampered]
@@ -1013,7 +1054,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           e = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                      (canon 1 (Just 1))
+                      (canon repo 1 (Just 1))
           SignedBox pk bs sig = evCanonBox e
           tampered = e { evCanonBox = SignedBox pk (bs <> "x") sig }
           fr = foldEvents repo [tampered]
@@ -1028,7 +1069,7 @@ spec = do
       -- and blessed by X's owner. It must not become a thread in X.
       let stolen = mkEvent alice ownerX
                      (AOpen (fst ownerY) HubIssue "authored elsewhere" [] Nothing Nothing Nothing 1)
-                     (canon 1 (Just 1))
+                     (canon (fst ownerX) 1 (Just 1))
           fr = foldEvents (fst ownerX) [stolen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [WrongTarget]
@@ -1038,12 +1079,12 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid   = eventId eOpen
           ac    = AComment tid Nothing (Just "once") Nothing 2
           -- the SAME author box, blessed twice under different seqs
-          c1 = mkEvent alice owner ac (canon 2 Nothing)
-          c2 = mkEvent alice owner ac (canon 3 Nothing)
+          c1 = mkEvent alice owner ac (canon repo 2 Nothing)
+          c2 = mkEvent alice owner ac (canon repo 3 Nothing)
           fr = foldEvents repo [eOpen, c1, c2]
           t  = threadOf fr tid
       eventId c1 `shouldBe` eventId c2      -- same content, same id
@@ -1055,11 +1096,11 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid   = eventId eOpen
           -- two DIFFERENT sets of the same attribute at the SAME seq
-          s1 = mkEvent owner owner (ASet tid "status" "one" 2) (canon 5 Nothing)
-          s2 = mkEvent owner owner (ASet tid "status" "two" 3) (canon 5 Nothing)
+          s1 = mkEvent owner owner (ASet tid "status" "one" 2) (canon repo 5 Nothing)
+          s2 = mkEvent owner owner (ASet tid "status" "two" 3) (canon repo 5 Nothing)
           fwd = foldEvents repo [eOpen, s1, s2]
           rev = foldEvents repo [eOpen, s2, s1]
       summary fwd `shouldBe` summary rev
@@ -1069,9 +1110,9 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "old" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid   = eventId eOpen
-          eSet  = mkEvent owner owner (ASet tid "title" "new" 2) (canon 2 Nothing)
+          eSet  = mkEvent owner owner (ASet tid "title" "new" 2) (canon repo 2 Nothing)
           fr = foldEvents repo [eOpen, eSet]
           t  = threadOf fr tid
       tsTitle t `shouldBe` "new"
@@ -1082,11 +1123,11 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                          (canonAt 1 (Just 1) 1000)
+                          (canonAt repo 1 (Just 1) 1000)
           tid   = eventId eOpen
           -- a comment claiming to be from the far future
           eCmt  = mkEvent alice owner (AComment tid Nothing (Just "spoof") Nothing maxBound)
-                          (canonAt 2 Nothing 2000)
+                          (canonAt repo 2 Nothing 2000)
           fr = foldEvents repo [eOpen, eCmt]
           t  = threadOf fr tid
       tsCreated t `shouldBe` 1000
@@ -1100,9 +1141,9 @@ spec = do
       alice <- kp
       let repo = fst owner
           real = mkEvent alice owner (AOpen repo HubIssue "a" [] Nothing Nothing Nothing 1)
-                         (canon 1 (Just 1))
+                         (canon repo 1 (Just 1))
           other = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
-                          (canon 2 (Just 2))
+                          (canon repo 2 (Just 2))
           -- graft: real author box, canon box that blesses the other id
           forged = Event (evAuthorBox real) (evCanonBox other)
           fr = foldEvents repo [forged]
@@ -1118,13 +1159,13 @@ spec = do
       dave  <- kp     -- bob illegally tries to delegate dave
       erin  <- kp     -- dave illegally tries to bless erin's open
       let repo = fst owner
-          eDelBob = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDelBob = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpenC  = mkEvent carol bob (AOpen repo HubIssue "ok" [] Nothing Nothing Nothing 100)
-                            (canon 2 (Just 1))
+                            (canon repo 2 (Just 1))
           tidC    = eventId eOpenC
-          eDelDave = mkEvent bob bob (ADelegate repo (fst dave) 3) (canon 3 Nothing)
+          eDelDave = mkEvent bob bob (ADelegate repo (fst dave) 3) (canon repo 3 Nothing)
           eOpenE  = mkEvent erin dave (AOpen repo HubIssue "bad" [] Nothing Nothing Nothing 400)
-                            (canon 4 (Just 2))
+                            (canon repo 4 (Just 2))
           tidE    = eventId eOpenE
           fr = foldEvents repo [eDelBob, eOpenC, eDelDave, eOpenE]
       HM.member tidC (frThreads fr) `shouldBe` True
@@ -1137,15 +1178,15 @@ spec = do
       bob   <- kp
       alice <- kp
       let repo = fst owner
-          eDel  = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon 1 Nothing)
+          eDel  = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           -- bob blesses this while authorized: must survive the later revoke
           eOk   = mkEvent alice bob (AOpen repo HubIssue "before" [] Nothing Nothing Nothing 2)
-                          (canon 2 (Just 1))
+                          (canon repo 2 (Just 1))
           tidOk = eventId eOk
-          eRev  = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon 3 Nothing)
+          eRev  = mkEvent owner owner (ARevoke repo (fst bob) 3) (canon repo 3 Nothing)
           -- after the revoke bob may no longer bless
           eBad  = mkEvent alice bob (AOpen repo HubIssue "after" [] Nothing Nothing Nothing 4)
-                          (canon 4 (Just 2))
+                          (canon repo 4 (Just 2))
           tidBad = eventId eBad
           fr = foldEvents repo [eDel, eOk, eRev, eBad]
       HM.member tidOk (frThreads fr) `shouldBe` True
@@ -1156,11 +1197,11 @@ spec = do
       owner <- kp
       alice <- kp
       let repo = fst owner
-          eSelf = mkEvent owner owner (ARevoke (fst owner) (fst owner) 1) (canon 1 Nothing)
+          eSelf = mkEvent owner owner (ARevoke (fst owner) (fst owner) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice owner (AOpen repo HubIssue "still works" [] Nothing Nothing Nothing 2)
-                          (canon 2 (Just 1))
+                          (canon repo 2 (Just 1))
           tid = eventId eOpen
-          eClose = mkEvent owner owner (AClose tid Nothing 3) (canon 3 Nothing)
+          eClose = mkEvent owner owner (AClose tid Nothing 3) (canon repo 3 Nothing)
           fr = foldEvents repo [eSelf, eOpen, eClose]
       titles fr `shouldBe` [(tid, ("still works", Just "closed", 0))]
       reasons fr `shouldBe` []
@@ -1174,12 +1215,12 @@ spec = do
       let repo = fst owner
           eOpen = mkEvent alice owner
                     (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           tid = eventId eOpen
           good = coords { prSourceTip = "cccc" }
           evil = coords { prSourceTip = "dead" }
-          eGood = mkEvent alice owner (ARevise tid good 2) (canon 2 Nothing)
-          eEvil = mkEvent mallory owner (ARevise tid evil 3) (canon 3 Nothing)
+          eGood = mkEvent alice owner (ARevise tid good 2) (canon repo 2 Nothing)
+          eEvil = mkEvent mallory owner (ARevise tid evil 3) (canon repo 3 Nothing)
           fr = foldEvents repo [eOpen, eGood, eEvil]
           t  = threadOf fr tid
       fmap (prSourceTip . psCoords) (tsPR t) `shouldBe` Just "cccc"
@@ -1190,9 +1231,9 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           tid = eventId eOpen
-          eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon 2 Nothing)
+          eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon repo 2 Nothing)
           fr = foldEvents repo [eOpen, eMerge]
           t  = threadOf fr tid
       tsPR t `shouldBe` Nothing
@@ -1204,7 +1245,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           eOpen = mkEvent alice owner (AOpen repo HubPR "no coords" [] Nothing Nothing Nothing 1)
-                          (canon 1 (Just 1))
+                          (canon repo 1 (Just 1))
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadKind]
@@ -1232,7 +1273,7 @@ spec = do
           nowhere = coords { prSource = Nothing, prBundle = Nothing }
           eOpen = mkEvent alice owner
                     (AOpen repo HubPR "unfetchable" [] Nothing Nothing (Just nowhere) 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadKind]
@@ -1243,10 +1284,10 @@ spec = do
       let repo = fst owner
           eOpen = mkEvent alice owner
                     (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           tid = eventId eOpen
           nowhere = coords { prSource = Nothing, prBundle = Nothing }
-          eRev = mkEvent alice owner (ARevise tid nowhere 2) (canon 2 Nothing)
+          eRev = mkEvent alice owner (ARevise tid nowhere 2) (canon repo 2 Nothing)
           fr = foldEvents repo [eOpen, eRev]
       reasons fr `shouldBe` [BadKind]
       -- the original coordinates survive
@@ -1260,7 +1301,7 @@ spec = do
       let repo = fst owner
           eOpen = mkEvent alice owner
                     (AOpen repo HubIssue "issue with coords" [] Nothing Nothing (Just coords) 1)
-                    (canon 1 (Just 1))
+                    (canon repo 1 (Just 1))
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [BadKind]

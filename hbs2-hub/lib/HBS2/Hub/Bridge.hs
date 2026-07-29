@@ -1255,7 +1255,8 @@ accepted (pk,sk) repo view folded origin secret content box authorOf scope reply
             | otherwise              = Nothing
 
     canonBox = signCanon pk sk CanonContent
-      { ccEventId    = eid
+      { ccTarget     = repo
+      , ccEventId    = eid
       , ccSeq        = ccrNextSeq cur
       , ccNumber     = mintedNumber content cur
       , ccOrigin     = origin

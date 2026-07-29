@@ -203,9 +203,20 @@ PR coordinates are a product, in this order: `source`, `source-ref`,
 
 The canon payload is frozen too, and it is the one it is easiest to forget,
 since no event-id covers it: every canon signature ever made does. Its fields
-are `event-id`, `seq`, `number`, `origin`, `folded-ts`, `part-secret`, with
-`number`, `origin` and `part-secret` optional. The `part-secret` is raw key
+are `target`, `event-id`, `seq`, `number`, `origin`, `folded-ts`, `part-secret`,
+with `number`, `origin` and `part-secret` optional. The `part-secret` is raw key
 bytes, not a serialised key type, for the reason given under Attachments.
+
+The `target` there is the repository the BLESSING is for, and it is first
+because it is the first thing a reader has to ask. The author box saying which
+repo it was written for is not enough, because what canon counts is the
+blessing: one person delegated in two repositories is an ordinary arrangement,
+and any file they sign in one of them is byte for byte valid in the other, both
+signatures verifying and the canon box referencing its own author box. Without
+this field the stamp is therefore spent before the fold gets as far as noticing
+that the CONTENT belongs elsewhere, which hands one repository's high-water mark
+to another, and in a hostile version hands over `maxBound`, after which nothing
+can be minted in the victim again, the `revoke` that would answer it included.
 
 The kind of an `open` is a two-constructor sum in the order `issue`, `pr`.
 
@@ -618,9 +629,9 @@ altering state:
      by construction.)
   4a. Payload rules that are admission rules, and so are consensus like the
      rest of this list. An `open`, a `delegate` and a `revoke` name THIS
-     repository (the owner key their author box was signed for): otherwise an
-     event authored for another repo could be lifted out of that repo's canon
-     and replayed here with a valid signature. For an `open` that means
+     repository in their author box, and EVERY event names it in its canon box:
+     otherwise an event authored or blessed for another repo could be lifted out
+     of that repo's canon and replayed here with valid signatures. For an `open` that means
      somebody else's words appearing here; for a `delegate` it means an owner
      who has two repositories signing, in one of them, a maintainer set for
      both. A `pr` open carries
@@ -1084,8 +1095,17 @@ event, not of the floor. Sharing one number for both made a refused file raise
 the bar, so a strictly increasing log of admitted events reported itself as
 going backwards.
 
-Who may spend one is three-valued. A key authorized at that point in the log
-spends its stamp outright. A key the log never authorized spends nothing, and
+Before any of that, the stamp has to be for THIS repository: the canon box names
+it (see the frozen fields above), and a blessing signed for another repo spends
+nothing here however authorized its signer is, because a maintainer of two
+repositories is authorized in both. The same rule is what keeps a number
+remembered from an unreadable file from being remembered at all when the file is
+not one this log counts: a number recorded off a stranger's file becomes a
+duplicate reported against the next honest `open`, with the honest maintainer's
+key beside it.
+
+Who may spend one is then three-valued. A key authorized at that point in the
+log spends its stamp outright. A key the log never authorized spends nothing, and
 that exclusion is the load-bearing one: counting a stranger would let anyone who
 can write one file into one clone strand the cursor at the top of its range,
 with the owner unable to mint even the `revoke` that would answer it. A key

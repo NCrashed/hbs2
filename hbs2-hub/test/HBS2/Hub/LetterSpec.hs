@@ -38,8 +38,8 @@ futureBox (pk,sk) =
          (Domained (domainOf (Nothing @AuthorContent)) (12345 :: Word64)) of
     SignedBox p b s -> SignedBox p b s
 
-canon :: Word64 -> Maybe Word64 -> EventId -> CanonContent
-canon sq num eid = CanonContent eid sq num Nothing sq Nothing
+canon :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
+canon repo sq num eid = CanonContent repo eid sq num Nothing sq Nothing
 
 threadOf :: FoldResult -> ThreadId -> ThreadState
 threadOf fr tid = fromMaybe (error "expected thread") (HM.lookup tid (frThreads fr))
@@ -61,7 +61,7 @@ expectLeft want = \case
 -- wrap it in an owner-signed canon box.
 bless :: KP -> Word64 -> Maybe Word64 -> SignedBox AuthorContent HubScheme -> Event
 bless (opk,osk) sq num box =
-  Event box (signCanon opk osk (canon sq num (authorBoxId box)))
+  Event box (signCanon opk osk (canon opk sq num (authorBoxId box)))
 
 -- A well-formed hash to stand in for a sigil reference.
 someHash :: IO HashRef
@@ -392,7 +392,7 @@ spec = do
                      (Just "inline") (Just part) Nothing 7
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
       (box, _, _, _) <- expectRight (openLetter letter)
-      let cc eid = CanonContent eid 1 (Just 1) (Just origin) 100 (Just secret32)
+      let cc eid = CanonContent (fst owner) eid 1 (Just 1) (Just origin) 100 (Just secret32)
           ev = Event box (signCanon (fst owner) (snd owner) (cc (authorBoxId box)))
           fr = foldEvents (fst owner) [ev]
           t = threadOf fr (eventId ev)
@@ -424,7 +424,7 @@ spec = do
       -- its own secret; carrying the opening one forward would hand a
       -- reader the wrong key for the new bundle.
       let mk s sq box = Event box (signCanon (fst owner) (snd owner)
-                          (CanonContent (authorBoxId box) sq Nothing Nothing sq (Just s)))
+                          (CanonContent (fst owner) (authorBoxId box) sq Nothing Nothing sq (Just s)))
           fr = foldEvents (fst owner) [mk secretA 1 obox, mk secretB 2 rbox]
           t = threadOf fr (eventId (mk secretA 1 obox))
       fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just b2)

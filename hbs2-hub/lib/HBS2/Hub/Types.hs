@@ -232,7 +232,24 @@ authorThread = \case
 -- the canon box signs, so a changed encoding invalidates every canon
 -- signature ever made.
 data CanonContent = CanonContent
-  { ccEventId    :: EventId          -- ^ the author box hash this blesses
+  { -- | The repository this blessing is for.
+    --
+    -- The author box says which repo it was written for; without this, the
+    -- blessing does not, and a blessing is what canon actually counts. One
+    -- person delegated in two repositories is an ordinary arrangement, and any
+    -- file they signed in one of them is byte-for-byte valid in the other: both
+    -- signatures verify, the canon box references its own author box, and the
+    -- stamp is therefore spent before the fold gets as far as noticing that the
+    -- CONTENT belongs elsewhere. That hands the other repository's high-water
+    -- mark to this one, and a hostile version of it hands over @maxBound@,
+    -- after which nothing can be minted here again, the @revoke@ that would
+    -- answer it included.
+    --
+    -- First rather than appended, because a reader asks "is this mine" before
+    -- it asks anything else, and because the order is being fixed now: no canon
+    -- has been published, so this is the last moment the question is free.
+    ccTarget     :: RepoRef
+  , ccEventId    :: EventId          -- ^ the author box hash this blesses
   , ccSeq        :: Word64           -- ^ globally monotonic order weight
   , ccNumber     :: Maybe Word64     -- ^ human #N, on open only
   , ccOrigin     :: Maybe HashRef    -- ^ Tier B letter hash (absent if owner-native)

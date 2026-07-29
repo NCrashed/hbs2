@@ -358,6 +358,11 @@ data FoldResult = FoldResult
 data Stamp = Stamp
   { spSeq    :: Word64
   , spKey    :: HubKey        -- ^ the canon box signer
+    -- | The repository the canon box was signed for. Without it, "a key this
+    -- log authorized" is not the question the check below thinks it is asking:
+    -- a maintainer of two repositories is authorized in both, so their stamp
+    -- from one would be counted in the other.
+  , spTarget :: RepoRef
   }
 
 -- | The stamp of an event this build could not resolve.
@@ -379,7 +384,7 @@ data Stamp = Stamp
 -- canon.
 ghostStamp :: Event -> Maybe (Stamp, Maybe Word64)
 ghostStamp e = case unboxChecked (evCanonBox e) of
-  Right (k, cc) -> Just (Stamp (ccSeq cc) k, ccNumber cc)
+  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccTarget cc), ccNumber cc)
   Left _        -> Nothing
 
 -- One entry in the ordered pass.
@@ -532,15 +537,25 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- this build and the build that can read the event minting the same
       -- numbers, and remembering it is what makes the collision visible when
       -- one of them hands the same number out again.
+      --
+      -- Remembered only if the stamp counts at all, though, and that guard was
+      -- missing: a number recorded from a file nobody authorized becomes a
+      -- 'DupNumber' the next honest open is accused of, with the honest
+      -- maintainer's key beside it. The seq has always been spelled this way;
+      -- this is the number catching up.
       go rest (dropAt eid (Just (spSeq sp)) (Just (spKey sp)) reason
-                 (seen num (stamp sp s)))
+                 (if spendable sp s then seen num (stamp sp s) else s))
       where
         seen (Just n) t = t { sNumbers = HS.insert n (sNumbers t) }
         seen Nothing t  = t
     go (Whole r : rest) s0
-      | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
-      | not (sane r)                = go rest (dropE r BadStamp s)
-      | otherwise                   = go rest (apply r s)
+      -- Before the stamp, because a canon box signed for another repository is
+      -- not a blessing here at all, and the content it blesses would be dropped
+      -- a moment later for a reason that says nothing about why.
+      | ccTarget (rCanon r) /= owner = go rest (dropE r WrongTarget s0)
+      | HM.member (rId r) (sSeen s)  = go rest (dropE r DupId s)
+      | not (sane r)                 = go rest (dropE r BadStamp s)
+      | otherwise                    = go rest (apply r s)
       where
         s = stamp (stampOf r) s0
 
@@ -606,20 +621,29 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- mutiny back out, since a run of files can only creep the cursor by the
     -- window each time.
     stamp sp s
-      | HS.member (spKey sp) (sMaint s) = spend
-      | HS.member (spKey sp) (sEver s), spSeq sp <= sMaxSeq s + staleStampWindow = spend
+      | not (spendable sp s) = s
       | otherwise = s
-      where
-        spend = s
           { sMaxSeq = if spSeq sp == maxBound
                         then sMaxSeq s
                         else max (sMaxSeq s) (spSeq sp)
           }
 
+    -- One predicate, because two callers ask it and one of them (the ghost
+    -- path, which also records the number) got it wrong by asking differently.
+    spendable sp s
+      -- This repository's blessing, before anything about the key. A maintainer
+      -- of two repositories is authorized in both, so their stamp from the
+      -- other one would otherwise pass every check below it.
+      | spTarget sp /= owner            = False
+      | HS.member (spKey sp) (sMaint s) = True
+      | HS.member (spKey sp) (sEver s)  = spSeq sp <= sMaxSeq s + staleStampWindow
+      | otherwise                       = False
+
     -- A resolved event's own stamp.
     stampOf r = Stamp
       { spSeq    = rSeq r
       , spKey    = rCanonKey r
+      , spTarget = ccTarget (rCanon r)
       }
 
     apply r s = case rContent r of

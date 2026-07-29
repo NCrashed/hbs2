@@ -34,9 +34,9 @@ secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
-canon :: Word64 -> Maybe Word64 -> Maybe HashRef -> Maybe PartSecret
+canon :: RepoRef -> Word64 -> Maybe Word64 -> Maybe HashRef -> Maybe PartSecret
       -> EventId -> CanonContent
-canon sq num origin sec eid = CanonContent eid sq num origin sq sec
+canon repo sq num origin sec eid = CanonContent repo eid sq num origin sq sec
 
 coords :: PRCoords
 coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
@@ -61,7 +61,7 @@ spec = do
       let repo = fst owner
           ev = mkEvent alice owner
                  (AOpen repo HubPR nasty ["bug"] (Just nasty) (Just part) (Just coords) 42)
-                 (canon 7 (Just 3) (Just origin) (Just secret32))
+                 (canon repo 7 (Just 3) (Just origin) (Just secret32))
       parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)
       -- One clause per line, one clause of each name. Two answers to the same
       -- question is what 'only' refuses, and the format is declared forever.
@@ -92,8 +92,8 @@ spec = do
             , ADelegate repo (fst alice) 9
             , ARevoke repo (fst alice) 10
             ]
-          evs = [ mkEvent alice owner c (canon 1 Nothing Nothing Nothing) | c <- contents ]
-             <> [ mkEvent alice owner c (canon 2 (Just 5) (Just origin) (Just secret32))
+          evs = [ mkEvent alice owner c (canon repo 1 Nothing Nothing Nothing) | c <- contents ]
+             <> [ mkEvent alice owner c (canon repo 2 (Just 5) (Just origin) (Just secret32))
                 | c <- take 1 contents ]
       mapM_ (\ev -> parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)) evs
 
@@ -119,14 +119,14 @@ spec = do
                    (Just (PRCoords (Just (filled maxRef)) (filled maxRef) (filled maxRef)
                             (filled maxRef) (filled maxRef) (Just part)))
                    42
-          biggest = mkEvent alice owner full (canon 7 (Just 3) Nothing (Just secret32))
+          biggest = mkEvent alice owner full (canon repo 7 (Just 3) Nothing (Just secret32))
           attrs = mkEvent owner owner
                     (ASet part (Text.replicate maxAttrName "a")
                        (Text.replicate maxAttrValue "v") 43)
-                    (canon 8 Nothing Nothing Nothing)
+                    (canon repo 8 Nothing Nothing Nothing)
           note = mkEvent owner owner
                    (AClose part (Just (filled maxInlineBody)) 44)
-                   (canon 9 Nothing Nothing Nothing)
+                   (canon repo 9 Nothing Nothing Nothing)
       oversizedField full `shouldBe` Nothing     -- the bridge would mint this
       parseEvent (renderEvent biggest) `shouldBe` Right (hubEventVersion, biggest)
       parseEvent (renderEvent attrs) `shouldBe` Right (hubEventVersion, attrs)
@@ -134,7 +134,7 @@ spec = do
       let escaped = mkEvent alice owner
                       (AOpen repo HubIssue (quoted maxTitle) (replicate maxLabels (quoted maxLabel))
                          (Just (quoted maxInlineBody)) Nothing Nothing 45)
-                      (canon 10 (Just 4) Nothing Nothing)
+                      (canon repo 10 (Just 4) Nothing Nothing)
       parseEvent (renderEvent escaped) `shouldBe` Right (hubEventVersion, escaped)
 
     it "keeps the boxes readable under a title written to break the file" $ do
@@ -148,7 +148,7 @@ spec = do
           hostile = "(canon-box x) " <> nasty
           ev = mkEvent alice owner
                  (AOpen repo HubIssue hostile [] (Just nasty) Nothing Nothing 1)
-                 (canon 1 (Just 1) Nothing Nothing)
+                 (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
       parseEvent file `shouldBe` Right (hubEventVersion, ev)
       -- Reading the boxes back is not enough to know the file survived: they
@@ -172,8 +172,9 @@ spec = do
       -- compaction re-renders canon somebody else wrote.
       target <- someHash
       let name = "a)(canon-box x) \"q"
+          repo = fst owner
           ev = mkEvent alice owner (ASet target name "v" 1)
-                 (canon 1 Nothing Nothing Nothing)
+                 (canon repo 1 Nothing Nothing Nothing)
           file = renderEvent ev
       parseEvent file `shouldBe` Right (hubEventVersion, ev)
       case parseTop file of
@@ -193,7 +194,7 @@ spec = do
       -- the stamp the fold needs, which is the same mistake one floor up.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canon 1 (Just 1) Nothing Nothing)
+                 (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
           bumped = Text.replace "(hub-event 1)" "(hub-event 4294967295)" file
       parseEvent bumped `shouldBe` Right (4294967295, ev)
@@ -211,7 +212,7 @@ spec = do
       -- to stop every fold in every clone with one file.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canon 1 (Just 1) Nothing Nothing)
+                 (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
       parseEvent (file <> Text.replicate maxEventBytes " ") `shouldBe` Left (TooLarge "file")
       parseEvent (file <> Text.replicate (maxClauses + 1) "()")
@@ -226,7 +227,7 @@ spec = do
       let bracketed = mkEvent alice owner
                         (AOpen repo HubIssue "t" [] (Just (Text.replicate 500 "(")) Nothing
                            Nothing 1)
-                        (canon 1 (Just 1) Nothing Nothing)
+                        (canon repo 1 (Just 1) Nothing Nothing)
       parseEvent (renderEvent bracketed) `shouldBe` Right (hubEventVersion, bracketed)
 
     it "refuses a file with a clause missing, twice over, or misshapen" $ do
@@ -234,7 +235,7 @@ spec = do
       alice <- kp
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canon 1 (Just 1) Nothing Nothing)
+                 (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
           without name = Text.unlines
             [ l | l <- Text.lines file, not (("(" <> name) `Text.isPrefixOf` l) ]
@@ -259,7 +260,7 @@ spec = do
       -- of text that anyone who can write the file can write.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canon 1 (Just 1) Nothing Nothing)
+                 (canon repo 1 (Just 1) Nothing Nothing)
           lied = Text.replace "(seq 1)" "(seq 99)" (renderEvent ev)
       parseEvent lied `shouldBe` Right (hubEventVersion, ev)
       -- and what the fold reads is still the box
@@ -305,7 +306,7 @@ spec = do
       let repo = fst owner
           ev n = mkEvent alice owner
                    (AOpen repo HubIssue (Text.pack (show n)) [] Nothing Nothing Nothing n)
-                   (canon n (Just n) Nothing Nothing)
+                   (canon repo n (Just n) Nothing Nothing)
           files = [ ("threads/a/1", renderEvent (ev 1))
                   , ("threads/a/2", "(hub-event 1)\n(author-box zz)\n")
                   , ("threads/a/3", renderEvent (ev 3))

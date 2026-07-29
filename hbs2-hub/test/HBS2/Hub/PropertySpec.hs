@@ -557,7 +557,7 @@ step cast st = \case
                -- Distinct per step, so that two intruders are two files rather
                -- than one file written twice.
                (AComment thr Nothing (Just (Text.pack (show (stStep st)))) Nothing ts)
-               (\e -> CanonContent e (maxBound - 1) Nothing Nothing ts Nothing)
+               (\e -> CanonContent (castRepo cast) e (maxBound - 1) Nothing Nothing ts Nothing)
     in st { stEvents = ev : stEvents st
           , stIntruders = eventId ev : stIntruders st
           , stTags = TIntruder : stTags st
