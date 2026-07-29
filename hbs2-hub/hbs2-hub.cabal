@@ -49,22 +49,25 @@ common shared-properties
                      , PatternSynonyms
                      , ViewPatterns
 
+  -- Only what every stanza needs. What the library alone needs is declared
+  -- there, so -Wunused-packages stays useful instead of being noise the CLI
+  -- inherits.
   build-depends:
         hbs2-core
       , suckless-conf
       , serialise
-      , bytestring
       , unordered-containers
-      , text
-      , prettyprinter
-      , saltine
-      , base64-bytestring
 
 library
     import:           shared-properties
     hs-source-dirs:   lib
     build-depends:    base
                     , cborg
+                    , bytestring
+                    , text
+                    , prettyprinter
+                    , saltine
+                    , base64-bytestring
     exposed-modules:
       HBS2.Hub.Types
       HBS2.Hub.Fold
@@ -72,6 +75,29 @@ library
       HBS2.Hub.Bridge
       HBS2.Hub.Canon
       HBS2.Hub.Manifest
+
+-- The CLI, and the only stanza here that knows about the network.
+--
+-- The library above is pure by design (PEP-22 "Principle"), which is what lets
+-- the whole admission surface be property-tested without a peer, a socket or a
+-- clock. Everything that talks to hbs2-peer, decrypts, or reads a mailbox lives
+-- here, so the seam between "what the rules are" and "where the bytes come
+-- from" is a package boundary rather than a convention.
+executable hub
+    import:           shared-properties
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    ghc-options:
+        -threaded
+        -rtsopts
+        "-with-rtsopts=-N4 -A64m"
+    build-depends:    base
+                    , hbs2-hub
+                    , hbs2-peer
+                    , hbs2-cli
+                    , hbs2-keyman-direct-lib
+    other-modules:
+      HBS2.Hub.CLI.Inbox
 
 test-suite spec
   import:          shared-properties

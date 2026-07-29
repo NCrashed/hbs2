@@ -1327,9 +1327,9 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
   scope <- case content of
     -- A redact belongs with the thread of the event it hides, so it lands
     -- beside it in the tree rather than under an id of its own.
-    ARedact target eid _
+    ARedact target hidden _
       | target /= repo -> Left WrongRepo
-      | otherwise -> case HM.lookup eid (cvEvents view) of
+      | otherwise -> case HM.lookup hidden (cvEvents view) of
           Nothing         -> Left UnknownTarget
           Just (Just thr) -> Right (ThreadScope thr)
           Just Nothing    -> Right RepoScope

@@ -558,7 +558,7 @@ materialize :: HubKey -> [Resolved] -> FoldResult
 materialize owner rs = materializeWith owner (fmap Whole rs) []
 
 materializeWith :: HubKey -> [Item] -> [(EventId,DropReason)] -> FoldResult
-materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
+materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
   where
     -- The third key is what makes this independent of the input order rather
     -- than merely stable. Two copies of one author box at the same seq are one
@@ -572,8 +572,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- 'eventFileName' and both copies are therefore the same path. The fold is
     -- still a public function over a list, and @hub verify@ exists to read
     -- canon somebody else wrote.
-    key (Whole r)            = (rSeq r, rId r, rCanonId r)
-    key (Ghost eid _ sp _ cid) = (spSeq sp, eid, cid)
+    sortKey (Whole r)            = (rSeq r, rId r, rCanonId r)
+    sortKey (Ghost eid _ sp _ cid) = (spSeq sp, eid, cid)
 
     st0 = S { sMaint    = HS.singleton owner
             , sEver     = HS.singleton owner

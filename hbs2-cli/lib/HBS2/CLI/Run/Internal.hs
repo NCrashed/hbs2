@@ -21,6 +21,7 @@ import HBS2.Peer.RPC.API.Peer
 import HBS2.Peer.RPC.API.RefLog
 import HBS2.Peer.RPC.API.RefChan
 import HBS2.Peer.RPC.API.LWWRef
+import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.API.Storage
 import HBS2.Peer.RPC.API.RefChan
 import HBS2.Peer.RPC.Client.StorageClient
@@ -46,6 +47,10 @@ data HBS2CliEnv =
   , _peerLwwRefAPI   :: ServiceCaller LWWRefAPI UNIX
   , _peerPeerAPI     :: ServiceCaller PeerAPI UNIX
   , _peerStorageAPI  :: ServiceCaller StorageAPI UNIX
+    -- Added for the forge (PEP-18 ingress): a mailbox is read over RPC like
+    -- every other ref, and without this the mailbox commands in this package
+    -- could only ever look at blocks already in local storage.
+  , _peerMailboxAPI  :: ServiceCaller MailboxAPI UNIX
   }
 
 makeLenses 'HBS2CliEnv
@@ -89,17 +94,19 @@ recover what = do
           refChanAPI <- makeServiceCaller @RefChanAPI (fromString soname)
           storageAPI <- makeServiceCaller @StorageAPI (fromString soname)
           lwwAPI     <- makeServiceCaller @LWWRefAPI (fromString soname)
+          mailboxAPI <- makeServiceCaller @MailboxAPI (fromString soname)
 
           let endpoints = [ Endpoint @UNIX  peerAPI
                           , Endpoint @UNIX  refLogAPI
                           , Endpoint @UNIX  refChanAPI
                           , Endpoint @UNIX  lwwAPI
                           , Endpoint @UNIX  storageAPI
+                          , Endpoint @UNIX  mailboxAPI
                           ]
 
           void $ ContT $ withAsync $ liftIO $ runReaderT (runServiceClientMulti endpoints) client
 
-          let env = Just (HBS2CliEnv soname refChanAPI refLogAPI lwwAPI peerAPI storageAPI)
+          let env = Just (HBS2CliEnv soname refChanAPI refLogAPI lwwAPI peerAPI storageAPI mailboxAPI)
           atomically $ writeTVar envVar env
 
           lift what
@@ -153,6 +160,11 @@ instance MonadUnliftIO m => HasClientAPI LWWRefAPI UNIX (HBS2Cli m) where
   getClientAPI = do
     what <- ask >>= readTVarIO >>= orThrow PeerNotConnectedException
     pure $ view peerLwwRefAPI what
+
+instance MonadUnliftIO m => HasClientAPI MailboxAPI UNIX (HBS2Cli m) where
+  getClientAPI = do
+    what <- ask >>= readTVarIO >>= orThrow PeerNotConnectedException
+    pure $ view peerMailboxAPI what
 
 instance MonadUnliftIO m => HasStorage (HBS2Cli m) where
   getStorage = getClientAPI @StorageAPI @UNIX  <&> AnyStorage . StorageClient
