@@ -216,9 +216,10 @@ msgSecret = fromMaybe (error "bad fixture secret")
 noParts :: LetterParts
 noParts = noMessageParts msgSecret
 
--- A part that is here and small enough to carry.
+-- A part that is here, small enough to carry, and opened with the secret this
+-- letter publishes.
 here :: HashRef -> (HashRef, PartEvidence)
-here h = (h, PartHere 1024)
+here h = (h, PartOpened 1024 secret32)
 
 -- An inline body over what triage will carry, in BYTES: half as many
 -- characters as the limit, of two bytes each, plus one. A gate written in
@@ -546,12 +547,12 @@ step cast st = \case
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
-               Ready      -> attachments secret32 msgSecret [here part]
-               NotFetched -> attachments secret32 msgSecret [(part, PartPending 1024)]
+               Ready      -> attachments msgSecret [here part]
+               NotFetched -> attachments msgSecret [(part, PartPending 1024)]
                NotCarried -> noParts
-               NoKey      -> attachmentsNoKey msgSecret [here part]
-               TooBig     -> attachments secret32 msgSecret
-                               [(part, PartHere (maxPartBytes + 1))]
+               NoKey      -> attachments msgSecret [(part, PartLocked 1024)]
+               TooBig     -> attachments msgSecret
+                               [(part, PartOpened (maxPartBytes + 1) secret32)]
         content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
               (clockOf st) (originOf (stStep st)) po (letterOf content) of

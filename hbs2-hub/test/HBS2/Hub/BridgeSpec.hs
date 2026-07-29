@@ -86,10 +86,12 @@ msgSecret = fromMaybe (error "bad fixture secret")
 noParts :: LetterParts
 noParts = noMessageParts msgSecret
 
--- A part that is here and small enough to carry. There is no way to say
--- "fetched" without saying how big, which is the number the gate reads.
+-- A part that is here, small enough to carry, and opened with the secret this
+-- letter goes on to publish. There is no way to say "opened" without saying how
+-- big and with what, which are the two things the gate reads and the two a
+-- caller cannot have without having looked.
 here :: HashRef -> (HashRef, PartEvidence)
-here h = (h, PartHere 1024)
+here h = (h, PartOpened 1024 secret32)
 
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
@@ -629,8 +631,8 @@ spec = do
                     (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1) noReplyChannel
           withPart = makeLetter (fst alice) (snd alice)
                        (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
-      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments secret32 msgSecret []) plain)
-      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments secret32 msgSecret [here part]) withPart)
+      a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments msgSecret []) plain)
+      a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments msgSecret [here part]) withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
       tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
       tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just secret32
@@ -658,8 +660,8 @@ spec = do
       -- message secret, which a reader of a letter always holds.
       expectErr (PartNotInMessage part) (accept noParts)
       either outcome (const Decide) (accept noParts) `shouldBe` Discard
-      expectErr (PartNotInMessage part) (accept (attachmentsNoKey msgSecret []))
-      either outcome (const Decide) (accept (attachmentsNoKey msgSecret []))
+      expectErr (PartNotInMessage part) (accept (attachments msgSecret []))
+      either outcome (const Decide) (accept (attachments msgSecret []))
         `shouldBe` Discard
       -- The caller reaching for the empty value IS still a stop, on the one
       -- path where it can happen: an owner-native event has no message behind
@@ -673,17 +675,17 @@ spec = do
       -- here would let one stranger wedge triage for good: the letter stays in
       -- the mailbox and every later pass hits it again.
       other <- someHash
-      expectErr (PartNotInMessage part) (accept (attachments secret32 msgSecret [here other]))
-      either outcome (const Decide) (accept (attachments secret32 msgSecret [here other]))
+      expectErr (PartNotInMessage part) (accept (attachments msgSecret [here other]))
+      either outcome (const Decide) (accept (attachments msgSecret [here other]))
         `shouldBe` Discard
       -- Carried but not fetched yet is a wait.
-      let notYet = attachments secret32 msgSecret [(part, PartPending 1024)]
+      let notYet = attachments msgSecret [(part, PartPending 1024)]
       expectErr (PartNotFetched part) (accept notYet)
       either outcome (const Decide) (accept notYet) `shouldBe` Retry
-      -- Here, but with no key to it, and with a key that cannot be one.
-
-      expectErr MissingPartSecret (accept (attachmentsNoKey msgSecret [here part]))
-      either outcome (const Decide) (accept (attachmentsNoKey msgSecret [here part])) `shouldBe` Retry
+      -- Fetched, but with no key to it.
+      let locked = attachments msgSecret [(part, PartLocked 1024)]
+      expectErr (MissingPartSecret part) (accept locked)
+      either outcome (const Decide) (accept locked) `shouldBe` Retry
       -- ...and the one the type exists for: the message's own secret offered
       -- as the parts secret would publish the letter's envelope, and with it
       -- the sender's private reply address, to every clone.
@@ -693,26 +695,76 @@ spec = do
       -- as well would not be. Nor is it deleted: the identical shape is what a
       -- caller that wrapped one secret twice produces, and discarding would
       -- then take the only copy of the part secret with it.
-      let wrongKey = attachments secret32 (sameAs secret32) [here part]
-      expectErr MessageSecretOffered (accept wrongKey)
+      let wrongKey = attachments (sameAs secret32) [here part]
+      expectErr (MessageSecretOffered part) (accept wrongKey)
       either outcome (const Decide) (accept wrongKey) `shouldBe` Park
       -- ...which is why the convenient constructor demands the message secret
       -- rather than defaulting it away. The owner path has its own, because
       -- an owner-native event arrived in no message at all.
-      expectErr MessageSecretOffered
-        (accept (attachments secret32 (sameAs secret32) [here part]))
-      _ <- expectRight (accept (attachments secret32 msgSecret [here part]))
+      expectErr (MessageSecretOffered part)
+        (accept (attachments (sameAs secret32) [here part]))
+      _ <- expectRight (accept (attachments msgSecret [here part]))
       _ <- expectRight
-        (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments secret32 [here part])
+        (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments [here part])
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
       pure ()
-      _ <- expectRight (accept (attachments secret32 msgSecret [here part]))
+      _ <- expectRight (accept (attachments msgSecret [here part]))
       -- On the owner path the mistake this type exists for cannot be made at
-      -- all: there is no message, so the builder takes the parts secret and
-      -- nothing else. What is still catchable there is vouching for nothing.
+      -- all: there is no message, so there is no message secret to confuse the
+      -- parts secret with. What is still catchable there is vouching for
+      -- nothing.
       expectOwn NoAttachmentsSupplied
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
+
+    it "publishes the secret a part was opened with, not one handed in beside it" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      part <- someHash
+      other <- someHash
+      -- The gap the evidence used to leave open. A secret sat beside the parts
+      -- as a field of its own, so it was a claim about nothing: well-formed,
+      -- usable, not the message secret, and opening none of the parts it was
+      -- published next to. Every check passed and canon got a permanent
+      -- reference to bytes nobody can read. A pure function cannot verify a
+      -- decryption; what it can refuse is a secret that is not attached to an
+      -- act of opening a named part, and now that is the only way to supply one.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing 1
+          letter = makeLetter (fst alice) (snd alice) content noReplyChannel
+          accept po = acceptLetter (ctxOf owner) env (emptyView repo) 1 origin po letter
+          otherSecret = fromMaybe (error "bad fixture secret")
+                          (mkPartSecret (BS.replicate typicalKeyLength 0x43))
+      -- what is published is the secret named in the evidence for THIS part
+      ok <- expectRight (accept (attachments msgSecret [(part, PartOpened 1024 otherSecret)]))
+      case unboxChecked (evCanonBox (acEvent ok)) of
+        Left e        -> expectationFailure ("cannot read the canon box: " <> show e)
+        Right (_, cc) -> ccPartSecret cc `shouldBe` Just otherSecret
+      -- ...and a secret named for some other part is not published for this
+      -- one: the evidence for the part the content references is missing, so
+      -- there is nothing to publish and nothing to mint
+      expectErr (PartNotInMessage part)
+        (accept (attachments msgSecret [(other, PartOpened 1024 secret32)]))
+      -- two parts opened with two different keys cannot both be carried, since
+      -- canon has one field for it, and the refusal names the one that differed
+      let two = AOpen repo HubPR "att" [] Nothing (Just part)
+                  (Just (PRCoords Nothing "refs/heads/f" "aa" "refs/heads/master" "bb"
+                           (Just other))) 1
+          twoLetter = makeLetter (fst alice) (snd alice) two noReplyChannel
+      expectErr (PartSecretsDiffer other)
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin
+           (attachments msgSecret [ (part, PartOpened 1024 secret32)
+                                  , (other, PartOpened 1024 otherSecret) ])
+           twoLetter)
+      -- and two parts opened with the same one are ordinary
+      _ <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin
+           (attachments msgSecret [ (part, PartOpened 1024 secret32)
+                                  , (other, PartOpened 1024 secret32) ])
+           twoLetter)
+      pure ()
 
     it "checks wiring and dedup before it asks a human" $ do
       alice <- kp
@@ -943,11 +995,12 @@ spec = do
       -- path compaction takes when it re-stamps
       let stunted = fromMaybe (error "no decode")
                       (decodeStrict (LBS.toStrict (serialise ("abc" :: BS.ByteString))))
-      expectOwn BadPartSecret
-        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [here part])
+          opened = ownAttachments [(part, PartOpened 1024 stunted)]
+      expectOwn (BadPartSecret part)
+        (ownerEvent (ctxOf owner) view 2 opened
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
       either outcome (const Decide)
-        (ownerEvent (ctxOf owner) view 2 (ownAttachments stunted [here part])
+        (ownerEvent (ctxOf owner) view 2 opened
            (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
         `shouldBe` Abort
 
@@ -1087,7 +1140,7 @@ spec = do
                     (Just coords { prBundle = Just bundle }) 1)
                  noReplyChannel
       acc <- expectRight
-        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (attachments secret32 msgSecret [here bundle]) pr)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (attachments msgSecret [here bundle]) pr)
       let t = threadOf (foldEvents repo [acEvent acc]) (scopeOf acc)
       fmap psPartSecret (tsPR t) `shouldBe` Just (Just secret32)
 
@@ -1372,7 +1425,7 @@ spec = do
       pending `shouldSatisfy` (not . isInfixOf (Text.unpack note))
       pending `shouldSatisfy` (not . isInfixOf (show sig))
       -- the evidence: how many parts, never the key to them
-      let evidence = show (attachments secret32 msgSecret [here part])
+      let evidence = show (attachments msgSecret [here part])
       evidence `shouldSatisfy` isInfixOf "secret = present"
       evidence `shouldSatisfy` (not . isInfixOf (replicate 8 'A'))
       evidence `shouldSatisfy` (not . isInfixOf (replicate 8 'B'))
@@ -1451,7 +1504,7 @@ spec = do
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
           with n = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo)
-                     1 origin (attachments secret32 msgSecret [(part, PartHere n)]) letter
+                     1 origin (attachments msgSecret [(part, PartOpened n secret32)]) letter
       expectErr (PartTooLarge part) (with (maxPartBytes + 1))
       either outcome (const Decide) (with (maxPartBytes + 1)) `shouldBe` Park
       _ <- expectRight (with maxPartBytes)
@@ -1691,7 +1744,7 @@ spec = do
       -- ...and every other hash an event carries, on every path
       expectErr (MalformedRef "body-part")
         (acceptLetter (ctxOf owner) env (acView acc) 2 origin2
-           (attachments secret32 msgSecret [here huge])
+           (attachments msgSecret [here huge])
            (letter (AComment (scopeOf acc) Nothing Nothing (Just huge) 2)))
       expectOwn (MalformedRef "redacts")
         (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments (ARedact repo huge 2))
@@ -1720,7 +1773,7 @@ spec = do
                      (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
           pending n = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice))
                         (emptyView repo) 1 origin
-                        (attachments secret32 msgSecret [(part, PartPending n)]) letter
+                        (attachments msgSecret [(part, PartPending n)]) letter
       expectErr (PartTooLarge part) (pending (maxPartBytes + 1))
       -- and one that fits is still simply not here yet
       expectErr (PartNotFetched part) (pending maxPartBytes)
@@ -1778,9 +1831,13 @@ spec = do
       -- The sender picks this one too, for the same reason: a Message is a box
       -- anyone can build, and nothing stops them encrypting their own parts
       -- with the message key.
-      outcome MessageSecretOffered `shouldBe` Park
+      outcome (MessageSecretOffered thr) `shouldBe` Park
+      -- ...and parts opened with two different keys is the letter's doing as
+      -- well, but unfoldable rather than merely refused here: canon has one
+      -- part-secret field, so no hub can carry both.
+      outcome (PartSecretsDiffer thr) `shouldBe` Discard
       -- The letter is intact and the caller can go and get what is missing.
-      outcome MissingPartSecret `shouldBe` Retry
+      outcome (MissingPartSecret thr) `shouldBe` Retry
       outcome (PartNotFetched thr) `shouldBe` Retry
       -- Local policy, not consensus: another hub may carry a body this one
       -- will not, so deleting the letter over it would be the wrong kind of
@@ -1796,7 +1853,7 @@ spec = do
       outcome ViewRepoMismatch `shouldBe` Abort
       outcome OwnerKeyRequired `shouldBe` Abort
       outcome NoAttachmentsSupplied `shouldBe` Abort
-      outcome BadPartSecret `shouldBe` Abort
+      outcome (BadPartSecret thr) `shouldBe` Abort
       outcome (UnnormalizedValue "labels") `shouldBe` Discard
 
     it "remembers a thread's number, so a reply can be acknowledged" $ do
@@ -1870,7 +1927,7 @@ spec = do
                            (ADelegate repo (fst bob) 1))
       a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
-      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments secret32 msgSecret [here part])
+      a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments msgSecret [here part])
                            (letter (AComment (scopeOf a2) Nothing Nothing (Just part) 3)))
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
                            (ASet (scopeOf a2) "labels" "bug" 4))

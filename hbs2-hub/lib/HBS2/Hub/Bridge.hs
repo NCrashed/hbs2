@@ -73,7 +73,6 @@ module HBS2.Hub.Bridge
   , PartEvidence(..)
   , noMessageParts
   , attachments
-  , attachmentsNoKey
   , noOwnAttachments
   , ownAttachments
   , outcome
@@ -322,15 +321,15 @@ data TriageError =
   | AlreadyHonoured
     -- | The view describes a different repository than the context.
   | ViewRepoMismatch
-    -- | The content references an encrypted part and the caller supplied no
-    -- group secret to unlock it. The letter is fine; the caller has to pass
-    -- the secret its Mailbox message came with, so this is a retry.
+    -- | The caller has this part but no key that opens it. The letter is fine;
+    -- the caller has to go and get the secret its Mailbox message came with, so
+    -- this is a retry.
     --
     -- Minting anyway would put a signed reference to bytes nobody can read
     -- into canon, permanently: the part cannot be re-encrypted (a new hash
     -- would break the author signature) and once the message is deleted from
     -- the mailbox the secret is gone (PEP-19 "Attachments in public canon").
-  | MissingPartSecret
+  | MissingPartSecret HashRef
     -- | The content names a part the message does not carry. Not repairable:
     -- a later message cannot add a part to an author box already signed.
   | PartNotInMessage HashRef
@@ -345,15 +344,20 @@ data TriageError =
     -- policy like 'BodyTooLarge' and parked for the same reason: another hub
     -- may take it, and the reference would be permanent here.
   | PartTooLarge HashRef
-    -- | The secret offered for the parts cannot be a key: it is the wrong
+    -- | The secret offered for this part cannot be a key: it is the wrong
     -- length. Minting it would put a reference to bytes nobody can read into
     -- canon, permanently.
-  | BadPartSecret
-    -- | The secret offered for the parts is the secret over the message
+  | BadPartSecret HashRef
+    -- | The secret offered for this part is the secret over the message
     -- payload. Publishing it would publish the letter's transport envelope,
     -- and with it the sender's private reply address, to every clone forever
     -- (PEP-18). A caller bug, and the one this type exists to catch.
-  | MessageSecretOffered
+  | MessageSecretOffered HashRef
+    -- | Two of the event's parts were opened with different secrets, and canon
+    -- has one @part-secret@ field: there is no event that can carry both, on
+    -- this hub or any other. The named part is the one that disagreed with the
+    -- first, because "they differ" is a refusal nobody can act on.
+  | PartSecretsDiffer HashRef
     -- | A text field over the limit triage will carry inline
     -- ('maxInlineBody'): the field name, so the sender can be told what to
     -- move to an attachment.
@@ -489,13 +493,15 @@ instance Pretty TriageError where
     ThreadMismatch        -> "moves the request to another thread"
     AlreadyHonoured       -> "this message has already been folded"
     ViewRepoMismatch      -> "the view describes another repository"
-    MissingPartSecret     -> "no key supplied for an attachment"
+    MissingPartSecret h   -> "no key supplied for an attachment:" <+> pretty h
     PartNotInMessage h    -> "names a part the message does not carry:" <+> pretty h
     NoAttachmentsSupplied -> "no evidence supplied about the attachments"
     PartNotFetched h      -> "an attachment not fetched yet:" <+> pretty h
     PartTooLarge h        -> "an attachment over what this hub carries:" <+> pretty h
-    BadPartSecret         -> "the part secret cannot be a key"
-    MessageSecretOffered  -> "the parts secret offered is the message secret"
+    BadPartSecret h       -> "the secret offered for a part cannot be a key:" <+> pretty h
+    MessageSecretOffered h -> "the secret offered for a part is the message secret:"
+                               <+> pretty h
+    PartSecretsDiffer h   -> "parts opened with two different secrets, from:" <+> pretty h
     BodyTooLarge f        -> "field" <+> pretty (safeText f) <+> "is over what triage carries inline"
     -- The field NAMES above are ours; only the attribute name is a stranger's.
     MalformedRef f        -> "field" <+> pretty (safeText f) <+> "is not a hash"
@@ -570,13 +576,17 @@ outcome = \case
   UnnormalizedValue _  -> Discard
   -- These two are the caller's own doing.
   NoAttachmentsSupplied -> Abort
-  BadPartSecret        -> Abort
+  BadPartSecret _      -> Abort
   -- Two causes that look identical from here: a sender who encrypted their own
   -- parts with the message key, and a caller that wrapped one secret twice.
   -- Discarding would have the second delete every letter carrying an
   -- attachment, and with it the only copy of the part secret; aborting would
   -- hand the loop to the first. Park is the one answer that costs neither.
-  MessageSecretOffered -> Park
+  MessageSecretOffered _ -> Park
+  -- Whoever built the message encrypted its parts with two different keys, so
+  -- there is no event that can carry both and no hub that could fold it. The
+  -- letter is at fault, not the caller reporting what it found.
+  PartSecretsDiffer _  -> Discard
   -- Local policy, not consensus: another hub may carry a body or a part this
   -- one will not ('maxInlineBody', 'maxPartBytes'). Deleting a letter over a
   -- threshold this build picked would be irreversible for a decision that is
@@ -587,7 +597,7 @@ outcome = \case
   -- later pass changes what the sender signed.
   MalformedRef _     -> Discard
   -- The letter is intact and the caller can supply what is missing.
-  MissingPartSecret  -> Retry
+  MissingPartSecret _ -> Retry
   PartNotFetched _   -> Retry
   -- Wiring, not letters. Retrying a view built for another repo would spin on
   -- a bug, and discarding would throw away a valid letter; a cursor at the end
@@ -637,14 +647,13 @@ honouredAlready view origin asked
 -- signed author box (PEP-19 "Attachments in public canon"), which is why the
 -- bridge takes the evidence rather than a bare secret.
 data PartsOf = PartsOf
-  { poSecret  :: Maybe PartSecret  -- ^ group secret for the part trees
-    -- | The secret over the Mailbox message's own payload, when there is a
+  { -- | The secret over the Mailbox message's own payload, when there is a
     -- message. Never published, and carried only to be refused: PEP-18 gives
     -- the parts a secret of their own, and if the two arrive equal then the
     -- caller is handing over the key to the envelope, whose back-channel
     -- clauses must never reach canon. Nothing about the bytes says which is
     -- which, so this is the only check that can catch it.
-  , poMessage :: Maybe MessageSecret
+    poMessage :: Maybe MessageSecret
     -- | The parts the caller vouches for, and what it knows about each. On the
     -- letter path these are the message's @messageParts@; on an owner-native
     -- event there is no message, and the caller is vouching for what it just
@@ -660,8 +669,24 @@ data PartsOf = PartsOf
 -- shape also refuses to let a caller claim more than it knows: there is no way
 -- to say "fetched" without saying how big, which is the number the gate needs
 -- and the one a caller cannot have without having looked.
+--
+-- The secret lives in here, in the one constructor that says the part was
+-- opened, and that is the point of the type. It used to sit beside the parts as
+-- a field of its own, which made it a claim about nothing: a caller could hand
+-- over a well-formed, usable, not-the-message secret that opens none of the
+-- parts it is published beside, and the bridge would mint a permanent reference
+-- to bytes nobody can read while believing it had checked exactly that. A pure
+-- function cannot verify a decryption, so it cannot do better than making the
+-- claim specific; what it can refuse is a secret that is not attached to an act
+-- of opening a named part.
 data PartEvidence =
-    PartHere Word64      -- ^ present in local storage, this many bytes
+    -- | Fetched, this many bytes, and opened with THIS secret. The only way to
+    -- introduce a secret, so the secret canon publishes is always one some
+    -- caller said it used on a part this event references.
+    PartOpened Word64 PartSecret
+    -- | Fetched, this many bytes, and the caller has no key for it. Distinct
+    -- from 'PartPending', which is a wait: this one is a key to go and get.
+  | PartLocked Word64
     -- | Carried by the message and not fetched yet, of this declared size.
     --
     -- The size is not optional here either, and that is what makes the limit
@@ -672,6 +697,8 @@ data PartEvidence =
     -- park the letter. What is bounded has to be what triage spends, not only
     -- what canon keeps.
   | PartPending Word64
+    -- Derived, unlike the instances below, and safe for the same reason they
+    -- are hand-written: 'Show PartSecret' hides its bytes.
   deriving stock (Eq,Show)
 
 -- Deliberately partial, like 'Show' on 'PartSecret' and for the same reason:
@@ -679,10 +706,9 @@ data PartEvidence =
 -- so a derived instance would put it in a log the first time anyone traced a
 -- refusal.
 instance Show PartsOf where
-  show p = "PartsOf {secret = " <> maybe "none" (const "present") (poSecret p)
-        <> ", message-secret = " <> maybe "none" (const "present") (poMessage p)
+  show p = "PartsOf {message-secret = " <> maybe "none" (const "present") (poMessage p)
         <> ", carried = " <> show (HM.size (poCarried p))
-        <> ", fetched = " <> show (length [ () | PartHere _ <- HM.elems (poCarried p) ])
+        <> ", opened = " <> show (length [ () | PartOpened _ _ <- HM.elems (poCarried p) ])
         <> "}"
 
 -- | A letter's attachments.
@@ -709,7 +735,7 @@ newtype OwnerParts = OwnerParts PartsOf
 -- the parts through is a bug that must. Only 'noOwnAttachments' can say the
 -- second thing now, and on that path there is no message to be wrong about.
 noMessageParts :: MessageSecret -> LetterParts
-noMessageParts msg = LetterParts (PartsOf Nothing (Just msg) HM.empty)
+noMessageParts msg = LetterParts (PartsOf (Just msg) HM.empty)
 
 -- | What the message carries, and what the caller knows about each part.
 --
@@ -717,20 +743,18 @@ noMessageParts msg = LetterParts (PartsOf Nothing (Just msg) HM.empty)
 -- fetched a tree at a time: a letter with two attachments, one of them here,
 -- was not expressible before and the convenient builder answered "fetched" for
 -- everything it was given, which is the answer the gate exists to check.
+--
+-- No secret argument, and that is the change this type exists for: a secret
+-- enters only through 'PartOpened', attached to the part it opened.
 attachments
-  :: PartSecret                   -- ^ the secret the PARTS are encrypted with
-  -> MessageSecret                -- ^ the secret @messageData@ was encrypted with, to refuse
+  :: MessageSecret                -- ^ the secret @messageData@ was encrypted with, to refuse
   -> [(HashRef, PartEvidence)]    -- ^ the message's parts
   -> LetterParts
-attachments s msg hs = LetterParts (PartsOf (Just s) (Just msg) (HM.fromList hs))
-
--- | The same, but the caller has no key for them.
-attachmentsNoKey :: MessageSecret -> [(HashRef, PartEvidence)] -> LetterParts
-attachmentsNoKey msg hs = LetterParts (PartsOf Nothing (Just msg) (HM.fromList hs))
+attachments msg hs = LetterParts (PartsOf (Just msg) (HM.fromList hs))
 
 -- | An owner-native event with no attachments.
 noOwnAttachments :: OwnerParts
-noOwnAttachments = OwnerParts (PartsOf Nothing Nothing HM.empty)
+noOwnAttachments = OwnerParts (PartsOf Nothing HM.empty)
 
 -- | Attachments the owner created itself.
 --
@@ -740,12 +764,17 @@ noOwnAttachments = OwnerParts (PartsOf Nothing Nothing HM.empty)
 -- since an owner-native @open@ or @comment@ can carry a body-part like any
 -- other; PEP-19 records deriving the secret from the part tree's own group key
 -- as the fix that would make the question unaskable.
-ownAttachments :: PartSecret -> [(HashRef, PartEvidence)] -> OwnerParts
-ownAttachments s hs = OwnerParts (PartsOf (Just s) Nothing (HM.fromList hs))
+ownAttachments :: [(HashRef, PartEvidence)] -> OwnerParts
+ownAttachments hs = OwnerParts (PartsOf Nothing (HM.fromList hs))
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
-requireParts :: PartsOf -> AuthorContent -> Either TriageError ()
+--
+-- Returns the secret to publish, rather than leaving the caller to fetch it
+-- from the evidence separately. Same reason 'stampFor' is one function: two
+-- expressions are two chances to check one value and publish another, and here
+-- the value is a key that cannot be corrected once it is in canon.
+requireParts :: PartsOf -> AuthorContent -> Either TriageError (Maybe PartSecret)
 requireParts po content
   -- Told nothing at all about attachments, for content that names one. That
   -- is the caller reaching for the empty value rather than wiring the parts
@@ -753,43 +782,53 @@ requireParts po content
   -- letter are indistinguishable, so it is the only one that stops the loop.
   | referencesPart content, toldNothing = Left NoAttachmentsSupplied
   | otherwise = do
-      mapM_ present (eventParts content)
-      if referencesPart content then secretOK else Right ()
+      secrets <- traverse present (eventParts content)
+      one secrets
   where
-    -- Told nothing means exactly that: no secret, no parts AND no message
-    -- behind them. A message that carried no attachments is not the same
-    -- thing, and reading it as one let any stranger wedge the loop by naming
-    -- a part in a letter whose message has none. Only reachable from
-    -- 'noOwnAttachments' now: every letter builder demands the message
-    -- secret, which is exactly the evidence this asks for.
-    toldNothing = isNothing (poSecret po)
-               && HM.null (poCarried po)
-               && isNothing (poMessage po)
+    -- Told nothing means exactly that: no parts AND no message behind them. A
+    -- message that carried no attachments is not the same thing, and reading it
+    -- as one let any stranger wedge the loop by naming a part in a letter whose
+    -- message has none. Only reachable from 'noOwnAttachments' now: every
+    -- letter builder demands the message secret, which is exactly the evidence
+    -- this asks for.
+    toldNothing = HM.null (poCarried po) && isNothing (poMessage po)
 
     -- Past that, the caller has supplied evidence about the message, so a part
     -- the evidence does not list is the letter's doing and no later pass
     -- changes it. Anyone can send such a letter; treating it as a caller bug
     -- would let one stranger stop triage for good.
-    -- Size first, and for both states: the answer to "too big" does not change
+    -- Size first, and for every state: the answer to "too big" does not change
     -- once it is downloaded, so refusing it before is strictly better and is
     -- the only order in which the limit bounds anything but canon.
     present h = case HM.lookup h (poCarried po) of
-      Nothing                              -> Left (PartNotInMessage h)
-      Just (PartPending n) | n > maxPartBytes -> Left (PartTooLarge h)
-                           | otherwise        -> Left (PartNotFetched h)
-      Just (PartHere n)    | n > maxPartBytes -> Left (PartTooLarge h)
-                           | otherwise        -> Right ()
-
-    secretOK = case poSecret po of
-      Nothing -> Left MissingPartSecret
-      Just sec
-        | maybe False (sameSecret sec) (poMessage po) -> Left MessageSecretOffered
+      Nothing -> Left (PartNotInMessage h)
+      Just ev | evidenceSize ev > maxPartBytes -> Left (PartTooLarge h)
+      Just (PartPending _) -> Left (PartNotFetched h)
+      Just (PartLocked _)  -> Left (MissingPartSecret h)
+      Just (PartOpened _ sec)
+        | maybe False (sameSecret sec) (poMessage po) -> Left (MessageSecretOffered h)
         -- Checked here as well as in 'mkPartSecret', because a secret can
         -- reach this point without passing through it: 'Serialise' decodes one
         -- unchecked so that canon somebody else wrote can be read, and
         -- compaction re-stamps events by reading the old canon boxes.
-        | not (usablePartSecret sec)                 -> Left BadPartSecret
-        | otherwise                                  -> Right ()
+        | not (usablePartSecret sec) -> Left (BadPartSecret h)
+        | otherwise                  -> Right (h, sec)
+
+    -- Canon has one @part-secret@ field, so an event whose parts were opened
+    -- with two different keys cannot be represented, whoever folds it. The
+    -- sender built the message that way, so this is the letter's doing and not
+    -- the caller's, and the pair is named because "they differ" without saying
+    -- which two is a refusal nobody can act on.
+    one = \case
+      []             -> Right Nothing
+      ((_,sec) : xs) -> case [ h | (h,s) <- xs, s /= sec ] of
+        []      -> Right (Just sec)
+        (odd':_) -> Left (PartSecretsDiffer odd')
+
+    evidenceSize = \case
+      PartOpened n _ -> n
+      PartLocked n   -> n
+      PartPending n  -> n
 
 -- Refuse a field triage will not carry inline. A local policy, not an
 -- admission rule (see 'maxInlineBody'), enforced here because the bridge is
@@ -1049,9 +1088,9 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- Last, because this one is about what the caller supplied rather than about
   -- the letter: a shape error should be reported as such rather than as a
   -- missing key.
-  requireParts parts content
+  secret <- requireParts parts content
 
-  Right (accepted canonKp repo view folded (Just origin) Nothing (poSecret parts) content box author
+  Right (accepted canonKp repo view folded (Just origin) Nothing secret content box author
            (ThreadScope thread) reply)
   where
     known thr
@@ -1326,9 +1365,9 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
                | not (coordsOK content)               -> Left BadContent
                | otherwise                            -> Right (ThreadScope thr)
 
-  requireParts parts content
+  secret <- requireParts parts content
 
-  Right (accepted kp repo view folded Nothing Nothing (poSecret parts) content box pk scope NoReply)
+  Right (accepted kp repo view folded Nothing Nothing secret content box pk scope NoReply)
   where
     coordsOK = \case
       ARevise _ c _ -> reachableCoords c
@@ -1401,9 +1440,6 @@ accepted (pk,sk) repo view folded origin honours secret content box authorOf sco
       AOpen{} -> True
       _       -> False
 
-    -- Only publish a secret when there is something encrypted to unlock.
-    secret' | referencesPart content = secret
-            | otherwise              = Nothing
 
     canonBox = signCanon pk sk CanonContent
       { ccTarget     = repo
@@ -1413,7 +1449,11 @@ accepted (pk,sk) repo view folded origin honours secret content box authorOf sco
       , ccOrigin     = origin
       , ccHonours    = honours
       , ccFoldedTs   = stamped
-      , ccPartSecret = secret'
+        -- Only ever set when there is something encrypted to unlock, and no
+        -- filter is needed to make that true: 'requireParts' collects this from
+        -- the parts THIS content references, so content that references none
+        -- yields Nothing on its own.
+      , ccPartSecret = secret
       }
 
     view' = view

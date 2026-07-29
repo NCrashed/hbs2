@@ -973,23 +973,40 @@ offered for the parts equals the secret over the message payload. That check is
 the only mechanical defence available, the two values being otherwise
 indistinguishable.
 
-Neither the type nor the check is the end of it, and the residue is worth
-writing down. Comparing the two catches one secret handed over twice; it cannot
-catch them handed over crossed, and on an owner-native event there is no message
-secret to compare against at all, which is not the impossible case it looks
-like, since an owner-authored `open` or `comment` carries a body-part like any
-other. The structural fix is to stop taking the parts secret as an argument and
-derive it from the group key embedded in the part tree itself: that is the one
-value which by construction cannot be the message secret, because it is the key
-the tree was encrypted under. That is a change to the layer that fetches trees,
-so it is recorded here as the intended shape rather than done: until then the
-check is the best available and the type is what keeps the question visible.
+The secret is supplied per part, inside the evidence that says the part was
+opened, and never as a value of its own beside the parts. This is the difference
+between a claim about something and a claim about nothing. A free-floating
+secret can be well-formed, usable and not the message secret while opening none
+of the parts it is published next to, and every check above would pass while
+canon acquired a permanent reference to bytes nobody can read. A bridge that
+does no IO cannot verify a decryption, so what it can do instead is refuse a
+secret that is not attached to an act of opening a named part: the only way to
+say "this part is here" is to say how big it is and what opened it, and neither
+is a thing a caller has without having looked. What remains unprovable is
+whether the named secret really was the one used, and nothing in a pure function
+can close that; what is closed is the gap between "a secret was supplied" and
+"a secret was supplied for this part".
 
-Relatedly, one event carries one `part-secret` while an `open` can reference two
-trees, a body-part and a PR bundle. That is sound only because both come from
-the same Mailbox message and therefore from the same parts key. An event whose
-references came from two messages cannot be represented, and nothing may mint
-one.
+One event carries one `part-secret` while an `open` can reference two trees, a
+body-part and a PR bundle. That is sound only because both come from the same
+Mailbox message and therefore from the same parts key. Since the evidence is now
+per part, the two can disagree, and an event whose parts were opened with two
+different secrets is refused: there is no field that can carry both, on this hub
+or any other, so the letter is unfoldable rather than merely refused here.
+
+Neither the type nor the checks are the end of it, and the residue is worth
+writing down. Comparing against the message secret catches one secret handed
+over twice; it cannot catch them handed over crossed, and on an owner-native
+event there is no message secret to compare against at all, which is not the
+impossible case it looks like, since an owner-authored `open` or `comment`
+carries a body-part like any other. The structural fix is to stop taking a
+secret from the caller at all and derive it from the group key embedded in the
+part tree itself: that is the one value which by construction cannot be the
+message secret, because it is the key the tree was encrypted under, and it is
+also the one that cannot be a secret for some other part. That is a change to
+the layer that fetches trees, so it is recorded here as the intended shape
+rather than done: until then the per-part evidence is the best available and the
+type is what keeps the question visible.
 
 For that check to run, the caller has to hand over the message secret with the
 parts, so the letter-side evidence always carries it and there is no value on
