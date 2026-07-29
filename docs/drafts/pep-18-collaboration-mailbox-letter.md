@@ -217,9 +217,18 @@ reads these and correlates them to sent threads:
 (target <repo-lwwref-b58>)
 (thread <thread-id>)                  ; the canonical thread this acknowledges
 (number <int>)                        ; the assigned issue/PR number
-(status <open|closed|merged|...>)     ; the new canonical status
-(merge-commit <git-sha1>)             ; on a merged PR (optional)
+(status "open"|"closed"|"merged"|...) ; the new canonical status
+(merge-commit "<git-sha1>")           ; on a merged PR (optional)
+(note "...")                          ; the maintainer's own words, when the
+                                      ;   event that prompted this carried a
+                                      ;   note: a close or a reopen (optional)
 ```
+
+The `note` is why the ack is worth sending at all rather than telling the
+contributor to poll: a status without a reason is exactly the half of the answer
+they can already get from canon. It is not authority, and a reader that
+distrusts the ack distrusts the note with it; the same words are in canon, in a
+signed event, for anyone who wants to check.
 
 An `ack` is a courtesy notification, not canon: it is a Mailbox message signed
 by the owner (or a delegated maintainer), and the recipient trusts it by

@@ -126,7 +126,7 @@ spec = do
       alice <- kp
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
-          rec' = AckRecord (fst owner) tid (Just 7) "merged" (Just "cafe")
+          rec' = AckRecord (fst owner) tid (Just 7) "merged" (Just "cafe") Nothing
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
       openAck (\_ _ -> True) (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
       expectLeft NotALetter (openLetter got)
@@ -137,7 +137,7 @@ spec = do
       alice <- kp
       let ac = AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1
           tid = authorBoxId (signAuthor (fst alice) (snd alice) ac)
-          rec' = AckRecord (fst owner) tid (Just 7) "closed" Nothing
+          rec' = AckRecord (fst owner) tid (Just 7) "closed" Nothing Nothing
           isMaintainer _ k = k == fst owner
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
       openAck isMaintainer (EnvelopeSigner (fst owner)) got `shouldBe` Right rec'
@@ -152,7 +152,7 @@ spec = do
       -- signature and the maintainer check both pass, so only the reader's own
       -- record of what it sent can tell the difference. Correlating by thread
       -- alone would show a stranger's status on the reader's submission.
-      let rec' = AckRecord (fst other) thr (Just 1) "closed" Nothing
+      let rec' = AckRecord (fst other) thr (Just 1) "closed" Nothing Nothing
           isMaintainer repo k = k == repo
           isMine repo t = repo == fst mine && t == thr
       got <- expectRight (parsePayload (letterPayload (makeAck rec')))
@@ -160,7 +160,7 @@ spec = do
       openAck isMaintainer (EnvelopeSigner (fst other)) got `shouldBe` Right rec'
       expectLeft UnrelatedAck (openAckFor isMaintainer isMine (EnvelopeSigner (fst other)) got)
       -- ...and the reader's own ack still passes
-      let ours = AckRecord (fst mine) thr (Just 1) "closed" Nothing
+      let ours = AckRecord (fst mine) thr (Just 1) "closed" Nothing Nothing
       oursMd <- expectRight (parsePayload (letterPayload (makeAck ours)))
       openAckFor isMaintainer isMine (EnvelopeSigner (fst mine)) oursMd `shouldBe` Right ours
       -- alice is nobody's maintainer, so the first check still fires first
@@ -277,21 +277,25 @@ spec = do
       thr <- someHash
       -- A contributor's tooling reads these ('hub updates', PEP-22), so the
       -- shape is part of the interop surface, not a debugging convenience.
-      let ack = AckRecord (fst owner) thr (Just 7) "merged" (Just "cafe")
+      let ack = AckRecord (fst owner) thr (Just 7) "merged" (Just "cafe") (Just "as agreed")
           rendered = fmap (show . pretty) (ackSyntax ack)
           whole = unwords rendered
       whole `shouldSatisfy` isInfixOf "(kind ack)"
       whole `shouldSatisfy` isInfixOf "(number 7)"
       whole `shouldSatisfy` isInfixOf "(merge-commit \"cafe\")"
+      -- the maintainer's own words, so a contributor is not sent to canon to
+      -- find out why their submission was closed
+      whole `shouldSatisfy` isInfixOf "(note \"as agreed\")"
       -- No op: an ack asserts nothing the contributor authored.
       whole `shouldSatisfy` (not . isInfixOf "(op ")
       case parseTop whole of
         Left e  -> expectationFailure ("projection does not re-parse: " <> show e)
         Right _ -> pure ()
       -- The optional halves are simply absent, not rendered empty.
-      let bare = unwords (fmap (show . pretty) (ackSyntax (AckRecord (fst owner) thr Nothing "open" Nothing)))
+      let bare = unwords (fmap (show . pretty) (ackSyntax (AckRecord (fst owner) thr Nothing "open" Nothing Nothing)))
       bare `shouldSatisfy` (not . isInfixOf "number")
       bare `shouldSatisfy` (not . isInfixOf "merge-commit")
+      bare `shouldSatisfy` (not . isInfixOf "note")
 
     it "classifies letter ops by what they may become" $ do
       owner <- kp

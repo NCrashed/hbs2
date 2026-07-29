@@ -358,12 +358,6 @@ data FoldResult = FoldResult
 data Stamp = Stamp
   { spSeq    :: Word64
   , spKey    :: HubKey        -- ^ the canon box signer
-    -- | The clock the stamp asserts. Carried here rather than left to 'keep'
-    -- because the next mint is clamped to be no lower than the highest one in
-    -- canon, so an event that spends a @seq@ without spending its @folded-ts@
-    -- leaves the bridge minting below a stamp canon already holds, which is a
-    -- 'FoldedTsWentBack' every verifier then reports forever.
-  , spFolded :: Word64
   }
 
 -- | The stamp of an event this build could not resolve.
@@ -383,9 +377,9 @@ data Stamp = Stamp
 -- this event was not admitted. A build that counted it would hand out different
 -- numbers than the build that can read the content and drops it, from the same
 -- canon.
-ghostStamp :: Event -> Maybe Stamp
+ghostStamp :: Event -> Maybe (Stamp, Maybe Word64)
 ghostStamp e = case unboxChecked (evCanonBox e) of
-  Right (k, cc) -> Just (Stamp (ccSeq cc) k (ccFoldedTs cc))
+  Right (k, cc) -> Just (Stamp (ccSeq cc) k, ccNumber cc)
   Left _        -> Nothing
 
 -- One entry in the ordered pass.
@@ -393,7 +387,7 @@ data Item =
     Whole Resolved
     -- | An event that did not resolve but whose canon box did: its id, why it
     -- was dropped, its stamp, and the canon box hash for the tie-break.
-  | Ghost EventId DropReason Stamp HashRef
+  | Ghost EventId DropReason Stamp (Maybe Word64) HashRef
 
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
 -- this event's id.
@@ -459,7 +453,7 @@ foldEvents owner es = materializeWith owner items unstamped
     step e (bad,oks) = case resolve e of
       Right r     -> (bad, Whole r : oks)
       Left reason -> case ghostStamp e of
-        Just sp -> (bad, Ghost (eventId e) reason sp (canonBoxId (evCanonBox e)) : oks)
+        Just (sp,num) -> (bad, Ghost (eventId e) reason sp num (canonBoxId (evCanonBox e)) : oks)
         Nothing -> ((eventId e, reason):bad, oks)
 
 -- | The pure, seq-ordered fold over resolved events (PEP-19 admission rules
@@ -484,7 +478,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- still a public function over a list, and @hub verify@ exists to read
     -- canon somebody else wrote.
     key (Whole r)            = (rSeq r, rId r, rCanonId r)
-    key (Ghost eid _ sp cid) = (spSeq sp, eid, cid)
+    key (Ghost eid _ sp _ cid) = (spSeq sp, eid, cid)
 
     st0 = S { sMaint    = HS.singleton owner
             , sEver     = HS.singleton owner
@@ -502,6 +496,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
             , sNumbers    = HS.empty
             , sLastNumber = 0
             , sLastFolded = 0
+            , sPrevFolded = 0
             , sAnoms      = []
             , sLog        = []
             , sParts      = HS.empty
@@ -532,8 +527,16 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- Nothing to admit and nothing to check: this build cannot read the event.
     -- What it can still do is spend the stamp, which is the whole reason a
     -- ghost is in the ordered pass at all.
-    go (Ghost eid reason sp _ : rest) s =
-      go rest (dropAt eid (Just (spSeq sp)) (Just (spKey sp)) reason (stamp sp s))
+    go (Ghost eid reason sp num _ : rest) s =
+      -- The number is remembered but not spent: not spending it is what keeps
+      -- this build and the build that can read the event minting the same
+      -- numbers, and remembering it is what makes the collision visible when
+      -- one of them hands the same number out again.
+      go rest (dropAt eid (Just (spSeq sp)) (Just (spKey sp)) reason
+                 (seen num (stamp sp s)))
+      where
+        seen (Just n) t = t { sNumbers = HS.insert n (sNumbers t) }
+        seen Nothing t  = t
     go (Whole r : rest) s0
       | HM.member (rId r) (sSeen s) = go rest (dropE r DupId s)
       | not (sane r)                = go rest (dropE r BadStamp s)
@@ -583,34 +586,40 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- one seq for good, with every LWW attribute between them settled by a hash
     -- instead of by time.
     --
-    -- EVER authorized, not currently: a delegate who minted from a view built
-    -- before their revocation, and whose event the publisher then wrote, leaves
-    -- a file the fold refuses at a seq that is nonetheless taken. Requiring a
-    -- live delegation there would hand that seq out a second time, and needs no
-    -- ill intent to happen. What it does exclude is a key this log never
-    -- authorized at all, which is the case that matters: the fold is a public
-    -- function over whatever files a tree holds, and counting a stranger's
-    -- would let anyone who can write one file strand the cursor. A former
-    -- maintainer could already have stranded it while their delegation stood,
-    -- so nothing is conceded by counting them now.
+    -- Who may spend one is three-valued, and the middle case is the whole of
+    -- the difficulty.
+    --
+    -- A key authorized right now spends its stamp outright. A key this log
+    -- never authorized spends nothing: the fold is a public function over
+    -- whatever files a tree holds, so counting a stranger would let anyone who
+    -- can write one file strand the cursor at the top of its range.
+    --
+    -- A key whose delegation has been WITHDRAWN spends a stamp only next to the
+    -- cursor. The case that needs it is honest and ordinary: a delegate minted
+    -- from a view built before the revocation and the publisher wrote the
+    -- result, which leaves a refused file at a seq that is nonetheless taken,
+    -- and such a seq is always within a step or two of the cursor because it
+    -- came from a cursor. Counting them without that bound made the revocation
+    -- useless as a remedy: before, a mutinous delegate's @maxBound - 1@ sorted
+    -- after their revoke and was ignored, and the owner had an answer; after,
+    -- the answer was compaction. The window keeps the honest case and takes the
+    -- mutiny back out, since a run of files can only creep the cursor by the
+    -- window each time.
     stamp sp s
-      | not (HS.member (spKey sp) (sEver s)) = s
+      | HS.member (spKey sp) (sMaint s) = spend
+      | HS.member (spKey sp) (sEver s), spSeq sp <= sMaxSeq s + staleStampWindow = spend
       | otherwise = s
+      where
+        spend = s
           { sMaxSeq = if spSeq sp == maxBound
                         then sMaxSeq s
                         else max (sMaxSeq s) (spSeq sp)
-            -- Field by field, like the counters: a value the fold refuses is
-            -- not spent, or the refusal would be the poisoning.
-          , sLastFolded = if spFolded sp > maxFoldedTs
-                            then sLastFolded s
-                            else max (sLastFolded s) (spFolded sp)
           }
 
     -- A resolved event's own stamp.
     stampOf r = Stamp
       { spSeq    = rSeq r
       , spKey    = rCanonKey r
-      , spFolded = ccFoldedTs (rCanon r)
       }
 
     apply r s = case rContent r of
@@ -755,6 +764,13 @@ data St = S
   , sNumbers    :: HashSet Word64
   , sLastNumber :: Word64
   , sLastFolded :: Word64
+    -- The folded-ts of the previous ADMITTED event, which is a different
+    -- question from the high-water mark above and needs its own field: one is
+    -- the floor the next mint is clamped to, the other is what a clock going
+    -- backwards is measured against. Sharing them made an event that was not
+    -- admitted raise the bar for the anomaly, so a strictly increasing log of
+    -- admitted events reported itself as going backwards.
+  , sPrevFolded :: Word64
     -- Newest first while accumulating. No sort key alongside, unlike
     -- 'sDropped': the pass runs in (seq, event-id, canon-box hash) order and
     -- appends, so reversing at the end is already the log's own order. A drop
@@ -767,22 +783,39 @@ data St = S
   , sParts      :: HashSet HashRef
   }
 
+-- | How far past the cursor a stamp from a withdrawn delegation may still
+-- reach. Small on purpose: a mint from a stale view sits a step or two behind
+-- the cursor, never a leap, so every file such a key writes can creep the
+-- cursor by at most this much and a revocation stays a remedy.
+staleStampWindow :: Word64
+staleStampWindow = 16
+
 -- Mark an event applied: the dedup set, the id every later redact resolves
 -- against, which thread it belongs to, and the provenance a later fold reads.
 keep :: Maybe ThreadId -> Resolved -> St -> St
 keep scope r s = s
   { sSeen      = HM.insert (rId r) scope (sSeen s)
-    -- The seq and the folded-ts are advanced by 'stamp' before this, for events
-    -- that were not admitted too. These three are not.
+    -- The @seq@ is advanced by 'stamp' before this, for events that were not
+    -- admitted too, because it is a position in the log and the file occupies
+    -- it either way. Everything below is advanced only here, on admission.
     --
-    -- The origin, because an event that was not admitted folded no letter. And
-    -- the human number, because it is not a position in the log but a label on
-    -- a thread that exists: an @open@ aimed at another repository, blessed by a
+    -- The origin, because an event that was not admitted folded no letter.
+    --
+    -- The human number, because it is not a position but a label on a thread
+    -- that exists: an @open@ aimed at another repository, blessed by a
     -- maintainer of this one, is refused here and never showed anyone a number,
     -- so spending it would burn one for nothing, and at the top of the range it
     -- would strand the counter and abort every later triage run. A number
     -- handed out twice is a reported anomaly on a display field; a number that
     -- cannot be handed out at all stops the repo.
+    --
+    -- And the clock, for the same shape of reason: it is the floor the next
+    -- mint is clamped to, so a refused file stamped at the ceiling would pin
+    -- every future stamp in the repository to the year 2100. A 'max' rather
+    -- than an assignment, because the floor is the highest thing canon holds
+    -- and not the last thing it happens to hold: assigning let an admitted
+    -- event with a lower stamp lower the floor, and a folder that rebuilt from
+    -- canon after a restart then disagreed with the one that had been running.
   , sOrigins   = maybe (sOrigins s) (\o -> HS.insert o (sOrigins s)) (ccOrigin (rCanon r))
   , sSeqSeen   = HS.insert (rSeq r) (sSeqSeen s)
   , sNumbers   = maybe (sNumbers s) (\n -> HS.insert n (sNumbers s)) num
@@ -790,6 +823,9 @@ keep scope r s = s
   , sMaxNumber = case num of
       Just n | n /= maxBound -> max (sMaxNumber s) n
       _                      -> sMaxNumber s
+  , sLastFolded = if folded > maxFoldedTs then sLastFolded s
+                                          else max (sLastFolded s) folded
+  , sPrevFolded = folded
   , sParts     = foldr HS.insert (sParts s) (eventParts (rContent r))
   , sLog       = LogEntry { lgSeq = rSeq r, lgEvent = rId r, lgThread = scope
                           , lgAuthor = rAuthorKey r, lgCanonBy = rCanonKey r
@@ -810,7 +846,7 @@ keep scope r s = s
         -- either a duplicate publisher or a hand-written stamp.
       , [ NumberWentBack (sLastNumber s) n
         | Just n <- [num], sLastNumber s > 0, n <= sLastNumber s ]
-      , [ FoldedTsWentBack (sLastFolded s) folded | folded < sLastFolded s ]
+      , [ FoldedTsWentBack (sPrevFolded s) folded | folded < sPrevFolded s ]
       , [ DupOrigin o | Just o <- [ccOrigin cc], HS.member o (sOrigins s) ]
       , [ PartWithoutSecret
         | referencesPart (rContent r), isNothing (ccPartSecret cc) ]

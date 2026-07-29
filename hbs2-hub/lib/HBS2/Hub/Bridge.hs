@@ -570,8 +570,17 @@ data PartsOf = PartsOf
 -- to say "fetched" without saying how big, which is the number the gate needs
 -- and the one a caller cannot have without having looked.
 data PartEvidence =
-    PartHere Word64   -- ^ present in local storage, this many bytes
-  | PartPending       -- ^ carried by the message, not fetched yet
+    PartHere Word64      -- ^ present in local storage, this many bytes
+    -- | Carried by the message and not fetched yet, of this declared size.
+    --
+    -- The size is not optional here either, and that is what makes the limit
+    -- worth anything: a tree declares its size in its root block, which is one
+    -- fetch, so a caller can know it before pulling the payload. Without it the
+    -- gate could only fire after the download, and a stranger naming a hundred
+    -- gigabytes would have the hub spend the hundred gigabytes and only then
+    -- park the letter. What is bounded has to be what triage spends, not only
+    -- what canon keeps.
+  | PartPending Word64
   deriving stock (Eq,Show)
 
 -- Deliberately partial, like 'Show' on 'PartSecret' and for the same reason:
@@ -670,11 +679,15 @@ requireParts po content
     -- the evidence does not list is the letter's doing and no later pass
     -- changes it. Anyone can send such a letter; treating it as a caller bug
     -- would let one stranger stop triage for good.
+    -- Size first, and for both states: the answer to "too big" does not change
+    -- once it is downloaded, so refusing it before is strictly better and is
+    -- the only order in which the limit bounds anything but canon.
     present h = case HM.lookup h (poCarried po) of
-      Nothing                            -> Left (PartNotInMessage h)
-      Just PartPending                   -> Left (PartNotFetched h)
-      Just (PartHere n) | n > maxPartBytes -> Left (PartTooLarge h)
-                        | otherwise      -> Right ()
+      Nothing                              -> Left (PartNotInMessage h)
+      Just (PartPending n) | n > maxPartBytes -> Left (PartTooLarge h)
+                           | otherwise        -> Left (PartNotFetched h)
+      Just (PartHere n)    | n > maxPartBytes -> Left (PartTooLarge h)
+                           | otherwise        -> Right ()
 
     secretOK = case poSecret po of
       Nothing -> Left MissingPartSecret
@@ -825,6 +838,13 @@ ackFor a = case acScope a of
       , akMergeCommit = case acContent a of
           AMerge _ mc _ _ -> Just mc
           _               -> Nothing
+        -- The words the maintainer wrote, when this event carried any. They are
+        -- already public in canon; what this saves the contributor is having to
+        -- go and read canon to find out why.
+      , akNote = case acContent a of
+          AClose _ note _  -> note
+          AReopen _ note _ -> note
+          _                -> Nothing
       }
 
 -- | Accept a letter into canon.
@@ -1048,10 +1068,14 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
       then Right ()
       else Left ThreadMismatch
 
-  thread <- composed $ case authorThread content0 of
+  -- NOT composed, and the check just above is why: the two contents name the
+  -- same thread by now, so a thread canon does not hold is the LETTER's thread,
+  -- and that is the ordinary out-of-order case. Fold the opening letter and
+  -- come back; deleting this one would lose a good submission.
+  thread <- case authorThread content0 of
     Just thr | HM.member thr (cvThreads view) -> Right thr
              | otherwise                      -> Left UnknownThread
-    Nothing -> Left BadContent
+    Nothing -> Left (Composed BadContent)
 
   -- Re-author: a new box signed by the owner, carrying the owner's clock.
   -- Honouring the same request twice at the same clock produces the same
@@ -1060,7 +1084,12 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
   -- 'classify' above has already established.
   let content = withAuthorTs folded content0
       box = signAuthor pk sk content
-  seenAlready view (authorBoxId box)
+  -- Composed, because this one is about the CLOCK the caller passed. A close, a
+  -- reopen and a close again on one tick re-author to the same bytes and so to
+  -- the same id, and answering that by discarding would delete the letter, leave
+  -- the thread open, and tell triage it had closed it. The caller has to vary
+  -- something; the letter has done nothing wrong.
+  composed (seenAlready view (authorBoxId box))
 
   -- No requireParts: 'classify' has established that this is a close, reopen
   -- or set, none of which can reference a part.
@@ -1074,6 +1103,10 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
 -- Ordering is checked here too. A redact whose target is not in canon yet is
 -- refused rather than minted, because the fold treats such a redact as a
 -- silent no-op, and a thread op on an unknown thread would be dropped.
+-- Every refusal on this path is 'Composed', without exception: there is no
+-- letter here, so nothing this function judges is anything a sender did. A
+-- triage loop that folds then deletes must not delete somebody's submission
+-- because the maintainer's own tooling composed a set with unsorted labels.
 ownerEvent
   :: TriageCtx
   -> CanonView
@@ -1081,7 +1114,17 @@ ownerEvent
   -> OwnerParts                         -- ^ the event's attachments, if any
   -> AuthorContent
   -> Either TriageError Accepted
-ownerEvent ctx view folded (OwnerParts parts) content = do
+ownerEvent ctx view folded parts content =
+  composed (ownerEvent' ctx view folded parts content)
+
+ownerEvent'
+  :: TriageCtx
+  -> CanonView
+  -> Word64
+  -> OwnerParts
+  -> AuthorContent
+  -> Either TriageError Accepted
+ownerEvent' ctx view folded (OwnerParts parts) content = do
   let kp@(pk,sk) = tcCanon ctx
       repo = tcRepo ctx
   requireCanon repo view folded pk
@@ -1131,11 +1174,7 @@ ownerEvent ctx view folded (OwnerParts parts) content = do
 
   requireSize content
   requireNormalized content
-  -- Wrapped, because on this path the evidence is the caller vouching for
-  -- trees it created itself: there is no message, so "the message does not
-  -- carry this part" is not a statement about anything a sender did, and
-  -- answering it with Discard would have a loop delete letters over it.
-  composed (requireParts parts content)
+  requireParts parts content
 
   Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)
   where

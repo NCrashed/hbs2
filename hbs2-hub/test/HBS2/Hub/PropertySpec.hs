@@ -167,7 +167,12 @@ newtype Script = Script [Step]
 instance Arbitrary Script where
   arbitrary = Script <$> ((:) <$> firstOpen <*> arbitrary)
     where firstOpen = StepOpen <$> genTs <*> elements [HubIssue,HubPR]
-  shrink (Script s) = Script <$> shrink s
+  -- The head is kept: shrinking it away leaves a script with no thread in
+  -- canon, where every remaining step refuses and every invariant holds
+  -- vacuously, so the shrinker would happily report that as the minimal
+  -- counterexample to whatever the run actually broke.
+  shrink (Script [])       = []
+  shrink (Script (x:xs))   = [ Script (x:xs') | xs' <- shrink xs ]
 
 -- | What a run minted, for coverage. The invariants cannot see this: a run
 -- that only ever refuses satisfies all of them.
@@ -315,8 +320,20 @@ spec =
         -- are a valid canon, just a wrong one); a mint against a stale view
         -- really would have collided, which is why the caller has to discard
         -- it; and every intruder was refused for being unauthorized.
-        assert (  null (rDropped r) && null (rAnoms r)
-               && rAgrees r && rOnePer r && rStaleDup r && rIntruded r )
+        -- One at a time, each named. A single conjunction says only that the
+        -- run failed, and the six are not equally likely to be the one that
+        -- did: the counterexample is worth nothing if it does not say which
+        -- invariant it is a counterexample to.
+        let invariants =
+              [ ("the fold dropped something the bridge minted", null (rDropped r))
+              , ("the fold reported an anomaly in what the bridge minted", null (rAnoms r))
+              , ("the accumulated view is not the rebuilt one", rAgrees r)
+              , ("one letter produced two canon events", rOnePer r)
+              , ("a mint against a stale view would not have collided", rStaleDup r)
+              , ("an intruder's event was not refused as unauthorized", rIntruded r)
+              ]
+        monitor (counterexample (unlines [ "FAILED: " <> name | (name,ok) <- invariants, not ok ]))
+        assert (all snd invariants)
   where
     isDoubleHonour = \case
       AlreadyHonoured -> True
@@ -462,7 +479,7 @@ step cast st = \case
     let part = originOf (stStep st + i + 1)
         po = case att of
                Ready      -> attachments secret32 msgSecret [here part]
-               NotFetched -> attachments secret32 msgSecret [(part, PartPending)]
+               NotFetched -> attachments secret32 msgSecret [(part, PartPending 1024)]
                NotCarried -> noParts
                NoKey      -> attachmentsNoKey msgSecret [here part]
                TooBig     -> attachments secret32 msgSecret
@@ -551,9 +568,15 @@ step cast st = \case
   -- field the accumulated view keeps and the rebuilt one does not shows up as a
   -- refusal or a bad mint rather than as a quiet difference at the end.
   StepRestart ->
-    st { stView = viewOf (foldEvents (castRepo cast) (stEvents st))
-       , stTags = TRestart : stTags st
-       }
+    let rebuilt = viewOf (foldEvents (castRepo cast) (stEvents st))
+    in if rebuilt /= stView st && null (stIntruders st)
+         -- Checked here and not only at the end: a view that drifts mid-run
+         -- goes on to mint from the drifted state, and the counterexample a
+         -- final check produces is the whole script rather than the two steps
+         -- that mattered. Skipped once a stranger has written into the tree,
+         -- which is a difference the accumulated view is supposed to have.
+         then error "the rebuilt view is not the accumulated one"
+         else st { stView = rebuilt, stTags = TRestart : stTags st }
 
   StepStaleView i ts -> case drop i (stOld st) of
     []      -> st

@@ -7,6 +7,8 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
 
+import Data.Config.Suckless
+
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
@@ -60,6 +62,15 @@ spec = do
                  (AOpen repo HubPR nasty ["bug"] (Just nasty) (Just part) (Just coords) 42)
                  (canon 7 (Just 3) (Just origin) (Just secret32))
       parseEvent (renderEvent ev) `shouldBe` Right (hubEventVersion, ev)
+      -- One clause per line, one clause of each name. Two answers to the same
+      -- question is what 'only' refuses, and the format is declared forever.
+      case parseTop (renderEvent ev) of
+        Left e      -> expectationFailure ("the file does not re-parse: " <> show e)
+        Right forms -> do
+          let cs = concat [ xs | List _ xs@(List{} : _) <- forms ] <> forms
+              named n = length [ () | List _ (SymbolVal m : _) <- cs, m == n ]
+          map named ["hub-event","author-box","canon-box","op","seq"]
+            `shouldBe` [1,1,1,1,1]
 
     it "round-trips every op, with and without the optional clauses" $ do
       owner <- kp
@@ -93,28 +104,81 @@ spec = do
       -- would make the file unparseable, permanently, with two valid signatures
       -- inside it.
       let repo = fst owner
+          hostile = "(canon-box x) " <> nasty
           ev = mkEvent alice owner
-                 (AOpen repo HubIssue ("(canon-box x) " <> nasty) [] (Just nasty)
-                    Nothing Nothing 1)
+                 (AOpen repo HubIssue hostile [] (Just nasty) Nothing Nothing 1)
                  (canon 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
       parseEvent file `shouldBe` Right (hubEventVersion, ev)
-      -- ...including the case where the title tries to be a clause of its own
-      Text.unpack file `shouldSatisfy` isInfixOf "(canon-box"
+      -- Reading the boxes back is not enough to know the file survived: they
+      -- are written first, so a title that ends its string early damages only
+      -- what comes after it. What has to hold is that the file still says what
+      -- it was written to say, clause for clause.
+      case parseTop file of
+        Left e      -> expectationFailure ("the file does not re-parse: " <> show e)
+        Right forms -> do
+          let cs = concat [ xs | List _ xs@(List{} : _) <- forms ] <> forms
+          [ t | List _ [SymbolVal "title", LitStrVal t] <- cs ] `shouldBe` [hostile]
+          -- and the clause after it is still a clause, not part of the title
+          [ () | List _ (SymbolVal "created" : _) <- cs ] `shouldBe` [()]
 
-    it "reports a file from a newer schema without vetoing the tree" $ do
+    it "keeps the boxes readable under an attribute name written to break the file" $ do
       owner <- kp
       alice <- kp
-      -- The version clause is unsigned text, so one line of it must not be able
-      -- to make a whole repository unreadable for every clone. This is one
-      -- file's answer, and the caller drops that file the way the fold drops an
-      -- event whose author box it cannot decode.
+      -- The same hole one field over, and the one nothing else closes: the fold
+      -- admits an attribute name that is not a vocabulary word (it only reports
+      -- it), so a name of "a)(canon-box" reaches this file from a letter, and
+      -- compaction re-renders canon somebody else wrote.
+      target <- someHash
+      let name = "a)(canon-box x) \"q"
+          ev = mkEvent alice owner (ASet target name "v" 1)
+                 (canon 1 Nothing Nothing Nothing)
+          file = renderEvent ev
+      parseEvent file `shouldBe` Right (hubEventVersion, ev)
+      case parseTop file of
+        Left e      -> expectationFailure ("the file does not re-parse: " <> show e)
+        Right forms -> do
+          let cs = concat [ xs | List _ xs@(List{} : _) <- forms ] <> forms
+          [ (k,v) | List _ [SymbolVal "set", LitStrVal k, LitStrVal v] <- cs ]
+            `shouldBe` [(name,"v")]
+
+    it "reports a file from a newer schema without obeying it" $ do
+      owner <- kp
+      alice <- kp
+      -- The version is reported, never obeyed. It vetoes neither the tree, which
+      -- would hand a veto to anyone who can write one unsigned line, nor the
+      -- file: the boxes are self-describing CBOR and a version this build does
+      -- not know does not make them unreadable. Refusing here would throw away
+      -- the stamp the fold needs, which is the same mistake one floor up.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                  (canon 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
           bumped = Text.replace "(hub-event 1)" "(hub-event 4294967295)" file
-      parseEvent bumped `shouldBe` Left (FileTooNew 4294967295)
+      parseEvent bumped `shouldBe` Right (4294967295, ev)
+      -- what a newer schema can really do is put content in a box this build
+      -- cannot decode, and the fold answers that itself, keeping the stamp
+      map drWhy (frDropped (foldEvents repo [ev])) `shouldBe` []
+
+    it "refuses a file too large to be worth reading" $ do
+      owner <- kp
+      alice <- kp
+      -- Reading is the first thing anyone does with a tree and the last thing
+      -- they can refuse to do, so the cost of a file has to be bounded by
+      -- something cheaper than parsing it. Base58 is quadratic in the token, and
+      -- the parser is superlinear in the number of forms, so either one is a way
+      -- to stop every fold in every clone with one file.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon 1 (Just 1) Nothing Nothing)
+          file = renderEvent ev
+      parseEvent (file <> Text.replicate 200000 " ") `shouldBe` Left (TooLarge "file")
+      parseEvent (file <> Text.replicate 4000 "()") `shouldBe` Left (TooLarge "clauses")
+      parseEvent (Text.unlines
+        [ "(hub-event 1)"
+        , "(author-box " <> Text.replicate 5000 "z" <> ")"
+        , "(canon-box zzz)"
+        ]) `shouldBe` Left (TooLarge "author-box")
 
     it "refuses a file with a clause missing, twice over, or misshapen" $ do
       owner <- kp

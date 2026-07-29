@@ -172,15 +172,29 @@ Shape (JSON projection of a thread):
   "assignees": ["<sign-key>"],       // multi-valued, like labels
   "author": "<sign-key>",             // opening event's author
   "canon_by": "<sign-key>",           // canon key that blessed the opening event
-  "created_at": 1737763200,           // folded-ts of the opening event: the
-                                      //   trusted clock, and what sorting uses
-  "declared_at": 1737763100,          // author-ts: advisory and attacker-chosen,
+  "created_at": 1737763200000,        // folded-ts of the opening event: the
+                                      //   trusted clock, and what sorting uses.
+                                      //   Unix epoch MILLISECONDS, here and in
+                                      //   every other time in this document
+  "declared_at": 1737763100000,       // author-ts: advisory and attacker-chosen,
                                       //   shown but never ordered by
-  "updated_at": 1737849600,
+  "updated_at": 1737849600000,        // folded-ts of the latest event on the
+                                      //   thread, including a redaction of one
+                                      //   of its events: moderating a thread
+                                      //   changes it
   "redacted": false,
+  "body": "...",                      // the opening event's own text, which is
+                                      //   not a comment and is not in the list
+                                      //   below; null when it had none
+  "body_part": "<hashref|null>",      // large or binary body, fetched over hbs2
+  "part_secret": "<b58|null>",        //   and decrypted with this
+  "labels_requested": ["bug"],        // what the AUTHOR asked for on open, never
+                                      //   applied: showing these as labels would
+                                      //   let a stranger label their own issue
   "comments": [
     { "event_id": "...", "author": "<sign-key>", "canon_by": "<sign-key>",
-      "ts": 1737766800, "body": "...", "redacted": false }
+      "ts": 1737766800000, "body": "...", "redacted": false,
+      "body_part": "<hashref|null>", "part_secret": "<b58|null>" }
   ],
   "pr": {                             // present when kind == pr
     "onto": "refs/heads/master",

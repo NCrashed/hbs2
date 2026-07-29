@@ -460,7 +460,10 @@ spec = do
       -- admission and would otherwise be counted by the build that cannot read
       -- the event and refused by the build that can
       cursorFrom fr `shouldBe` CanonCursor 10 1
-      frLastFolded fr `shouldBe` 9
+      -- and not the clock, which is the floor the next mint is clamped to: a
+      -- refused file stamped at the ceiling would pin every later stamp in the
+      -- repository to the year 2100
+      frLastFolded fr `shouldBe` 0
       -- ...and nothing is spent when the canon box is not readable either:
       -- then there is no stamp, only bytes claiming to be one.
       let unreadable = Event (futureBox alice) (mangleSig (evCanonBox real))
@@ -507,6 +510,63 @@ spec = do
       reasons fr `shouldBe` [UnauthorizedCanon]
       cursorFrom fr `shouldBe` CanonCursor 2 2
 
+    it "does not let a refused file move the clock, or the anomaly" $ do
+      owner <- kp
+      alice <- kp
+      -- Two questions that used to share one number. The floor the next mint is
+      -- clamped to is a high-water mark; whether the clock went backwards is
+      -- asked of the previous ADMITTED event. Sharing them meant a refused file
+      -- raised the bar, so a strictly increasing log reported itself as going
+      -- backwards, and a file stamped at the ceiling pinned every future stamp
+      -- in the repository to the year 2100.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                    (canonAt 1 (Just 1) 5000)
+          tid = eventId eOpen
+          -- refused: nobody authorized this key
+          eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 2)
+                   (canonAt 2 Nothing maxFoldedTs)
+          eCmt = mkEvent alice owner (AComment tid Nothing (Just "yes") Nothing 3)
+                   (canonAt 3 Nothing 6000)
+          fr = foldEvents repo [eOpen, eBad, eCmt]
+      reasons fr `shouldBe` [UnauthorizedCanon]
+      map anWhat (frAnomalies fr) `shouldBe` []
+      frLastFolded fr `shouldBe` 6000
+
+    it "remembers a number it could not read, so the collision is visible" $ do
+      owner <- kp
+      alice <- kp
+      -- The build that cannot decode the content does not spend the number,
+      -- which is what keeps it minting the same numbers as the build that can.
+      -- Silence about the collision is a different thing, and not wanted: the
+      -- number was seen, so handing it out again is reportable.
+      let repo = fst owner
+          real = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                   (canon 1 (Just 3))
+          ghost = Event (futureBox alice) (evCanonBox real)
+          mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
+                   (canon 2 (Just 3))
+          fr = foldEvents repo [ghost, mine]
+      map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      map anWhat (frAnomalies fr) `shouldBe` [DupNumber 3]
+
+    it "does not spend a number on an event it refused" $ do
+      owner <- kp
+      alice <- kp
+      other <- kp
+      -- An open aimed at another repository, blessed by a maintainer of this
+      -- one: refused, and it never showed anyone a number, so burning one would
+      -- leave a gap nothing explains. At the top of the range it would strand
+      -- the counter and abort every later triage run.
+      let repo = fst owner
+          foreign' = mkEvent alice owner
+                       (AOpen (fst other) HubIssue "elsewhere" [] Nothing Nothing Nothing 1)
+                       (canon 1 (Just (maxBound - 1)))
+          fr = foldEvents repo [foreign']
+      reasons fr `shouldBe` [WrongTarget]
+      -- the seq is spent, since the file sits at it; the number is not
+      cursorFrom fr `shouldBe` CanonCursor 2 1
+
     it "still counts a seq a maintainer took before their revocation landed" $ do
       owner <- kp
       bob <- kp
@@ -527,7 +587,16 @@ spec = do
           fr = foldEvents repo [eDel, eOpen, eRev, eLate]
       reasons fr `shouldBe` [UnauthorizedCanon]
       cursorFrom fr `shouldBe` CanonCursor 10 2
-      frLastFolded fr `shouldBe` 9
+      frLastFolded fr `shouldBe` 3
+      -- ...and only next to the cursor. A withdrawn delegation that could still
+      -- stamp anywhere made the revocation useless as a remedy: the owner had
+      -- nothing left to answer a mutiny with but compaction.
+      let eMutiny = mkEvent alice bob
+                      (AComment (eventId eOpen) Nothing (Just "mutiny") Nothing 5)
+                      (canonAt (maxBound - 1) Nothing 5)
+          fr2 = foldEvents repo [eDel, eOpen, eRev, eMutiny]
+      reasons fr2 `shouldBe` [UnauthorizedCanon]
+      cursorFrom fr2 `shouldBe` CanonCursor 4 2
 
     it "hands back the admitted events in order, including the invisible ones" $ do
       owner <- kp
@@ -542,19 +611,21 @@ spec = do
                     (canon 2 (Just 1))
           tid = eventId eOpen
           eSet = mkEvent owner owner (ASet tid "labels" "bug" 3) (canon 3 Nothing)
+          eClose = mkEvent owner owner (AClose tid Nothing 4) (canon 4 Nothing)
           -- refused, so it is in the drop report and not here
-          eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 4)
-                   (canon 4 Nothing)
-          fr = foldEvents repo [eSet, eBad, eOpen, eDel]
-      map lgSeq (frLog fr) `shouldBe` [1,2,3]
-      map lgEvent (frLog fr) `shouldBe` map eventId [eDel, eOpen, eSet]
-      map lgThread (frLog fr) `shouldBe` [Nothing, Just tid, Just tid]
-      map lgCanonBy (frLog fr) `shouldBe` [fst owner, fst bob, fst owner]
-      map lgAuthor (frLog fr) `shouldBe` [fst owner, fst alice, fst owner]
+          eBad = mkEvent alice alice (AComment tid Nothing (Just "no") Nothing 5)
+                   (canon 5 Nothing)
+          fr = foldEvents repo [eSet, eBad, eClose, eOpen, eDel]
+      map lgSeq (frLog fr) `shouldBe` [1,2,3,4]
+      map lgEvent (frLog fr) `shouldBe` map eventId [eDel, eOpen, eSet, eClose]
+      map lgThread (frLog fr) `shouldBe` [Nothing, Just tid, Just tid, Just tid]
+      map lgCanonBy (frLog fr) `shouldBe` [fst owner, fst bob, fst owner, fst owner]
+      map lgAuthor (frLog fr) `shouldBe` [fst owner, fst alice, fst owner, fst owner]
       map lgContent (frLog fr) `shouldBe`
         [ ADelegate (fst bob) 1
         , AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2
         , ASet tid "labels" "bug" 3
+        , AClose tid Nothing 4
         ]
       map drWhy (frDropped fr) `shouldBe` [UnauthorizedCanon]
 

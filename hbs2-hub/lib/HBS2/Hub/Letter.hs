@@ -277,6 +277,14 @@ data AckRecord = AckRecord
   , akNumber      :: Maybe Word64
   , akStatus      :: Text
   , akMergeCommit :: Maybe Text   -- ^ on a merged PR
+    -- | Why, in the maintainer's own words, when the event that prompted this
+    -- carried one: the note on a @close@ or a @reopen@.
+    --
+    -- Without it an acknowledgement can say a submission was closed and never
+    -- why, and the contributor has to read canon to find a sentence that was
+    -- written for them. It is not authority (canon is), and a reader that
+    -- distrusts the ack distrusts this line with it.
+  , akNote        :: Maybe Text
   }
   deriving stock (Eq,Show,Generic)
 
@@ -547,8 +555,15 @@ href h = mkSym @C (show (pretty h))
 txt :: Text -> Syntax C
 txt = sexpStr
 
+-- An attribute NAME. A string like the value, not a bare symbol, and that is
+-- the whole of the fix: a name comes from whoever sent the letter, the fold
+-- admits one that is not a vocabulary word (it only reports it), and this
+-- projection is what the canon file carries beside the two boxes. A name of
+-- @a)(canon-box@ written bare puts a clause of the attacker's choosing into
+-- that file, and a name with a quote in it makes the file unparseable, with two
+-- valid signatures inside it and no way to rewrite them.
 tsym :: Text -> Syntax C
-tsym t = mkSym @C (Text.unpack t)
+tsym = sexpStr
 
 -- | Open an ack and bind it to something this reader actually sent.
 --
@@ -586,6 +601,7 @@ ackSyntax a =
   -- so it is whatever text they signed, not a fixed vocabulary.
   <> [ mkForm "status" [txt (akStatus a)] ]
   <> [ mkForm "merge-commit" [txt c] | Just c <- [akMergeCommit a] ]
+  <> [ mkForm "note" [txt n] | Just n <- [akNote a] ]
 
 -- | The readable S-expression projection of a letter (PEP-18). It is
 -- regenerated from the decoded content and never signed or parsed back: the

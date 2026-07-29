@@ -187,13 +187,26 @@ redaction of any event. The domains are assigned once and never reused or
 renumbered, because they are inside the signed bytes and therefore inside every
 event-id.
 
-Two more things are frozen for the same reason and are named here rather than
-left to an implementation. The order of the ops in the author payload's sum is
-part of the encoding, so new ops are appended and existing ones are never
-reordered or removed: an event-id hashes those bytes. And the order of the
-fields inside PR coordinates is likewise fixed, since they are reachable from
-an author box. Two implementations that disagree about either produce canon
-they cannot verify for each other, and there is no repair afterwards.
+Everything reachable from either payload is frozen for the same reason, and is
+listed here rather than left to an implementation to read out of one. Two that
+disagree about any line of it produce canon they cannot verify for each other,
+and there is no repair afterwards, because an event-id hashes the bytes.
+
+The author payload is a sum, encoded with its constructor's position as the tag,
+in this order: `open`, `comment`, `revise`, `set`, `close`, `reopen`, `merge`,
+`redact`, `delegate`, `revoke`. New ops are appended and none is ever reordered
+or removed. The fields of each are in the order the schema below lists them.
+
+PR coordinates are a product, in this order: `source`, `source-ref`,
+`source-tip`, `onto`, `base`, `bundle-part`, with the first and last optional.
+
+The canon payload is frozen too, and it is the one it is easiest to forget,
+since no event-id covers it: every canon signature ever made does. Its fields
+are `event-id`, `seq`, `number`, `origin`, `folded-ts`, `part-secret`, with
+`number`, `origin` and `part-secret` optional. The `part-secret` is raw key
+bytes, not a serialised key type, for the reason given under Attachments.
+
+The kind of an `open` is a two-constructor sum in the order `issue`, `pr`.
 
 The two boxes are independent so the event-id is stable before `seq`/`number`
 exist, and so an event extracted from the tree in isolation is verifiable:
@@ -278,8 +291,8 @@ One event per file. The two authoritative artifacts are the base58-encoded
 signed boxes; the remaining clauses are the readable projection.
 
 ```
+;; --- the version of THIS FILE, reported by a reader and obeyed by nobody ---
 (hub-event 1)
-(op       open)                     ; open|comment|revise|set|close|reopen|merge|redact|delegate|revoke
 
 ;; --- authoritative signed boxes (verification operates on these) ---
 (author-box <base58 of serialised SignedBox>)   ; signed by the author
@@ -287,14 +300,25 @@ signed boxes; the remaining clauses are the readable projection.
 
 ;; --- readable projection of the AUTHOR box (regenerated, not trusted) ---
 (author    <sign-pubkey-b58>)
-(author-ts <word64>)               ; Unix epoch milliseconds, UTC; = a letter's `created`
-(kind      issue)                  ; on open: issue | pr
-(title     "...")                  ; on open
+(kind      pr)                     ; on open: issue | pr
+(op        open)                   ; open|comment|revise|set|close|reopen|merge|redact|delegate|revoke
+(target    <sign-pubkey-b58>)      ; on open: the repo the author box was signed for
+(title     "a title")              ; on open
+(created   <word64>)               ; the author's declared time, Unix epoch MILLISECONDS
+(labels    "bug" "ui")             ; on open: what the author ASKS for, never applied
+(body      "...")                  ; inline text, or (body-part <hashref>) for large/binary
 (thread    <thread-id>)            ; replies only, absent on open; the canonical
                                    ;   thread id (an event-id), sender-computable
 (reply-to  <event-id>)             ; canonical id of the event replied to, replies only
-;; body: inline text in the file body, or (body-part <hashref>) for large/binary
-(set       status closed)          ; on set/close/reopen: the assignment
+(source     "hbs23://<fork-key>")  ; on open/revise of a pr: the fork-pointer path
+(source-ref "refs/heads/...")      ;   and the four coordinates that always travel
+(source-tip "<sha1>")
+(onto       "refs/heads/master")
+(base       "<sha1>")
+(bundle-part <hashref>)            ;   or the bundle, on the delta path
+(set       "status" "closed")      ; on set: the assignment, name AND value quoted
+(merge-commit "<sha1>")            ; on merge
+(merged-into  "refs/heads/master")
 (redacts   <event-id>)             ; on redact: the target event
 (delegate  <sign-pubkey-b58>)      ; on delegate: the maintainer key authorized
 (revoke    <sign-pubkey-b58>)      ; on revoke: the maintainer key withdrawn
@@ -317,7 +341,15 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   the sender's reply address (PEP-18)
 ```
 
-Four rules make those bytes a format rather than a habit, and a reader and a
+Every string in the projection is quoted, including an attribute NAME, which is
+the one that looks like a symbol and is not: a name arrives from whoever sent
+the letter, the fold admits one that is not a vocabulary word (it reports it and
+nothing more), and a name of `a)(canon-box ...` written bare puts a clause of
+the sender's choosing into a file that has two valid signatures in it. The op,
+the kind, keys and hashes are the only bare symbols, and every one of those is
+generated here from a fixed vocabulary or a base58 alphabet.
+
+Five rules make those bytes a format rather than a habit, and a reader and a
 writer that disagree about any of them cannot exchange canon.
 
 One clause per line, and no line wrapping. Several forms on one line read back
@@ -333,18 +365,49 @@ quote does not spoil a display line, it ends the string early and everything
 after it is re-read as whatever it happens to look like, in a file that has two
 valid signatures in it and can never be rewritten.
 
+A reader un-escapes the same five and no others, which is the half of that rule
+a writer cannot state alone: escaping is only a round trip if both sides agree
+on the alphabet. Anything else after a backslash is malformed rather than
+interesting, and a reader is free to refuse the file.
+
+The bridge refuses to mint an event whose text is over a limit, and canon does
+not care what those limits are: they are triage policy, so two hubs may draw
+them differently without disagreeing about canon, and a letter over one is kept
+rather than deleted. They exist because this is the last gate before something
+is in every clone forever. The fields that have one, with the numbers this
+implementation uses: an inline body 32 KiB, a title 512 bytes, an attribute
+value 4 KiB, an attribute name 128 bytes, a git ref or sha or fork locator 512
+bytes, one label 128 bytes and at most 32 of them, and one encrypted part 64
+MiB. Every one is measured in BYTES of UTF-8, since what they bound is what a
+relay carries and what a clone keeps, and a limit in characters is a limit an
+attacker chooses the units of.
+
+A reader also refuses a file before parsing it, on two bounds: how long it is
+and how many clauses it declares. Reading is the first thing anyone does with a
+tree and the last thing they can refuse to do, so the cost of a file has to be
+bounded by something cheaper than parsing it. Base58 decoding is quadratic in
+the length of its token and an s-expression parse is superlinear in the number
+of forms, so without both bounds one file of a few hundred kilobytes, written by
+anyone who can write to a clone, stops every fold and every `hub verify`
+everywhere, before a single signature is checked. An event file is two boxes, a
+version and a couple of dozen clauses; the numbers this implementation uses are
+128 KiB, 128 clauses and 4 KiB per base58 token.
+
 The projection is never read back. A reader takes the two box clauses and the
 version, and regenerates everything else from what it unboxed. Believing
 `(seq 5)` over the canon box would mean believing an unsigned line of text
 written by whoever last touched the file.
 
-`(hub-event N)` governs ONE FILE. A reader that meets a version it does not know
-drops that file and reports it, exactly as it drops an event whose author box it
-cannot decode; it does not refuse the tree. The clause is unsigned text, so a
-tree-wide veto would be available to anyone who can write a single file, and one
-line saying `(hub-event 4294967295)` would make a repository unreadable for
-every clone, permanently and for free. The tree's own `(hub-meta N)` is the one
-that governs everything, because it names the admission rules that produced the
+`(hub-event N)` is reported and never obeyed. It vetoes neither the tree nor the
+file. Not the tree, because the clause is unsigned text and one line saying
+`(hub-event 4294967295)` would otherwise make a repository unreadable for every
+clone, permanently and for free. And not the file either: the two boxes are
+self-describing CBOR, so a version this reader does not know does not make them
+unreadable, and refusing over it would throw away a `seq` the reader could see
+perfectly well. What a newer schema can really do is put content inside a box
+that an older build cannot decode, and the fold answers that itself, by dropping
+the event and keeping its stamp. The tree's own `(hub-meta N)` is the one that
+governs everything, because it names the admission rules that produced the
 canon, and folding under rules a reader does not know is how a clone quietly
 disagrees with every other clone.
 
@@ -909,20 +972,20 @@ The cursor can be poisoned by `seq` as well as by `number`, and the `seq`
 variant is worse. A stamp of `maxBound - 1` on any event leaves the next
 `seq` at the top of the range, and from then on EVERY op is refused, not only
 `open`: the folder cannot mint a comment, a close, a redaction, or the
-`revoke` that would withdraw the delegate who did it. One delegated
-maintainer can therefore make their own revocation unwritable through the
-bridge. Recovering means the re-stamping compaction described below, which
-the owner can still perform because it rewrites canon rather than appending
-to it.
+`revoke` that would withdraw the delegate who did it.
 
-Who can do that is exactly the maintainer set, and no one else. A stamp is
-spent only when the canon box carrying it was signed by a key authorized at
-that point in the log (see the rule below), so a file written into a clone by
-someone who was never a maintainer, or by one whose delegation had already been
-withdrawn, contributes nothing to either counter. The fold is a public function
-over whatever files a tree happens to hold, and `hub verify` runs it on canon
-somebody else wrote, so without that restriction anyone able to get one file
-into one clone could strand the cursor there.
+Who can do that is bounded, and in three steps rather than two, because the
+middle one is where the difficulty lives. See the stamp rule below for the
+statement; the consequence is this. A currently authorized maintainer can strand
+the cursor, which is the standing exposure of delegating to anyone: one hostile
+or broken maintainer, who can already do worse, and whom `hub verify` names. A
+key the log never authorized can do nothing at all, which matters because the
+fold is a public function over whatever files a tree holds and `hub verify` runs
+it on canon somebody else wrote. And a key whose delegation has been WITHDRAWN
+can only move the cursor a bounded step past where it already is, which is what
+keeps `revoke` a remedy rather than a formality: without that bound the owner's
+only answer to a mutinous delegate is the re-stamping compaction described
+below, and with it the answer is the revocation itself.
 
 A known bound on the same weakness. The fold refuses a `seq` or `number` of
 `maxBound`, since the next mint is the maximum plus one and would wrap. It does
@@ -956,36 +1019,59 @@ and a reply dropped as dangling is admitted the moment the opening event it
 names turns up. And even where admission is final, the file occupies that
 `seq`, so minting into it leaves canon holding two events there for good, with
 every last-writer-wins attribute between them settled by a hash rather than by
-time. The rule is therefore about the canon box, not about the event: the `seq`
-and the `folded-ts` of a stamp signed by an authorized key are spent whether or
-not the event was applied, including one whose author content this build cannot
-decode at all, which is precisely the older build reading a newer schema's
-`open`. Both together: an event that took a `seq` without taking the clock with
-it leaves the next mint stamping a time below one canon already holds, which is
-a non-monotonic `folded-ts` every verifier then reports forever.
+time. The rule is therefore about the canon box, not about the event: the `seq` of a
+stamp signed by an authorized key is spent whether or not the event was applied,
+including one whose author content this build cannot decode at all, which is
+precisely the older build reading a newer schema's `open`.
 
-The human `number` is the exception, and it is spent only on ADMISSION. It is
-not a position in the log but a label on a thread that exists, so an `open`
-aimed at another repository, blessed by a maintainer of this one, must not burn
-one: it never showed anyone a number, and at the top of the range it would
-strand the counter and abort every later triage run. The two failure modes are
-not equal. A number handed out twice is a reported anomaly on a field that is
-displayed and nothing more; a number that cannot be handed out at all stops the
-repository. The same rule keeps two builds agreeing: an event whose content one
-of them cannot read is not admitted by either, so neither spends its number.
+The `seq` and nothing else. The other two stamped values are spent only on
+ADMISSION, and for the same reason in two costumes: neither is a position in the
+log, so an event that was refused took neither.
 
-Authorized means a key this log has ever authorized, which is not the same as
-one authorized right now. A delegate who minted from a view built before their
-revocation, and whose event the publisher then wrote, leaves a file the fold
-refuses at a `seq` that is nonetheless taken; requiring a live delegation there
-would hand that `seq` out a second time, and no ill intent is needed for it to
-happen. What is excluded is a key the log never authorized at all, and that
-exclusion is the load-bearing one: the fold is a public function over whatever
-files a tree happens to hold, so counting a stranger's stamp would let anyone
-who can write one file into one clone strand the cursor at the top of its range,
-with the owner unable to mint even the `revoke` that would answer it. A former
-maintainer could already have stranded it while their delegation stood, so
-nothing is conceded by counting them.
+The human `number` is a label on a thread that exists. An `open` aimed at
+another repository, blessed by a maintainer of this one, must not burn one: it
+never showed anyone a number, and at the top of the range it would strand the
+counter and abort every later triage run. The two failure modes are not equal. A
+number handed out twice is a reported anomaly on a field that is displayed and
+nothing more; a number that cannot be handed out at all stops the repository.
+The same rule keeps two builds agreeing: an event whose content one of them
+cannot read is not admitted by either, so neither spends its number. What a
+reader does record from an event it could not read is that the number was SEEN,
+which costs nothing and is what makes the duplicate visible when the other build
+hands it out again.
+
+The `folded-ts` is the floor the next mint is clamped to. A refused file stamped
+at the ceiling would pin every later stamp in the repository to the year 2100,
+which is precisely the harm the ceiling exists to bound, so a refused file does
+not raise the floor. What the floor is taken over is the highest admitted stamp
+and not the last one: assigning rather than maximizing let an admitted event
+with a lower stamp lower the floor, and a folder that rebuilt from canon after a
+restart then disagreed with the one that had been running.
+
+Which leaves the anomaly. "The clock went backwards" is a different question
+from "how high has the clock been", and it is asked of the previous ADMITTED
+event, not of the floor. Sharing one number for both made a refused file raise
+the bar, so a strictly increasing log of admitted events reported itself as
+going backwards.
+
+Who may spend one is three-valued. A key authorized at that point in the log
+spends its stamp outright. A key the log never authorized spends nothing, and
+that exclusion is the load-bearing one: counting a stranger would let anyone who
+can write one file into one clone strand the cursor at the top of its range,
+with the owner unable to mint even the `revoke` that would answer it. A key
+whose delegation has been WITHDRAWN spends a stamp only if its `seq` is within a
+small window of the cursor.
+
+That middle case is not a compromise, it is the shape of the problem. The honest
+case it exists for is a delegate who minted from a view built before the
+revocation, whose event the publisher then wrote: that leaves a refused file at
+a `seq` that is nonetheless taken, handing it out again puts two events there,
+and no ill intent is needed. Such a `seq` came from a cursor, so it is always
+within a step or two of one. Counting a withdrawn key WITHOUT that bound is what
+makes `revoke` stop being a remedy: the same key can then stamp `maxBound - 1`
+and pin `folded-ts` at the ceiling, and the owner has no answer but compaction.
+With the bound, a run of such files can creep the cursor by the window each
+time and no further. This implementation uses sixteen.
 
 What stays restricted to admitted events, besides the number, is the `origin`
 set: an event that was not applied folded no letter.

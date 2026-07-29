@@ -9,12 +9,17 @@
 -- never read back and never trusted: a reader that believed @(seq 5)@ over the
 -- canon box would be trusting an unsigned line of text.
 --
--- The version clause is per FILE, and a file this build cannot read is one
--- file. It does not veto the tree: the clause is unsigned text that anyone who
--- can write a file can write, so a single line saying @(hub-event 4294967295)@
--- would otherwise make a repository unreadable for every clone, permanently
--- and for free. The caller drops such a file and reports it, exactly as the
--- fold drops an event whose author box it cannot decode.
+-- The version clause is reported and never obeyed. It vetoes nothing: not the
+-- tree, which would hand a veto to anyone who can write one unsigned line, and
+-- not the file either. The two boxes are self-describing CBOR and a version
+-- this build does not know does not make them unreadable; what a newer schema
+-- can actually do is put content inside a box that this build cannot decode,
+-- and the fold answers that on its own, by dropping the event and keeping its
+-- stamp. Refusing here instead would throw the stamp away one floor higher up,
+-- which is the same mistake the tree-wide veto was.
+--
+-- Both bounds a reader needs are checked before the parser runs, because
+-- reading is what a hostile file attacks. See 'maxEventBytes'.
 module HBS2.Hub.Canon
   ( CanonError(..)
   , renderEvent
@@ -53,8 +58,27 @@ data CanonError =
     NotAnEvent Text        -- ^ the text does not parse as s-expressions at all
   | MissingClause Text     -- ^ a clause the schema requires is absent
   | BadClause Text         -- ^ present, but not the shape the schema pins
-  | FileTooNew Word32      -- ^ @(hub-event N)@ newer than this build speaks
+    -- | Over a bound this reader will not spend work on, naming what: the file,
+    -- its clause count, or one token. Not a judgement about the content, which
+    -- is exactly the point: it is refused before anything reads it.
+  | TooLarge Text
   deriving stock (Eq,Show)
+
+-- | What a reader will look at before deciding the file is an attack.
+--
+-- An event file is two base58 boxes, a version, and a projection of at most a
+-- couple of dozen clauses; the one part that can be legitimately large is an
+-- inline body, bounded elsewhere at 32 KiB. These are all far above anything a
+-- writer here produces and far below what costs a reader anything.
+maxEventBytes, maxClauses, maxTokenBytes :: Int
+maxEventBytes = 128 * 1024
+maxClauses    = 128
+maxTokenBytes = 4 * 1024
+
+bounded :: Int -> Int -> Text -> Either CanonError ()
+bounded got limit what
+  | got > limit = Left (TooLarge what)
+  | otherwise   = Right ()
 
 -- | Write one event file.
 --
@@ -71,12 +95,14 @@ renderEvent :: Event -> Text
 renderEvent e = Text.unlines (fmap render clauses)
   where
 
+    -- The op clause comes from 'contentSyntax', which every projection of an
+    -- author content emits: writing one here as well put two of them in every
+    -- file, and 'only' refuses a clause that appears twice.
     clauses =
-      [ mkForm "hub-event" [mkInt hubEventVersion] ]
-      <> [ mkForm "op" [mkSym @C (Text.unpack (opName ac))] | Just (_,ac) <- [author] ]
-      <> [ mkForm "author-box" [b58 (boxBytes (evAuthorBox e))]
-         , mkForm "canon-box"  [b58 (boxBytes (evCanonBox e))]
-         ]
+      [ mkForm "hub-event" [mkInt hubEventVersion]
+      , mkForm "author-box" [b58 (boxBytes (evAuthorBox e))]
+      , mkForm "canon-box"  [b58 (boxBytes (evCanonBox e))]
+      ]
       <> concat [ mkForm "author" [b58key k] : contentSyntax ac | Just (k,ac) <- [author] ]
       <> concat [ canonClauses k cc | Just (k,cc) <- [canonOf] ]
 
@@ -100,12 +126,6 @@ renderEvent e = Text.unlines (fmap render clauses)
     boxBytes :: Serialise a => a -> LBS.ByteString
     boxBytes = serialise
 
-    opName = \case
-      AOpen{} -> "open"; AComment{} -> "comment"; ARevise{} -> "revise"
-      ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
-      AMerge{} -> "merge"; ARedact{} -> "redact"
-      ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
-
 -- | Read one event file back.
 --
 -- Returns the file's declared version alongside the event, because a caller
@@ -120,16 +140,19 @@ parseEvent :: Text -> Either CanonError (Word32, Event)
 parseEvent txt = do
   cs <- clausesOf txt
   version <- word32 =<< only "hub-event" cs
-  if version > hubEventVersion
-    then Left (FileTooNew version)
-    else do
-      abox <- box "author-box" =<< only "author-box" cs
-      cbox <- box "canon-box" =<< only "canon-box" cs
-      pure (version, Event abox cbox)
+  abox <- box "author-box" =<< only "author-box" cs
+  cbox <- box "canon-box" =<< only "canon-box" cs
+  pure (version, Event abox cbox)
   where
     box :: Serialise a => Text -> Syntax C -> Either CanonError a
     box name s = do
       sym <- symbol name s
+      -- Before the decode, not after. Base58 is Integer arithmetic and
+      -- quadratic in the length of the token, so a hundred kilobytes in one
+      -- clause exhausts the heap of whoever reads the file, and a reader that
+      -- verifies signatures afterwards never gets that far. A box is a few
+      -- hundred bytes; anything past 'maxTokenBytes' is not a late one.
+      _ <- bounded (Text.length sym) maxTokenBytes name
       raw <- maybe (Left (BadClause name)) Right
                (fromBase58 (Text.encodeUtf8 sym))
       either (const (Left (BadClause name))) Right (decodeChecked raw)
@@ -180,7 +203,17 @@ parseNumberIndex txt = do
 -- the layout is not part of the format and a file may have been re-flowed by
 -- anything.
 clausesOf :: Text -> Either CanonError [Syntax C]
-clausesOf txt =
+clausesOf txt = do
+  -- Both bounds are checked before the parser runs, and both are counted in
+  -- one pass over the text, because the parser is what they are protecting.
+  -- Reading a canon file is the first thing anyone does with a tree and the
+  -- last thing they can refuse to do, so the cost of a file has to be bounded
+  -- by something cheaper than parsing it. It is superlinear in the number of
+  -- forms, so a file of forty thousand empty clauses costs a minute of CPU,
+  -- and one file that anybody with write access can drop into a tree would
+  -- then stop every fold and every verify in every clone.
+  _ <- bounded (Text.length txt) maxEventBytes "file"
+  _ <- bounded (Text.count "(" txt) maxClauses "clauses"
   case parseTop txt of
     Left e     -> Left (NotAnEvent (Text.pack (show e)))
     Right tops -> Right (concatMap flatten tops)
