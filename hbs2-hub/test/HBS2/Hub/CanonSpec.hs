@@ -202,6 +202,30 @@ spec = do
       -- cannot decode, and the fold answers that itself, keeping the stamp
       map drWhy (frDropped (foldEvents repo [ev])) `shouldBe` []
 
+    it "counts every bracket the parser opens, not only the round one" $ do
+      -- The bound is only a bound if it counts what the parser counts. It used
+      -- to look for '(' alone, and the same quarter-megabyte of empty forms
+      -- written with square brackets parsed for four minutes and allocated six
+      -- hundred gigabytes: one file, from anyone who can write to a clone,
+      -- stopping every fold and every verify everywhere.
+      let full o c = Text.replicate (maxClauses + 1) (Text.pack [o,c])
+      parseEvent (full '(' ')') `shouldBe` Left (TooLarge "clauses")
+      parseEvent (full '[' ']') `shouldBe` Left (TooLarge "clauses")
+      parseEvent (full '{' '}') `shouldBe` Left (TooLarge "clauses")
+      parseEvent (full '<' '>') `shouldBe` Left (TooLarge "clauses")
+      -- quote, quasiquote and unquote each wrap what follows in a list of
+      -- their own, so they open forms too
+      parseEvent (Text.replicate (maxClauses + 1) "'x ")
+        `shouldBe` Left (TooLarge "clauses")
+      parseEvent (Text.replicate (maxClauses + 1) "`x ")
+        `shouldBe` Left (TooLarge "clauses")
+      parseEvent (Text.replicate (maxClauses + 1) ",x ")
+        `shouldBe` Left (TooLarge "clauses")
+      -- ...and a quote inside a comment does not put the counter into a string
+      -- it is not in, which would have stopped it counting anything after it
+      parseEvent ("; a \" quote in a comment\n" <> full '[' ']')
+        `shouldBe` Left (TooLarge "clauses")
+
     it "refuses a file too large to be worth reading" $ do
       owner <- kp
       alice <- kp

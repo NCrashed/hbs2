@@ -351,17 +351,35 @@ clausesWith byteLimit formLimit txt = do
 -- escape rule is the one the writer emits and the reader honours, so a quote
 -- inside a string does not end it.
 countForms :: Text -> Int
-countForms = seen . Text.foldl' step (0 :: Int, False, False)
+countForms = seen . Text.foldl' step (0 :: Int, Plain)
   where
-    seen (n,_,_) = n
-    step (n, inStr, esc) c
-      | inStr && esc      = (n, True, False)
-      | inStr && c == '\\' = (n, True, True)
-      | inStr && c == '"' = (n, False, False)
-      | inStr             = (n, True, False)
-      | c == '"'          = (n, True, False)
-      | c == '('          = (n + 1, False, False)
-      | otherwise         = (n, False, False)
+    seen (n,_) = n
+
+    step (n, st) c = case st of
+      InComment | c == '\n'   -> (n, Plain)
+                | otherwise   -> (n, InComment)
+      InEscape                -> (n, InString)
+      InString  | c == '\\'   -> (n, InEscape)
+                | c == '"'    -> (n, Plain)
+                | otherwise   -> (n, InString)
+      Plain     | c == '"'    -> (n, InString)
+                -- A comment is tracked for one reason: a quote inside one
+                -- would otherwise put this counter into a string it is not in,
+                -- and everything after it would go uncounted.
+                | c == ';'    -> (n, InComment)
+                | opens c     -> (n + 1, Plain)
+                | otherwise   -> (n, Plain)
+
+    -- Every character that opens a form, not just the round one. The parser
+    -- treats three other bracket pairs the same way, and quote, quasiquote and
+    -- unquote each wrap what follows in a list of their own. Counting only '('
+    -- was a bound with a one-character bypass: the same quarter-megabyte of
+    -- empty forms written as "[]" parsed for four minutes and allocated six
+    -- hundred gigabytes, which is exactly the file this bound exists to refuse.
+    opens c = c `elem` ("([{<'`," :: String)
+
+-- Where a scan of the text is, for 'countForms'.
+data Scan = Plain | InString | InEscape | InComment
 
 -- Exactly one clause of this name, because two would mean two answers and no
 -- rule for picking between them.

@@ -45,6 +45,7 @@ module HBS2.Hub.Letter
   , maxLabels
   , textSize
   , oversizedField
+  , malformedRef
   , noReplyChannel
   , makeLetter
   , makeAck
@@ -78,6 +79,7 @@ import Codec.Serialise (Serialise(..),serialise)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe,listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -252,6 +254,41 @@ oversizedField = \case
                      ]
       , textSize t > maxRef
       ]
+
+-- | Which hash-shaped field is not a hash, if any.
+--
+-- A 'HashRef' takes any length on the wire ('validHashRef'), and the size gates
+-- above all measure text, so this was the way past every one of them: fifty
+-- kilobytes in a @reply-to@ sits inside a signed author box, past 'maxBoxBytes',
+-- and produces a canon file the reader refuses forever in every clone, with the
+-- bytes inside the signature and inside the event-id where nothing can reach
+-- them.
+--
+-- Every hash an event carries is checked, not only the one that was reachable.
+-- Most of the others are compared against something that exists (a thread, a
+-- redact target), so a wrong-length one merely fails to match; @reply-to@ is
+-- deliberately compared against nothing, which is what left it open, and one
+-- rule over all of them is easier to keep true than a list of exceptions.
+malformedRef :: AuthorContent -> Maybe Text
+malformedRef = \case
+  AOpen _ _ _ _ _ part coords _ -> named "body-part" part
+                               <|> (coordsRefs =<< coords)
+  AComment thr replyto _ part _ -> bad "thread" thr
+                               <|> named "reply-to" replyto
+                               <|> named "body-part" part
+  ARevise thr coords _          -> bad "thread" thr <|> coordsRefs coords
+  ASet thr _ _ _                -> bad "thread" thr
+  AClose thr _ _                -> bad "thread" thr
+  AReopen thr _ _               -> bad "thread" thr
+  AMerge thr _ _ _              -> bad "thread" thr
+  ARedact target _              -> bad "redacts" target
+  ADelegate{}                   -> Nothing
+  ARevoke{}                     -> Nothing
+  where
+    bad name h | validHashRef h = Nothing
+               | otherwise      = Just name
+    named name = (>>= bad name)
+    coordsRefs c = named "bundle-part" (prBundle c)
 
 -- | Where the owner should send acknowledgements and status updates.
 --

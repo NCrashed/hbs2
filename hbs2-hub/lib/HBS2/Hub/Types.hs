@@ -50,6 +50,8 @@ module HBS2.Hub.Types
   , normalizeAttr
   , normalizedAttr
   , validAttrName
+  , validHashRef
+  , hashRefBytes
   , PartSecret
   , mkPartSecret
   , MessageSecret
@@ -80,8 +82,10 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Char (isAsciiLower,isDigit)
+import Data.Coerce (coerce)
 import Data.List (nub,sort)
 import Data.Text qualified as Text
+import Data.Int (Int64)
 import Data.Word (Word32,Word64)
 
 -- | The whole hub is fixed to the basic scheme, like hbs2-git3.
@@ -352,6 +356,32 @@ normalizeAttr :: Text -> Text -> Text
 normalizeAttr k v
   | k `elem` multiValued = encodeLabels (decodeLabels v)
   | otherwise            = v
+
+-- | Is this a hash at all?
+--
+-- A 'HashRef' is a newtype over a ByteString with a generic 'Serialise'
+-- instance, so it accepts any length on the way in: nothing about the type says
+-- 32 bytes. Most of the ones an event carries are compared against something (a
+-- thread that must exist, a redact target that must be in canon), and a
+-- wrong-length one simply matches nothing. A @reply-to@ is compared against
+-- nothing on purpose, so it was the one place a sender could put fifty
+-- kilobytes inside a signed author box, past every size gate, and produce a
+-- file the reader then refuses forever in every clone. It cannot be repaired:
+-- the bytes are inside the signature and inside the event-id.
+--
+-- The width is the digest's, and it is also what the box-size budget assumes
+-- (see @maxBoxBytes@): four kilobytes of slack covers a handful of hashes only
+-- while a hash is a hash.
+validHashRef :: HashRef -> Bool
+validHashRef h = LBS.length (serialise h) == hashRefBytes
+
+-- | What a well-formed one weighs on the wire.
+--
+-- Measured from a real hash rather than written down as a number, so that it
+-- stays right if the digest or its framing ever changes, and so that there is
+-- no second opinion about the encoding anywhere in this module.
+hashRefBytes :: Int64
+hashRefBytes = LBS.length (serialise (HashRef (hashObject ("" :: ByteString))))
 
 -- | Is this a well-formed attribute name?
 --

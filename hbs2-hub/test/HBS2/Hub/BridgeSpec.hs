@@ -6,13 +6,14 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
-import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Data.Types.Refs (HashRef(..))
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise (serialise)
 import Data.HashMap.Strict qualified as HM
 import Data.List (isInfixOf)
+import Data.String (fromString)
 import Data.Text qualified as Text
 import Data.Maybe (fromMaybe)
 import Test.Hspec
@@ -1525,6 +1526,48 @@ spec = do
       -- one tick later it is an ordinary close
       _ <- expectRight
         (honourRequest (ctxOf owner) env (acView a2) 10 req3 (letter (AClose thr Nothing 4)))
+      pure ()
+
+    it "refuses a hash-shaped field that is not a hash" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      -- A HashRef takes any length on the wire and every size gate measures
+      -- text, so this went past all of them: fifty kilobytes in a reply-to sits
+      -- inside a signed author box, past the box budget the reader's bounds are
+      -- derived from, and makes a canon file no reader accepts again. The bytes
+      -- are inside the signature and inside the event-id, so there is no
+      -- repairing it afterwards.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+          huge = HashRef (fromString (replicate 50000 'z'))
+      acc <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+      origin2 <- someHash
+      expectErr (MalformedRef "reply-to")
+        (acceptLetter (ctxOf owner) env (acView acc) 2 origin2 noParts
+           (letter (AComment (scopeOf acc) (Just huge) (Just "hi") Nothing 2)))
+      either outcome (const Decide)
+        (acceptLetter (ctxOf owner) env (acView acc) 2 origin2 noParts
+           (letter (AComment (scopeOf acc) (Just huge) (Just "hi") Nothing 2)))
+        `shouldBe` Discard
+      -- ...and every other hash an event carries, on every path
+      expectErr (MalformedRef "body-part")
+        (acceptLetter (ctxOf owner) env (acView acc) 2 origin2
+           (attachments secret32 msgSecret [here huge])
+           (letter (AComment (scopeOf acc) Nothing Nothing (Just huge) 2)))
+      expectOwn (MalformedRef "redacts")
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments (ARedact huge 2))
+      expectOwn (MalformedRef "thread")
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
+           (AClose huge Nothing 2))
+      -- a well-formed one is still fine, which is what says the gate is a gate
+      -- and not a wall
+      _ <- expectRight
+        (acceptLetter (ctxOf owner) env (acView acc) 2 origin2 noParts
+           (letter (AComment (scopeOf acc) (Just (scopeOf acc)) (Just "hi") Nothing 2)))
       pure ()
 
     it "refuses an oversized attachment before fetching it" $ do

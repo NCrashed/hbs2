@@ -392,6 +392,19 @@ a writer cannot state alone: escaping is only a round trip if both sides agree
 on the alphabet. Anything else after a backslash is malformed rather than
 interesting, and a reader is free to refuse the file.
 
+Every hash-shaped field an event carries has to be a hash: a thread, a
+`reply-to`, a `body-part`, a `bundle-part`, a redact target. A hash reference is
+a byte string on the wire and nothing about the type says thirty-two of them, so
+this is not implied by the size limits below, which measure text. Most of these
+fields are compared against something that exists and a wrong-length one merely
+fails to match, but `reply-to` is deliberately compared against nothing (see the
+render contract), so it was the one field that could carry fifty kilobytes past
+every gate, into a signed author box, and into a file no reader would accept
+again, with the bytes inside the signature and inside the event-id where nothing
+can reach them. It is one rule over all of them rather than a list of
+exceptions, and the box-size budget below assumes it: four kilobytes of slack
+covers a handful of hashes only while a hash is a hash.
+
 The bridge refuses to mint an event whose text is over a limit, and canon does
 not care what those limits are: they are triage policy, so two hubs may draw
 them differently without disagreeing about canon, and a letter over one is kept
@@ -413,11 +426,18 @@ a few hundred kilobytes, written by anyone who can write to a clone, otherwise
 stops every fold and every `hub verify` everywhere, before a single signature is
 checked.
 
-Forms, not parentheses. A body is a string literal and code inside one has
-brackets, so counting every `(` in the file was a bound on the contributor
-rather than on the attacker, and a hundred and fifteen of them anywhere in an
-issue made the file unreadable for good. The count skips what is inside a string
-literal, honouring the same escape rule as the reader.
+Forms, not parentheses, and forms means every character that opens one. A body
+is a string literal and code inside one has brackets, so counting every `(` in
+the file was a bound on the contributor rather than on the attacker: a hundred
+and fifteen of them anywhere in an issue made the file unreadable for good. But
+counting only `(` was also no bound at all, since this dialect opens a form on
+`[`, `{` and `<` as well, and quote, quasiquote and unquote each wrap what
+follows in a list of their own. The same quarter-megabyte of empty forms written
+with square brackets parsed for four minutes and allocated six hundred gigabytes.
+The count therefore covers `([{<` and `` '`, ``, skips what is inside a string
+literal, and tracks comments, because a quote inside a comment would otherwise
+put the counter into a string it is not in and stop it counting anything after
+that.
 
 And all three are DERIVED from the limits the bridge mints under, not chosen
 beside them. A reader bound picked on its own is a reader that refuses what its

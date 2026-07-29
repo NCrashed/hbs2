@@ -342,6 +342,12 @@ data TriageError =
     -- ('maxInlineBody'): the field name, so the sender can be told what to
     -- move to an attachment.
   | BodyTooLarge Text
+    -- | A hash-shaped field that is not a hash ('validHashRef'), named. Not a
+    -- threshold like the one above and not local policy either: a 'HashRef'
+    -- takes any length on the wire, so this was the one field that could carry
+    -- fifty kilobytes past every size gate, into a signed author box, and into
+    -- a canon file no reader would ever accept again.
+  | MalformedRef Text
     -- | Only the repo owner key may delegate or revoke (PEP-19 rule 5), and
     -- this folding key is a delegate. Distinct from 'UnauthorizedForRepo':
     -- that one another folder can satisfy, this one nobody but the owner can,
@@ -504,6 +510,9 @@ outcome = \case
   -- not canon's.
   BodyTooLarge _     -> Park
   PartTooLarge _     -> Park
+  -- Not a threshold: nobody can fold this letter, here or anywhere, and no
+  -- later pass changes what the sender signed.
+  MalformedRef _     -> Discard
   -- The letter is intact and the caller can supply what is missing.
   MissingPartSecret  -> Retry
   PartNotFetched _   -> Retry
@@ -706,6 +715,12 @@ requireParts po content
 requireSize :: AuthorContent -> Either TriageError ()
 requireSize content = maybe (Right ()) (Left . BodyTooLarge) (oversizedField content)
 
+-- Refuse a hash-shaped field that is not a hash. Beside the size gate rather
+-- than inside it because it is not a threshold: the field is malformed, no hub
+-- would take it, and a letter carrying one can never be folded anywhere.
+requireRefs :: AuthorContent -> Either TriageError ()
+requireRefs content = maybe (Right ()) (Left . MalformedRef) (malformedRef content)
+
 -- Refuse to sign a multi-valued attribute the caller did not canonicalize.
 -- The fold cannot fix one (the value is inside a signed author box) and must
 -- not drop it either, so it would be admitted and reported forever.
@@ -887,6 +902,7 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- whoever wrote it, and raising it as a decision first would put a letter in
   -- front of a maintainer that no answer can fold.
   requireSize content
+  requireRefs content
 
   -- And the same for an attribute nobody can sign as sent. Without this the
   -- letter reaches a maintainer as a request, the obvious thing to do with a
@@ -1053,6 +1069,7 @@ honourOpened path canonKp@(pk,sk) repo view folded origin asked content0 reply =
     -- owner-authored event: 'ownerEvent' checks it, and there is no reason for
     -- the two owner paths to disagree.
     requireSize content0
+    requireRefs content0
     requireNormalized content0
 
     -- What the owner signs must still be a request-shaped op on a thread that
@@ -1135,6 +1152,12 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
   requireStamp view content
   seenAlready view eid
 
+  -- Before the scope is resolved, so that a malformed hash is reported as one
+  -- rather than as the unknown target it necessarily looks like.
+  requireSize content
+  requireRefs content
+  requireNormalized content
+
   scope <- case content of
     -- A redact belongs with the thread of the event it hides, so it lands
     -- beside it in the tree rather than under an id of its own.
@@ -1174,8 +1197,6 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
                | not (coordsOK content)               -> Left BadContent
                | otherwise                            -> Right (ThreadScope thr)
 
-  requireSize content
-  requireNormalized content
   requireParts parts content
 
   Right (accepted kp repo view folded Nothing (poSecret parts) content box pk scope NoReply)
