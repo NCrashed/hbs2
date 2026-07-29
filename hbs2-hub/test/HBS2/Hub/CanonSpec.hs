@@ -109,6 +109,10 @@ spec = do
       -- limits rather than near them.
       let repo = fst owner
           filled n = Text.replicate n "x"
+          -- The tightest axis of the derived bound is the doubling a projection
+          -- suffers when every character has to be escaped, so one fixture is
+          -- made of the character that does it.
+          quoted n = Text.replicate n "\""
           full = AOpen repo HubPR (filled maxTitle)
                    (replicate maxLabels (filled maxLabel))
                    (Just (filled maxInlineBody)) (Just part)
@@ -127,6 +131,11 @@ spec = do
       parseEvent (renderEvent biggest) `shouldBe` Right (hubEventVersion, biggest)
       parseEvent (renderEvent attrs) `shouldBe` Right (hubEventVersion, attrs)
       parseEvent (renderEvent note) `shouldBe` Right (hubEventVersion, note)
+      let escaped = mkEvent alice owner
+                      (AOpen repo HubIssue (quoted maxTitle) (replicate maxLabels (quoted maxLabel))
+                         (Just (quoted maxInlineBody)) Nothing Nothing 45)
+                      (canon 10 (Just 4) Nothing Nothing)
+      parseEvent (renderEvent escaped) `shouldBe` Right (hubEventVersion, escaped)
 
     it "keeps the boxes readable under a title written to break the file" $ do
       owner <- kp
@@ -277,6 +286,14 @@ spec = do
       -- 128 issues and returned a hard error on the 129th.
       let many' = [ (fromIntegral n, a) | n <- [1 .. 500 :: Int] ]
       parseNumberIndex (renderNumberIndex many') `shouldBe` Right many'
+      -- ...and bounds of its own, checked before the file is split into lines,
+      -- since reading a hint must cost less than folding the canon it is a hint
+      -- about. Refusing one is not refusing the repository: the index is
+      -- regenerable from the open events and never trusted over them.
+      parseNumberIndex (Text.replicate (3 * 1024 * 1024) "x")
+        `shouldBe` Left (TooLarge "index-file")
+      parseNumberIndex ("(number 1 " <> Text.replicate 300 "z" <> ")")
+        `shouldBe` Left (TooLarge "index-line")
 
     it "reads a whole tree, keeping what parsed and naming what did not" $ do
       owner <- kp

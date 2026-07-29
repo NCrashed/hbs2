@@ -288,7 +288,7 @@ jointly with PEP-18.
 Event schema (S-expression)
 ===========================
 
-One event per file. The two authoritative artifacts are the base58-encoded
+One event per file. The two authoritative artifacts are the base64-encoded
 signed boxes; the remaining clauses are the readable projection.
 
 ```
@@ -349,8 +349,16 @@ the one that looks like a symbol and is not: a name arrives from whoever sent
 the letter, the fold admits one that is not a vocabulary word (it reports it and
 nothing more), and a name of `a)(canon-box ...` written bare puts a clause of
 the sender's choosing into a file that has two valid signatures in it. The op,
-the kind, keys and hashes are the only bare symbols, and every one of those is
-generated here from a fixed vocabulary or a base58 alphabet.
+the kind, keys, hashes and the two boxes are the only bare symbols, and every
+one of those is generated here from a fixed vocabulary, a base58 alphabet or a
+base64 one.
+
+The boxes are base64 while every key and hash in the file is base58, and the
+mismatch is deliberate. Base58 earns its keep on short things people read aloud
+and copy by hand; a box is kilobytes, and base58 is a base conversion over a big
+integer, so decoding it is quadratic in the length: 12 ms at 4 KiB, 213 ms at
+16 KiB, two and a half seconds at 64 KiB, paid by every fold in every clone for
+every event. Base64 is linear and a third smaller, and nobody reads a box.
 
 Five rules make those bytes a format rather than a habit, and a reader and a
 writer that disagree about any of them cannot exchange canon.
@@ -385,16 +393,32 @@ MiB. Every one is measured in BYTES of UTF-8, since what they bound is what a
 relay carries and what a clone keeps, and a limit in characters is a limit an
 attacker chooses the units of.
 
-A reader also refuses a file before parsing it, on two bounds: how long it is
-and how many clauses it declares. Reading is the first thing anyone does with a
-tree and the last thing they can refuse to do, so the cost of a file has to be
-bounded by something cheaper than parsing it. Base58 decoding is quadratic in
-the length of its token and an s-expression parse is superlinear in the number
-of forms, so without both bounds one file of a few hundred kilobytes, written by
-anyone who can write to a clone, stops every fold and every `hub verify`
-everywhere, before a single signature is checked. An event file is two boxes, a
-version and a couple of dozen clauses; the numbers this implementation uses are
-128 KiB, 128 clauses and 4 KiB per base58 token.
+A reader refuses a file before parsing it, on three bounds: its size in UTF-8
+bytes, the number of FORMS it opens, and the size of each encoded box. Reading
+is the first thing anyone does with a tree and the last thing they can refuse to
+do, so the cost of a file has to be bounded by something cheaper than parsing
+it: an s-expression parse is superlinear in the number of forms, so one file of
+a few hundred kilobytes, written by anyone who can write to a clone, otherwise
+stops every fold and every `hub verify` everywhere, before a single signature is
+checked.
+
+Forms, not parentheses. A body is a string literal and code inside one has
+brackets, so counting every `(` in the file was a bound on the contributor
+rather than on the attacker, and a hundred and fifteen of them anywhere in an
+issue made the file unreadable for good. The count skips what is inside a string
+literal, honouring the same escape rule as the reader.
+
+And all three are DERIVED from the limits the bridge mints under, not chosen
+beside them. A reader bound picked on its own is a reader that refuses what its
+own writer produced, which is what happened here: with a token capped at 4 KiB
+the bridge would mint the 32 KiB inline body this document promises, write the
+file, and answer "too large" on reading it back. The derivation is: a box is the
+sum of the field limits above plus framing; a token is that base64-encoded; a
+file is two tokens plus the projection, which repeats the same text and can
+double under escaping. With the numbers above that gives a box of 48 768 bytes,
+a token of 65 024, a file of 235 776, and forms are capped at 128 because the
+schema has a couple of dozen. A second implementation should derive them the
+same way rather than copy these.
 
 The projection is never read back. A reader takes the two box clauses and the
 version, and regenerates everything else from what it unboxed. Believing

@@ -1,18 +1,12 @@
+# One bare cabal cradle: HLS asks cabal which component a file belongs to, and
+# cabal knows, for every package in this repository including the ones that are
+# not listed anywhere here.
+#
+# Enumerating components by hand was tried and was worse than nothing. A path
+# that does not exist silently matches nothing, and a trailing catch-all sends
+# every file it did not think of (every app/, every package added later) into
+# whichever component the catch-all names, which is a wrong answer rather than
+# no answer. If this ever does need per-component entries, they have to be
+# complete and have no catch-all under them.
 cradle:
   cabal:
-    - path: "hbs2-core/lib"
-      component: "lib:hbs2-core"
-    - path: "hbs2-hub/lib"
-      component: "lib:hbs2-hub"
-    - path: "hbs2-hub/test"
-      component: "hbs2-hub:test:spec"
-    - path: "hbs2-peer/lib"
-      component: "lib:hbs2-peer"
-    - path: "hbs2-git3/lib"
-      component: "lib:hbs2-git3"
-    - path: "hbs2-storage-simple/lib"
-      component: "lib:hbs2-storage-simple"
-    - path: "hbs2-keyman/lib"
-      component: "lib:hbs2-keyman"
-    - path: "."
-      component: "lib:hbs2-core"

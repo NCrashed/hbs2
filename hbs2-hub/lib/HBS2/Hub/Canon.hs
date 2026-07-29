@@ -6,8 +6,8 @@
 --
 -- Two clauses in an event file are authoritative, the base64 of the two signed
 -- boxes (see 'encodedBytes' for why that encoding and not the base58 the rest
--- of this project uses). Everything else in the file is a projection regenerated from them,
--- never read back and never trusted: a reader that believed @(seq 5)@ over the
+-- of this project uses). Everything else in the file is a projection
+-- regenerated from them, never read back and never trusted: a reader that believed @(seq 5)@ over the
 -- canon box would be trusting an unsigned line of text.
 --
 -- The version clause is reported and never obeyed. It vetoes nothing: not the
@@ -108,6 +108,21 @@ bounded got limit what
   | got > limit = Left (TooLarge what)
   | otherwise   = Right ()
 
+-- | The size of a text in UTF-8 bytes, which is the unit every bound here is
+-- derived in.
+--
+-- Counting characters instead let a multi-byte file reach four times the bound
+-- it was measured against, and the parameter was called a byte limit. Folded
+-- rather than encoded, because measuring by encoding allocates the very
+-- megabytes the bound exists to refuse.
+utf8Length :: Text -> Int
+utf8Length = Text.foldl' (\n c -> n + width c) 0
+  where
+    width c | c < '\x80'    = 1
+            | c < '\x800'   = 2
+            | c < '\x10000' = 3
+            | otherwise     = 4
+
 -- | Write one event file.
 --
 -- The two boxes are written first, so that a reader that stops early still has
@@ -183,7 +198,7 @@ parseEvent txt = do
       -- clause exhausts the heap of whoever reads the file, and a reader that
       -- verifies signatures afterwards never gets that far. A box is a few
       -- hundred bytes; anything past 'maxTokenBytes' is not a late one.
-      _ <- bounded (Text.length sym) maxTokenBytes name
+      _ <- bounded (utf8Length sym) maxTokenBytes name
       raw <- either (const (Left (BadClause name))) Right
                (B64.decode (Text.encodeUtf8 sym))
       either (const (Left (BadClause name))) Right (decodeChecked raw)
@@ -258,12 +273,15 @@ renderNumberIndex ns = Text.unlines
 -- and the work is linear in the file either way.
 parseNumberIndex :: Text -> Either CanonError [(Word64, ThreadId)]
 parseNumberIndex txt = do
+  -- Before Text.lines, which materializes the whole file: a bound checked after
+  -- the split is a bound on nothing.
+  _ <- bounded (utf8Length txt) maxIndexBytes "index-file"
   let ls = [ l | l <- Text.lines txt, not (Text.null (Text.strip l)) ]
   _ <- bounded (length ls) maxIndexEntries "index"
   traverse line ls
   where
     line l = do
-      _ <- bounded (Text.length l) maxIndexLineBytes "index-line"
+      _ <- bounded (utf8Length l) maxIndexLineBytes "index-line"
       cs <- clausesWith maxIndexLineBytes 4 l
       entry =<< only "number" cs
 
@@ -275,11 +293,22 @@ parseNumberIndex txt = do
       _ -> Left (BadClause "number")
 
 -- | A number and a thread id per line, so the whole of a line's bound is one
--- integer and one base58 hash with room to spare; and a repository with more
--- threads than this has other problems.
-maxIndexLineBytes, maxIndexEntries :: Int
+-- integer and one base58 hash with room to spare.
+--
+-- The file bound is what actually decides this, and it is small on purpose. An
+-- index exists to answer "#42" without folding canon, so reading one has to
+-- cost less than folding: at roughly forty microseconds a line, a bound of a
+-- million entries permitted half a minute of parsing and, with the line bound,
+-- a quarter of a gigabyte of file. The threat model is the event file's, since
+-- @hub verify@ reads trees other people wrote.
+--
+-- Refusing an index is not refusing the repository: it is regenerable from the
+-- open events and never trusted over them, so a caller that meets 'TooLarge'
+-- here proceeds as though there were no index at all.
+maxIndexBytes, maxIndexLineBytes, maxIndexEntries :: Int
+maxIndexBytes     = 2 * 1024 * 1024
 maxIndexLineBytes = 256
-maxIndexEntries   = 1000000
+maxIndexEntries   = maxIndexBytes `div` 48
 
 -- The clauses of a file, however the writer laid them out.
 --
@@ -300,7 +329,7 @@ clausesWith byteLimit formLimit txt = do
   -- forms, so a file of forty thousand empty clauses costs a minute of CPU,
   -- and one file that anybody with write access can drop into a tree would
   -- then stop every fold and every verify in every clone.
-  _ <- bounded (Text.length txt) byteLimit "file"
+  _ <- bounded (utf8Length txt) byteLimit "file"
   _ <- bounded (countForms txt) formLimit "clauses"
   case parseTop txt of
     Left e     -> Left (NotAnEvent (Text.pack (show e)))
