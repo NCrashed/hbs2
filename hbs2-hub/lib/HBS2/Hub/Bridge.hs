@@ -38,17 +38,24 @@
 --
 --   * @BadAuthorSig@, @BadCanonSig@, @UndecodableAuthor@,
 --     @UndecodableCanon@, @IdMismatch@: impossible for boxes minted here.
---   * @WrongTarget@, @BadKind@, @BadThread@, @UnknownRedact@, @DupId@,
---     @BadRevise@, @UnauthorizedDelegate@: refused by the gate, on both the
---     letter path and the owner-native one.
+--   * @WrongTarget@, @BadThread@, @UnknownRedact@, @DupId@, @BadRevise@,
+--     @UnauthorizedDelegate@, and the four payload refusals
+--     (@PROpenWithoutCoords@, @IssueOpenWithCoords@, @CoordsUnreachable@,
+--     @PROnlyOnIssue@): refused by the gate, on both the letter path and the
+--     owner-native one.
 --   * @UnauthorizedCanon@: refused by checking this folder's own key against
 --     the maintainer set canon reports, which is why 'CanonView' carries it.
---   * @BadStamp@: a number is minted only for an open; the cursor is refused
---     once it reaches the top of its range ('CursorExhausted'); and the
---     @folded-ts@ about to be stamped is refused once it passes the ceiling
---     canon admits ('StampOutOfRange'). Those are the three stamped fields,
---     and every gate is in 'requireCanon' or 'requireStamp', which all four
---     entry points go through.
+--   * The four stamp refusals. @NumberOnNonOpen@ cannot happen because a
+--     number is minted only for an open; @SeqAtTopOfRange@ and
+--     @NumberAtTopOfRange@ are refused once the cursor reaches the top of its
+--     range ('CursorExhausted'); @FoldedTsAboveCeiling@ is refused once the
+--     clock about to be stamped passes the ceiling ('StampOutOfRange'). Those
+--     are the three stamped fields, and every gate is in 'requireCanon' or
+--     'requireStamp', which all four entry points go through.
+--
+-- The list is checked by hand and nothing checks it for you, so it has to name
+-- the constructors as they are: it was left naming two that had been split into
+-- eight, which is how an argument stops being an argument.
 --
 -- Anything that weakens one of those checks weakens the property, so the
 -- view must come from the fold ('viewOf') rather than be reconstructed.
@@ -283,7 +290,7 @@ data TriageError =
     -- case separately too.
   | UnknownTarget
     -- | The cursor has reached the top of its range, so the next stamp would
-    -- be one the fold refuses ('BadStamp'). Unreachable in practice, but it
+    -- be one the fold refuses ('SeqAtTopOfRange'). Unreachable in practice, but it
     -- is the one case that would otherwise leave the module's promise
     -- incomplete.
   | CursorExhausted
@@ -450,7 +457,10 @@ instance Pretty TriageError where
   pretty = \case
     BadLetter e           -> pretty e
     NotAcceptable d       -> "an op a letter may not carry:" <+> viaShow d
-    Requested p           -> "a request to rule on:" <+> viaShow (pdContent p)
+    -- viaShow of the Pending, never of the content inside it: Show Pending is
+    -- hand-written precisely so that a body and a back-channel do not reach a
+    -- log, and Requested is the most logged case there is.
+    Requested p           -> "a request to rule on:" <+> viaShow p
     WrongRepo             -> "authored for another repository"
     UnknownThread         -> "names a thread canon does not hold yet"
     AlreadyInCanon        -> "already in canon"
@@ -471,10 +481,11 @@ instance Pretty TriageError where
     BadPartSecret         -> "the part secret cannot be a key"
     MessageSecretOffered  -> "the parts secret offered is the message secret"
     BodyTooLarge f        -> "field" <+> pretty f <+> "is over what triage carries inline"
+    -- The field NAMES above are ours; only the attribute name is a stranger's.
     MalformedRef f        -> "field" <+> pretty f <+> "is not a hash"
     OwnerKeyRequired      -> "only the owner key may do this"
     NeedsReview           -> "carries words the owner would be signing as their own"
-    UnnormalizedValue k   -> "attribute" <+> pretty k <+> "is not in canonical form"
+    UnnormalizedValue k   -> "attribute" <+> pretty (safeText k) <+> "is not in canonical form"
     Composed e            -> "in what this caller composed:" <+> pretty e
 
 instance Pretty Outcome where
@@ -803,9 +814,9 @@ requireCanon repo view folded k
   -- The mirror of the fold's ceiling on the same field. Without it the one
   -- stamped value with no gate on this side was the one the caller supplies
   -- directly, and a folder whose clock read past the ceiling would mint an
-  -- event the fold drops as 'BadStamp', and then keep minting: the accepted
-  -- view carries the stamp forward, so every later letter is clamped up to it
-  -- and burns too, and a loop that folds then deletes deletes each of them.
+  -- event the fold drops as 'FoldedTsAboveCeiling', and then keep minting: the
+  -- accepted view carries the stamp forward, so every later letter is clamped
+  -- up to it and burns too, and a loop that folds then deletes deletes each.
   | stampFor folded view > maxFoldedTs     = Left StampOutOfRange
   | otherwise                              = Right ()
   where

@@ -354,6 +354,8 @@ signed boxes; the remaining clauses are the readable projection.
                                    ;   refused above 4102444800000 (2100-01-01Z):
                                    ;   the next stamp is clamped to be no lower
 (canon-by  <sign-pubkey-b58>)      ; owner or delegated maintainer
+(canon-target <sign-pubkey-b58>)   ; the repo this BLESSING is for; named apart
+                                   ;   from the author box's own (target)
 (part-secret <group-secret-b58>)   ; only on events referencing encrypted parts:
                                    ;   the PARTS group secret, NOT the one over
                                    ;   messageData: publishing that one would publish
@@ -431,18 +433,23 @@ a few hundred kilobytes, written by anyone who can write to a clone, otherwise
 stops every fold and every `hub verify` everywhere, before a single signature is
 checked.
 
-Forms, not parentheses, and forms means every character that opens one. A body
-is a string literal and code inside one has brackets, so counting every `(` in
-the file was a bound on the contributor rather than on the attacker: a hundred
-and fifteen of them anywhere in an issue made the file unreadable for good. But
-counting only `(` was also no bound at all, since this dialect opens a form on
-`[`, `{` and `<` as well, and quote, quasiquote and unquote each wrap what
-follows in a list of their own. The same quarter-megabyte of empty forms written
-with square brackets parsed for four minutes and allocated six hundred gigabytes.
-The count therefore covers `([{<` and `` '`, ``, skips what is inside a string
-literal, and tracks comments, because a quote inside a comment would otherwise
-put the counter into a string it is not in and stop it counting anything after
-that.
+Forms, not parentheses, and forms means every way of opening one. A body is a
+string literal and code inside one has brackets, so counting every `(` in the
+file was a bound on the contributor rather than on the attacker: a hundred and
+fifteen of them anywhere in an issue made the file unreadable for good. And
+counting only `(` was no bound at all either, because the parser makes a list
+per bracket pair, a list per quote, quasiquote or unquote, and a list per
+non-empty LINE. Each spelling of the attack was cheaper than the last: square
+brackets cost four minutes a file, and bare atoms one to a line cost over a
+minute for eighty kilobytes, growing sixfold per doubling, with no punctuation
+at all.
+
+The count therefore covers `([{`, the three quoting marks, and a newline; it
+skips what is inside a string literal; and it tracks comments, because a quote
+inside a comment would otherwise put the counter into a string it is not in and
+stop it counting anything after that. Counting lines as well as brackets
+double-counts an honest file, which a bound can afford: a real event is a dozen
+or so lines against a limit of a hundred and twenty-eight.
 
 And all three are DERIVED from the limits the bridge mints under, not chosen
 beside them. A reader bound picked on its own is a reader that refuses what its
@@ -635,6 +642,14 @@ Ordering:
 
 With all three keys the fold is deterministic regardless of enumeration order
 or how commits batched the events.
+
+A note on the version, since this document says in several places that changing
+any of this bumps `hub-meta` and the number has stayed at 1 through every change
+so far. Both are true and they are not in tension: the rule is about canon that
+EXISTS. Nothing has published a tree, so there is no clone to disagree with and
+nothing to migrate, and the number will be 1 for the first one written. The
+first published tree is what closes the window; after it, every line here costs
+a bump and a fork in the fold.
 
 The set of refusals is consensus too, and finer than a reader might expect on
 purpose. "Kind and payload disagree" and "the stamp is unusable" are each four

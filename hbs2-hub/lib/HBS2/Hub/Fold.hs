@@ -449,7 +449,7 @@ instance Pretty Anomaly where
     PartWithoutSecret   -> "an attachment with no key published for it"
     SecretWithoutPart   -> "a key published for no attachment"
     UnusablePartSecret  -> "a part secret that cannot be a key"
-    UnnormalizedAttr k  -> "attribute" <+> pretty k <+> "is not in canonical form"
+    UnnormalizedAttr k  -> "attribute" <+> pretty (safeText k) <+> "is not in canonical form"
 
 -- | One line per refusal, naming the event, where it sits, and who blessed it,
 -- which is what PEP-22 requires of the report.

@@ -282,9 +282,11 @@ malformedRef = \case
   AReopen thr _ _               -> bad "thread" thr
   AMerge thr _ _ _              -> bad "thread" thr
   ARedact _ target _            -> bad "redacts" target
-  ADelegate{}                   -> Nothing
-  ARevoke{}                     -> Nothing
+  ADelegate _ k _               -> key "delegate" k
+  ARevoke _ k _                 -> key "revoke" k
   where
+    key name k | validHubKey k = Nothing
+               | otherwise     = Just name
     bad name h | validHashRef h = Nothing
                | otherwise      = Just name
     named name = (>>= bad name)

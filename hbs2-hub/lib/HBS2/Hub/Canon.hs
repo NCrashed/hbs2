@@ -75,9 +75,9 @@ data CanonError =
 -- | What a reader says about a file it would not read, on a terminal.
 instance Pretty CanonError where
   pretty = \case
-    NotAnEvent e    -> "not an s-expression:" <+> pretty e
+    NotAnEvent e    -> "not an s-expression:" <+> pretty (safeText e)
     MissingClause c -> "missing clause" <+> pretty c
-    BadClause c     -> "malformed clause" <+> pretty c
+    BadClause c     -> "malformed clause" <+> pretty (safeText c)
     TooLarge what   -> "over the bound this reader will read:" <+> pretty what
 
 -- | What a reader will look at before deciding the file is an attack.
@@ -167,6 +167,9 @@ renderEvent e = Text.unlines (fmap render clauses)
       <> [ mkForm "origin" [href o] | Just o <- [ccOrigin cc] ]
       <> [ mkForm "folded-ts" [mkInt (ccFoldedTs cc)]
          , mkForm "canon-by" [b58key k]
+           -- Named apart from the author box's own (target), which an open also
+           -- carries: they answer different questions and a file shows both.
+         , mkForm "canon-target" [b58key (ccTarget cc)]
          ]
       <> [ mkForm "part-secret" [mkSym @C (show (pretty (AsBase58 (partSecretBytes s))))]
          | Just s <- [ccPartSecret cc] ]
@@ -193,7 +196,7 @@ renderEvent e = Text.unlines (fmap render clauses)
 parseEvent :: Text -> Either CanonError (Word32, Event)
 parseEvent txt = do
   cs <- clausesOf txt
-  version <- word32 =<< only "hub-event" cs
+  version <- word32 "hub-event" =<< only "hub-event" cs
   abox <- box "author-box" =<< only "author-box" cs
   cbox <- box "canon-box" =<< only "canon-box" cs
   pure (version, Event abox cbox)
@@ -260,7 +263,7 @@ renderMeta = render (mkForm  "hub-meta" [mkInt hubMetaVersion]) <> "\n"
 parseMeta :: Text -> Either CanonError Word32
 parseMeta txt = do
   cs <- clausesOf txt
-  word32 =<< only "hub-meta" cs
+  word32 "hub-meta" =<< only "hub-meta" cs
 
 -- | The number index (PEP-19): a convenience map from human @#N@ to thread.
 --
@@ -368,7 +371,7 @@ countForms = seen . Text.foldl' step (0 :: Int, Plain)
     seen (n,_) = n
 
     step (n, st) c = case st of
-      InComment | c == '\n'   -> (n, Plain)
+      InComment | c == '\n'   -> (n + 1, Plain)
                 | otherwise   -> (n, InComment)
       InEscape                -> (n, InString)
       InString  | c == '\\'   -> (n, InEscape)
@@ -382,13 +385,20 @@ countForms = seen . Text.foldl' step (0 :: Int, Plain)
                 | opens c     -> (n + 1, Plain)
                 | otherwise   -> (n, Plain)
 
-    -- Every character that opens a form, not just the round one. The parser
-    -- treats three other bracket pairs the same way, and quote, quasiquote and
-    -- unquote each wrap what follows in a list of their own. Counting only '('
-    -- was a bound with a one-character bypass: the same quarter-megabyte of
-    -- empty forms written as "[]" parsed for four minutes and allocated six
-    -- hundred gigabytes, which is exactly the file this bound exists to refuse.
-    opens c = c `elem` ("([{<'`," :: String)
+    -- Every character that opens a form, and a newline is one of them.
+    --
+    -- The parser makes a list per bracket pair, a list per quote, quasiquote or
+    -- unquote, and a list per non-empty LINE, and the cost is superlinear in
+    -- how many lists it makes. Each spelling of the same attack was cheaper
+    -- than the last: counting only '(' let "[]" through at four minutes a file,
+    -- and counting brackets alone let bare atoms one per line through at over a
+    -- minute for eighty kilobytes, growing sixfold per doubling. A newline is
+    -- the cheapest of the three, two bytes an item and no punctuation at all.
+    --
+    -- Counting newlines as well as brackets double-counts an ordinary event
+    -- file, which is what a bound can afford to do: a real one is a dozen or so
+    -- lines against a limit of a hundred and twenty-eight.
+    opens c = c `elem` ("([{'`,\n" :: String)
 
 -- Where a scan of the text is, for 'countForms'.
 data Scan = Plain | InString | InEscape | InComment
@@ -423,9 +433,12 @@ symbol name = \case
   List _ [SymbolVal _, SymbolVal v] -> Right (idText v)
   _                                 -> Left (BadClause name)
 
-word32 :: Syntax C -> Either CanonError Word32
-word32 = \case
-  List _ [SymbolVal name, LitIntVal n]
+-- The clause name is passed in rather than taken from what was parsed: the
+-- fallback used to print the whole malformed form into the error, which is a
+-- stranger's bytes on their way to a terminal, and the caller already knows the
+-- name it asked for.
+word32 :: Text -> Syntax C -> Either CanonError Word32
+word32 name = \case
+  List _ [SymbolVal _, LitIntVal n]
     | n >= 0, n <= fromIntegral (maxBound :: Word32) -> Right (fromIntegral n)
-    | otherwise -> Left (BadClause (idText name))
-  s -> Left (BadClause (Text.pack (show (pretty s))))
+  _ -> Left (BadClause name)

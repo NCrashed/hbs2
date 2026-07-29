@@ -212,7 +212,12 @@ spec = do
       parseEvent (full '(' ')') `shouldBe` Left (TooLarge "clauses")
       parseEvent (full '[' ']') `shouldBe` Left (TooLarge "clauses")
       parseEvent (full '{' '}') `shouldBe` Left (TooLarge "clauses")
-      parseEvent (full '<' '>') `shouldBe` Left (TooLarge "clauses")
+      -- ...and a line, which is the cheapest form of all: the parser makes one
+      -- list per non-empty line, so bare atoms one to a line cost two bytes an
+      -- item with no punctuation at all, and went past a bound that counted
+      -- only brackets.
+      parseEvent (Text.replicate (maxClauses + 1) "a\n")
+        `shouldBe` Left (TooLarge "clauses")
       -- quote, quasiquote and unquote each wrap what follows in a list of
       -- their own, so they open forms too
       parseEvent (Text.replicate (maxClauses + 1) "'x ")

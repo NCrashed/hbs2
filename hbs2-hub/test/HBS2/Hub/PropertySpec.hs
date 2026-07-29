@@ -372,7 +372,7 @@ runSteps steps = do
       fr  = foldEvents repo (stEvents st)
       -- Everything a fold produces, so that a field added later is covered
       -- without anyone remembering to add it here.
-      whole f = ( frDropped f, frAnomalies f, frRedacted f, frParts f
+      whole f = ( frThreads f, frDropped f, frAnomalies f, frRedacted f, frParts f
                 , frMaxSeq f, frMaxNumber f, frLastFolded f, frOrigins f
                 , frMaintainers f, frAdmitted f, frLog f )
       same f = whole f == whole (foldEvents repo (rotate (stEvents st)))

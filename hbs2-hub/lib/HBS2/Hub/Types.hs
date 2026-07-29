@@ -51,6 +51,8 @@ module HBS2.Hub.Types
   , normalizedAttr
   , validAttrName
   , validHashRef
+  , validHubKey
+  , safeText
   , hashRefBytes
   , PartSecret
   , mkPartSecret
@@ -83,7 +85,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Char (isAsciiLower,isDigit)
-import Data.Coerce (coerce)
+import Data.Char qualified as Char
 import Data.Maybe (isJust)
 import Data.List (nub,sort)
 import Data.Text qualified as Text
@@ -366,6 +368,21 @@ normalizeAttr k v
   | k `elem` multiValued = encodeLabels (decodeLabels v)
   | otherwise            = v
 
+-- | Text on its way to a terminal, with the control characters made visible.
+--
+-- Every renderer in this package that prints a field a stranger chose goes
+-- through this. Canon carries what was signed, as it must, so an attribute name
+-- with an ESC in it is an attribute name with an ESC in it; printing that to a
+-- terminal hands a stranger the terminal. PEP-22 makes this the renderer's duty
+-- and this is the renderer's half of it.
+safeText :: Text -> Text
+safeText = Text.concatMap esc
+  where
+    esc c | Char.isControl c = Text.pack ("\\x" <> showHex (Char.ord c))
+          | otherwise        = Text.singleton c
+    showHex n = let d = "0123456789abcdef"
+                in [ d !! (n `div` 16 `mod` 16), d !! (n `mod` 16) ]
+
 -- | Is this a hash at all?
 --
 -- A 'HashRef' is a newtype over a ByteString with a generic 'Serialise'
@@ -600,6 +617,14 @@ unboxChecked (SignedBox pk bs sig)
         -- presented as a kind of record they were never signed as.
         | d /= domainOf (Nothing @p) -> Left (BoxUndecodable pk WrongDomain)
         | otherwise                  -> Right (pk, p)
+
+-- | Is this a key at all?
+--
+-- Defence in depth rather than a hole being closed: the base58 path a key
+-- normally arrives by does check the length. A key inside a signed author box
+-- did not come that way.
+validHubKey :: HubKey -> Bool
+validHubKey k = isJust (Saltine.decode (Saltine.encode k) :: Maybe HubKey)
 
 -- | Are these the right shape to hand to the verifier at all?
 --

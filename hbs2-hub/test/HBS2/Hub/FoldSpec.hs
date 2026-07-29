@@ -8,7 +8,8 @@ import HBS2.Data.Types.SignedBox
 
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
-import Data.List (sortOn)
+import Data.List (isInfixOf,sortOn)
+import HBS2.Base58 (AsBase58(..))
 import Data.Maybe (fromMaybe)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -572,6 +573,95 @@ spec = do
           fr = foldEvents repoB [delegB, fromC]
       reasons fr `shouldBe` [WrongTarget]
       cursorFrom fr `shouldBe` CanonCursor 2 1
+
+    it "does not spend a ghost's stamp blessed for another repository" $ do
+      ownerB <- kp
+      ownerC <- kp
+      bob <- kp
+      alice <- kp
+      -- The other half of the repository binding, and the half nothing reached:
+      -- on the readable path the event is dropped before the stamp is even
+      -- forced, so the target check inside 'spendable' is only ever asked on a
+      -- ghost, and both ghost fixtures reused a canon box from their own repo.
+      -- This one is a canon box from C, with content this build cannot read.
+      let repoB = fst ownerB
+          repoC = fst ownerC
+          delegB = mkEvent ownerB ownerB (ADelegate repoB (fst bob) 1)
+                     (canon repoB 1 Nothing)
+          fromC = mkEvent alice bob (AComment (eventId delegB) Nothing Nothing Nothing 2)
+                    (canon repoC 5000 (Just 9))
+          ghost = Event (futureBox alice) (evCanonBox fromC)
+          fr = foldEvents repoB [delegB, ghost]
+      map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
+      cursorFrom fr `shouldBe` CanonCursor 2 1
+
+    it "refuses a redaction authored for another repository" $ do
+      owner <- kp
+      other <- kp
+      alice <- kp
+      -- A redact names an event-id and nothing else, so the transitive binding
+      -- through a thread does not reach it: without its own target, one signed
+      -- by a maintainer of two repos hides an event in whichever holds that id.
+      let repo = fst owner
+          eOpen = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                    (canon repo 1 (Just 1))
+          tid = eventId eOpen
+          elsewhere = mkEvent owner owner (ARedact (fst other) tid 2) (canon repo 2 Nothing)
+          here = mkEvent owner owner (ARedact repo tid 3) (canon repo 3 Nothing)
+      reasons (foldEvents repo [eOpen, elsewhere]) `shouldBe` [WrongTarget]
+      HS.member tid (frRedacted (foldEvents repo [eOpen, elsewhere])) `shouldBe` False
+      reasons (foldEvents repo [eOpen, here]) `shouldBe` []
+      HS.member tid (frRedacted (foldEvents repo [eOpen, here])) `shouldBe` True
+
+    it "refuses a box whose key or signature is the wrong length" $ do
+      owner <- kp
+      alice <- kp
+      -- The Serialise instances for a key and a signature are generic over a
+      -- newtype and take any length, walking past the length check the crypto
+      -- library does in its own decoder; the verifier then hands the pointers
+      -- to a C function that reads a fixed number of bytes regardless.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon repo 1 (Just 1))
+          bend n = case evAuthorBox ev of
+            SignedBox _ bs sig -> Event (SignedBox (stunt n) bs sig) (evCanonBox ev)
+          -- A key is a newtype over bytes with a generic instance, so its
+          -- encoding is the constructor tag and the field: exactly what any
+          -- length of bytes decodes into, which is the hole.
+          stunt n = fromMaybe (error "cannot build a stunted key")
+                      (either (const Nothing) Just
+                        (CBOR.deserialiseOrFail
+                           (serialise ((0 :: Word), BS.replicate n 0x41))))
+      map drWhy (frDropped (foldEvents repo [bend 0]))  `shouldBe` [BadAuthorSig]
+      map drWhy (frDropped (foldEvents repo [bend 31])) `shouldBe` [BadAuthorSig]
+      map drWhy (frDropped (foldEvents repo [bend 5000])) `shouldBe` [BadAuthorSig]
+      -- What the guard changes is not observable from here, and saying so is
+      -- more useful than implying otherwise: the refusal is the same with or
+      -- without it, because the read out of bounds lands in heap slack and
+      -- comes back a mismatch. So this pins the predicate and the refusal, and
+      -- the reason for the guard is that a read out of bounds is undefined
+      -- behaviour whatever it happens to return today.
+      validHubKey (stunt 0) `shouldBe` False
+      validHubKey (stunt 31) `shouldBe` False
+      validHubKey (stunt 5000) `shouldBe` False
+      validHubKey (fst owner) `shouldBe` True
+
+    it "prints a refusal in words, with keys anyone can look up" $ do
+      owner <- kp
+      alice <- kp
+      -- The renderers exist because the derived Show of a key is a short
+      -- internal digest, not the base58 an operator can search for, and because
+      -- an attribute name is a stranger's bytes on their way to a terminal.
+      let repo = fst owner
+          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon repo 1 (Just 1))
+          shown = show (pretty (Dropped (eventId ev) (Just 1) (Just (fst owner))
+                                 UnauthorizedCanon))
+      shown `shouldSatisfy` isInfixOf (show (pretty (AsBase58 (fst owner))))
+      shown `shouldSatisfy` isInfixOf "not blessed by an authorized key"
+      -- control bytes are made visible rather than passed through
+      show (pretty (UnnormalizedAttr "a\ESCb")) `shouldSatisfy` isInfixOf "\\x1b"
+      show (pretty (UnnormalizedAttr "a\ESCb")) `shouldSatisfy` (not . isInfixOf "\ESC")
 
     it "does not remember a number from a stamp it will not count" $ do
       owner <- kp

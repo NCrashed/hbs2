@@ -536,7 +536,7 @@ spec = do
       owner <- kp
       origin <- someHash
       -- The author is right; the thread is the wrong kind, and the fold
-      -- would say BadKind, so the bridge must not blame the author.
+      -- would say PROnlyOnIssue, so the bridge must not blame the author.
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
@@ -1526,6 +1526,28 @@ spec = do
       -- one tick later it is an ordinary close
       _ <- expectRight
         (honourRequest (ctxOf owner) env (acView a2) 10 req3 (letter (AClose thr Nothing 4)))
+      pure ()
+
+    it "refuses to mint a redaction for another repository" $ do
+      owner <- kp
+      other <- kp
+      alice <- kp
+      origin <- someHash
+      -- The bridge's half of the binding the fold checks: a redact names an
+      -- event-id and nothing else, so it is the one op no thread binds to a
+      -- repository for it.
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+      acc <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (makeLetter (fst alice) (snd alice)
+              (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel))
+      expectOwn WrongRepo
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
+           (ARedact (fst other) (scopeOf acc) 2))
+      _ <- expectRight
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
+           (ARedact repo (scopeOf acc) 2))
       pure ()
 
     it "refuses a hash-shaped field that is not a hash" $ do
