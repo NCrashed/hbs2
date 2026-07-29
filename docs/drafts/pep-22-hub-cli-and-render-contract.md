@@ -20,9 +20,10 @@ Principle: CLI-first, web as a pure view
 
 The hub is a library plus a CLI. The library is the union of the pieces the
 other PEPs specify: the PEP-18 letter (compose/verify), the PEP-19 canon
-(event boxes, the deterministic fold, and a read-side store holding what the
-fold produced rather than a position inside it), the PEP-20 PR flow, and the
-PEP-21 moderation controls. The CLI is a thin driver over that library. A
+(event boxes and the deterministic fold), the PEP-20 PR flow, and the PEP-21
+moderation controls. It is pure: no storage, no network, no clock. Whether
+reads are served by re-folding or from a cache is the CLI's decision and is
+discussed under Reuse. The CLI is a thin driver over that library. A
 minimalist Gitea-style web UI is optional and is a pure view: it renders the
 contract below and never folds, decrypts, verifies, or writes canon itself.
 Everything the web can show, the CLI can show; the web adds presentation, not
@@ -41,14 +42,13 @@ compose (Tier B)          read (any clone)          maintain / moderate (Tier A)
    PEP-18 letter            render contract                     |
    -> Mailbox               (from the fold)                     v
                                  ^                          PEP-19 canon events
-   library: letter + canon + fold + cache + moderation      -> refs/hbs2/meta
+   library: letter + canon + fold + moderation              -> refs/hbs2/meta
 ```
 
 Writes are one-way into the tiers: compose commands emit PEP-18 letters (Tier
 B), maintain commands emit owner-signed PEP-19 events (Tier A). Reads all go
-through the fold, whose result the read-side store holds; the render contract
-is the serialized projection of that. The web view is downstream of the
-contract and writes nothing.
+through the fold, and the render contract is the serialized projection of its
+result. The web view is downstream of the contract and writes nothing.
 
 
 CLI surface
@@ -358,28 +358,40 @@ implements most of this shape over a channel and is the starting code:
     styled terminal output) is the list/show formatting. (fixme-new has no
     mustache/microstache; a mustache-style web templating layer, if wanted,
     is new work, not a port.)
-  - The SQLite `object(o,w,k,v)` materialization with last-write-wins is the
-    shape of the read-side store, generalized with comments.
+  - fixme-new's SQLite `object(o,w,k,v)` materialization is NOT ported, and
+    this entry is here to say so rather than to plan a port.
 
-    Not its update strategy, though, and this is the one place the port cannot
-    be a port. fixme-new advances a last-applied-`seq` marker and applies what
-    is past it. PEP-19 forbids that: the fold is one pass over the fully sorted
-    set, and a file with a lower `seq` arriving later inserts into the middle
-    and can admit an event that an earlier pass dropped as dangling. A marker
-    would then leave that event dropped for good, in one clone and not in
-    another, with nothing reporting anything. Canon minted by the triage bridge
-    never has that shape, since the bridge will not mint a reply before its
-    thread is in canon; canon written by anything else may, and `hub verify` has
-    to reach a verdict on that canon too.
+    Two reasons, and the second is the one that matters. The first: hbs2-hub
+    has no persistence today and no dependency that could give it one. The
+    library is letter, canon, fold and manifest, all pure functions returning
+    `Either`, which is what lets the whole admission surface be property-tested
+    without a filesystem. Adding a store is a decision about the CLI, not about
+    the library, and it is not made here.
 
-    So the store holds the OUTPUT of a fold rather than a position inside one.
-    Two keys make it safe to reuse without re-folding, and either is enough on
-    its own: the whole result against the canon tree hash (plus the repository
-    key and the `hub-meta` version, which are the fold's only other inputs), or
-    per file against that file's own content hash, which is the one that stays
-    useful when the tree grows. Measured on this code, parsing the files is 72%
-    of a cold fold and the ordered pass itself is 2.4%, so the per-file key is
-    where the time actually is.
+    The second: fixme-new advances a last-applied-`seq` marker and applies what
+    is past it, and PEP-19 forbids that shape whatever the store is. The fold is
+    one pass over the fully sorted set, so a file with a lower `seq` arriving
+    later inserts into the middle and can admit an event an earlier pass dropped
+    as dangling. A marker would leave that event dropped for good, in one clone
+    and not in another, with nothing reporting anything. Canon minted by the
+    triage bridge never has that shape, since the bridge will not mint a reply
+    before its thread is in canon; canon written by anything else may, and
+    `hub verify` has to reach a verdict on that canon too.
+
+    What replaces it depends on a thing not yet decided: whether reads run in a
+    long-lived process or a one-shot one. In a daemon the answer needs no store
+    at all, since holding the `FoldResult` and dropping it when the canon tree
+    hash changes costs nothing and cannot go stale across a restart that takes
+    the cache with it. In a one-shot CLI something has to survive the process,
+    and then the rule is that it caches the OUTPUT of a fold and never a
+    position inside one. Two keys are safe and either is enough alone: the whole
+    result against the canon tree hash together with the repository key and the
+    `hub-meta` version, which are the fold's only other inputs; or per file
+    against that file's own content hash, which is the one that stays useful
+    when the tree grows. Measured on this code, parsing the files is 72% of a
+    cold fold, signature verification 19%, and the ordered pass these rules
+    describe 2.4%, so the per-file key is where the time actually is. If a
+    persistent store is wanted, `db-pipe` is what the rest of this project uses.
 
 What changes from fixme-new: the channel is Mailbox ingress plus reflog canon
 (not a RefChan), events carry the PEP-19 two-layer signing, and the PR verbs,
@@ -393,7 +405,10 @@ Exists today:
 
   - hbs2-cli's `bindMatch` S-expression command machinery and the Mailbox
     message create/read commands the compose/triage verbs build on.
-  - fixme-new's query DSL, templates, and SQLite materialization to port.
+  - fixme-new's query DSL and templates to port. Its SQLite materialization is
+    not portable here and is not counted: see Reuse.
+  - The PEP-18..21 library itself, which is pure and has no store, so nothing
+    below inherits one by default.
   - The git tooling `hub pr` shells out to (bundle, fetch, merge, index-pack).
 
 Must be built:
