@@ -96,13 +96,29 @@ reads that mailbox and correlates each ack to the thread it sent.
 Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 
 ```
-hub inbox                          ; decrypted triage queue (Tier B), verified
+hub inbox [--mailbox <key>]        ; decrypted triage queue (Tier B), verified
 hub inbox show <msg>               ; one submission, inner author + payload + attachments
 hub inbox accept <msg>             ; fold into canon (assigns number), then delete (PEP-21)
 hub inbox reject <msg> [< note]    ; delete the letter + optional courtesy note; NO canon event
 hub issue close|reopen|label|assign <n> ...   ; owner-signed set events on a folded thread
 hub pr   merge <n> [--strategy ...]           ; verify, integrate, merge event (PEP-20)
 ```
+
+`hub inbox` takes no mailbox key in the ordinary case: it reads the repository
+you are standing in, resolves the ingress mailbox from its manifest (PEP-18
+`mailboxByTier`), and that same manifest is where the PEP-21 deny-list comes
+from. `--mailbox <key>` names one directly and skips both, which makes it the
+form that is available before a manifest reader exists and the form that has no
+deny-list to apply. It is therefore not a shorthand: a queue read that way shows
+letters from banned authors, and anything built on it must not treat "it was in
+the queue" as "it may be folded".
+
+Either way the mailbox has to be one the local peer holds. A peer only asks the
+network about mailboxes in its own database, so a key it does not have reads as
+an empty inbox on this run and on every future one; a reader that cannot tell
+those two apart is reporting silence as an answer. The distinction is available
+(`mailboxGetStatus` answers `Nothing` for a mailbox the peer does not know) and
+has to be used.
 
 Two distinctions matter here. `hub inbox reject` acts on an unfolded Tier B
 submission: there is no canon thread to close (the fold never ran), so it is

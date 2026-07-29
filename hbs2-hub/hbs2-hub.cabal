@@ -49,19 +49,16 @@ common shared-properties
                      , PatternSynonyms
                      , ViewPatterns
 
-  -- Only what every stanza needs. What the library alone needs is declared
-  -- there, so -Wunused-packages stays useful instead of being noise the CLI
-  -- inherits.
-  build-depends:
-        hbs2-core
-      , suckless-conf
-      , serialise
-      , unordered-containers
-
 library
     import:           shared-properties
     hs-source-dirs:   lib
+    -- Declared per stanza and not in the shared block: a dependency every stanza
+    -- inherits is one -Wunused-packages can never say anything useful about.
     build-depends:    base
+                    , hbs2-core
+                    , suckless-conf
+                    , serialise
+                    , unordered-containers
                     , cborg
                     , bytestring
                     , text
@@ -76,14 +73,42 @@ library
       HBS2.Hub.Canon
       HBS2.Hub.Manifest
 
--- The CLI, and the only stanza here that knows about the network.
+-- Everything that knows about the network, in a sublibrary rather than inside
+-- the executable.
 --
 -- The library above is pure by design (PEP-22 "Principle"), which is what lets
 -- the whole admission surface be property-tested without a peer, a socket or a
 -- clock. Everything that talks to hbs2-peer, decrypts, or reads a mailbox lives
--- here, so the seam between "what the rules are" and "where the bytes come
--- from" is a package boundary rather than a convention.
-executable hub
+-- here, so the seam is a package boundary rather than a convention.
+--
+-- A sublibrary and not `other-modules` of the executable, because a module a
+-- test cannot import is a module with no tests: the ingress has pure decisions
+-- in it (which messages a mailbox tree still holds, what a letter turned out to
+-- be) and those were unreachable while they lived in the exe.
+library hub-ingress
+    import:           shared-properties
+    visibility:       public
+    hs-source-dirs:   ingress
+    build-depends:    base
+                    , hbs2-hub
+                    , hbs2-core
+                    , hbs2-peer
+                    , hbs2-cli
+                    , hbs2-keyman-direct-lib
+                    , serialise
+                    , unordered-containers
+                    , text
+    exposed-modules:
+      HBS2.Hub.Ingress
+      HBS2.Hub.CLI.Compose
+      HBS2.Hub.CLI.Inbox
+
+-- The CLI itself.
+--
+-- Named hbs2-hub, like every other binary in this repository except the one git
+-- names for us. `hub` is a widely installed GitHub tool, so the PEP-22 surface
+-- is reached through a symlink rather than by claiming the name in PATH.
+executable hbs2-hub
     import:           shared-properties
     hs-source-dirs:   app
     main-is:          Main.hs
@@ -92,12 +117,11 @@ executable hub
         -rtsopts
         "-with-rtsopts=-N4 -A64m"
     build-depends:    base
-                    , hbs2-hub
-                    , hbs2-peer
+                    , hbs2-hub:hub-ingress
                     , hbs2-cli
-                    , hbs2-keyman-direct-lib
-    other-modules:
-      HBS2.Hub.CLI.Inbox
+                    , suckless-conf
+                    , text
+                    , unordered-containers
 
 test-suite spec
   import:          shared-properties
@@ -112,6 +136,8 @@ test-suite spec
       hspec-discover:hspec-discover
   build-depends:   base
                  , hbs2-hub
+                 , hbs2-hub:hub-ingress
+                 , hbs2-peer
                  , hbs2-core
                  , suckless-conf
                  , hspec
@@ -128,3 +154,4 @@ test-suite spec
       HBS2.Hub.BridgeSpec
       HBS2.Hub.CanonSpec
       HBS2.Hub.PropertySpec
+      HBS2.Hub.IngressSpec

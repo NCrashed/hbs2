@@ -4,8 +4,27 @@
 
   - **`hbs2-hub` (new).** The core of the decentralized forge specified
     by PEP-17: issues and pull requests carried by the repository
-    itself, with ingress from anyone through the Mailbox protocol. This
-    is the network-free half, library and tests only, with no CLI yet.
+    itself, with ingress from anyone through the Mailbox protocol.
+      - **Layout.** Three stanzas, and the split is the design rather
+        than a convenience. The library is pure: no storage, no
+        network, no clock, which is what lets the whole admission
+        surface be property-tested without a peer. A `hub-ingress`
+        sublibrary holds everything that decrypts or talks to
+        hbs2-peer. The `hbs2-hub` binary is a driver over both. The
+        PEP-22 surface is spelled `hub`, which is reached through a
+        symlink rather than by claiming a name in `PATH` that a widely
+        installed GitHub tool already uses.
+      - **`hbs2-hub inbox <mailbox-key>`.** Read-only: waits for the
+        peer's copy of a mailbox to settle, opens every message this
+        node holds a key for, and reports what each letter asks for and
+        the event-id it would fold to. Nothing is folded, minted or
+        deleted. A mailbox the peer does not hold locally is reported
+        as such rather than as an empty inbox, because a peer never
+        asks the network about one it does not have.
+      - **`hbs2-hub issue new`.** Composes a Tier B letter, signs the
+        author box, seals it to the recipient sigils and hands it to
+        the peer. Prints the message hash and the event-id, which the
+        sender can compute before any maintainer has looked.
       - **Canon (PEP-19).** One shared signed content record for both
         trust tiers, wrapped in two independent boxes: an author box
         (who said it, kept verbatim from the contributor's letter) and a
