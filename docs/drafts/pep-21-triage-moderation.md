@@ -214,6 +214,23 @@ are the loop's problem rather than the letter's.
   - ABORT means the caller is wired wrong: stop, do not touch the letter.
     DISCARD and DECIDE are the ordinary outcomes.
 
+A letter is deleted from the mailbox only after a RE-FOLD of the tree the event
+was written to shows it admitted. Accepting is a pure function of the view it
+was handed, and a view is a cache: a delegation withdrawn between the read and
+the write, or a write that failed, leaves an event the fold does not admit and a
+letter nobody will ever look at again. Fold, write, re-fold, and only then
+delete; the origin the accept hands back is the hash to delete by, and the fold
+reports the same origin once the event is really in canon. Deleting on the
+strength of a Right is how a contributor's submission disappears without anyone
+seeing an error.
+
+Publishing a triage ban into canon, which this document leaves as an open
+question, is deferred past `hub-meta 1`. It would need a new author-content
+constructor and an admission rule saying who may sign one and what it does,
+which is a consensus change: the deny-list stays loop state, and the earliest a
+public ban can appear is `hub-meta 2`. Recorded here so that nothing plans
+around a clause that does not exist.
+
 Which of the five a refusal gets depends on WHERE it was raised, not on what it
 says. Honouring a request runs every check twice, once over what the letter
 asked for and once over what the maintainer is actually signing, and the same

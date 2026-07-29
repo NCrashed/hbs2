@@ -101,6 +101,7 @@ import HBS2.Hub.Letter
 import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Data.Types.SignedBox (SignedBox)
 import HBS2.Net.Auth.Credentials
+import HBS2.Prelude.Plated (Pretty(..),viaShow,(<+>))
 
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
@@ -438,6 +439,51 @@ instance Show Pending where
         ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
         AMerge{} -> "merge"; ARedact{} -> "redact"
         ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
+
+-- | What triage says about a refusal, on a terminal.
+--
+-- Written here rather than left to whoever prints it, for the reason the other
+-- renderers in this package are: this is what an operator reads when a
+-- submission did not land, and six call sites inventing their own wording is
+-- six different answers to one question.
+instance Pretty TriageError where
+  pretty = \case
+    BadLetter e           -> pretty e
+    NotAcceptable d       -> "an op a letter may not carry:" <+> viaShow d
+    Requested p           -> "a request to rule on:" <+> viaShow (pdContent p)
+    WrongRepo             -> "authored for another repository"
+    UnknownThread         -> "names a thread canon does not hold yet"
+    AlreadyInCanon        -> "already in canon"
+    NotAuthorOfRecord     -> "a revise from someone other than the author of record"
+    BadContent            -> "kind and payload disagree"
+    UnauthorizedForRepo   -> "this folding key may not bless events here"
+    UnknownTarget         -> "redacts an event canon does not hold"
+    CursorExhausted       -> "the cursor has no room left"
+    StampOutOfRange       -> "the clock to stamp is past the ceiling canon admits"
+    ThreadMismatch        -> "moves the request to another thread"
+    AlreadyHonoured       -> "this message has already been folded"
+    ViewRepoMismatch      -> "the view describes another repository"
+    MissingPartSecret     -> "no key supplied for an attachment"
+    PartNotInMessage h    -> "names a part the message does not carry:" <+> pretty h
+    NoAttachmentsSupplied -> "no evidence supplied about the attachments"
+    PartNotFetched h      -> "an attachment not fetched yet:" <+> pretty h
+    PartTooLarge h        -> "an attachment over what this hub carries:" <+> pretty h
+    BadPartSecret         -> "the part secret cannot be a key"
+    MessageSecretOffered  -> "the parts secret offered is the message secret"
+    BodyTooLarge f        -> "field" <+> pretty f <+> "is over what triage carries inline"
+    MalformedRef f        -> "field" <+> pretty f <+> "is not a hash"
+    OwnerKeyRequired      -> "only the owner key may do this"
+    NeedsReview           -> "carries words the owner would be signing as their own"
+    UnnormalizedValue k   -> "attribute" <+> pretty k <+> "is not in canonical form"
+    Composed e            -> "in what this caller composed:" <+> pretty e
+
+instance Pretty Outcome where
+  pretty = \case
+    Retry   -> "retry"
+    Park    -> "park"
+    Decide  -> "decide"
+    Discard -> "discard"
+    Abort   -> "abort"
 
 outcome :: TriageError -> Outcome
 outcome = \case
@@ -1161,10 +1207,12 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
   scope <- case content of
     -- A redact belongs with the thread of the event it hides, so it lands
     -- beside it in the tree rather than under an id of its own.
-    ARedact target _ -> case HM.lookup target (cvEvents view) of
-      Nothing         -> Left UnknownTarget
-      Just (Just thr) -> Right (ThreadScope thr)
-      Just Nothing    -> Right RepoScope
+    ARedact target eid _
+      | target /= repo -> Left WrongRepo
+      | otherwise -> case HM.lookup eid (cvEvents view) of
+          Nothing         -> Left UnknownTarget
+          Just (Just thr) -> Right (ThreadScope thr)
+          Just Nothing    -> Right RepoScope
 
     -- Only the owner key may delegate (PEP-19 rule 5): a delegate signing
     -- one would be dropped, so refuse before minting.

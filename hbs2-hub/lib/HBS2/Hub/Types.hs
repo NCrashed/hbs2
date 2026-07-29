@@ -76,6 +76,7 @@ import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 
 import Codec.CBOR.Read (deserialiseFromBytes)
+import Crypto.Saltine.Class qualified as Saltine
 import Codec.Serialise (Serialise(..),serialise)
 import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
@@ -83,6 +84,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Char (isAsciiLower,isDigit)
 import Data.Coerce (coerce)
+import Data.Maybe (isJust)
 import Data.List (nub,sort)
 import Data.Text qualified as Text
 import Data.Int (Int64)
@@ -158,8 +160,15 @@ data AuthorContent =
   | AReopen ThreadId (Maybe Text) Word64
     -- | thread, merge-commit, merged-into, ts  (owner, PR)
   | AMerge ThreadId Text Text Word64
-    -- | redacts (target event-id), ts  (owner)
-  | ARedact EventId Word64
+    -- | target, redacts (event-id), ts  (owner)
+    --
+    -- The only op whose subject is not a thread, so the only one the transitive
+    -- binding does not reach: a comment names a thread, a thread is an open, and
+    -- an open names its repository, but a redact names an event-id and nothing
+    -- else. Without the repo here, one signed by a maintainer of two repos hides
+    -- an event in whichever of them holds that id, and the argument beside
+    -- ADelegate applies word for word.
+  | ARedact RepoRef EventId Word64
     -- | target, maintainer key authorized, ts  (owner-key only, PEP-21)
     --
     -- The repo is named here for the reason it is named on an open: an author
@@ -192,7 +201,7 @@ authorTs = \case
   AClose _ _ t        -> t
   AReopen _ _ t       -> t
   AMerge _ _ _ t      -> t
-  ARedact _ t         -> t
+  ARedact _ _ t       -> t
   ADelegate _ _ t     -> t
   ARevoke _ _ t       -> t
 
@@ -210,7 +219,7 @@ withAuthorTs t = \case
   AClose a b _          -> AClose a b t
   AReopen a b _         -> AReopen a b t
   AMerge a b c _        -> AMerge a b c t
-  ARedact a _           -> ARedact a t
+  ARedact a b _         -> ARedact a b t
   ADelegate a b _       -> ADelegate a b t
   ARevoke a b _         -> ARevoke a b t
 
@@ -572,6 +581,16 @@ unboxChecked
   => SignedBox p HubScheme
   -> Either BoxError (HubKey, p)
 unboxChecked (SignedBox pk bs sig)
+  -- Before the verify, because the verify is where the bytes stop being ours.
+  -- The Serialise instances for a signing key and a signature are generic over
+  -- a newtype, so they take any length and walk straight past the length check
+  -- the crypto library does on its own decoder; the verifier then hands the
+  -- pointers to a C function that reads thirty-two and sixty-four bytes without
+  -- asking. On this heap that lands in slack and returns a mismatch rather than
+  -- a crash, which is luck rather than a defence: it is a read out of bounds
+  -- either way. This runs the check the instance skipped, using the crypto
+  -- library's own decoder so there is no second opinion about the sizes.
+  | not (wellFormed pk sig)               = Left BoxBadSig
   | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
   | otherwise = case decodeChecked bs of
       Left why -> Left (BoxUndecodable pk why)
@@ -581,6 +600,18 @@ unboxChecked (SignedBox pk bs sig)
         -- presented as a kind of record they were never signed as.
         | d /= domainOf (Nothing @p) -> Left (BoxUndecodable pk WrongDomain)
         | otherwise                  -> Right (pk, p)
+
+-- | Are these the right shape to hand to the verifier at all?
+--
+-- Round-tripping through the crypto library's own encoder and decoder, which is
+-- the length check the 'Serialise' instances do not do. Deliberately not a pair
+-- of constants: the sizes belong to the scheme, and writing them down here
+-- would be a second place for them to be wrong.
+wellFormed :: HubKey -> Signature HubScheme -> Bool
+wellFormed pk sig = ok @(PubKey 'Sign HubScheme) pk && ok @(Signature HubScheme) sig
+  where
+    ok :: forall a . Saltine.IsEncoding a => a -> Bool
+    ok a = isJust (Saltine.decode (Saltine.encode a) :: Maybe a)
 
 -- | Decode CBOR requiring the whole input to be consumed.
 --

@@ -314,7 +314,7 @@ spec = do
       classify (AReopen tid Nothing 1) `shouldBe` RequestOnly
       classify (ASet tid "labels" "bug" 1) `shouldBe` RequestOnly
       classify (AMerge tid "a" "b" 1) `shouldBe` OwnerNative
-      classify (ARedact tid 1) `shouldBe` OwnerNative
+      classify (ARedact repo tid 1) `shouldBe` OwnerNative
       classify (ADelegate (fst owner) (fst owner) 1) `shouldBe` OwnerNative
       classify (ARevoke (fst owner) (fst owner) 1) `shouldBe` OwnerNative
 

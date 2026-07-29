@@ -57,6 +57,7 @@ common shared-properties
       , unordered-containers
       , text
       , prettyprinter
+      , saltine
       , base64-bytestring
 
 library

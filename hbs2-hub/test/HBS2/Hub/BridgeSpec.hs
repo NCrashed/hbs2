@@ -228,7 +228,7 @@ spec = do
       -- bridge that blessed whatever arrived would have the owner sign a
       -- redact authored by a stranger.
       let repo = fst owner
-          evil = makeLetter (fst mallory) (snd mallory) (ARedact target 1) noReplyChannel
+          evil = makeLetter (fst mallory) (snd mallory) (ARedact repo target 1) noReplyChannel
       expectErr (NotAcceptable OwnerNative)
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo) 1 origin noParts evil)
 
@@ -393,7 +393,7 @@ spec = do
     it "refuses an owner redact whose target is not in canon yet" $ do
       owner <- kp
       ghost <- someHash
-      expectOwn UnknownTarget (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ARedact ghost 1))
+      expectOwn UnknownTarget (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ARedact (fst owner) ghost 1))
 
     it "can redact an event that left no visible trace" $ do
       alice <- kp
@@ -415,7 +415,7 @@ spec = do
       let fr = foldEvents repo (map acEvent [aOpen, aSet])
           rebuilt = viewOf fr
       aRedact <- expectRight
-        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments (ARedact (eventId (acEvent aSet)) 3))
+        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments (ARedact repo (eventId (acEvent aSet)) 3))
       -- and it lands with the thread it belongs to, not under its target's id
       acScope aRedact `shouldBe` ThreadScope (scopeOf aOpen)
       let fr' = foldEvents repo (map acEvent [aOpen, aSet, aRedact])
@@ -521,14 +521,14 @@ spec = do
         (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
       aRed <- expectRight
         (ownerEvent (ctxOf owner) (acView aDel) 2 noOwnAttachments
-           (ARedact (eventId (acEvent aDel)) 2))
+           (ARedact (fst owner) (eventId (acEvent aDel)) 2))
       acScope aRed `shouldBe` RepoScope
 
     it "reports an unknown redact target as such, not as an unknown thread" $ do
       owner <- kp
       ghost <- someHash
       expectOwn UnknownTarget
-        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ARedact ghost 1))
+        (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ARedact (fst owner) ghost 1))
 
     it "reports a revise on an issue thread as bad content" $ do
       origin2 <- someHash
@@ -836,9 +836,9 @@ spec = do
       expectErr (Composed (NotAcceptable OwnerNative))
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (AMerge tid "abc" "master" 2) req)
       expectErr (Composed (NotAcceptable OwnerNative))
-        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact repo tid 2) req)
       either outcome (const Decide)
-        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact tid 2) req)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact repo tid 2) req)
         `shouldBe` Abort
       -- ...and the request itself is still there to be honoured properly
       _ <- expectRight
@@ -1559,7 +1559,7 @@ spec = do
            (attachments secret32 msgSecret [here huge])
            (letter (AComment (scopeOf acc) Nothing Nothing (Just huge) 2)))
       expectOwn (MalformedRef "redacts")
-        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments (ARedact huge 2))
+        (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments (ARedact repo huge 2))
       expectOwn (MalformedRef "thread")
         (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments
            (AClose huge Nothing 2))
@@ -1740,7 +1740,7 @@ spec = do
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
                            (ASet (scopeOf a2) "labels" "bug" 4))
       a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 noOwnAttachments
-                           (ARedact (eventId (acEvent a4)) 5))
+                           (ARedact repo (eventId (acEvent a4)) 5))
       a6 <- expectRight (ownerEvent (ctxOf owner) (acView a5) 6 noOwnAttachments
                            (ADelegate repo (fst carol) 6))
       a7 <- expectRight (ownerEvent (ctxOf owner) (acView a6) 7 noOwnAttachments

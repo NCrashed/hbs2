@@ -71,7 +71,7 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 import HBS2.Net.Auth.Credentials
-import HBS2.Prelude.Plated (Pretty(..))
+import HBS2.Prelude.Plated (Pretty(..),(<+>))
 
 import Data.Config.Suckless.Syntax
 
@@ -281,7 +281,7 @@ malformedRef = \case
   AClose thr _ _                -> bad "thread" thr
   AReopen thr _ _               -> bad "thread" thr
   AMerge thr _ _ _              -> bad "thread" thr
-  ARedact target _              -> bad "redacts" target
+  ARedact _ target _            -> bad "redacts" target
   ADelegate{}                   -> Nothing
   ARevoke{}                     -> Nothing
   where
@@ -395,6 +395,22 @@ data LetterError =
     -- (repo, thread) pair is not one this reader submitted. See 'openAckFor'.
   | UnrelatedAck
   deriving stock (Eq,Show)
+
+-- | What a triage loop says about a letter it would not open.
+instance Pretty LetterError where
+  pretty = \case
+    MalformedPayload       -> "not a letter payload"
+    UnsupportedVersion v   -> "schema version" <+> pretty v <+> "is newer than this build"
+    BadInnerSig            -> "the inner signature does not verify"
+    UndecodableContent k w -> "content from" <+> pretty (AsBase58 k) <+> case w of
+      Undecodable  -> "this build cannot decode"
+      TrailingData -> "with bytes left over"
+      WrongDomain  -> "signed as another kind of record"
+    NotALetter             -> "an acknowledgement, where a letter was expected"
+    NotAnAck               -> "a letter, where an acknowledgement was expected"
+    AuthorDenied           -> "from a deny-listed key"
+    UntrustedAck           -> "acknowledged by a key that is not a maintainer"
+    UnrelatedAck           -> "about a thread this reader never submitted"
 
 -- | What a letter's op can become once the owner triages it (PEP-18/PEP-19).
 data Disposition =
@@ -740,8 +756,9 @@ contentSyntax = body
         , mkForm "merge-commit" [txt mc], mkForm "merged-into" [txt into]
         , mkForm "created" [mkInt ts] ]
 
-      ARedact target ts ->
-        [ op "redact", mkForm "redacts" [href target], mkForm "created" [mkInt ts] ]
+      ARedact target eid ts ->
+        [ op "redact", mkForm "target" [b58 target]
+        , mkForm "redacts" [href eid], mkForm "created" [mkInt ts] ]
 
       ADelegate target k ts ->
         [ op "delegate", mkForm "target" [b58 target]

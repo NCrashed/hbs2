@@ -41,7 +41,7 @@ import HBS2.Hub.Letter (contentSyntax,maxBoxBytes)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
-import HBS2.Prelude.Plated (Pretty(..),fromStringMay)
+import HBS2.Prelude.Plated (Pretty(..),fromStringMay,(<+>))
 
 import Data.Config.Suckless
 import Data.Coerce (coerce)
@@ -71,6 +71,14 @@ data CanonError =
     -- is exactly the point: it is refused before anything reads it.
   | TooLarge Text
   deriving stock (Eq,Show)
+
+-- | What a reader says about a file it would not read, on a terminal.
+instance Pretty CanonError where
+  pretty = \case
+    NotAnEvent e    -> "not an s-expression:" <+> pretty e
+    MissingClause c -> "missing clause" <+> pretty c
+    BadClause c     -> "malformed clause" <+> pretty c
+    TooLarge what   -> "over the bound this reader will read:" <+> pretty what
 
 -- | What a reader will look at before deciding the file is an attack.
 --
@@ -287,9 +295,13 @@ parseNumberIndex txt = do
 
     entry = \case
       List _ [SymbolVal "number", LitIntVal n, SymbolVal t]
-        | n >= 0 -> case fromStringMay (Text.unpack (idText t)) of
-            Just h  -> Right (fromIntegral n, HashRef h)
-            Nothing -> Left (BadClause "number")
+        -- Both ends of the range, not just the sign. Checking only n >= 0 and
+        -- then narrowing let two lines of an index both claim to be number one,
+        -- silently, on a file that is meant to answer which thread is which.
+        | n >= 0, n <= fromIntegral (maxBound :: Word64) ->
+            case fromStringMay (Text.unpack (idText t)) of
+              Just h  -> Right (fromIntegral n, HashRef h)
+              Nothing -> Left (BadClause "number")
       _ -> Left (BadClause "number")
 
 -- | A number and a thread id per line, so the whole of a line's bound is one

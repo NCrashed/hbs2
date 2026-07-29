@@ -196,7 +196,12 @@ The author payload is a sum, encoded with its constructor's position as the tag,
 in this order: `open`, `comment`, `revise`, `set`, `close`, `reopen`, `merge`,
 `redact`, `delegate`, `revoke`. New ops are appended and none is ever reordered
 or removed. The fields of each are in the order the schema below lists them, and
-`delegate` and `revoke` begin with their target repository like an `open` does.
+`redact`, `delegate` and `revoke` begin with their target repository like an
+`open` does. A `redact` needs it for a reason the others do not: every remaining
+op names a thread, a thread is an `open`, and an `open` names its repository, so
+they are bound transitively. A `redact` names an event-id and nothing else, and
+would otherwise be the one op a maintainer of two repositories could sign in one
+and have take effect in the other.
 
 PR coordinates are a product, in this order: `source`, `source-ref`,
 `source-tip`, `onto`, `base`, `bundle-part`, with the first and last optional.
@@ -532,7 +537,8 @@ The tree under a `refs/hbs2/meta` commit:
 
 ```
 /
-  version                      ; "hub-meta 1"
+  version                      ; exactly "(hub-meta 1)\n", a clause like every
+                               ;   other one in this tree
   threads/
     <thread-id>/
       00000000000000000042-<event-id>   ; name = seq zero-padded to 20 digits + "-" + event-id
@@ -630,6 +636,15 @@ Ordering:
 With all three keys the fold is deterministic regardless of enumeration order
 or how commits batched the events.
 
+The set of refusals is consensus too, and finer than a reader might expect on
+purpose. "Kind and payload disagree" and "the stamp is unusable" are each four
+different things, and which one it was cannot be recovered from the event
+afterwards: a reader looking at a dropped pull request cannot tell whether the
+coordinates were missing, unreachable, or on a thread that is not a PR at all,
+and an operator whose counter has stalled needs to know WHICH counter. So they
+are separate reasons, and adding or merging one is a `hub-meta` bump like any
+other admission change.
+
 Admission. An event enters the fold only if all of the following hold; any
 failure drops the event and is surfaced as a warning, never silently
 altering state:
@@ -648,8 +663,9 @@ altering state:
      op: it is a canon-box field on the `open` event, so it is owner-signed
      by construction.)
   4a. Payload rules that are admission rules, and so are consensus like the
-     rest of this list. An `open`, a `delegate` and a `revoke` name THIS
-     repository in their author box, and EVERY event names it in its canon box:
+     rest of this list. An `open`, a `delegate`, a `revoke` and a `redact` name
+     THIS repository in their author box, and EVERY event names it in its canon
+     box:
      otherwise an event authored or blessed for another repo could be lifted out
      of that repo's canon and replayed here with valid signatures. For an `open` that means
      somebody else's words appearing here; for a `delegate` it means an owner
@@ -1233,11 +1249,24 @@ what they expose. The contract:
 The CLI maintains a local materialized cache in SQLite, ported from
 fixme-new (`/home/user/dev/hbs2-legacy/fixme-new/lib/Fixme/State.hs`): its
 single `object(o, w, k, v)` table with last-write-wins by weight, plus a
-`comments` table and a `scanned`-style table recording the last applied
-`seq` so re-fold is incremental. The port is nearly verbatim; the monofold,
-the LWW-by-weight upsert, and the scanned-dedup table all carry over. The
-cache is node-local and never canonical: it is always reproducible from the
-event log, so it is gitignored and rebuildable. A renderer reads either the
+`comments` table. The port is nearly verbatim; the monofold and the
+LWW-by-weight upsert carry over. The cache is node-local and never canonical:
+it is always reproducible from the event log, so it is gitignored and
+rebuildable.
+
+What does NOT carry over is the `scanned`-style table recording the last applied
+`seq` as a resume point. That works for a log that only ever grows at the end,
+and canon does not: files arrive in whatever order a fetch produces them, and an
+`open` with a lower `seq` can turn up after the reply that names it has already
+been refused as dangling. Resuming from "the highest seq applied" would leave
+that reply refused forever, in a cache nobody would think to distrust.
+
+The rule an incremental cache has to follow is therefore: a batch of new files
+may be applied on top of the cache only if every one of them has a `seq` above
+every `seq` already applied. Otherwise the cache is dropped and rebuilt from the
+whole log, which is cheap because the fold is cheap and the tree is local. Any
+cleverer scheme has to answer what a late arrival does to admission, and
+admission is not a function of one event. A renderer reads either the
 library `materialize` directly or the SQLite cache; it never writes canon.
 
 

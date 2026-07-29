@@ -270,6 +270,10 @@ data Run = Run
     -- | Every event a stranger wrote into the tree was refused, and refused
     -- for being unauthorized rather than for anything about its content.
   , rIntruded :: Bool
+    -- | Re-folding the same canon in another order gives the same everything.
+    -- Determinism had three hand-built logs of five events and no property, so
+    -- the sort keys were exercised only where somebody thought to.
+  , rOrderFree :: Bool
   , rTags     :: [Tag]
   , rRefused  :: [TriageError]
   }
@@ -331,6 +335,7 @@ spec =
               , ("one letter produced two canon events", rOnePer r)
               , ("a mint against a stale view would not have collided", rStaleDup r)
               , ("an intruder's event was not refused as unauthorized", rIntruded r)
+              , ("the fold is not independent of the order it reads", rOrderFree r)
               ]
         monitor (counterexample (unlines [ "FAILED: " <> name | (name,ok) <- invariants, not ok ]))
         assert (all snd invariants)
@@ -365,6 +370,14 @@ runSteps steps = do
       st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] []
       st  = foldl' (\s sp -> step cast s { stStep = stStep s + 1 } sp) st0 steps
       fr  = foldEvents repo (stEvents st)
+      -- Everything a fold produces, so that a field added later is covered
+      -- without anyone remembering to add it here.
+      whole f = ( frDropped f, frAnomalies f, frRedacted f, frParts f
+                , frMaxSeq f, frMaxNumber f, frLastFolded f, frOrigins f
+                , frMaintainers f, frAdmitted f, frLog f )
+      same f = whole f == whole (foldEvents repo (rotate (stEvents st)))
+      rotate [] = []
+      rotate (x:xs) = xs <> [x]
       intruders = HS.fromList (stIntruders st)
       -- One canon event per letter: count the origins the events carry. The
       -- intruders' own events are excluded from both of these: they are in the
@@ -378,6 +391,7 @@ runSteps steps = do
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
     , rStaleDup = all (`HS.member` live) (stStale st)
+    , rOrderFree = same fr && same (foldEvents repo (reverse (stEvents st)))
     , rIntruded = all (\eid -> [UnauthorizedCanon] ==
                                  [ drWhy d | d <- frDropped fr, drEvent d == eid ])
                       (stIntruders st)
@@ -451,7 +465,7 @@ step cast st = \case
     let target = case drop i (stEvents st) of
                    (e:_) -> eventId e
                    []    -> originOf (stStep st)  -- not an event id at all
-    in mint TRedact (ARedact target ts) ts
+    in mint TRedact (ARedact repo target ts) ts
 
   StepDelegate ts -> mint TDelegate (ADelegate repo (castDelegKey cast) ts) ts
   StepRevoke ts   -> mint TRevoke (ARevoke repo (castDelegKey cast) ts) ts

@@ -88,7 +88,7 @@ spec = do
             , AClose target (Just "done") 5
             , AReopen target Nothing 6
             , AMerge target "cafe" "refs/heads/master" 7
-            , ARedact target 8
+            , ARedact repo target 8
             , ADelegate repo (fst alice) 9
             , ARevoke repo (fst alice) 10
             ]

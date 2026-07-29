@@ -41,7 +41,9 @@ module HBS2.Hub.Fold
 
 import HBS2.Hub.Types
 
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Prelude.Plated (Doc,Pretty(..),(<+>))
 
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
@@ -87,14 +89,22 @@ data DropReason =
   | UnauthorizedDelegate -- ^ delegate/revoke not signed by the LWWRef owner key (rule 5)
   | BadThread         -- ^ reply to a non-admitted open (dangling)
   | BadRevise         -- ^ revise not from the author of record
-  | BadKind           -- ^ kind and payload disagree, or a PR-only op on an issue
   | UnknownRedact     -- ^ redact target never admitted (no-op)
-    -- | A canon box whose stamped values are not usable: a @number@ on
-    -- anything but an @open@, a @seq@ or @number@ at the very top of the
-    -- range, which would leave the next mint with nowhere to go, or a
-    -- @folded-ts@ above 'maxFoldedTs'. A wrong or hostile maintainer could
-    -- otherwise poison the cursor permanently.
-  | BadStamp
+    -- Kind and payload disagreeing, split four ways, because @hub verify@ has
+    -- to name the cause and the event cannot be re-examined to recover it: a
+    -- reader looking at a dropped PR cannot tell whether the coordinates were
+    -- missing, unreachable, or on the wrong kind of thread.
+  | PROpenWithoutCoords   -- ^ a @pr@ open carrying none
+  | IssueOpenWithCoords   -- ^ an @issue@ open carrying some
+  | CoordsUnreachable     -- ^ neither a fork to pull nor a bundle to fetch
+  | PROnlyOnIssue         -- ^ a @revise@ or a @merge@ on an issue thread
+    -- A canon box whose stamped values are not usable, likewise split: a wrong
+    -- or hostile maintainer can poison a counter permanently, and which counter
+    -- is the first thing an operator needs.
+  | NumberOnNonOpen       -- ^ a @number@ on anything but an @open@
+  | SeqAtTopOfRange       -- ^ the next mint would wrap to zero
+  | NumberAtTopOfRange
+  | FoldedTsAboveCeiling  -- ^ past 'maxFoldedTs'
   deriving stock (Eq,Ord,Show)
 
 -- | Something admitted canon should not contain.
@@ -394,6 +404,71 @@ data Item =
     -- was dropped, its stamp, and the canon box hash for the tie-break.
   | Ghost EventId DropReason Stamp (Maybe Word64) HashRef
 
+-- | How a refusal reads on a terminal (PEP-22 @hub verify@).
+--
+-- Here rather than in whatever prints it, and for the reason every renderer in
+-- this package is: a key printed by 'show' is a short internal digest and not
+-- the base58 anyone can look up, so six call sites left to their own devices
+-- produce six spellings of one fact, and the operator learns which tool they
+-- are using rather than what happened.
+instance Pretty DropReason where
+  pretty = \case
+    BadAuthorSig          -> "author signature does not verify"
+    BadCanonSig           -> "canon signature does not verify"
+    UndecodableAuthor k w -> "author content" <+> why w <+> "from" <+> key k
+    UndecodableCanon k w  -> "canon content" <+> why w <+> "from" <+> key k
+    IdMismatch            -> "canon box blesses another event"
+    WrongTarget           -> "authored or blessed for another repository"
+    DupId                 -> "this author box is already in canon"
+    UnauthorizedCanon     -> "not blessed by an authorized key"
+    UnauthorizedDelegate  -> "delegate or revoke not signed by the owner key"
+    BadThread             -> "reply to a thread canon does not hold"
+    BadRevise             -> "revise from someone other than the author of record"
+    UnknownRedact         -> "redacts an event canon does not hold"
+    PROpenWithoutCoords   -> "a pull request with no coordinates"
+    IssueOpenWithCoords   -> "an issue carrying pull request coordinates"
+    CoordsUnreachable     -> "coordinates with nothing to fetch"
+    PROnlyOnIssue         -> "a pull-request-only op on an issue"
+    NumberOnNonOpen       -> "a number on something that is not an open"
+    SeqAtTopOfRange       -> "seq at the top of its range"
+    NumberAtTopOfRange    -> "number at the top of its range"
+    FoldedTsAboveCeiling  -> "folded-ts above the ceiling canon admits"
+    where
+      why = \case
+        Undecodable  -> "this build cannot decode"
+        TrailingData -> "with bytes left over"
+        WrongDomain  -> "signed as another kind of record"
+
+instance Pretty Anomaly where
+  pretty = \case
+    DupSeq n            -> "two events at seq" <+> pretty n
+    DupNumber n         -> "two threads numbered" <+> pretty n
+    NumberWentBack a b  -> "number went from" <+> pretty a <+> "to" <+> pretty b
+    FoldedTsWentBack a b -> "folded-ts went from" <+> pretty a <+> "to" <+> pretty b
+    DupOrigin h         -> "two events folded from message" <+> pretty h
+    PartWithoutSecret   -> "an attachment with no key published for it"
+    SecretWithoutPart   -> "a key published for no attachment"
+    UnusablePartSecret  -> "a part secret that cannot be a key"
+    UnnormalizedAttr k  -> "attribute" <+> pretty k <+> "is not in canonical form"
+
+-- | One line per refusal, naming the event, where it sits, and who blessed it,
+-- which is what PEP-22 requires of the report.
+instance Pretty Dropped where
+  pretty d = at (drSeq d) <+> pretty (drEvent d)
+         <+> pretty (drWhy d) <+> by (drCanonBy d)
+    where
+      at = maybe "seq ?" (("seq" <+>) . pretty)
+      by = maybe mempty (\k -> "(blessed by" <+> key k <> ")")
+
+instance Pretty Anomalous where
+  pretty a = "seq" <+> pretty (anSeq a) <+> pretty (anEvent a)
+         <+> pretty (anWhat a) <+> "(blessed by" <+> key (anCanonBy a) <> ")"
+
+-- Keys are printed the way anyone can look them up, which the derived Show is
+-- not: it is a short internal digest.
+key :: HubKey -> Doc ann
+key = pretty . AsBase58
+
 -- | Discharge rules 1-2: both boxes verify, and the canon box references
 -- this event's id.
 resolve :: Event -> Either DropReason Resolved
@@ -554,7 +629,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- a moment later for a reason that says nothing about why.
       | ccTarget (rCanon r) /= owner = go rest (dropE r WrongTarget s0)
       | HM.member (rId r) (sSeen s)  = go rest (dropE r DupId s)
-      | not (sane r)                 = go rest (dropE r BadStamp s)
+      | Just why <- unusable r        = go rest (dropE r why s)
       | otherwise                    = go rest (apply r s)
       where
         s = stamp (stampOf r) s0
@@ -571,15 +646,19 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
     -- Closing that needs an admission rule about what a stamp may be
     -- relative to the ones before it, and one that a partial clone can
     -- evaluate at that; PEP-19 records it as a known bound.
-    sane r = numberOK && seqOK && numberSmallEnough && foldedOK
+    unusable r
+      | not numberOK          = Just NumberOnNonOpen
+      | ccSeq cc == maxBound  = Just SeqAtTopOfRange
+      | numberIsMax           = Just NumberAtTopOfRange
+      | not foldedOK          = Just FoldedTsAboveCeiling
+      | otherwise             = Nothing
       where
         cc = rCanon r
         numberOK = case (rContent r, ccNumber cc) of
           (AOpen{}, _)      -> True
           (_, Nothing)      -> True
           (_, Just _)       -> False
-        seqOK = ccSeq cc /= maxBound
-        numberSmallEnough = maybe True (/= maxBound) (ccNumber cc)
+        numberIsMax = ccNumber cc == Just maxBound
         -- A ceiling rather than the top of the range, because the harm here is
         -- not the wrap the counters suffer: the next stamp is clamped to be no
         -- lower than this one, so 'max' carries a bad value forward from
@@ -670,7 +749,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
       -- Owner-authored (PEP-19 rule 4): BOTH boxes must be an authorized
       -- key. Checking only the canon box would let anyone author a redact
       -- and hide any event in the repo as soon as it got blessed.
-      ARedact target _
+      ARedact repo target _
+        | repo /= owner              -> dropE r WrongTarget s
         | not (ownerAuthored r s)    -> dropE r UnauthorizedCanon s
         -- Moderating a thread changes it, so its clock moves with it:
         -- otherwise a thread whose comment was just withdrawn looks
@@ -692,9 +772,9 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         -- Kind and payload must agree. A PR must carry its coordinates
         -- (nothing may invent them later); an issue must not, or canon
         -- would silently materialize less than the author box says.
-        | kind == HubPR && isNothing mpr -> dropE r BadKind s
-        | kind == HubIssue && isJust mpr -> dropE r BadKind s
-        | maybe False (not . reachableCoords) mpr -> dropE r BadKind s
+        | kind == HubPR && isNothing mpr -> dropE r PROpenWithoutCoords s
+        | kind == HubIssue && isJust mpr -> dropE r IssueOpenWithCoords s
+        | maybe False (not . reachableCoords) mpr -> dropE r CoordsUnreachable s
         | otherwise ->
             let t = ThreadState
                       { tsId = rId r, tsKind = kind
@@ -722,8 +802,8 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
         touch r t { tsComments = mkComment r replyto ts body bodypart : tsComments t }
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
-        if tsKind t /= HubPR then Left BadKind
-        else if not (reachableCoords coords) then Left BadKind
+        if tsKind t /= HubPR then Left PROnlyOnIssue
+        else if not (reachableCoords coords) then Left CoordsUnreachable
         else if rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s)
           -- The new coordinates come with the secret for their own bundle.
           then Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
@@ -745,7 +825,7 @@ materializeWith owner rs0 pre = finish (go (sortOn key rs0) st0)
           (HubPR, Just pr) ->
             Right (touch r t { tsPR = Just pr { psMerge = Just (mc,into) }
                              , tsAttrs = HM.insert "status" "merged" (tsAttrs t) })
-          _ -> Left BadKind
+          _ -> Left PROnlyOnIssue
 
     foldedTs = ccFoldedTs . rCanon
 
