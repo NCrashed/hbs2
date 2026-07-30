@@ -47,6 +47,14 @@ data GitBounds = GitBounds
   { gbListingBytes :: Int   -- ^ 'maxListingBytes'
   , gbListingFiles :: Int   -- ^ 'maxCanonFiles', counted before anything is built
   , gbToolMessage  :: Int   -- ^ how much of a tool's complaint to keep
+    -- | How much of a complaint to keep PER FILE. Smaller than the above by two
+    -- orders, because it is kept until the report is printed and there can be
+    -- 'maxCanonFiles' of them: 64 KiB apiece would be twelve gigabytes.
+  , gbBlobMessage  :: Int
+    -- | How long any single git call may take. Not the listing, which streams
+    -- under its own byte bound; the four small ones, which have no reason to be
+    -- slow and every reason not to hang.
+  , gbCallSeconds  :: Int
   }
 
 gitBounds :: GitBounds
@@ -54,6 +62,8 @@ gitBounds = GitBounds
   { gbListingBytes = maxListingBytes
   , gbListingFiles = maxCanonFiles
   , gbToolMessage  = 64 * 1024
+  , gbBlobMessage  = 512
+  , gbCallSeconds  = 60
   }
 
 -- | Canon from the repository the process is standing in.
@@ -171,7 +181,7 @@ gitCanonWith bounds cwd = CanonSource
         -- error. Distinct from git not having run, below, which says nothing about
         -- canon at all: read as one answer, a fork that failed on EAGAIN became an
         -- unreadable event file and exit 2, the code for an audit that ran.
-        Right (_, e) -> BlobRefused (msg (decode e))
+        Right (_, e) -> BlobRefused (Text.take (gbBlobMessage bounds) (msg (decode e)))
         Left e -> BlobUnavailable (msg e)
   }
   where
@@ -204,35 +214,68 @@ gitCanonWith bounds cwd = CanonSource
     -- hook auditing a repository other than the one it was invoked for is the
     -- kind of wrong that reads as correct.
     --
-    -- The stripping is only for a NAMED directory. With none, the environment is
-    -- the caller's whole answer to "which repository", and a hook's GIT_DIR is
-    -- then the right one to obey.
+    -- The repository stripping is only for a NAMED directory. With none, the
+    -- environment is the caller's whole answer to "which repository", and a
+    -- hook's GIT_DIR is then the right one to obey. Everything else here applies
+    -- to both, because the command line is what names a repository and none of
+    -- the rest is about which one.
     inDir p = do
       env0 <- liftIO getEnvironment
-      let kept = case cwd of
-                   Nothing -> env0
-                   Just _  -> List.filter (not . override . fst) env0
+      let dropped = fmap fst forced <> refuseToLook
+                      <> (case cwd of Nothing -> [] ; Just _ -> whichRepository)
+          kept = List.filter ((`notElem` dropped) . fst) env0
           here = maybe id setWorkingDir cwd
       pure (setEnv (kept <> forced) (here p))
 
-    -- Not negotiable by the environment, so appended: setEnv takes the last
-    -- binding of a name.
-    forced = [ ("GIT_NO_LAZY_FETCH", "1"), ("GIT_TERMINAL_PROMPT", "0") ]
+    -- REMOVED FROM THE INHERITED SET and then added, which is the whole of the
+    -- difference between this working and not. Appending alone does nothing: with
+    -- two bindings of one name in envp, getenv returns the FIRST, so a caller
+    -- with GIT_NO_LAZY_FETCH=0 in their environment got a reader that fetched the
+    -- tree it was auditing, with the bounds firing after the bytes had landed.
+    -- Measured on the same clone and the same binary, changing only the parent's
+    -- environment: 0 blobs against 2, and one file refused as 270177 bytes after
+    -- it had been downloaded.
+    forced =
+      [ -- The audit is read-only and offline; see the note above.
+        ("GIT_NO_LAZY_FETCH", "1")
+        -- refs/replace rewrites what a commit's tree IS, so canon could be read
+        -- from a substituted tree while the report printed the honest commit id.
+        -- Verified: a planted replacement added an event to a clean audit and the
+        -- header line named the real commit throughout. Not reachable through the
+        -- documented fetch refspec, but a mirror clone carries refs/replace.
+      , ("GIT_NO_REPLACE_OBJECTS", "1")
+        -- No prompting, in three places, because git tries them in order and only
+        -- the last is a terminal: core.askPass, then GIT_ASKPASS (which overrides
+        -- it), then /dev/tty, which `setStdin closed` does not cover. A hook that
+        -- stops for a password nobody is there to type is a hung hook.
+      , ("GIT_ASKPASS", "/bin/false")
+      , ("SSH_ASKPASS", "/bin/false")
+      , ("GIT_TERMINAL_PROMPT", "0")
+      ]
 
-    -- The variables that answer "which repository" from outside it. The ceiling
-    -- and the filesystem-crossing flag are in here with the GIT_DIR family
-    -- because they change the answer for a directory that WAS named: under a CI
-    -- harness or `git bisect run` that sets a ceiling above the named directory,
-    -- git refuses to find a perfectly healthy repository and this reported code 4.
+    -- Variables that answer "which repository" from outside it. Obeyed when the
+    -- caller named no directory, dropped when they did: naming one and being
+    -- given another is the failure, and a hook has GIT_DIR set for every command
+    -- it runs.
+    whichRepository = [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
+                      , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
+                      , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                      ]
+
+    -- Variables that stop git looking at all. Dropped ALWAYS, including the path
+    -- the CLI actually takes, which is the one with no directory named: they do
+    -- not answer "which repository", they refuse the question, and the answer
+    -- here is already given by the caller's own working directory. Under a CI
+    -- harness or `git bisect run` that sets a ceiling above it, a healthy
+    -- repository reported "not a git repository" and exit 4.
     --
-    -- GIT_CONFIG_* are NOT here: a config that turns off gpg signing or sets
-    -- safe.directory is the caller's business, and this only reads.
-    override k = k `elem` [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
-                          , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
-                          , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-                          , "GIT_CEILING_DIRECTORIES"
-                          , "GIT_DISCOVERY_ACROSS_FILESYSTEM"
-                          ]
+    -- The cost is honest: a caller who set a ceiling to keep git off a slow
+    -- network mount does not get that protection here. This reader only ever
+    -- looks where it was pointed.
+    refuseToLook = [ "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM" ]
+
+    -- GIT_CONFIG_* are in NEITHER list: a config that turns off gpg signing or
+    -- sets safe.directory is the caller's business, and this only reads.
 
     -- Lenient, so a blob that is not UTF-8 becomes replacement characters rather
     -- than an exception. It costs up to three bytes per invalid one, which the
@@ -343,15 +386,28 @@ gitCanonWith bounds cwd = CanonSource
     -- dubiously owned, the remedy (the safe.directory command to run) is on the
     -- line AFTER the complaint, so keeping one line kept the half without the fix
     -- in it while claiming stderr was what a human needs.
+    -- Bounded in time, like the listing read and for the same reason: readProcess
+    -- waits for EOF on both pipes, and EOF comes when the LAST holder of the fd
+    -- closes it, which is not necessarily git. A grandchild that outlives it hangs
+    -- the call for ever. The listing got a bound and these four did not, which
+    -- left the hang on the path that runs two hundred thousand times.
+    --
+    -- Generous, because none of these is allowed to be slow: three ref lookups and
+    -- one blob read, all local, all off the network by construction.
     raw args = do
       cfg <- inDir (proc "git" args)
       -- tryAny and not try @SomeException: the latter also caught UserInterrupt and
       -- AsyncCancelled, so Ctrl-C during an audit came back as a file that will
       -- not read and the audit went on to report it.
-      tryAny (readProcess (setStdin closed cfg))
+      tryAny (timeout (gbCallSeconds bounds * 1000000)
+                      (readProcess (setStdin closed cfg)))
         <&> \case
           Left e -> Left (Text.pack (show e))
-          Right (code, out, errOut) ->
+          Right Nothing ->
+            Left ( "git " <> Text.pack (unwords (take 2 args))
+                     <> " did not finish in "
+                     <> Text.pack (show (gbCallSeconds bounds)) <> "s" )
+          Right (Just (code, out, errOut)) ->
             Right (code, if code == ExitSuccess then out else errOut)
 
 -- | Parse the output of @ls-tree -r -z -l@.

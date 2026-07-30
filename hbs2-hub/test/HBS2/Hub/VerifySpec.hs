@@ -17,6 +17,8 @@ import HBS2.Hub.Repo
 import HBS2.Hub.CLI.Verify
 
 import HBS2.Net.Auth.Credentials
+import HBS2.Base58 (AsBase58(..))
+import HBS2.Prelude.Plated (pretty)
 
 import Data.ByteString (ByteString)
 import Data.List (nub,sort)
@@ -159,9 +161,18 @@ spec = do
       let said = "fatal: detected dubious ownership\nrun: git config --global ..."
           ls = Text.lines (render (refusalDoc (NoRepository said)))
       any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` False
-      any ("run: git config" `Text.isInfixOf`) ls `shouldBe` True
-      -- Each line of it on its own line, indented under the complaint.
-      length (filter ("  " `Text.isPrefixOf`) ls) `shouldSatisfy` (>= 2)
+      -- Both lines of it, each on its own line and each MARKED as quoted. The
+      -- marker is what tells a stranger's text from this program's advice, which
+      -- is printed at the same indent immediately below it: unmarked, git's "run:
+      -- git config --global ..." sat exactly where hbs2-hub's own "run this"
+      -- lines sit. An assertion about indentation alone passed without it,
+      -- because the advice is indented too.
+      filter ("  | " `Text.isPrefixOf`) ls `shouldBe`
+        [ "  | fatal: detected dubious ownership"
+        , "  | run: git config --global ..." ]
+      -- And this program's own advice is still there, unmarked, under it.
+      any (\l -> "  " `Text.isPrefixOf` l && not ("  | " `Text.isPrefixOf` l)) ls
+        `shouldBe` True
 
     it "counts a missing version file as a finding, and prints it" $ do
       owner <- kp
@@ -169,9 +180,13 @@ spec = do
       -- zero exit, which is the one thing in the report a reader had to notice
       -- unprompted. Deleting both the line and the exit-code clause used to leave
       -- the whole suite green, which is why this asserts both.
-      st <- readCanon (byPath [("threads/t/0001-x", "not an event")]) (fst owner)
-              >>= either (fail . show) pure
+      -- An EMPTY tree, so the missing version file is the only finding there is:
+      -- with an unreadable file in it as well, the exit code was 2 either way and
+      -- deleting the version clause from reportCode left the suite green.
+      st <- readCanon (byPath []) (fst owner) >>= either (fail . show) pure
       stVersion st `shouldBe` Nothing
+      stBad st `shouldBe` []
+      frDropped (stFold st) `shouldBe` []
       reportCode st `shouldBe` 2
       any ("no version file" `Text.isPrefixOf`) (fmap render (reportDoc st))
         `shouldBe` True
@@ -248,6 +263,11 @@ spec = do
 
       clean <- readCanon (byPath good) repo >>= either (fail . show) pure
       reportCode clean `shouldBe` 0
+      -- The header names the key the audit ran AGAINST. Pasting a fork's key
+      -- instead of upstream's gives "admitted 0 dropped 57", which reads exactly
+      -- like mass forgery, and the report did not say which key it used.
+      head (fmap render (reportDoc clean)) `shouldSatisfy`
+        Text.isInfixOf (Text.pack (show (pretty (AsBase58 repo))))
 
       -- One unreadable file and nothing else wrong. Still 2: a file somebody has
       -- to look at is a finding, and the drops are not the only kind.

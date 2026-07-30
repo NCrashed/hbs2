@@ -57,12 +57,19 @@ done
 
 # git-hbs2 -> hbs2-git3 (mirrors dockerImage convention so that
 # `git hbs2 ...` works once bin/ is on PATH).
+rm -f "${BUNDLE}/bin/git-hbs2"
 ln -s hbs2-git3 "${BUNDLE}/bin/git-hbs2"
 
 # hub -> hbs2-hub. PEP-22 spells the forge CLI `hub`; the binary is named
 # hbs2-hub like everything else here, because `hub` is also a widely installed
 # GitHub tool and claiming it in PATH is not ours to do. The symlink gives the
 # documented surface to whoever wants it.
+#
+# rm -f first: .#default carries bin/hub already (the flake adds the same alias
+# so that nix profile install has it), and cp -L above turned it into a real
+# 19 MiB file, so this ln failed with "File exists" and set -e took the whole
+# script down. The linux job in release.yml has this rm; here it was missing.
+rm -f "${BUNDLE}/bin/hub"
 ln -s hbs2-hub "${BUNDLE}/bin/hub"
 
 echo "==> Bundling dylibs via dylibbundler"

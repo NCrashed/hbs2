@@ -117,6 +117,16 @@ hashObject :: FilePath -> ByteString -> IO String
 hashObject dir content =
   gitStdin dir (LBS8.fromStrict content) ["hash-object", "-w", "--stdin"]
 
+-- Git, whole output, and it worked. Not 'git', which keeps the first line: a
+-- test that counted lines of it counted a line.
+gitAll :: FilePath -> [String] -> IO [String]
+gitAll cwd args = do
+  p <- gitProc cwd args
+  (code, out, errOut) <- readProcess (setStdin closed p)
+  case code of
+    ExitSuccess -> pure (lines (LBS8.unpack out))
+    _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
+
 -- Git with bytes on stdin, and it worked.
 gitStdin :: FilePath -> LBS8.ByteString -> [String] -> IO String
 gitStdin dir input args = do
@@ -153,6 +163,36 @@ kindOf = \case
 shimmed :: Int -> ByteString
         -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
 shimmed noise out act = shimmedWith gitBounds noise 0 out (\r _ -> act r)
+
+-- A git that answers once and then is not there any more: it deletes itself after
+-- the first question, so the second call cannot spawn. That is what a process
+-- limit reached partway through an audit looks like from here, and the only way
+-- to reach the branch from a test.
+vanishing :: (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+vanishing act =
+  withSystemTempDirectory "hub-vanish" $ \dir -> do
+    let bin = dir </> "bin"
+    createDirectoryIfMissing True bin
+    -- An absolute rm, looked up out here: PATH below is the shim directory alone,
+    -- so the shim cannot find one itself, and /bin/rm is not on every machine
+    -- (it is not on NixOS).
+    rm <- fromMaybe "/bin/rm" <$> findExecutable "rm"
+    writeFile (bin </> "git") (unlines
+      [ "#!/bin/sh"
+      , "case \"$*\" in"
+      , "  *rev-parse*--git-dir*) echo .git; " <> rm <> " -f \"$0\" ;;"
+      , "  *) exit 1 ;;"
+      , "esac"
+      ])
+    perm <- getPermissions (bin </> "git")
+    setPermissions (bin </> "git") (setOwnerExecutable True perm)
+    old <- Env.lookupEnv "PATH"
+    -- PATH is ONLY the shim directory, so that once the shim removes itself there
+    -- is no git anywhere: with the real one still on PATH the second call found
+    -- it, and it answered about a directory that is not a repository.
+    bracket_ (Env.setEnv "PATH" bin)
+             (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+             (act (readTreeWith gitBounds dir))
 
 -- The reader, and how many pieces of the listing the shim got to write.
 --
@@ -405,9 +445,12 @@ spec = do
                         , "--no-local", "file://" <> origin, clone ]
         void $ git clone ["fetch", "-q", "origin", "+refs/hbs2/meta:refs/hbs2/meta"]
 
-        let blobs = length . filter (== "blob") . lines
-              <$> git clone [ "cat-file", "--batch-all-objects"
-                            , "--batch-check=%(objecttype)" ]
+        -- gitAll, not git: the latter keeps the FIRST LINE of the output, so
+        -- counting blobs in it counted at most one, and the assertion this whole
+        -- test exists for passed whenever the lowest-oid object was not a blob.
+        let blobs = length . filter (== "blob")
+              <$> gitAll clone [ "cat-file", "--batch-all-objects"
+                               , "--batch-check=%(objecttype)" ]
         before <- blobs
         before `shouldBe` 0
 
@@ -479,10 +522,15 @@ spec = do
       -- blobless or partial clone it drives a lazy fetch per missing blob and that
       -- progress goes to stderr. Measured at 39 KB of stdout against 1.1 MB of
       -- stderr. A promisor remote is more machinery than this test needs, so the
-      -- shape is reproduced with a shim: 2000 lines of stderr hung the suite until
-      -- the timeout, 500 passed, which is the pipe buffer to the byte.
-      shimmed 4000 "100644 blob deadbeef      5\tthreads/t/0001-x\0" $ \readIt ->
-        (fmap (fmap teePath) <$> readIt) `shouldReturn` Right ["threads/t/0001-x"]
+      -- shape is reproduced with a shim.
+      --
+      -- Both streams are past a pipe buffer on their own: 4000 lines a side is
+      -- about 160 KB of stderr, and the listing is 8000 records, about 376 KB. A
+      -- listing that fits in the stdout buffer is the case a sequential reader
+      -- survives, so sizing it below one would test nothing.
+      let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
+      shimmed 8000 (mconcat (replicate 8000 entry)) $ \readIt ->
+        (fmap (length . fmap teePath) <$> readIt) `shouldReturn` Right 8000
 
     it "refuses a listing past the byte bound while it is still arriving" $ do
       -- The bound has to hold before the bytes are all in memory, so it cannot be
@@ -534,6 +582,21 @@ spec = do
             last (Text.unpack m) `shouldNotBe` '\n'
           other -> expectationFailure
                      ("expected RefUnresolved, got " <> show (fmap (const ()) other))
+
+    it "calls git vanishing mid-audit local, not a verdict on the tree" $ do
+      -- A Left from a call after the first is git NOT HAVING RUN, and git ran a
+      -- moment ago, so it is this machine and not that repository. Reported as
+      -- NoRepository it advised somebody to fix safe.directory in a repository
+      -- git had successfully read one call earlier.
+      --
+      -- The shim deletes itself after answering the first question, which is the
+      -- cheapest way to make the second call fail to spawn. A process limit
+      -- reached partway through does the same thing for real.
+      vanishing $ \readIt ->
+        readIt >>= \case
+          Left (ReaderFailed _) -> pure ()
+          other -> expectationFailure
+                     ("expected ReaderFailed, got " <> show (fmap (const ()) other))
 
     it "tells an absent ref from a directory that is not a repository" $ do
       -- rev-parse exits 1 for the first and 128 for the second, and collapsing

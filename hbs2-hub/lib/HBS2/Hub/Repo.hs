@@ -180,7 +180,12 @@ data CanonUnreadable =
   deriving stock (Eq,Show)
 
 -- | The tool's own words, as their own indented block rather than a value in a
--- one-line field.
+-- one-line field, and MARKED as quoted.
+--
+-- The marker is not decoration. Advice from this program is printed at the same
+-- indent directly underneath, so an unmarked block put a stranger's text in the
+-- exact position of a line telling the reader what command to run. A tool's
+-- complaint and this program's instruction have to be told apart at a glance.
 --
 -- git's complaints are multi-line on purpose: the remedy for a dubious-ownership
 -- refusal is the safe.directory command on the SECOND line. Rendered as a field
@@ -189,7 +194,12 @@ data CanonUnreadable =
 -- right (one line of a report must stay one line); what was wrong is putting a
 -- block where a line goes.
 toolSaid :: Text -> Doc ann
-toolSaid e = nest 2 (line <> vsep [ pretty (safeText l) | l <- Text.lines e ])
+toolSaid e
+  -- Reachable: the stderr read is bounded in time, so a tool that exits without
+  -- its message being collected leaves nothing here. A bare indent under "read
+  -- the message above" is worse than saying there is none.
+  | Text.null (Text.strip e) = " (it said nothing)"
+  | otherwise = nest 2 (line <> vsep [ "|" <+> pretty (safeText l) | l <- Text.lines e ])
 
 instance Pretty CanonUnreadable where
   pretty = \case
@@ -242,8 +252,8 @@ data FileProblem =
     -- | The tree lists this path more than once, which git fsck calls
     -- duplicateEntries and which a hand-built tree can carry.
     --
-    -- It matters most for  taking the head of the list meant the rules
-    -- canon is folded under were chosen by the ORDER of entries in somebody
+    -- It matters most for the version file: taking the head of the list meant the
+    -- rules canon is folded under were chosen by the ORDER of entries in somebody
     -- else's tree, silently, with the audit exiting zero. Everywhere else in this
     -- package an ambiguity is refused rather than resolved, and this is that.
   | FileDuplicated
@@ -252,8 +262,11 @@ data FileProblem =
 instance Pretty FileProblem where
   pretty = \case
     FileMalformed e     -> pretty e
+    -- Escaped onto ONE line, not blocked like the refusals above: this is a field
+    -- in a per-file line of the report, and 'reportDoc' promises one Doc per
+    -- line. A block here put a paragraph in the middle of a list.
     FileUnreadable e    -> "listed in the tree and its blob does not read:"
-                             <> toolSaid e
+                             <+> pretty (safeText e)
     FileTooLarge n      -> "over the bound this reader will read:" <+> pretty n
                              <+> "bytes"
     FileNotABlob        -> "not a blob: a submodule, in a canon tree"

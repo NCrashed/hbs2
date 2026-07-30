@@ -97,7 +97,7 @@ and a tree full of forged events were the same event.
 |------|------------------------------------------------------|
 | 0    | the audit ran and found nothing                       |
 | 1    | usage: a bad argument, an unknown verb                 |
-| 2    | the audit ran and found drops, anomalies, unreadable files, or no `version` |
+| 2    | the audit ran and found drops, anomalies, unreadable files, no `version`, or a file with no version clause |
 | 3    | `refs/hbs2/meta` is not here, or is here and broken    |
 | 4    | not a git repository, or git could not be run          |
 | 5    | the ref is here and does not resolve to a commit       |

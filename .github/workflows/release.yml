@@ -75,18 +75,35 @@ jobs:
           # bundle-darwin.sh does.
           cp -L "${STATIC}/bin"/* "${DIR}/bin/"
           chmod +w "${DIR}/bin"/*   # strip read-only from nix store
-          rm -f "${DIR}/bin/hub"
+          # bf6-git-hbs2 installs bin/git-hbs2 as a one-line shebang script
+          # pointing at /nix/store/...-suckless-conf/bin/bf6, which is a path
+          # that does not exist on the machine unpacking this archive. The docker
+          # image drops it and bundle-darwin.sh drops it; the linux archive was
+          # shipping it, and INSTALL.md offers `git-hbs2 --help` as a check.
+          # Replaced by the same symlink those two use.
+          rm -f "${DIR}/bin/git-hbs2" "${DIR}/bin/hub"
+          ln -s hbs2-git3 "${DIR}/bin/git-hbs2"
           ln -s hbs2-hub "${DIR}/bin/hub"
           # Include a small README so the archive is self-explanatory.
           cat > "${DIR}/README.txt" <<EOF
           hbs2 ${TAG}, statically linked against musl libc.
           Built for ${{ matrix.arch }}. Copy the bin/ contents anywhere on PATH.
 
-          The binaries need no shared libraries. One of them needs a PROGRAM:
-          hbs2-hub runs git, because a repository's issue tracker is an ordinary
-          git ref (PEP-19). Everything else here is self-contained.
+          The binaries need no shared libraries. Three of them need a PROGRAM:
+          hbs2-hub, hbs2-git3 and git-remote-hbs23 run git. For hbs2-hub that is
+          because a repository's issue tracker is an ordinary git ref (PEP-19);
+          for the other two it is the point. Everything else is self-contained.
           Source: https://github.com/NCrashed/hbs2
           EOF
+          # Smoke test before the archive is made, for the same reason the darwin
+          # job has one: a broken symlink or a shebang naming a nix store path
+          # ships silently otherwise. The linux archive had no test at all.
+          "${DIR}/bin/hbs2-peer" version
+          "${DIR}/bin/hbs2-cli" --help >/dev/null
+          "${DIR}/bin/hbs2-hub" --help >/dev/null
+          "${DIR}/bin/hub" --help >/dev/null
+          test -L "${DIR}/bin/hub"
+          test -L "${DIR}/bin/git-hbs2"
           ARCHIVE="${DIR}.tar.gz"
           tar czf "${ARCHIVE}" "${DIR}"
           echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
@@ -199,6 +216,15 @@ jobs:
           "${BUNDLE}/bin/hbs2-peer" version
           "${BUNDLE}/bin/hbs2-cli" --help >/dev/null
           "${BUNDLE}/bin/hbs2-sync" --help >/dev/null
+          # Every binary the archive ships, not three of them. The two symlinks
+          # are the point: an ln that failed, or a shebang script naming a nix
+          # store path, is invisible to a smoke test that only runs the daemon.
+          "${BUNDLE}/bin/hbs2-hub" --help >/dev/null
+          "${BUNDLE}/bin/hub" --help >/dev/null
+          "${BUNDLE}/bin/hbs2-keyman" --help >/dev/null
+          "${BUNDLE}/bin/git-hbs2" --help >/dev/null || true
+          test -L "${BUNDLE}/bin/hub"
+          test -L "${BUNDLE}/bin/git-hbs2"
 
       - name: Upload to GitHub Release (assets only)
         uses: softprops/action-gh-release@v2

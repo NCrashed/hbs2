@@ -73,7 +73,20 @@
         it was fetching everything, before any bound could speak. The
         reader sets `GIT_NO_LAZY_FETCH=1`, so the same listing reports a
         missing object as missing, and every bound is a bound on what
-        reaches the disk.
+        reaches the disk. Every variable it sets is REMOVED from the
+        inherited environment first: with two bindings of one name,
+        `getenv` returns the first, so a caller with `GIT_NO_LAZY_FETCH=0`
+        already set got the old behaviour back in full.
+
+        It also sets `GIT_NO_REPLACE_OBJECTS=1`. `refs/replace` rewrites
+        what a commit's tree is, so canon was read out of a substituted
+        tree while the report printed the honest commit id; a mirror
+        clone carries those refs. And no prompting: `GIT_ASKPASS`,
+        `SSH_ASKPASS` and `GIT_TERMINAL_PROMPT` in that order, because
+        git tries them in that order and only the last is a terminal.
+        Every git call is bounded in time, since waiting for EOF on a
+        pipe is waiting for the last holder of the fd and that need not
+        be git.
 
         A path the tree lists twice is named rather than resolved by
         order; on `version` it is a refusal, since the first entry

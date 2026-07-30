@@ -130,7 +130,12 @@ main = do
   case (argv, verbOf dict argv) of
     -- No arguments: a script on stdin, or the help if there is no stdin either.
     ([], _) -> runHBS2Cli do
-      eof <- liftIO IO.isEOF
+      -- A TERMINAL means there is no script coming: a person typed the name of
+      -- the program and pressed return. Reading stdin then sat there until they
+      -- worked out that Ctrl-D was expected of them. A pipe or a file still gets
+      -- read, which is what a hook uses.
+      tty <- liftIO (IO.hIsTerminalDevice IO.stdin)
+      eof <- if tty then pure True else liftIO IO.isEOF
       if eof
         then liftIO (hubHelp dict)
         else liftIO getContents
@@ -188,7 +193,10 @@ main = do
     -- all of it the peer probe, which is readProcess of `hbs2-peer poke` with no
     -- timeout. Against a wedged peer the two commands that hang are the two you
     -- would run to find out how to audit without one.
-    peerFreeNames = ["hub:verify", "help", "--help"]
+    peerFreeNames = ["hub:verify"] <> helpNames
+
+    helpNames :: [Id]
+    helpNames = ["help", "--help"]
 
     -- The WHOLE form, not its head. A head-symbol test said yes to
     -- @(hub:verify (hub:inbox:show X))@, whose argument reaches the peer and then
@@ -198,7 +206,13 @@ main = do
     -- Only names the dictionary actually holds are examined: everything else in a
     -- form is data, and a repository key parses as a symbol like any other word.
     -- Unknown names are somebody else's error to report, not a reason to guess.
-    peerFree dict = go
+    peerFree dict = \case
+      -- help NAMES a verb, it does not run it, so what it names says nothing
+      -- about whether a peer is needed: `help hub:inbox` paid the probe to print
+      -- a paragraph. The head decides for this one form, which is the only place
+      -- a head is enough.
+      ListVal (SymbolVal k : _) | k `elem` helpNames -> True
+      form -> go form
       where
         go = \case
           ListVal xs -> all go xs
