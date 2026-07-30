@@ -12,12 +12,15 @@
 -- not mint, does not delete, and does not need canon. Everything it decides
 -- about a letter comes out of "HBS2.Hub.Letter".
 --
--- Read-only on purpose, and that is worth stating rather than implying. The
--- accept path is irreversible twice over: an event minted into canon is in
--- every clone forever, and the retention rule (PEP-21) deletes the letter
--- afterwards, taking the only copy of the part secret with it. So the first
--- thing built here is the one that can be run against a live mailbox without
--- any of that being at stake.
+-- Read-only, and deliberately so: the accept path is irreversible, because an
+-- event minted into canon is in every clone forever. Composing and sending a
+-- letter lives next door in "HBS2.Hub.CLI.Compose", which is also read-only with
+-- respect to canon: it puts a letter in a mailbox, and a mailbox is retractable.
+--
+-- What this module must never do is throw on one message. A mailbox is public,
+-- anybody can put anything in it, and a reader that stops at the first thing it
+-- cannot open is a queue one stranger can close. Every failure is a value; see
+-- 'OpenError'.
 module HBS2.Hub.Ingress
   ( Ingress(..)
   , OpenError(..)
@@ -26,6 +29,7 @@ module HBS2.Hub.Ingress
   , MailboxUnknown(..)
   , liveMessages
   , readInbox
+  , openMessage
   , awaitMailbox
   , maxFetchRounds
   , fetchRound
@@ -40,19 +44,16 @@ import HBS2.CLI.Prelude
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Merkle (walkMerkle)
 import HBS2.Net.Auth.Credentials
+import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
-import HBS2.Peer.RPC.API.Mailbox
-import HBS2.Peer.RPC.Client
-import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage.Operations.Class (OperationError)
 
 import Codec.Serialise (deserialiseOrFail)
 import Data.Coerce (coerce)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
-import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (sort)
 
@@ -63,7 +64,10 @@ import Data.List (sort)
 -- has exactly one implementation and the alternative is a class with one
 -- instance, which is the same thing with more places to look.
 data Ingress m = Ingress
-  { igBlock    :: HashRef -> m (Maybe ByteString)
+  { -- | A block from local storage. Lazy bytes, because that is what the storage
+    -- gives and what every reader here consumes: a strict field made the wiring
+    -- toStrict on the way in and all three readers fromStrict on the way back.
+    igBlock    :: HashRef -> m (Maybe LBS.ByteString)
     -- | Does the peer hold this mailbox at all? 'Nothing' means it does not.
     --
     -- A function rather than the 'ServiceCaller' this used to be, and so is the
@@ -88,6 +92,17 @@ data Ingress m = Ingress
     -- and a banned author's letter should not be in it.
   , igAllowed  :: HubKey -> Bool
     -- | Resolve the group secret for a message.
+    --
+    -- The one call here whose failures are NOT turned into an 'OpenError', and
+    -- that is a choice rather than an omission. In the real wiring this is a
+    -- keyman lookup over sqlite, so it can fail for reasons that have nothing to
+    -- do with the message: a locked database, a missing keyring. Those are the
+    -- reader's own problem, they are the same for every message in the queue, and
+    -- reporting them once per letter would bury the letters. So they propagate.
+    --
+    -- What must never propagate is anything a SENDER can cause, and none of that
+    -- arrives here: the two exception types 'openMessage' catches are the whole
+    -- of what a message's own bytes can raise.
   , igSecret   :: ReadMessageServices HBS2Basic
   }
 
@@ -312,14 +327,14 @@ readInbox ig mbox = do
       -- property of the container's implementation and not a promise it makes.
       -- A triage queue that reorders itself on a dependency bump is one a
       -- maintainer cannot work through a page at a time.
-      lvs <- mapM readOne (sort (HS.toList (liveMessages entries)))
+      lvs <- mapM (openMessage ig) (sort (HS.toList (liveMessages entries)))
       pure (InboxRead lvs misses settled)
 
   where
     readEntries tree = do
       acc <- newTVarIO []
       bad <- newTVarIO []
-      walkMerkle @[HashRef] (coerce tree) (fmap (fmap LBS.fromStrict) . igBlock ig . HashRef) $ \case
+      walkMerkle @[HashRef] (coerce tree) (igBlock ig . HashRef) $ \case
         Left miss -> atomically $ modifyTVar bad (HashRef miss :)
         Right hs -> do
           es <- forM hs $ \h -> (h,) <$> readEntry h
@@ -333,67 +348,79 @@ readInbox ig mbox = do
 
     readEntry h = igBlock ig h
                     <&> (>>= either (const Nothing) Just
-                           . deserialiseOrFail @MailboxEntry . LBS.fromStrict)
+                           . deserialiseOrFail @MailboxEntry)
 
-    readOne mh = do
-      blk <- igBlock ig mh
-      case blk >>= either (const Nothing) Just
-                   . deserialiseOrFail @(Message HBS2Basic) . LBS.fromStrict of
-        Nothing  -> pure (LetterView mh Nothing (Left NotFetched) Nothing)
-        Just msg -> do
-          -- The envelope signer is recovered separately from the decryption, and
-          -- that is the point. It is authenticated by this call alone, so on
-          -- every path below except a bad signature the key is KNOWN, and on a
-          -- public mailbox the bulk of the queue is letters sealed to somebody
-          -- else. Taking the key from readMessage's success value left all of
-          -- them anonymous, which is the queue with no key to block by.
-          let envelope = fmap fst
-                           (unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg))
+-- | What one message in a mailbox turns out to be.
+--
+-- Top-level rather than local to 'readInbox', and that is what makes the mapping
+-- below testable at all: it is a function of the 'Ingress' record and a hash, so
+-- each of the six answers can be produced without a peer, a mailbox or a merkle
+-- tree. The bug this shape keeps out (an exception type escaping the loop) had
+-- been fixed once already, and while this lived inside a @where@ clause nothing
+-- could have caught it coming back.
+openMessage :: MonadUnliftIO m => Ingress m -> HashRef -> m LetterView
+openMessage ig mh = do
+  blk <- igBlock ig mh
+  case blk >>= either (const Nothing) Just . deserialiseOrFail @(Message HBS2Basic) of
+    Nothing  -> pure (LetterView mh Nothing (Left NotFetched) Nothing)
+    Just msg -> do
+      -- The envelope signer is recovered separately from the decryption, and
+      -- that is the point. It is authenticated by this call alone, so on every
+      -- path below except a bad signature the key is KNOWN, and on a public
+      -- mailbox the bulk of the queue is letters sealed to somebody else. Taking
+      -- the key from readMessage's success value left all of them anonymous,
+      -- which is a queue with no key to block by.
+      let envelope = fmap fst
+                       (unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg))
 
-          -- Two exception types, not one, and this is where a stranger could
-          -- close the queue. readMessage's own errors are ReadMessageError, but
-          -- its last step decrypts, and that throws OperationError
-          -- (DecryptionError for ciphertext that does not open, UnsupportedFormat
-          -- for bytes that are not a payload). A catch naming only the first let
-          -- the second escape readOne, mapM and readInbox, so one message with a
-          -- resolvable group key and rubbish inside it printed no queue at all.
-          -- Anyone can send that: recipients' encryption keys are public.
-          opened <- tryOpen msg
-          case opened of
-            Left e -> pure (LetterView mh (envelopeFor e envelope) (Left e) Nothing)
-            Right (_, _, payload) -> do
-              let md = parsePayload payload
-              pure LetterView
-                { lvMessage  = mh
-                , lvEnvelope = envelope
-                , lvLetter   = case (envelope, md) of
-                    (_, Left e)          -> Left (BadLetterHere e)
-                    -- Unreachable: readMessage succeeding means the same unbox
-                    -- succeeded. Answered rather than asserted, because the one
-                    -- thing this loop must not do is throw.
-                    (Nothing, _)         -> Left BadEnvelopeSig
-                    (Just who, Right md') -> openWith who md'
-                , lvEventId  = either (const Nothing) letterEventId md
-                }
+      opened <- tryOpen msg
+      case opened of
+        Left e -> pure (LetterView mh (envelopeFor e envelope) (Left e) Nothing)
+        Right (_, _, payload) -> do
+          let md = parsePayload payload
+          pure LetterView
+            { lvMessage  = mh
+            , lvEnvelope = envelope
+            , lvLetter   = case (envelope, md) of
+                (_, Left e)           -> Left (BadLetterHere e)
+                -- Unreachable: readMessage succeeding means the same unbox
+                -- succeeded. Answered rather than asserted, because the one
+                -- thing this function must not do is throw.
+                (Nothing, _)          -> Left BadEnvelopeSig
+                (Just who, Right md') -> openWith who md'
+            , lvEventId  = either (const Nothing) letterEventId md
+            }
 
-    -- A forged envelope names nobody: the signature is what would have
-    -- established the key, and it did not.
-    envelopeFor BadEnvelopeSig _ = Nothing
-    envelopeFor _ k = k
-
+  where
+    -- Two exception types, not one, and this is where a stranger could close the
+    -- queue. readMessage's own errors are ReadMessageError, but its last step
+    -- decrypts, and that raises OperationError: DecryptionError for ciphertext
+    -- that does not open, UnsupportedFormat for bytes that are not a payload. A
+    -- catch naming only the first let the second escape here, and through mapM
+    -- and readInbox, so one message with a resolvable group key and rubbish
+    -- inside it printed no queue at all. Anyone can send that, since recipients'
+    -- encryption keys are public in their sigils.
     tryOpen msg =
       (Right <$> readMessage (igSecret ig) msg)
         `catch` (pure . Left . readErr)
-        -- Everything the decrypt step can raise, which is a DIFFERENT type from
-        -- the one above. Both of its cases mean the same thing to a reader (a key
-        -- resolved and the bytes behind it are not a message), and neither is a
-        -- reason to stop reading the mailbox.
         `catch` (\(_ :: OperationError) -> pure (Left Undecipherable))
 
     readErr = \case
       ReadSignCheckFailed  -> BadEnvelopeSig
       ReadNoGroupKey       -> GroupKeyByRef
       ReadNoGroupKeyAccess -> NotForUs
+
+    -- A forged envelope names nobody: the signature is what would have
+    -- established the key, and it did not. Every other case is spelled out
+    -- rather than wildcarded, so a new OpenError has to say whether its signer
+    -- is known instead of inheriting an answer.
+    envelopeFor e k = case e of
+      BadEnvelopeSig   -> Nothing
+      NotFetched       -> k
+      NotForUs         -> k
+      GroupKeyByRef    -> k
+      Undecipherable   -> k
+      BadLetterHere{}  -> k
 
     openWith who md = do
       (_, author, content, _) <-

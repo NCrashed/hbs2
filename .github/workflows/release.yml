@@ -68,9 +68,15 @@ jobs:
           TAG="${{ steps.tag.outputs.name }}"
           DIR="hbs2-${TAG}-${{ matrix.arch_short }}-linux-musl"
           mkdir -p "${DIR}/bin"
-          # cp -L resolves the symlinkJoin's symlinks into actual files.
+          # cp -L resolves the symlinkJoin's symlinks into actual files. That is
+          # what we want for every binary and NOT what we want for the `hub`
+          # alias: dereferenced, it becomes a second 19 MiB copy of hbs2-hub in
+          # the archive. Copy the binaries, then recreate the alias, the way
+          # bundle-darwin.sh does.
           cp -L "${STATIC}/bin"/* "${DIR}/bin/"
           chmod +w "${DIR}/bin"/*   # strip read-only from nix store
+          rm -f "${DIR}/bin/hub"
+          ln -s hbs2-hub "${DIR}/bin/hub"
           # Include a small README so the archive is self-explanatory.
           cat > "${DIR}/README.txt" <<EOF
           hbs2 ${TAG}, statically linked against musl libc.

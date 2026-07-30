@@ -49,7 +49,8 @@ main = do
         composeEntries
 
         -- BEFORE helpEntries, because the dictionary is a left-biased union and
-        -- the first binding of a name wins. Overrides the inherited `help`, which prints an "hbs2-cli tool" banner
+        -- the first binding of a name wins. Overrides the inherited `help`, which
+        -- prints an "hbs2-cli tool" banner
         -- and is keyed by the full entry name. Both were wrong here: the banner
         -- names another tool, and the top-level help offers verbs as `inbox` and
         -- `issue new`, so `hbs2-hub help inbox` has to be the spelling that
@@ -77,10 +78,16 @@ main = do
         -- suckless script dictionary carries, alphabetically, which put the two
         -- verbs this tool has at lines 91 and 92 of 214. A first look at a tool
         -- should show what the tool does.
+        -- Through the same verbOf as `help`, so that a spelling the top-level
+        -- help prints works under both. They had diverged: `help inbox` found
+        -- the entry and `--help inbox` printed nothing, while the comment beside
+        -- the prefixing claimed the point of it was that they could not.
         entry $ bindMatch "--help" $ nil_ \case
           HelpEntryBound what -> helpEntry what
-          [StringLike s]      -> helpList False (Just s)
-          _                   -> liftIO (hubHelp dict)
+          ws | Just (ListVal (SymbolVal k : _)) <- verbOf dict (fmap asWord ws) ->
+                 helpEntry k
+             | [StringLike s] <- ws -> found dict s
+             | otherwise -> liftIO (hubHelp dict)
 
   case (argv, verbOf dict argv) of
     -- No arguments: a script on stdin, or the help if there is no stdin either.
@@ -103,6 +110,17 @@ main = do
     (_, Just form) -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
 
   where
+    -- A prefix search that says so when it matches nothing, instead of printing
+    -- an empty line. It is a prefix match on NAMES, not a search of the
+    -- descriptions, which is worth being honest about: `--help mailbox` finds
+    -- nothing though the mailbox verb is the one thing this tool is for.
+    found dict s = do
+      let named (Id t) = Text.unpack t
+      case sort [ n | k <- HM.keys dict, let n = named k, s `isPrefixOf` n ] of
+        [] -> liftIO $ putStrLn ("no entry name starts with " <> show s
+                                  <> " (this matches names, not descriptions)")
+        _  -> helpList False (Just s)
+
     -- A dictionary name back to the word a user typed, so that `help` can route
     -- its argument through the same verbOf the command line does.
     asWord = \case
@@ -174,12 +192,21 @@ main = do
     -- Anything that does not lex as exactly one atom is a string, which is the
     -- only reading left for it.
     literal s = case parseTop s of
-      Right [x] -> unwrap x
-      _         -> mkStr @C s
+      Right [x] | isForm s  -> x
+                | otherwise -> unwrap x
+      _ -> mkStr @C s
       where
         -- parseTop makes a list per LINE, so a single atom on a line of its own
-        -- comes back wrapped in one. Unwrapped here: a bare word from argv is an
-        -- atom, not a call with no arguments, and leaving it wrapped is why
+        -- comes back wrapped in one. Unwrapped, because a bare word from argv is
+        -- an atom and not a call with no arguments: leaving it wrapped is why
         -- `hbs2-hub help hub:inbox` answered BadFormException (help (hub:inbox)).
+        --
+        -- Only for a word, though, and this is why the text is consulted after
+        -- all. The wrapper around a lone atom and a genuine one-element form are
+        -- the SAME value, so nothing in the parsed result can tell them apart:
+        -- unwrapping unconditionally turned `(list)` into the bare symbol `list`,
+        -- which evaluates to a lambda instead of calling it. What distinguishes
+        -- them is what the user typed, and only there.
+        isForm t = any (`isPrefixOf` t) ["(", "["]
         unwrap (ListVal [x]) = x
         unwrap x = x

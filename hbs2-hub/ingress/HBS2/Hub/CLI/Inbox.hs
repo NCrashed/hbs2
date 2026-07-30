@@ -28,7 +28,6 @@ import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
 
-import Data.ByteString.Lazy qualified as LBS
 import Data.Coerce (coerce)
 import Data.List qualified as List
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
@@ -79,33 +78,39 @@ inboxEntries = do
 
       liftIO $ mapM_ (print . render) (irLetters r)
 
-      -- Two ways the list above can be wrong rather than short, and neither
-      -- leaves through a zero exit. Said once at the end: the counts are what
-      -- matter, and a page of identical warnings buries the letters.
+      -- Two things can be said about the list above, and only one of them makes
+      -- it WRONG. Said once at the end: the counts are what matter, and a page
+      -- of identical warnings buries the letters.
       liftIO do
+        -- Not an error, and not silence either. Every letter listed is real; the
+        -- mailbox was simply still arriving, which is the routine state of a
+        -- first read of a big one, since the peer rewrites the mailbox ref on
+        -- every merged batch. A non-zero exit here would fire on ordinary use
+        -- and teach a caller to ignore the code.
         unless (irSettled r) $
           hPutDoc stderr $ "hub: the peer's copy of this mailbox was still"
-            <+> "changing after" <+> pretty maxFetchRounds <+> "rounds;"
-            <+> "the list above is a snapshot of something still arriving" <> line
+            <+> "changing after" <+> pretty maxFetchRounds <+> "rounds, so more"
+            <+> "letters may follow. Everything listed above is real." <> line
 
-        unless (List.null (irMissing r)) $
+        -- This one IS wrong, in both directions: a missing chunk carrying Exists
+        -- entries makes letters vanish, one carrying Deleted entries puts folded
+        -- letters back in the queue. So it does not leave through a zero exit.
+        unless (List.null (irMissing r)) do
           hPutDoc stderr $ "hub:" <+> pretty (length (irMissing r))
             <+> "block(s) of this mailbox tree could not be read, so the list"
             <+> "above is incomplete in both directions."
             <+> "Missing:" <+> hsep (fmap pretty (irMissing r)) <> line
-
-        unless (irSettled r && List.null (irMissing r)) (exitWith (ExitFailure 2))
+          exitWith (ExitFailure 2)
 
     -- The one place the ingress is wired to a peer. Everything above it is a
     -- function of these five, which is what lets the wait loop and every
     -- OpenError be tested without one.
     overRpc sto api = Ingress
-      { igBlock  = \h -> liftIO (getBlock sto (coerce h)) <&> fmap LBS.toStrict
+      { igBlock  = liftIO . getBlock sto . coerce
       , igStatus = \k ->
           callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
             >>= orThrowUser "cannot reach the peer's mailbox service"
-            >>= either (\e -> orThrowUser ("mailbox service:" <+> viaShow e) Nothing)
-                       (pure . void)
+            >>= either badService (pure . void)
       , igFetch  = void . callRpcWaitMay @RpcMailboxFetch rpcTimeout api
       , igRoot   = \k ->
           callRpcWaitMay @RpcMailboxGet rpcTimeout api k
@@ -119,6 +124,9 @@ inboxEntries = do
       , igSecret = ReadMessageServices
           (liftIO . runKeymanClientRO . extractGroupKeySecret)
       }
+
+badService :: MonadUnliftIO m => MailboxServiceError -> m a
+badService e = throwIO (userError (show ("mailbox service:" <+> viaShow e)))
 
 -- One line per letter, in the order the fields matter to somebody deciding what
 -- to do with it.
@@ -159,5 +167,11 @@ render lv = pretty (lvMessage lv) <+> maybe "-" (pretty . AsBase58) (lvEnvelope 
 -- queue is read by a person, and a column of thirteen-digit integers is a column
 -- nobody compares.
 utcOf :: Word64 -> String
-utcOf ms = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
-             (posixSecondsToUTCTime (fromIntegral ms / 1000))
+utcOf ms
+  -- Clamped at the ceiling canon admits, because the value is the SENDER's and
+  -- unverifiable (PEP-19): maxBound formats as the year 584 million, which does
+  -- not crash but does let a sender wreck the column alignment of the queue a
+  -- maintainer is reading.
+  | ms > maxFoldedTs = "after " <> utcOf maxFoldedTs
+  | otherwise = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
+                  (posixSecondsToUTCTime (fromIntegral ms / 1000))

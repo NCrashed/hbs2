@@ -205,6 +205,21 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       chmod -R u+w $out 2>/dev/null || true
     '';
 
+    # PEP-22 spells the forge CLI `hub`; the binary is named hbs2-hub like
+    # everything else here, because `hub` is also a widely installed GitHub tool
+    # and claiming that name in PATH is not ours to do. The symlink offers the
+    # documented surface to whoever wants it.
+    #
+    # In every output that ships binaries, not just the docker image: the linux
+    # tarball is built from `.#static` and a symlink added only to the image
+    # would have left `nix profile install .#` and the release archive without
+    # it. git-hbs2 escapes the same gap only because bf6-git-hbs2 brings a
+    # same-named script along.
+    hubAlias = pkgs.runCommand "hbs2-hub-alias" { } ''
+      mkdir -p $out/bin
+      ln -s hbs2-hub $out/bin/hub
+    '';
+
     dockerImageFor = imagePackages: pkgs.dockerTools.buildImage {
       name = "hbs2-peer";
       tag = imagePackages.hbs2-peer.version;
@@ -221,16 +236,11 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         # documented in INSTALL.md.
         paths = (map stripPackageToBin (builtins.attrValues
                   (removeAttrs imagePackages [ "bf6-git-hbs2" ]))) ++ [
-          (pkgs.runCommand "hbs2-symlinks" { } ''
+          (pkgs.runCommand "git-hbs2-symlink" { } ''
             mkdir -p $out/bin
             ln -s hbs2-git3 $out/bin/git-hbs2
-            # PEP-22 spells the forge CLI `hub`; the binary is named hbs2-hub
-            # like everything else here, because `hub` is also a widely
-            # installed GitHub tool and claiming that name in PATH is not ours
-            # to do. The symlink offers the documented surface to whoever wants
-            # it, without taking it from anyone who does not.
-            ln -s hbs2-hub $out/bin/hub
           '')
+          hubAlias
           pkgs.cacert
           pkgs.tzdata
         ];
@@ -273,12 +283,12 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         default =
         pkgs.symlinkJoin {
           name = "hbs2-all";
-          paths = builtins.attrValues packagesDynamic;
+          paths = builtins.attrValues packagesDynamic ++ [ hubAlias ];
         };
         static =
         pkgs.symlinkJoin {
           name = "hbs2-static";
-          paths = builtins.attrValues packagesStatic;
+          paths = builtins.attrValues packagesStatic ++ [ hubAlias ];
         };
         # See the dockerImageFor comment: aarch64-linux cannot build
         # the musl cross-GHC, so its image ships dynamic binaries.

@@ -7,6 +7,10 @@ import HBS2.Hub.Letter (LetterError(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
+import HBS2.Data.Types.EncryptedBox
+import HBS2.Data.Types.SignedBox
+import HBS2.Data.Types.SmallEncryptedBlock
+import HBS2.Net.Auth.GroupKeySymm (GroupKey,generateGroupKey)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Prelude.Plated (Pretty(..))
@@ -17,6 +21,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
+import Crypto.Saltine.Core.SecretBox qualified as SK
 import Data.IORef
 import Test.Hspec
 
@@ -40,6 +45,30 @@ stub = Ingress
   , igAllowed = const True
   , igSecret  = ReadMessageServices (const (pure Nothing))
   }
+
+-- A Message with an envelope this sender really signed and a payload that is
+-- rubbish. What varies between the tests is the group key: by reference, or
+-- inline for a secret lookup to answer.
+message :: PeerCredentials 'HBS2Basic
+        -> Either HashRef (GroupKey 'Symm 'HBS2Basic)
+        -> Message 'HBS2Basic
+message creds gk =
+  MessageBasic (makeSignedBox @'HBS2Basic (_peerSignPk creds) (_peerSignSk creds) content)
+  where
+    content = MessageContent (MessageFlags1 (MessageTimestamp 0) Nothing Nothing Nothing)
+                mempty gk mempty
+                (SmallEncryptedBlock (mh "gk")
+                   (B8.replicate 24 'n')
+                   (EncryptedBox (B8.pack "not a secretbox")))
+
+-- Flip a bit of the envelope signature. The classic probe, and the only way to
+-- reach the one OpenError that is an accusation.
+mangle :: Message 'HBS2Basic -> Message 'HBS2Basic
+mangle (MessageBasic (SignedBox pk bs sig)) = MessageBasic (SignedBox pk (bs <> "x") sig)
+
+-- Serve exactly one message, whatever hash is asked for.
+served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
+served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
 spec = do
@@ -138,6 +167,49 @@ spec = do
       r <- readInbox stub { igRoot = const (pure (Just (mh "tree"))) } k
       irMissing r `shouldBe` [mh "tree"]
       irLetters r `shouldBe` []
+
+    it "answers rather than throwing when a message decrypts to rubbish" $ do
+      -- The bug this commit is named for, and one nothing could reach while the
+      -- mapping lived inside readInbox's where clause. A key IS found for this
+      -- message and the ciphertext does not open, which the decrypt step raises
+      -- as OperationError: a different type from readMessage's own errors, so a
+      -- catch naming only those let it escape and take the whole listing with
+      -- it. Anyone can send it, since recipients' encryption keys are public in
+      -- their sigils.
+      sender <- newCredentials @'HBS2Basic
+      gk <- generateGroupKey @'HBS2Basic Nothing []
+      sec <- SK.newKey
+      let ig = stub { igSecret = ReadMessageServices (const (pure (Just sec))) }
+      lv <- openMessage (served (message sender (Right gk)) ig) (mh "m")
+      lvLetter lv `shouldBe` Left Undecipherable
+      -- ...and the envelope signer is still named, because its signature is what
+      -- established it and that part was fine. This is the key `hub block` takes,
+      -- and on a public mailbox most of the queue arrives on paths like this one.
+      lvEnvelope lv `shouldBe` Just (_peerSignPk sender)
+
+    it "calls a forged envelope forged, and names nobody for it" $ do
+      -- The one case that is an accusation rather than a wait or a shrug, so it
+      -- must not share an answer with them; and the one case with no signer to
+      -- name, since the signature is what would have established it.
+      sender <- newCredentials @'HBS2Basic
+      gk <- generateGroupKey @'HBS2Basic Nothing []
+      lv <- openMessage (served (mangle (message sender (Right gk))) stub) (mh "m")
+      lvLetter lv `shouldBe` Left BadEnvelopeSig
+      lvEnvelope lv `shouldBe` Nothing
+
+    it "tells a group key it cannot resolve from one not meant for it" $ do
+      sender <- newCredentials @'HBS2Basic
+      gk <- generateGroupKey @'HBS2Basic Nothing []
+      -- By reference: this build does not resolve those (the peer's own
+      -- TODO: support-groupkey-by-reference). Reported as NotForUs until now,
+      -- which is a claim about something never examined, since the letter may
+      -- well be addressed here.
+      byRef <- openMessage (served (message sender (Left (mh "gk"))) stub) (mh "m")
+      lvLetter byRef `shouldBe` Left GroupKeyByRef
+      -- Inline, and no key of ours in it: that one really is not for us, and the
+      -- stub's secret lookup answering Nothing is exactly that condition.
+      inline <- openMessage (served (message sender (Right gk)) stub) (mh "m")
+      lvLetter inline `shouldBe` Left NotForUs
 
     it "names every way a message does not become a letter, and says it differently" $ do
       -- These were one constructor. The five call for five different things:
