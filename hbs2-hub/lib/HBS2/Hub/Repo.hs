@@ -24,6 +24,8 @@ module HBS2.Hub.Repo
   , readCanon
   , metaRef
   , eventEntries
+  , maxCanonBytes
+  , maxCanonFiles
   ) where
 
 import HBS2.Hub.Types
@@ -33,20 +35,28 @@ import HBS2.Hub.Fold
 import HBS2.Prelude.Plated (Pretty(..),(<+>))
 
 import Data.Functor ((<&>))
-import Data.List (isPrefixOf,partition,sortOn)
+import Control.Monad (foldM)
+import Data.List (isPrefixOf,sortOn)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Word (Word32)
 
--- | One blob the tree lists: its path and its size.
+-- | One entry the tree lists.
 --
 -- The size comes from the tree listing, so it is known before anything is read,
 -- which is the only order in which a size bound bounds what a READER spends. A
 -- reader that fetched the blob and then compared it against 'maxEventBytes' has
--- already paid for it: a tree of twenty thousand files just under the limit is
--- inside every per-file bound and is gigabytes of resident text.
+-- already paid for it.
+--
+-- 'Nothing' for anything that is not a blob: a submodule, or a subtree that
+-- survived @-r@. Not dropped from the listing, because a gitlink under
+-- @threads\/@ is something somebody put in canon, and a reader that filtered it
+-- out would be the reader 'eventEntries' says it will not be. Before the size
+-- was read from the tree at all, such an entry failed the blob read and was
+-- reported; the type check that made the size available must not lose it.
 data TreeEntry = TreeEntry
   { teePath :: FilePath
-  , teeSize :: Int
+  , teeSize :: Maybe Int
   }
   deriving stock (Eq,Show)
 
@@ -91,6 +101,12 @@ data CanonUnreadable =
     -- whose unreadability nothing else can report, since it is not an event, so
     -- swallowing it made a corrupt stamp and an absent one the same observation.
   | VersionUnreadable
+    -- | The tree totals more than this reader will hold. Refused whole, because
+    -- the fold needs every admitted event at once and there is no per-file
+    -- culprit to name: see 'maxCanonBytes'.
+  | CanonTooBig Int
+    -- | More files than this reader will ask for one at a time.
+  | CanonTooMany Int
   deriving stock (Eq,Show)
 
 instance Pretty CanonUnreadable where
@@ -102,6 +118,10 @@ instance Pretty CanonUnreadable where
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
     VersionUnreadable -> "the version file is present and does not read"
+    CanonTooBig n     -> "this canon tree totals" <+> pretty n
+                           <+> "bytes, past what this reader will hold"
+    CanonTooMany n    -> "this canon tree has" <+> pretty n
+                           <+> "files, past what this reader will read"
 
 -- | Why one file in the tree did not become an event.
 data FileProblem =
@@ -112,6 +132,10 @@ data FileProblem =
     -- | Bigger than 'maxEventBytes', refused from the tree listing without ever
     -- being fetched.
   | FileTooLarge Int
+    -- | The tree lists it and it is not a blob: a submodule, or a subtree. Named
+    -- rather than filtered, because something under /@ that is not an
+    -- event file is something somebody put in canon.
+  | FileNotABlob
   deriving stock (Eq,Ord,Show)
 
 instance Pretty FileProblem where
@@ -120,6 +144,7 @@ instance Pretty FileProblem where
     FileUnreadable  -> "listed in the tree and its blob does not read"
     FileTooLarge n  -> "over the bound this reader will read:" <+> pretty n
                          <+> "bytes"
+    FileNotABlob    -> "not a blob: a submodule or a subtree, in a canon tree"
 
 -- | What reading canon produced.
 data CanonState = CanonState
@@ -148,11 +173,40 @@ metaRef = "refs/hbs2/meta"
 -- that does not look like an event is a file somebody put there, and reporting
 -- it is the point; silently ignoring anything unrecognised would let a tree
 -- carry events this reader pretends not to see.
-eventEntries :: [TreeEntry] -> ([TreeEntry], [(FilePath, FileProblem)])
-eventEntries es = (small, [ (teePath e, FileTooLarge (teeSize e)) | e <- big ])
+eventEntries :: [TreeEntry] -> ([FilePath], [(FilePath, FileProblem)])
+eventEntries es = ([ teePath e | e <- ok ], refused)
   where
-    (big, small) = partition ((> maxEventBytes) . teeSize) (filter isEvent es)
+    mine = filter isEvent es
     isEvent e = "threads/" `isPrefixOf` teePath e || "repo/" `isPrefixOf` teePath e
+
+    (ok, refused) = go [] [] mine
+
+    go acc bad [] = (reverse acc, reverse bad)
+    go acc bad (e:rest) = case teeSize e of
+      Nothing -> go acc ((teePath e, FileNotABlob) : bad) rest
+      Just n
+        | n > maxEventBytes -> go acc ((teePath e, FileTooLarge n) : bad) rest
+        | otherwise         -> go (e : acc) bad rest
+
+-- | How much of a tree this reader will take in before it refuses the whole
+-- thing, and how many files.
+--
+-- Two bounds and not one, because they bound different costs. The bytes bound
+-- what the reader holds: the fold sorts the whole log, so every admitted event
+-- is resident at once, and a per-file bound does not imply a total one. Twenty
+-- thousand files each just under 'maxEventBytes' is legal by every check in this
+-- module and is gigabytes. The count bounds the number of times a 'CanonSource'
+-- is asked for a blob, which for the git one is a process each.
+--
+-- Both are checked against the LISTING, before a byte is fetched, which is what
+-- makes them bounds on the reader rather than observations about it. The numbers
+-- are round because the honest answer is "no repository is near this and any
+-- repository past it needs compaction, not a bigger reader" (PEP-19).
+maxCanonBytes :: Int
+maxCanonBytes = 256 * 1024 * 1024
+
+maxCanonFiles :: Int
+maxCanonFiles = 200000
 
 -- | Read canon and fold it.
 --
@@ -166,11 +220,25 @@ readCanon cs owner = csCommit cs >>= \case
   Left e -> pure (Left e)
   Right commit -> csEntries cs commit >>= \case
     Nothing -> pure (Left (TreeUnreadable commit))
-    Just entries -> do
+    Just entries
+      -- Both bounds before any blob is fetched, which is the only order in which
+      -- they bound what this costs rather than describe what it cost.
+      | Just n <- oversized entries -> pure (Left (CanonTooBig n))
+      | length entries > maxCanonFiles -> pure (Left (CanonTooMany (length entries)))
+      | otherwise -> do
       -- The version first, because it decides whether the rest may be folded at
       -- all. An absent file is not a refusal (a tree written by something else
       -- is still readable); one that is present and malformed is.
-      ver <- csBlob cs commit "version" <&> fmap parseMeta
+      --
+      -- Found in the listing rather than asked for by name: its size is right
+      -- there, and reading it blind was the one file left in this module that
+      -- could be any size at all. A 200 MB version file peaked at 658 MiB of
+      -- resident memory before parseMeta got to say it was not a version.
+      ver <- case [ e | e <- entries, teePath e == "version" ] of
+               (e:_) | maybe True (<= maxEventBytes) (teeSize e) ->
+                 csBlob cs commit "version" <&> fmap parseMeta
+               (_:_) -> pure (Just (Left (TooLarge "version")))
+               []    -> pure Nothing
       case ver of
         Just (Left _) -> pure (Left VersionUnreadable)
         _ -> do
@@ -178,27 +246,47 @@ readCanon cs owner = csCommit cs >>= \case
           let declared = case ver of
                            Just (Right n) -> Just n
                            _              -> Nothing
-              (ok, tooBig) = eventEntries entries
-              paths = fmap teePath ok
+              (paths, refused) = eventEntries entries
 
-          files <- traverse (\p -> csBlob cs commit p <&> (p,)) paths
+          -- Parsed inside the loop, so a file's TEXT dies as soon as it has
+          -- become an event or a problem. Binding the texts first and using the
+          -- list twice kept every one of them alive at once, which made the peak
+          -- the size of canon rather than the size of its largest file:
+          -- measured, 10 MB of blobs took 300 MiB, 100 MB took 576, 300 MB took
+          -- 1127, with no plateau. What survives here is the events, which the
+          -- fold genuinely needs all of at once, since it sorts the whole log.
+          read' <- foldM (readOne commit) ([],[],[]) paths
 
-          let got = readEventLog [ (p,t) | (p, Just t) <- files ]
-              absent = [ (p, FileUnreadable) | (p, Nothing) <- files ]
-              bad = sortOn fst $ tooBig <> absent
-                      <> [ (p, FileMalformed e) | (p,e) <- crBad got ]
+          let (evs, vers, bad') = read'
+              bad = sortOn fst (refused <> bad')
 
           -- foldCanon and not foldEvents: the tree's version governs the
           -- admission rules, which is the whole reason it is a tree-level file
           -- rather than a per-file one, and folding a newer tree under this
           -- build's rules is the divergence PEP-19 versions canon to prevent.
-          let rules = maybe hubMetaVersion id declared
-          pure $ case foldCanon rules owner (crEvents got) of
+          pure $ case foldCanon (fromMaybe hubMetaVersion declared) owner evs of
             Left (MetaTooNew n) -> Left (CanonTooNewHere n)
             Right fr -> Right CanonState
               { stCommit  = commit
               , stVersion = declared
               , stBad     = bad
-              , stFileVersions = sortOn fst (crVersions got)
+              , stFileVersions = sortOn fst vers
               , stFold    = fr
               }
+
+  where
+    -- The first entry over the per-file bound is not what refuses the tree; the
+    -- SUM is. A file over 'maxEventBytes' is refused on its own and reported by
+    -- path, which is useful; a tree whose total is past what this reader will
+    -- hold has no per-file culprit to name, so the number is the total.
+    oversized es =
+      let total = sum [ n | e <- es, Just n <- [teeSize e] ]
+      in if total > maxCanonBytes then Just total else Nothing
+
+    -- One file: fetched, parsed, and the text let go. The accumulator carries
+    -- only what outlives it.
+    readOne commit (evs, vers, bad) p = csBlob cs commit p >>= \case
+      Nothing -> pure (evs, vers, (p, FileUnreadable) : bad)
+      Just t  -> pure $ case parseEvent t of
+        Left e         -> (evs, vers, (p, FileMalformed e) : bad)
+        Right (v, ev)  -> (ev : evs, (p, v) : vers, bad)

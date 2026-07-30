@@ -67,6 +67,10 @@ refused u = do
                             <> " Fetch again, or unshallow."
       CanonTooNewHere _ -> line <> "  Upgrade; this build would fold it under"
                              <> " rules it does not implement."
+      CanonTooBig _  -> line <> "  Compaction is the answer to a canon this"
+                          <> " large (PEP-19), not a bigger reader."
+      CanonTooMany _ -> line <> "  Compaction is the answer to a canon this"
+                          <> " large (PEP-19), not a bigger reader."
       _ -> mempty
 
     -- Distinct codes, and chosen so a hook can say "audit could not run" without
@@ -79,6 +83,8 @@ refused u = do
       TreeUnreadable{}  -> 5
       CanonTooNewHere{} -> 6
       VersionUnreadable -> 7
+      CanonTooBig{}     -> 8
+      CanonTooMany{}    -> 8
 
 report :: CanonState -> IO ()
 report st = do

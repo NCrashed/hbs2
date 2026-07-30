@@ -10,7 +10,9 @@ import HBS2.Net.Auth.Credentials
 import Data.HashMap.Strict qualified as HM
 import Data.Text (Text)
 import Data.IORef
+import Data.ByteString qualified as BS
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
 import Test.Hspec
 
@@ -29,9 +31,13 @@ canon repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
 inMemory :: [(FilePath, Text)] -> CanonSource IO
 inMemory files = CanonSource
   { csCommit  = pure (Right "deadbeef")
-  , csEntries = const (pure (Just [ TreeEntry p (Text.length t) | (p,t) <- files ]))
+    -- UTF-8 bytes, because that is the unit git reports and the unit the bounds
+    -- are in. Text.length counts characters, so a fixture measured that way is
+    -- measured in a different unit from production.
+  , csEntries = const (pure (Just [ TreeEntry p (Just (utf8Len t)) | (p,t) <- files ]))
   , csBlob    = \_ p -> pure (lookup p files)
   }
+  where utf8Len = BS.length . Text.encodeUtf8
 
 -- Read a tree that is expected to read.
 readOk :: CanonSource IO -> RepoRef -> IO CanonState
@@ -92,9 +98,9 @@ spec = do
       -- Both are read by their own readers and would fail an event parse, so a
       -- reader that fed every path to one would report two corrupt files in
       -- every healthy tree.
-      let entries = [ TreeEntry p 10 | p <- ["version", numberIndexPath
-                                          , "repo/1-x", "threads/t/2-y"] ]
-      fmap teePath (fst (eventEntries entries)) `shouldBe` ["repo/1-x", "threads/t/2-y"]
+      let entries = [ TreeEntry p (Just 10) | p <- ["version", numberIndexPath
+                                                  , "repo/1-x", "threads/t/2-y"] ]
+      fst (eventEntries entries) `shouldBe` ["repo/1-x", "threads/t/2-y"]
 
     it "answers an absent ref as absent, not as empty canon" $ do
       owner <- kp
@@ -128,10 +134,11 @@ spec = do
       owner <- kp
       bob <- kp
       alice <- kp
-      -- delegate/revoke live under repo/ and must be seen in seq order with the
-      -- thread events, or the maintainer set is wrong at the events between
-      -- them. A reader that only walked threads/ would drop everything bob
-      -- blessed.
+      -- delegate/revoke live under repo/, and a reader that walked only threads/
+      -- would drop everything the delegate blessed. Ordering is not what this
+      -- test is about, and an earlier version of this comment claimed it was:
+      -- the fold sorts the whole set itself, so the only thing a reader has to
+      -- get right is reading BOTH directories.
       let repo = fst owner
           deleg = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice bob
@@ -145,8 +152,8 @@ spec = do
       st <- readOk (inMemory files) repo
       fmap drWhy (frDropped (stFold st)) `shouldBe` []
       HM.size (frThreads (stFold st)) `shouldBe` 1
-      -- ...and the same tree read without the repo/ file drops the open, which
-      -- is what makes the assertion above about ordering and not about luck
+      -- ...and the same tree without the repo/ file drops the open, which is what
+      -- makes the assertion above about reading repo/ rather than about luck
       let onlyThread = [ f | f@(p,_) <- files, not (Text.isPrefixOf "repo/" (Text.pack p)) ]
       st' <- readOk (inMemory onlyThread) repo
       fmap drWhy (frDropped (stFold st')) `shouldBe` [UnauthorizedCanon]
@@ -159,7 +166,7 @@ spec = do
       let repo = fst owner
           p = "threads/t/00000000000000000001-x"
           listed = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Just [TreeEntry p 10])))
+                     (const (pure (Just [TreeEntry p (Just 10)])))
                      (\_ _ -> pure Nothing)
       st <- readOk listed repo
       stBad st `shouldBe` [(p, FileUnreadable)]
@@ -211,12 +218,14 @@ spec = do
       let repo = fst owner
           huge = "threads/t/00000000000000000001-x"
           src = CanonSource (pure (Right "deadbeef"))
-                  (const (pure (Just [TreeEntry huge (maxEventBytes + 1)])))
+                  (const (pure (Just [TreeEntry huge (Just (maxEventBytes + 1))])))
                   (\_ p -> do modifyIORef fetched succ
                               pure (if p == "version" then Just renderMeta
                                                       else Just "whatever"))
       st <- readOk src repo
       stBad st `shouldBe` [(huge, FileTooLarge (maxEventBytes + 1))]
-      -- and the version file is the only blob that was asked for
-      readIORef fetched `shouldReturn` 1
+      -- Nothing was fetched at all. Not even the version file: it is looked up in
+      -- the listing, which this tree does not have one in, so the reader does not
+      -- ask for a blob whose size it has no way to know.
+      readIORef fetched `shouldReturn` 0
 

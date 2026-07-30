@@ -318,9 +318,13 @@ data CanonRead = CanonRead
 -- which files count on the day one of them grew a special case. The IO that
 -- lists the tree stays outside; this is the whole of the decision.
 --
--- Order is the caller's: hand the paths in lexical order and the events arrive
--- in the fold's own order for the @seq@ prefix, which costs the fold nothing
--- (it sorts anyway) and makes a truncated read a prefix rather than a sample.
+-- Order does not matter, and this used to claim it did: that handing the paths in
+-- lexical order made the events arrive in the fold's own order. It does not, and
+-- nothing needs it to. The zero-padding in a file name makes a DIRECTORY listing
+-- agree with the seq order within one thread, but canon is two directory trees
+-- merged, and the fold sorts the whole set by (seq, event-id, canon-box hash)
+-- regardless of what order it was handed. 'HBS2.Hub.Repo', the only caller, does
+-- not sort.
 readEventLog :: [(FilePath, Text)] -> CanonRead
 readEventLog = foldr one (CanonRead [] [] [])
   where

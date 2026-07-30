@@ -154,6 +154,10 @@ test-suite spec
                  , unordered-containers
                  , saltine
                  , text
+                 , directory
+                 , filepath
+                 , temporary
+                 , typed-process
   other-modules:
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec
@@ -163,3 +167,4 @@ test-suite spec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
       HBS2.Hub.RepoSpec
+      HBS2.Hub.GitRepoSpec
