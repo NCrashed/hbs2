@@ -69,8 +69,15 @@ hub pr    list [query]
 hub pr    show  <n|thread-id>      ; PR thread + coordinates + diff
 hub pr    checkout <n>            ; fetch pulls/<n>/head to a local branch for review
 hub log   [<n>]                    ; timeline of surviving events (subject to compaction)
-hub verify                         ; re-run the fold's checks; report dropped events
+hub verify <repo-key>              ; re-run the fold's checks; report dropped events
 ```
+
+`hub verify` takes the repository key rather than reading it from canon, and
+this is the one place a verb needs an argument that looks like it should be
+derivable. It is not derivable: the owner key is the root of the trust chain
+(rule 3 of the fold), so a tree that named its own owner would be a tree that
+could rename it, and the whole audit would then be an audit against whatever the
+tree claimed.
 
 Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 
@@ -258,6 +265,13 @@ such a comment at the bridge would strand a legitimate submission for good.
 Render it flat rather than failing or inventing a parent, and leave the
 reporting to `hub verify`, which lists dangling and cross-thread references
 along with the dropped events.
+
+That last part is not implemented and needs a fold change, not a CLI one: the
+fold has no anomaly for a `reply-to` that dangles or crosses a thread, so `hub
+verify` cannot list what nothing records. Adding one is an admission-rule change
+under PEP-19 and therefore a `hub-meta` bump once anything has published canon;
+until then it is free, which is an argument for doing it before the first
+release rather than after.
 
 Provenance is per item, not per thread: `canon_by` sits on the opening event
 and on each comment, because under delegation (PEP-21) different events on one

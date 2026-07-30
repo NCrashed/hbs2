@@ -11,13 +11,16 @@ module HBS2.Hub.CLI.Verify
   ( verifyEntries
   ) where
 
+import HBS2.Hub.Types (safeText)
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
+import HBS2.Hub.Repo.Git
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import Data.List qualified as List
+import Data.Text qualified as Text
 import System.Exit (exitWith,ExitCode(..))
 
 verifyEntries :: forall c m . ( IsContext c
@@ -42,45 +45,81 @@ verifyEntries = do
              <> line <> "canon that could rename it." )
     $ entry $ bindMatch "hub:verify" $ nil_ \case
         [ SignPubKeyLike repo ] -> lift do
-          st <- readCanon gitCanon repo
-
-          liftIO $ case stCommit st of
-            Nothing -> do
-              hPutDoc stderr $ "hub: no" <+> pretty metaRef <+> "in this repository."
-                <+> "Fetch it with a forcing refspec, or nothing has published"
-                <+> "canon yet." <> line
-              exitWith (ExitFailure 1)
-
-            Just commit -> do
-              let fr = stFold st
-                  dropped = frDropped fr
-                  anomalies = frAnomalies fr
-
-              print $ "canon" <+> pretty commit
-                <+> parens (maybe "no version file" (("hub-meta" <+>) . pretty)
-                                  (stVersion st))
-
-              -- The unreadable files first: an event nothing could parse is not
-              -- in the fold at all, so no drop or anomaly below can mention it,
-              -- and a reader who stopped at the fold's own report would not learn
-              -- it existed.
-              for_ (stBad st) $ \(p, e) ->
-                print $ "unreadable" <+> pretty p <> ":" <+> pretty e
-
-              for_ dropped (print . pretty)
-              for_ anomalies (print . pretty)
-
-              print $ "admitted" <+> pretty (length (frLog fr))
-                <+> "dropped" <+> pretty (length dropped)
-                <+> "anomalies" <+> pretty (length anomalies)
-                <+> "unreadable" <+> pretty (length (stBad st))
-
-              -- Non-zero when there is anything to act on, so this is usable in
-              -- a hook. All three counts, and not only the drops: an anomaly is
-              -- admitted canon that should not exist, which is exactly what an
-              -- audit is for, and an unreadable file is a file somebody has to
-              -- look at.
-              unless (List.null dropped && List.null anomalies && List.null (stBad st)) $
-                exitWith (ExitFailure 2)
+          readCanon gitCanon repo >>= liftIO . either refused report
 
         _ -> throwIO (BadFormException @c nil)
+
+-- There is nothing to audit, and which nothing it is decides both the advice and
+-- the exit code. One code for all of them told a hook that an unfetched ref, a
+-- repository that is not one, a tree with a pruned object and canon from the
+-- future were the same event.
+refused :: CanonUnreadable -> IO ()
+refused u = do
+  hPutDoc stderr ("hub:" <+> pretty u <> advice u <> line)
+  exitWith (ExitFailure (codeOf u))
+  where
+    advice = \case
+      NoCanonRef -> line <> "  Fetch it, which a plain clone does not:" <> line
+                      <> "    git fetch <remote> '+" <> pretty metaRef
+                      <> ":" <> pretty metaRef <> "'" <> line
+                      <> "  Or nothing has published canon for this repository yet."
+      TreeUnreadable _ -> line <> "  A partial clone or a pruned object."
+                            <> " Fetch again, or unshallow."
+      CanonTooNewHere _ -> line <> "  Upgrade; this build would fold it under"
+                             <> " rules it does not implement."
+      _ -> mempty
+
+    -- Distinct codes, and chosen so a hook can say "audit could not run" without
+    -- enumerating them: 3 and up is this function, 2 is a completed audit that
+    -- found something. 1 is left to the argument and usage failures every verb
+    -- shares.
+    codeOf = \case
+      NoCanonRef        -> 3
+      NoRepository{}    -> 4
+      TreeUnreadable{}  -> 5
+      CanonTooNewHere{} -> 6
+      VersionUnreadable -> 7
+
+report :: CanonState -> IO ()
+report st = do
+  print $ "canon" <+> pretty (stCommit st)
+    <+> parens (maybe "no version file" (("hub-meta" <+>) . pretty) (stVersion st))
+
+  -- The unreadable files first: a file nothing could parse never became an
+  -- event, so no drop or anomaly below can mention it, and a reader who stopped
+  -- at the fold's own report would not learn it existed.
+  --
+  -- Through safeText, because a path is a stranger's bytes: the tree is read with
+  -- -z precisely because a path may contain anything but NUL, and a file named
+  -- with a newline and a plausible summary line forged the last line of this
+  -- report. Every other stranger's text in this project already goes through it.
+  for_ (stBad st) $ \(p, e) ->
+    print $ "unreadable" <+> pretty (safeText (Text.pack p)) <> ":" <+> pretty e
+
+  -- Files whose own version clause did not read. Reported and never obeyed
+  -- (PEP-19), and reported at all because a writer that appends to this tree is
+  -- about to rewrite those files with its own version.
+  for_ [ p | (p, Nothing) <- stFileVersions st ] $ \p ->
+    print $ "no file version" <+> pretty (safeText (Text.pack p))
+
+  for_ dropped (print . pretty)
+  for_ anomalies (print . pretty)
+
+  -- Counts, not a partition, and said so: an event with two anomalies adds one
+  -- to admitted and two to anomalies.
+  print $ "admitted" <+> pretty (length (frLog fr))
+    <+> "dropped" <+> pretty (length dropped)
+    <+> "anomalies" <+> pretty (length anomalies)
+    <+> "unreadable" <+> pretty (length (stBad st))
+
+  -- Non-zero when there is anything to act on, so this is usable in a hook. All
+  -- three, and not only the drops: an anomaly is admitted canon that should not
+  -- exist, which is exactly what an audit is for, and an unreadable file is a
+  -- file somebody has to look at.
+  unless (List.null dropped && List.null anomalies && List.null (stBad st)) $
+    exitWith (ExitFailure 2)
+
+  where
+    fr = stFold st
+    dropped = frDropped fr
+    anomalies = frAnomalies fr

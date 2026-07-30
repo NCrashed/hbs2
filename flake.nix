@@ -243,6 +243,10 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           hubAlias
           pkgs.cacert
           pkgs.tzdata
+          # git, because the image already ships git-hbs2 and hbs2-git3, and
+          # hbs2-hub reads canon out of an ordinary git ref by running git. A
+          # forge CLI in an image with no git can announce a verb and not run it.
+          pkgs.git
         ];
         pathsToLink = [ "/bin" "/etc" "/share" ];
       };

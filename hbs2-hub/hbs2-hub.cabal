@@ -72,6 +72,7 @@ library
       HBS2.Hub.Bridge
       HBS2.Hub.Canon
       HBS2.Hub.Manifest
+      HBS2.Hub.Repo
 
 -- Everything that knows about the network, in a sublibrary rather than inside
 -- the executable.
@@ -103,7 +104,7 @@ library hub-ingress
                     , text
     exposed-modules:
       HBS2.Hub.Ingress
-      HBS2.Hub.Repo
+      HBS2.Hub.Repo.Git
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Inbox
       HBS2.Hub.CLI.Verify

@@ -9,6 +9,7 @@ import HBS2.Net.Auth.Credentials
 
 import Data.HashMap.Strict qualified as HM
 import Data.Text (Text)
+import Data.IORef
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import Test.Hspec
@@ -27,10 +28,14 @@ canon repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
 -- a list. This is why 'CanonSource' is a record of functions, not a git call.
 inMemory :: [(FilePath, Text)] -> CanonSource IO
 inMemory files = CanonSource
-  { csCommit = pure (Just "deadbeef")
-  , csPaths  = const (pure (fmap fst files))
-  , csBlob   = \_ p -> pure (lookup p files)
+  { csCommit  = pure (Right "deadbeef")
+  , csEntries = const (pure (Just [ TreeEntry p (Text.length t) | (p,t) <- files ]))
+  , csBlob    = \_ p -> pure (lookup p files)
   }
+
+-- Read a tree that is expected to read.
+readOk :: CanonSource IO -> RepoRef -> IO CanonState
+readOk cs repo = readCanon cs repo >>= either (fail . show) pure
 
 spec :: Spec
 spec = do
@@ -52,7 +57,7 @@ spec = do
                   , (threadDir thr <> "/" <> eventFileName 2 (eventId eCom), renderEvent eCom)
                   ]
 
-      st <- readCanon (inMemory files) repo
+      st <- readOk (inMemory files) repo
       stVersion st `shouldBe` Just hubMetaVersion
       stBad st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -77,7 +82,7 @@ spec = do
                     -- event, so this is the only place it can be reported.
                   , (threadDir thr <> "/junk", "not an event at all")
                   ]
-      st <- readCanon (inMemory files) repo
+      st <- readOk (inMemory files) repo
       fmap fst (stBad st) `shouldBe` [threadDir thr <> "/junk"]
       -- and the good file still folded
       frDropped (stFold st) `shouldBe` []
@@ -87,8 +92,9 @@ spec = do
       -- Both are read by their own readers and would fail an event parse, so a
       -- reader that fed every path to one would report two corrupt files in
       -- every healthy tree.
-      eventPaths ["version", numberIndexPath, "repo/1-x", "threads/t/2-y"]
-        `shouldBe` ["repo/1-x", "threads/t/2-y"]
+      let entries = [ TreeEntry p 10 | p <- ["version", numberIndexPath
+                                          , "repo/1-x", "threads/t/2-y"] ]
+      fmap teePath (fst (eventEntries entries)) `shouldBe` ["repo/1-x", "threads/t/2-y"]
 
     it "answers an absent ref as absent, not as empty canon" $ do
       owner <- kp
@@ -96,12 +102,10 @@ spec = do
       -- until somebody asks for it: git's default refspec covers heads and tags
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
-      let noRef = CanonSource (pure Nothing) (const (pure [])) (\_ _ -> pure Nothing)
-      st <- readCanon noRef (fst owner)
-      stCommit st `shouldBe` Nothing
-      -- and the fold it carries is the empty one, so a caller that ignores the
-      -- commit gets a defined answer rather than a crash
-      frDropped (stFold st) `shouldBe` []
+      let noRef = CanonSource (pure (Left NoCanonRef))
+                    (const (pure (Just []))) (\_ _ -> pure Nothing)
+      readCanon noRef (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left NoCanonRef
 
     it "reads a tree with no version file, and says the version is missing" $ do
       owner <- kp
@@ -116,7 +120,7 @@ spec = do
                 (canon repo 1 (Just 1))
           thr = eventId e
       let files = [(threadDir thr <> "/" <> eventFileName 1 thr, renderEvent e)]
-      st <- readCanon (inMemory files) repo
+      st <- readOk (inMemory files) repo
       stVersion st `shouldBe` Nothing
       HM.size (frThreads (stFold st)) `shouldBe` 1
 
@@ -138,13 +142,13 @@ spec = do
                   , (repoDir <> "/" <> eventFileName 1 (eventId deleg), renderEvent deleg)
                   , (threadDir thr <> "/" <> eventFileName 2 thr, renderEvent eOpen)
                   ]
-      st <- readCanon (inMemory files) repo
+      st <- readOk (inMemory files) repo
       fmap drWhy (frDropped (stFold st)) `shouldBe` []
       HM.size (frThreads (stFold st)) `shouldBe` 1
       -- ...and the same tree read without the repo/ file drops the open, which
       -- is what makes the assertion above about ordering and not about luck
       let onlyThread = [ f | f@(p,_) <- files, not (Text.isPrefixOf "repo/" (Text.pack p)) ]
-      st' <- readCanon (inMemory onlyThread) repo
+      st' <- readOk (inMemory onlyThread) repo
       fmap drWhy (frDropped (stFold st')) `shouldBe` [UnauthorizedCanon]
 
     it "keeps the paths a caller has to act on" $ do
@@ -153,9 +157,66 @@ spec = do
       -- malformed file and reported all the same: the first is a broken read of
       -- something that exists, and the path is what `hbs2-peer download` takes.
       let repo = fst owner
-          listed = CanonSource (pure (Just "deadbeef"))
-                     (const (pure ["threads/t/00000000000000000001-x"]))
+          p = "threads/t/00000000000000000001-x"
+          listed = CanonSource (pure (Right "deadbeef"))
+                     (const (pure (Just [TreeEntry p 10])))
                      (\_ _ -> pure Nothing)
-      st <- readCanon listed repo
-      fmap fst (stBad st) `shouldBe` ["threads/t/00000000000000000001-x"]
+      st <- readOk listed repo
+      stBad st `shouldBe` [(p, FileUnreadable)]
+
+    it "refuses a tree it cannot list, rather than reporting empty canon" $ do
+      owner <- kp
+      -- A commit that is here and a tree that is not: a partial clone, a pruned
+      -- object, a killed ls-tree. This used to answer an empty fold and a zero
+      -- exit, which is the one answer indistinguishable from a tracker that has
+      -- nothing in it.
+      let noTree = CanonSource (pure (Right "deadbeef"))
+                     (const (pure Nothing)) (\_ _ -> pure Nothing)
+      readCanon noTree (fst owner)
+        >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "deadbeef")
+
+    it "will not fold a tree whose rules are newer than this build" $ do
+      owner <- kp
+      alice <- kp
+      -- The tree version governs the admission rules, which is the whole reason
+      -- it is a tree-level file. Folding it here anyway printed the version and
+      -- then a drop list computed under v1 rules, and for the accept path that
+      -- reuses this reader it would be minting into a view built from rules this
+      -- build does not implement.
+      let repo = fst owner
+          e = mkEvent alice owner
+                (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                (canon repo 1 (Just 1))
+          thr = eventId e
+          files = [ ("version", "(hub-meta " <> Text.pack (show (hubMetaVersion + 1)) <> ")\n")
+                  , (threadDir thr <> "/" <> eventFileName 1 thr, renderEvent e)
+                  ]
+      readCanon (inMemory files) repo >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooNewHere (hubMetaVersion + 1))
+
+    it "refuses a version file that is present and unreadable" $ do
+      owner <- kp
+      -- The one file in the tree whose unreadability nothing else can report: it
+      -- is not an event, so it never reaches the fold, and swallowing the parse
+      -- error made a corrupt stamp and an absent one the same observation.
+      readCanon (inMemory [("version", "(hub-meta not-a-number)")]) (fst owner)
+        >>= \r -> fmap (const ()) r `shouldBe` Left VersionUnreadable
+
+    it "refuses an oversized blob from the listing, without fetching it" $ do
+      owner <- kp
+      fetched <- newIORef (0 :: Int)
+      -- The size comes from the tree, so the bound bounds what a READER spends.
+      -- Comparing after the fetch is comparing after paying: a tree of files just
+      -- under the limit is inside every per-file bound and is gigabytes of text.
+      let repo = fst owner
+          huge = "threads/t/00000000000000000001-x"
+          src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Just [TreeEntry huge (maxEventBytes + 1)])))
+                  (\_ p -> do modifyIORef fetched succ
+                              pure (if p == "version" then Just renderMeta
+                                                      else Just "whatever"))
+      st <- readOk src repo
+      stBad st `shouldBe` [(huge, FileTooLarge (maxEventBytes + 1))]
+      -- and the version file is the only blob that was asked for
+      readIORef fetched `shouldReturn` 1
 
