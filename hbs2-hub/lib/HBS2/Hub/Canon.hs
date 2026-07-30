@@ -271,7 +271,11 @@ truncationMark = " [projection truncated: see the author box]"
 parseEvent :: Text -> Either CanonError (Maybe Word32, Event)
 parseEvent txt = do
   cs <- clausesOf txt
-  let version = either (const Nothing) Just (word32 "hub-event" =<< only "hub-event" cs)
+  -- Forced here, not returned as a thunk. Unforced it closed over cs, so the
+  -- whole parse of the file stayed alive inside the Maybe: the caller keeps one
+  -- of these per file and forces them only when the report is printed, which made
+  -- the peak the sum of every file's parse instead of the largest single file.
+  let !version = either (const Nothing) Just (word32 "hub-event" =<< only "hub-event" cs)
   abox <- box "author-box" =<< only "author-box" cs
   cbox <- box "canon-box" =<< only "canon-box" cs
   pure (version, Event abox cbox)

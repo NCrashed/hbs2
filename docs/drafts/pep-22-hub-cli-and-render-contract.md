@@ -80,11 +80,18 @@ could rename it, and the whole audit would then be an audit against whatever the
 tree claimed.
 
 It reads canon out of the git ref directly and talks to no peer, so it runs in a
-hook, in CI, and in a clone whose peer is down. That is the reason its exit code
-is a contract rather than "non-zero on trouble": a hook has to tell "the audit
-ran and found things" from "the audit could not run", and one code for both told
-a hook that an unfetched ref and a tree full of forged events were the same
-event.
+hook, in CI, and in a clone whose peer is down. It opens no network connection
+either, and that takes saying because it is not free: `ls-tree -l` must know the
+size of every entry, so in a blobless or partial clone it drives a lazy fetch per
+missing blob, through the AUDITED repository's remote urls, `core.sshCommand` and
+`credential.helper`. The reader sets `GIT_NO_LAZY_FETCH=1`, so a missing object is
+reported as missing instead of fetched, and every bound below is a bound on what
+reaches the disk rather than a remark made after it got there.
+
+That it runs in a hook is also the reason its exit code is a contract rather than
+"non-zero on trouble": a hook has to tell "the audit ran and found things" from
+"the audit could not run", and one code for both told a hook that an unfetched ref
+and a tree full of forged events were the same event.
 
 | code | meaning                                              |
 |------|------------------------------------------------------|
@@ -132,6 +139,9 @@ silently dropped:
     numbers itself and a file cannot be allowed to change what the fold decided.
   - A blob whose object this clone does not have is reported as that, and not as
     a submodule. It is the one of these that fetching fixes.
+  - A path the tree lists TWICE is named. git fsck calls it duplicateEntries; on
+    `version` it is a refusal, because taking the first would let the order of
+    entries in somebody else's tree pick the rules canon is folded under.
 
 Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 

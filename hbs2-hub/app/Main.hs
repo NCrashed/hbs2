@@ -184,7 +184,11 @@ main = do
     -- (the verb reports "not connected" the first time anybody runs it), whereas a
     -- verb wrongly absent from it fails quietly by being slow.
     peerFreeNames :: [Id]
-    peerFreeNames = ["hub:verify"]
+    -- help too, and measured: `--help` took 1.553 s against `verify`'s 0.012 s,
+    -- all of it the peer probe, which is readProcess of `hbs2-peer poke` with no
+    -- timeout. Against a wedged peer the two commands that hang are the two you
+    -- would run to find out how to audit without one.
+    peerFreeNames = ["hub:verify", "help", "--help"]
 
     -- The WHOLE form, not its head. A head-symbol test said yes to
     -- @(hub:verify (hub:inbox:show X))@, whose argument reaches the peer and then

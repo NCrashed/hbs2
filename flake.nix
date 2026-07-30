@@ -176,9 +176,13 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     packagesDynamic = makePackages pkgs;
     packagesStatic = makePackages pkgs.pkgsStatic;
 
-    # hbs2-peer container image. On x86_64 it is built from the static
-    # (musl) binaries so the layer carries no glibc or distro
-    # userspace. On aarch64-linux the musl cross-GHC does not build
+    # hbs2-peer container image. On x86_64 the hbs2 binaries are the static
+    # (musl) ones, so none of THEM carries glibc or distro userspace. The
+    # image as a whole does: pkgs.gitMinimal below comes from the dynamic
+    # pkgs, and brings glibc with it. That is deliberate (see the note
+    # beside it) and it is why this no longer claims a glibc-free image.
+    #
+    # On aarch64-linux the musl cross-GHC does not build
     # (rts compile errors), so the image falls back to the dynamic
     # (glibc) binaries instead: justStaticExecutables already links the
     # Haskell libs statically, so the dynamic closure only adds glibc
@@ -220,30 +224,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       ln -s hbs2-hub $out/bin/hub
     '';
 
-    # git on hbs2-hub's own PATH, for the outputs that are a nix closure.
-    #
-    # `hub verify` runs git: canon is an ordinary git ref, and reading it is four
-    # plumbing calls. A nix profile is the one install path where "the user surely
-    # has git" is not an argument, since the point of installing from a flake is
-    # that the closure says what is needed.
-    #
-    # A wrapper rather than gitMinimal in the joined output, because that would
-    # put a `git` binary in the profile: a collision with the user's own, and this
-    # project has no business shipping one. --suffix, so a git already on PATH
-    # still wins and this is only a floor.
-    #
-    # NOT applied to `.#static`. That output is the source of the musl tarball,
-    # whose promise is a binary that depends on nothing, and the release archive
-    # copies bin/* with `cp -L`: a wrapper script would arrive as a shell script
-    # naming /nix/store paths that are not in the archive. INSTALL.md states the
-    # git requirement for that path instead.
-    hubWithGit = drv: pkgs.runCommand "hbs2-hub-git-path"
-      { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-      mkdir -p $out/bin
-      makeWrapper ${drv}/bin/hbs2-hub $out/bin/hbs2-hub \
-        --suffix PATH : ${pkgs.gitMinimal}/bin
-    '';
-
     dockerImageFor = imagePackages: pkgs.dockerTools.buildImage {
       name = "hbs2-peer";
       tag = imagePackages.hbs2-peer.version;
@@ -276,8 +256,10 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           # paths its legacyPackages give), the full package's closure is 326 MB
           # against gitMinimal's 123 MB, and the difference is perl with 35
           # modules and a python, in an image built from packagesStatic precisely
-          # so that it carries no glibc userspace. What is used here is rev-parse,
-          # show-ref, ls-tree and cat-file.
+          # so that the hbs2 binaries carry no glibc. git does bring glibc into the
+          # image, which is the price of shipping a forge CLI that shells out;
+          # gitMinimal keeps that price to one libc instead of a perl and a
+          # python. What is used here is rev-parse, show-ref, ls-tree and cat-file.
           #
           # Measured on the pin and not on whatever nixpkgs is on the developer's
           # path, which is where the previous numbers (402/167 MB, 39 modules)
@@ -324,12 +306,15 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         default =
         pkgs.symlinkJoin {
           name = "hbs2-all";
-          # hbs2-hub replaced by the wrapped one, not added alongside it: two
-          # derivations both offering bin/hbs2-hub is a collision symlinkJoin
-          # resolves by whichever it saw first.
-          paths = builtins.attrValues (packagesDynamic // {
-                    hbs2-hub = hubWithGit packagesDynamic.hbs2-hub;
-                  }) ++ [ hubAlias ];
+          # No wrapper putting git on hbs2-hub's PATH, though it is tempting.
+          # This output is what scripts/bundle-darwin.sh builds and copies with
+          # `cp -L`, so a wrapper arrives in the tarball and in the Homebrew
+          # bundle as a 414-byte shell script naming /nix/store paths that do not
+          # exist on the target machine. It also would not cover `nix run
+          # .#hbs2-hub` or `nix profile install .#hbs2-hub`, which take the
+          # package and not this join. git is a documented requirement instead
+          # (INSTALL.md), which is the same answer every non-nix install gets.
+          paths = builtins.attrValues packagesDynamic ++ [ hubAlias ];
         };
         static =
         pkgs.symlinkJoin {

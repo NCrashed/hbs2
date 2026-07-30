@@ -65,6 +65,21 @@
         which blames the owner for what is really a blobless or partial
         clone, and the fix (fetch) went unsaid.
 
+        No network, and this had to be arranged: `ls-tree -l` needs the
+        size of every entry, so in a blobless or partial clone it drives
+        a lazy fetch per missing blob, through the audited repository's
+        own remote urls, `core.sshCommand` and `credential.helper`. The
+        flag that is there so a bound can refuse a blob without fetching
+        it was fetching everything, before any bound could speak. The
+        reader sets `GIT_NO_LAZY_FETCH=1`, so the same listing reports a
+        missing object as missing, and every bound is a bound on what
+        reaches the disk.
+
+        A path the tree lists twice is named rather than resolved by
+        order; on `version` it is a refusal, since the first entry
+        winning let the order of entries in somebody else's tree choose
+        the rules canon is folded under.
+
         The repository key is an argument: the owner key is the root of
         the trust chain, so canon that named its own owner would be
         canon that could rename it.

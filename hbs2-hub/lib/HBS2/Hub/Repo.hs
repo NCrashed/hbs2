@@ -42,13 +42,15 @@ import HBS2.Hub.Types
 import HBS2.Hub.Canon
 import HBS2.Hub.Fold
 
-import HBS2.Prelude.Plated (Pretty(..),(<+>))
+import HBS2.Prelude.Plated (Pretty(..),(<+>),Doc,nest,vsep,line)
 
 import Control.Monad (foldM)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.List (sortOn)
+import Data.List qualified as List
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Word (Word32)
 
 -- | One entry a tree listing reported.
@@ -109,9 +111,13 @@ data CanonSource m = CanonSource
 -- the thing that ran the tool knows whether the tool ran.
 data BlobResult =
     BlobText Text
-    -- | The source ran and does not have it. A blob listed with a size and gone
-    -- by the time it was asked for: a gc or a prune between two calls.
-  | BlobAbsent
+    -- | The source ran and would not give it, with what it said. Not only "gone":
+    -- a gc or a prune between two calls, a corrupt pack, EACCES on an object
+    -- file, an ownership complaint. git exits 128 for all of those and this
+    -- reader cannot tell them apart, so it keeps the words instead of choosing a
+    -- story. Reported as 'FileUnreadable', which is the honest shape: what is
+    -- broken is the read.
+  | BlobRefused Text
     -- | The source could not run. Says nothing about canon.
   | BlobUnavailable Text
   deriving stock (Eq,Show)
@@ -173,13 +179,25 @@ data CanonUnreadable =
   | ReaderFailed Text
   deriving stock (Eq,Show)
 
+-- | The tool's own words, as their own indented block rather than a value in a
+-- one-line field.
+--
+-- git's complaints are multi-line on purpose: the remedy for a dubious-ownership
+-- refusal is the safe.directory command on the SECOND line. Rendered as a field
+-- value those newlines went through 'safeText' and came out as \\u{0a}, so the
+-- fix arrived spelled as an escape in the middle of a sentence. The escaping is
+-- right (one line of a report must stay one line); what was wrong is putting a
+-- block where a line goes.
+toolSaid :: Text -> Doc ann
+toolSaid e = nest 2 (line <> vsep [ pretty (safeText l) | l <- Text.lines e ])
+
 instance Pretty CanonUnreadable where
   pretty = \case
     NoCanonRef        -> "no" <+> pretty metaRef <+> "in this repository"
-    NoRepository e    -> "cannot read this git repository:" <+> pretty (safeText e)
+    NoRepository e    -> "cannot read this git repository:" <> toolSaid e
     RefUnresolved e   -> pretty metaRef <+> "does not resolve to a commit:"
-                           <+> pretty (safeText e)
-    TreeUnreadable e  -> "cannot list the canon tree:" <+> pretty (safeText e)
+                           <> toolSaid e
+    TreeUnreadable e  -> "cannot list the canon tree:" <> toolSaid e
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
     VersionUnreadable p -> "the version file is listed and does not read:"
@@ -191,14 +209,16 @@ instance Pretty CanonUnreadable where
                            <+> "will take in"
     CanonListingTooBig n -> "the canon tree listing is over" <+> pretty n
                               <+> "bytes, past what this reader will read"
-    ReaderFailed e    -> "this reader could not run git:" <+> pretty (safeText e)
+    ReaderFailed e    -> "this reader could not run git:" <> toolSaid e
 
 -- | Why one file in the tree did not become an event.
 data FileProblem =
     FileMalformed CanonError  -- ^ read, and not an event
-    -- | Listed and its blob will not read. Not the same as malformed, and
-    -- reported all the same: what is broken is the read, not the file.
-  | FileUnreadable
+    -- | Listed and its blob will not read, with what the source said. Not the same
+    -- as malformed, and reported all the same: what is broken is the read, not
+    -- the file. The message is kept because the causes range from a pruned object
+    -- to a permission error, and the difference is the whole of what to do next.
+  | FileUnreadable Text
     -- | Bigger than 'maxEventBytes', refused from the listing unfetched.
   | FileTooLarge Int
     -- | Listed and not a blob: a submodule. Named rather than filtered, because
@@ -219,18 +239,28 @@ data FileProblem =
     -- a path outside it is somebody's addition, and a reader that only looked
     -- under the two event directories could not see it at all.
   | FileUnexpected
+    -- | The tree lists this path more than once, which git fsck calls
+    -- duplicateEntries and which a hand-built tree can carry.
+    --
+    -- It matters most for  taking the head of the list meant the rules
+    -- canon is folded under were chosen by the ORDER of entries in somebody
+    -- else's tree, silently, with the audit exiting zero. Everywhere else in this
+    -- package an ambiguity is refused rather than resolved, and this is that.
+  | FileDuplicated
   deriving stock (Eq,Ord,Show)
 
 instance Pretty FileProblem where
   pretty = \case
     FileMalformed e     -> pretty e
-    FileUnreadable      -> "listed in the tree and its blob does not read"
+    FileUnreadable e    -> "listed in the tree and its blob does not read:"
+                             <> toolSaid e
     FileTooLarge n      -> "over the bound this reader will read:" <+> pretty n
                              <+> "bytes"
     FileNotABlob        -> "not a blob: a submodule, in a canon tree"
     FileObjectMissing   -> "the object is not in this clone; fetch, or unshallow"
     FileListingUnparsed -> "this reader could not parse the tree listing record"
     FileUnexpected      -> "not a path the canon tree layout has"
+    FileDuplicated      -> "listed more than once in the tree"
 
 -- | What reading canon produced.
 data CanonState = CanonState
@@ -287,8 +317,8 @@ assumedMetaVersion = 1
 -- MEMORY and not a stand-in for the file count: a listing of minimal 63-byte
 -- records fits 1.6M of them under it, eight times 'maxCanonFiles', so the count
 -- has to be enforced on the raw bytes before any entry is built. The git source
--- does that by counting record terminators; 'sortCanon' keeps its own count as
--- the backstop for a source that does not.
+-- does that by counting record terminators; 'readCanon' keeps its own count over
+-- the parsed entries as the backstop for a source that does not.
 maxCanonBytes :: Int
 maxCanonBytes = 256 * 1024 * 1024
 
@@ -305,9 +335,15 @@ maxListingBytes = maxCanonFiles * 512
 -- addition. The last is reported. A reader that looked only under the two event
 -- directories was blind to the rest of the tree, which is the reader that lets a
 -- tree carry things it pretends not to see.
+-- A path listed twice is reported once, as well as being handled: git fsck calls
+-- it duplicateEntries, a hand-built tree can carry it, and nothing downstream can
+-- see it, since every later step works one entry at a time.
 sortCanon :: [TreeEntry] -> ([(ByteString, Text, Int)], [(ByteString, FileProblem)])
-sortCanon = go [] []
+sortCanon entries = let (evs, bad) = go [] [] entries in (evs, dups <> bad)
   where
+    dups = [ (p, FileDuplicated)
+           | p : _ : _ <- List.group (List.sort (fmap teePath entries)) ]
+
     go evs bad [] = (reverse evs, reverse bad)
     go evs bad (e:rest) = case teeKind e of
       -- Before the layout question, because a record nobody could read has no
@@ -391,8 +427,12 @@ readCanon cs owner = csCommit cs >>= \case
         -- have. Before the listing was consulted, a pruned version blob read as
         -- "no version file" and the tree was folded under this build's rules,
         -- which is the gate below being skipped in silence.
+        -- More than one is refused, not resolved. Taking the head let the ORDER
+        -- of entries in somebody else's tree choose the rules canon is folded
+        -- under, with nothing said and a zero exit.
         ver <- case [ teeKind e | e <- entries, teePath e == versionPath ] of
                  [] -> pure (Right Nothing)
+                 (_ : _ : _) -> pure (Left (Right FileDuplicated))
                  (NotABlob : _)      -> pure (Left (Right FileNotABlob))
                  (Unparsed : _)      -> pure (Left (Right FileListingUnparsed))
                  (BlobMissing _ : _) -> pure (Left (Right FileObjectMissing))
@@ -400,7 +440,7 @@ readCanon cs owner = csCommit cs >>= \case
                    | n > maxEventBytes -> pure (Left (Right (FileTooLarge n)))
                    | otherwise -> csBlob cs oid >>= \case
                        BlobUnavailable e -> pure (Left (Left (ReaderFailed e)))
-                       BlobAbsent -> pure (Left (Right FileUnreadable))
+                       BlobRefused e -> pure (Left (Right (FileUnreadable e)))
                        BlobText t -> pure (either (Left . Right . FileMalformed)
                                                   (Right . Just)
                                                   (parseMeta t))
@@ -443,7 +483,7 @@ readCanon cs owner = csCommit cs >>= \case
     readOne acc@(Left _) _ = pure acc
     readOne (Right (evs, vers, bad)) (p, oid, _) = csBlob cs oid >>= \case
       BlobUnavailable e -> pure (Left (ReaderFailed e))
-      BlobAbsent -> pure (Right (evs, vers, (p, FileUnreadable) : bad))
+      BlobRefused e -> pure (Right (evs, vers, (p, FileUnreadable e) : bad))
       BlobText t -> pure $ case parseEvent t of
         Left e        -> Right (evs, vers, (p, FileMalformed e) : bad)
         Right (v, ev) -> Right (ev : evs, (p, v) : vers, bad)

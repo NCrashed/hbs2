@@ -55,7 +55,7 @@ byPath files = CanonSource
   , csEntries = const (pure (Right
       [ TreeEntry p (Blob (oidOf i) (BS.length (TextE.encodeUtf8 t)))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
-  , csBlob    = \oid -> pure (maybe BlobAbsent BlobText (lookup oid byOid))
+  , csBlob    = \oid -> pure (maybe (BlobRefused "no such object") BlobText (lookup oid byOid))
   }
   where
     oidOf i = Text.pack (show i)
@@ -78,7 +78,7 @@ everyRefusal =
   , (NoRepository "not a git repository", 4)
   , (RefUnresolved "bad object",          5)
   , (CanonTooNewHere 99,                  6)
-  , (VersionUnreadable FileUnreadable,    7)
+  , (VersionUnreadable (FileUnreadable "x"),    7)
   , (CanonTooBig (maxCanonBytes + 1),     8)
   , (TreeUnreadable "missing blob",       9)
   , (CanonTooMany (maxCanonFiles + 1),   10)
@@ -149,6 +149,56 @@ spec = do
       pathText "\\" `shouldBe` "\\u{5c}"
       pathText "\\\xff" `shouldBe` "\\x{5c}\\x{ff}"
 
+    it "prints a tool's own complaint as a block, not as a field value" $ do
+      -- git's complaints are multi-line on purpose: the remedy for a
+      -- dubious-ownership refusal is the safe.directory command on the SECOND
+      -- line. Rendered as a value in a one-line field, those newlines went
+      -- through safeText and came out as \u{0a}, so the fix arrived spelled as an
+      -- escape in the middle of a sentence. The escaping is right; a report line
+      -- must stay one line. What was wrong is putting a paragraph in a field.
+      let said = "fatal: detected dubious ownership\nrun: git config --global ..."
+          ls = Text.lines (render (refusalDoc (NoRepository said)))
+      any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` False
+      any ("run: git config" `Text.isInfixOf`) ls `shouldBe` True
+      -- Each line of it on its own line, indented under the complaint.
+      length (filter ("  " `Text.isPrefixOf`) ls) `shouldSatisfy` (>= 2)
+
+    it "counts a missing version file as a finding, and prints it" $ do
+      owner <- kp
+      -- PEP-19 requires the file. It was a parenthesis on the header line and a
+      -- zero exit, which is the one thing in the report a reader had to notice
+      -- unprompted. Deleting both the line and the exit-code clause used to leave
+      -- the whole suite green, which is why this asserts both.
+      st <- readCanon (byPath [("threads/t/0001-x", "not an event")]) (fst owner)
+              >>= either (fail . show) pure
+      stVersion st `shouldBe` Nothing
+      reportCode st `shouldBe` 2
+      any ("no version file" `Text.isPrefixOf`) (fmap render (reportDoc st))
+        `shouldBe` True
+
+    it "counts a file with no version clause of its own as a finding" $ do
+      owner <- kp
+      alice <- kp
+      -- Reported since PEP-19 says the clause is never obeyed but is worth
+      -- knowing about, and now counted: stdout listed one line per file and $?
+      -- said 0, which PEP-22 defines as an audit that found nothing.
+      let repo = fst owner
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                 (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
+          thr = eventId ev
+          -- renderEvent writes the clause; stripping it is what a writer that
+          -- does not know about it would produce.
+          without = Text.unlines
+                      [ l | l <- Text.lines (renderEvent ev)
+                          , not ("(hub-event" `Text.isPrefixOf` l) ]
+      st <- readCanon (byPath
+              [ ("version", renderMeta)
+              , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), without) ]) repo
+              >>= either (fail . show) pure
+      [ p | (p, Nothing) <- stFileVersions st ] `shouldSatisfy` (not . null)
+      reportCode st `shouldBe` 2
+
     it "keeps two paths that differ in one invalid byte on two distinct lines" $ do
       owner <- kp
       let repo = fst owner
@@ -194,7 +244,7 @@ spec = do
                     (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
           thr = eventId eOpen
           good = [ ("version", renderMeta)
-                 , (encode (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent eOpen) ]
+                 , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent eOpen) ]
 
       clean <- readCanon (byPath good) repo >>= either (fail . show) pure
       reportCode clean `shouldBe` 0
@@ -207,5 +257,5 @@ spec = do
       reportCode dirty `shouldBe` 2
 
   where
-    encode = TextE.encodeUtf8 . Text.pack
+    encodePath = TextE.encodeUtf8 . Text.pack
     lastOf xs = if null xs then Nothing else Just (last xs)

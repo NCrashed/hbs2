@@ -20,12 +20,14 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Foldable (for_)
 import Data.List (sort)
 import Data.Maybe (fromMaybe,isJust)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Control.Monad (unless)
-import System.Directory (createDirectoryIfMissing,findExecutable,getPermissions,setPermissions,setOwnerExecutable)
+import System.Directory ( createDirectoryIfMissing,findExecutable,getPermissions
+                        , setPermissions,setOwnerExecutable,doesFileExist )
 import System.Environment qualified as Env
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
@@ -150,27 +152,55 @@ kindOf = \case
 -- stops being true for the specs around it.
 shimmed :: Int -> ByteString
         -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
-shimmed = shimmedWith gitBounds
+shimmed noise out act = shimmedWith gitBounds noise 0 out (\r _ -> act r)
 
-shimmedWith :: GitBounds -> Int -> ByteString
-            -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
-shimmedWith bounds noise out act =
+-- The reader, and how many pieces of the listing the shim got to write.
+--
+-- The count is what makes "the reader stopped early" observable at all. A marker
+-- file after the last piece was the first attempt and it was flaky: whether the
+-- shell survives the SIGTERM long enough to run one more command is up to the
+-- shell, so the marker sometimes appeared for a reader that had stopped. A piece
+-- count only ever goes up while somebody is reading, so a count below the total
+-- means the writer was stopped, whoever got the signal.
+shimmedWith :: GitBounds -> Int -> Int -> ByteString
+            -> (IO (Either CanonUnreadable [TreeEntry]) -> IO (Int, Int) -> IO a)
+            -> IO a
+shimmedWith bounds noise showRefCode out act =
   withSystemTempDirectory "hub-shim" $ \dir -> do
     let bin = dir </> "bin"
+        -- Pieces a little under a pipe buffer, so a writer that is not being read
+        -- blocks partway rather than finishing in one syscall.
+        pieces = chunksOf 32768 out
+        piece i = bin </> ("listing." <> show i)
+        progress = bin </> "progress"
     createDirectoryIfMissing True bin
-    BS.writeFile (bin </> "listing") out
-    writeFile (bin </> "git") (unlines
+    for_ (zip [0 :: Int ..] pieces) $ \(i, p) -> BS.writeFile (piece i) p
+    writeFile (bin </> "git") (unlines $
       [ "#!/bin/sh"
+      , "noise() { i=0; while [ $i -lt $1 ]; do"
+      , "  echo \"remote: enumerating objects $i, done.\" >&2; i=$((i+1)); done; }"
       , "case \"$*\" in"
       , "  *ls-tree*)"
-      -- stderr FIRST and unread by design: the child has to be able to fill the
-      -- pipe before the parent has finished stdout, which is the deadlock.
-      , "    i=0; while [ $i -lt " <> show noise <> " ]; do"
-      , "      echo \"remote: enumerating objects $i, done.\" >&2; i=$((i+1)); done"
-      , "    cat " <> (bin </> "listing")
+      -- Noise on BOTH sides of the listing, and unread by design. Before it, so
+      -- the child can fill the 64 KiB stderr pipe while the parent is still on
+      -- stdout; after it, so a reader that finished stdout and then waited on the
+      -- process is covered too. One order alone would leave the other untested,
+      -- and the untested one is a hang, which reads as a slow CI rather than a
+      -- red one.
+      , "    noise " <> show (noise `div` 2)
+      ] <>
+      [ "    cat " <> piece i <> " && echo x >> " <> progress
+      | i <- [0 .. length pieces - 1] ] <>
+      [ "    noise " <> show (noise - noise `div` 2)
       , "    ;;"
       , "  *rev-parse*--git-dir*) echo .git ;;"
-      , "  *show-ref*) exit 0 ;;"
+      , "  *show-ref*)"
+      , "    if [ " <> show showRefCode <> " -ne 0 ]; then"
+      -- Two lines, like git's own: the complaint, and what to run about it.
+      , "      echo \"fatal: git show-ref: bad ref refs/hbs2/meta (deadbeef)\" >&2"
+      , "      echo \"run this to fix it: git fsck --no-progress\" >&2"
+      , "    fi"
+      , "    exit " <> show showRefCode <> " ;;"
       , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
       , "  *) exit 1 ;;"
       , "esac"
@@ -180,7 +210,20 @@ shimmedWith bounds noise out act =
     old <- Env.lookupEnv "PATH"
     bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
              (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
-             (act (readTreeWith bounds dir))
+             (act (readTreeWith bounds dir) (written progress (length pieces)))
+
+-- How many pieces the shim finished, and how many there were.
+written :: FilePath -> Int -> IO (Int, Int)
+written progress total = do
+  here <- doesFileExist progress
+  n <- if here then length . lines <$> readFile progress else pure 0
+  pure (n, total)
+
+-- A ByteString in pieces of at most n bytes.
+chunksOf :: Int -> ByteString -> [ByteString]
+chunksOf n bs
+  | BS.null bs = []
+  | otherwise  = BS.take n bs : chunksOf n (BS.drop n bs)
 
 -- Entries as the reader returns them, whole.
 readTreeWith :: GitBounds -> FilePath -> IO (Either CanonUnreadable [TreeEntry])
@@ -318,13 +361,64 @@ spec = do
       -- caller's answer to "which repository", and a hook's GIT_DIR is the right
       -- one to obey. gitCanon is what `hub verify` uses, so this is the path in
       -- production and it had no test at all.
-      withCanon [("version", "(hub-meta 1)\n")] $ \dir ->
+      withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
+        wanted <- git dir ["rev-parse", "refs/hbs2/meta"]
         bracket_ (Env.setEnv "GIT_DIR" (dir </> ".git"))
                  (Env.unsetEnv "GIT_DIR")
                  (csCommit (gitCanon @IO) >>= \case
-                    Right c -> Text.length c `shouldBe` 40
+                    -- The commit itself, not its length: a reader that answered
+                    -- with any forty characters would pass a length check, and
+                    -- what this is about is WHICH repository was read.
+                    Right c -> Text.unpack c `shouldBe` wanted
                     Left e -> expectationFailure
                                 ("expected a commit, got " <> show e))
+
+    it "lists a blobless clone without fetching a single object" $ do
+      -- THE FETCH. ls-tree -l has to know the size of every entry, so in a
+      -- partial clone it drives a lazy fetch per missing blob: the flag that is
+      -- here so a bound can refuse a blob WITHOUT fetching it was fetching
+      -- everything, before any bound could speak. A four-gigabyte event file
+      -- landed on disk and was then refused as too large.
+      --
+      -- Worse than the bytes: the fetch goes wherever the AUDITED repository's
+      -- config says, through its remote urls, its core.sshCommand and its
+      -- credential.helper. PEP-22 calls this verb read-only and peerless.
+      --
+      -- A local file:// promisor, so this needs no network to prove it.
+      withSystemTempDirectory "hub-partial" $ \root -> do
+        let origin = root </> "origin"
+            clone  = root </> "clone"
+        createDirectoryIfMissing True origin
+        void $ git origin ["init", "-q", "."]
+        void $ git origin ["config", "uploadpack.allowFilter", "true"]
+        h <- hashObject origin "(hub-meta 1)\n"
+        e <- hashObject origin "not an event"
+        void $ gitStdin origin
+                 (LBS8.pack ("100644 " <> h <> "\tversion\0"
+                             <> "100644 " <> e <> "\tthreads/t/0001-x\0"))
+                 ["update-index", "-z", "--index-info"]
+        tree <- git origin ["write-tree"]
+        commit <- git origin ["commit-tree", tree, "-m", "canon"]
+        void $ git origin ["update-ref", "refs/hbs2/meta", commit]
+
+        void $ git root [ "clone", "-q", "--filter=blob:none", "--no-checkout"
+                        , "--no-local", "file://" <> origin, clone ]
+        void $ git clone ["fetch", "-q", "origin", "+refs/hbs2/meta:refs/hbs2/meta"]
+
+        let blobs = length . filter (== "blob") . lines
+              <$> git clone [ "cat-file", "--batch-all-objects"
+                            , "--batch-check=%(objecttype)" ]
+        before <- blobs
+        before `shouldBe` 0
+
+        -- The listing still reports both files, and reports the ones whose
+        -- objects are absent as absent: BAD in the size column, which is what
+        -- git prints when it is told not to go and get them.
+        readIn clone `shouldReturn`
+          Right [ ("threads/t/0001-x", Missing), ("version", Missing) ]
+
+        -- And nothing was fetched. This is the assertion the whole test is for.
+        blobs `shouldReturn` 0
 
     it "tells a blob whose object is gone from a submodule" $ do
       -- ls-tree -l prints BAD, not a number, in the size column of a blob it
@@ -357,9 +451,11 @@ spec = do
           [oid] -> csBlob cs oid `shouldReturn` BlobText "\1087\1088\1080\1074\1077\1090"
           _ -> expectationFailure ("expected one event blob, got " <> show oids)
 
-        -- An object that is not there is BlobAbsent: git ran and said no. Not an
+        -- An object that is not there is BlobRefused "no such object": git ran and said no. Not an
         -- exception, not "", and not the answer for git having failed to run.
-        csBlob cs (Text.pack (replicate 40 'a')) `shouldReturn` BlobAbsent
+        csBlob cs (Text.pack (replicate 40 'a')) >>= \case
+          BlobRefused m -> Text.unpack m `shouldContain` "bad file"
+          other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
     it "says it could not read a listing record rather than calling it a submodule" $ do
       -- Not reachable through git today, and that is the point: this is the
@@ -393,16 +489,51 @@ spec = do
       -- a check on a buffer. With the real 102 MB bound nothing could afford to
       -- exercise this, which is why the bounds are a parameter.
       let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
-      shimmedWith (gitBounds { gbListingBytes = 200 }) 0 (mconcat (replicate 40 entry))
-        $ \readIt -> readIt `shouldReturn` Left (CanonListingTooBig 200)
+      -- Big enough that the shim blocks on a full stdout pipe rather than
+        -- finishing in one write, which is what makes "stopped early" observable
+        -- at all.
+      shimmedWith (gitBounds { gbListingBytes = 200 }) 0 0
+                  (mconcat (replicate 8000 entry))
+        $ \readIt written' -> do
+            readIt `shouldReturn` Left (CanonListingTooBig 200)
+            -- The reader stopped, and the writer with it. Without this the test
+            -- passes on a reader that reads all 376 KB and then checks a length,
+            -- which is the implementation this replaced.
+            (n, total) <- written'
+            n `shouldSatisfy` (< total)
 
-    it "counts the records before it builds them" $ do
-      -- Not one TreeEntry per record and then a count: the byte bound admits 1.6M
-      -- minimal records, eight times the file bound, and counting the parsed list
-      -- refused them after the allocation the bound exists to prevent.
+    it "refuses a listing with more records than the file bound" $ do
+      -- What this pins is the refusal and its count. What it does NOT pin is that
+      -- the count happens on the raw bytes before the entries are built, and
+      -- nothing can: the parser never drops a record, so NULs and parsed entries
+      -- are always the same number, and the difference is in what is allocated
+      -- along the way, not in the answer. The reason it is done on the bytes is
+      -- that the byte bound admits 1.6M minimal records, eight times this bound.
       let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
-      shimmedWith (gitBounds { gbListingFiles = 3 }) 0 (mconcat (replicate 10 entry))
-        $ \readIt -> readIt `shouldReturn` Left (CanonTooMany 10)
+      shimmedWith (gitBounds { gbListingFiles = 3 }) 0 0 (mconcat (replicate 10 entry))
+        $ \readIt _ -> readIt `shouldReturn` Left (CanonTooMany 10)
+
+    it "keeps a tool complaint whole, in a block, and says who could not run" $ do
+      -- show-ref exiting 128 is the "ref names an object that is gone" branch, and
+      -- nothing reached it: git only produces it on a repository whose ref points
+      -- into a pack that is not there.
+      --
+      -- Two things are asserted about the message. It is kept WHOLE, because git
+      -- puts the remedy for a dubious-ownership refusal on the second line, and
+      -- one line of it is the half without the fix. And it renders as an indented
+      -- block, not as a field value; that half is asserted in VerifySpec, which
+      -- is where the renderer lives.
+      shimmedWith gitBounds 0 128 "" $ \readIt _ ->
+        readIt >>= \case
+          Left (RefUnresolved m) -> do
+            Text.unpack m `shouldContain` "bad ref refs/hbs2/meta"
+            -- The SECOND line, which is where git puts what to run.
+            Text.unpack m `shouldContain` "git fsck"
+            -- And no trailing newline of its own: it is a message, not a file.
+            Text.unpack m `shouldNotContain` "\n\n"
+            last (Text.unpack m) `shouldNotBe` '\n'
+          other -> expectationFailure
+                     ("expected RefUnresolved, got " <> show (fmap (const ()) other))
 
     it "tells an absent ref from a directory that is not a repository" $ do
       -- rev-parse exits 1 for the first and 128 for the second, and collapsing

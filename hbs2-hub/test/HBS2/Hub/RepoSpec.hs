@@ -50,7 +50,7 @@ inMemory files = CanonSource
   , csEntries = const (pure (Right
       [ TreeEntry (encPath p) (Blob (oidOf i) (utf8Len t))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
-  , csBlob    = \oid -> pure (maybe BlobAbsent BlobText (lookup oid byOid))
+  , csBlob    = \oid -> pure (maybe (BlobRefused "no such object") BlobText (lookup oid byOid))
   }
   where
     utf8Len = BS.length . Text.encodeUtf8
@@ -133,7 +133,7 @@ spec = do
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
       let noRef = CanonSource (pure (Left NoCanonRef))
-                    (const (pure (Right []))) (const (pure BlobAbsent))
+                    (const (pure (Right []))) (const (pure (BlobRefused "no such object")))
       readCanon noRef (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left NoCanonRef
 
@@ -191,9 +191,9 @@ spec = do
           p = B8.pack "threads/t/00000000000000000001-x"
           listed = CanonSource (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry p (Blob "oid" 10)])))
-                     (const (pure BlobAbsent))
+                     (const (pure (BlobRefused "no such object")))
       st <- readOk listed repo
-      stBad st `shouldBe` [(p, FileUnreadable)]
+      stBad st `shouldBe` [(p, FileUnreadable "no such object")]
 
     it "refuses a tree it cannot list, rather than reporting empty canon" $ do
       owner <- kp
@@ -202,7 +202,7 @@ spec = do
       -- exit, which is the one answer indistinguishable from a tracker that has
       -- nothing in it.
       let noTree = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure BlobAbsent))
+                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure (BlobRefused "no such object")))
       readCanon noTree (fst owner)
         >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "gone")
 
@@ -279,9 +279,9 @@ spec = do
       -- tells them apart.
       let listed = CanonSource (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry versionPath (Blob "oid" 13)])))
-                     (const (pure BlobAbsent))
+                     (const (pure (BlobRefused "no such object")))
       readCanon listed (fst owner) >>= \r ->
-        fmap (const ()) r `shouldBe` Left (VersionUnreadable FileUnreadable)
+        fmap (const ()) r `shouldBe` Left (VersionUnreadable (FileUnreadable "no such object"))
       -- ...and a tree that simply does not list one is read
       st <- readOk (inMemory []) (fst owner)
       stVersion st `shouldBe` Nothing
@@ -343,6 +343,54 @@ spec = do
         , (B8.pack numberIndexPath, FileNotABlob)
         , ("threads/t/0001-gone", FileObjectMissing)
         , ("threads/t/0001-sub", FileNotABlob)
+        ]
+
+    it "refuses a tree that lists the version file twice" $ do
+      owner <- kp
+      -- git fsck calls it duplicateEntries and a hand-built tree can carry it.
+      -- Taking the head of the list let the ORDER of entries in somebody else's
+      -- tree pick the rules canon is folded under, silently, exit 0.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "a" 13)
+                    , TreeEntry versionPath (Blob "b" 13)
+                    ])))
+                  (const (pure (BlobText renderMeta)))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (VersionUnreadable FileDuplicated)
+
+    it "names a path the tree lists twice, wherever it is" $ do
+      owner <- kp
+      -- Not only the version file: nothing downstream can see a duplicate,
+      -- because every later step works one entry at a time.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "threads/t/0001-x" (Blob "a" 4)
+                    , TreeEntry "threads/t/0001-x" (Blob "b" 4)
+                    ])))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+      st <- readOk src (fst owner)
+      ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
+
+    it "reports a path under threads/ that is not a thread and a file" $ do
+      owner <- kp
+      -- A bare prefix match folded threads/x as an event and then reported it as
+      -- malformed, where it is really a path the layout does not have. The depth
+      -- is what tells those apart, and both directions matter.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "threads/x" (Blob "a" 4)
+                    , TreeEntry "threads/t/sub/0001-x" (Blob "b" 4)
+                    , TreeEntry "repo/a/b" (Blob "c" 4)
+                    ])))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+      st <- readOk src (fst owner)
+      stBad st `shouldBe`
+        [ ("repo/a/b", FileUnexpected)
+        , ("threads/t/sub/0001-x", FileUnexpected)
+        , ("threads/x", FileUnexpected)
         ]
 
     it "says a version file is missing rather than only implying it" $ do

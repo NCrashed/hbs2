@@ -27,6 +27,7 @@ module HBS2.Hub.CLI.Verify
   ) where
 
 import HBS2.Hub.Types (pathText)
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
@@ -94,10 +95,14 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
       NoRepository _ -> line <> "  Run this inside the repository, or check that"
                           <> " git is installed and" <> line
                           <> "  that this user may read it (safe.directory)."
+      -- No mention of tags: this reader asks for @^{commit}@, which PEELS an
+      -- annotated tag, so a ref pointing at one is accepted and audited. The
+      -- advice said otherwise and was checked: exit 0, canon read.
       RefUnresolved _ -> line <> "  The ref is here and what it names is not."
                            <> " Fetch again, or unshallow." <> line
-                           <> "  A ref pointing at a tree or a tag rather than a"
-                           <> " commit is not canon."
+                           <> "  A ref pointing at a tree or a blob is not canon;"
+                           <> " one pointing at a tag is" <> line
+                           <> "  read as the commit the tag names."
       -- No single cause, so no single remedy: the message above is git's own, and
       -- claiming "a pruned object" over a permission error or a listing past the
       -- bound sent people to fetch what was already there.
@@ -170,8 +175,13 @@ report st = do
 -- line about a stranger's bytes.
 reportDoc :: CanonState -> [Doc ann]
 reportDoc st =
+  -- The owner key is on the header line, because an audit is an audit AGAINST a
+  -- key and the report did not say which. The likeliest mistake anybody makes
+  -- with this verb is pasting a fork's key instead of upstream's, and its result
+  -- is "admitted 0 dropped 57", which reads exactly like mass forgery.
   [ "canon" <+> pretty (stCommit st)
-      <+> parens (maybe "no version file" (("hub-meta" <+>) . pretty) (stVersion st)) ]
+      <+> parens (maybe "no version file" (("hub-meta" <+>) . pretty) (stVersion st))
+      <+> "owner" <+> pretty (AsBase58 (frOwner (stFold st))) ]
 
   -- A line of its own, and a finding, because PEP-19 requires the file. As a
   -- parenthesis on the header it was the only thing in this report that a reader
@@ -195,7 +205,7 @@ reportDoc st =
   -- Files whose own version clause did not read. Reported and never obeyed
   -- (PEP-19), and reported at all because a writer that appends to this tree is
   -- about to rewrite those files with its own version.
-  <> [ "no file version" <+> pathDoc p | (p, Nothing) <- stFileVersions st ]
+  <> [ "no file version" <+> pathDoc p | p <- noFileVersion st ]
 
   <> fmap pretty dropped
   <> fmap pretty anomalies
@@ -223,12 +233,22 @@ reportDoc st =
 -- admission rules is absent and unsigned.
 reportCode :: CanonState -> Int
 reportCode st
-  | clean && stVersion st /= Nothing = 0
+  | clean = 0
   | otherwise = 2
   where
     fr = stFold st
+    -- Every line the report prints as a finding, and nothing else. The two that
+    -- were printed and not counted are the missing tree version and the files
+    -- with no version clause of their own: stdout listed them, 0 said 0, and
+    -- PEP-22 defines 0 as an audit that found nothing.
     clean = List.null (frDropped fr) && List.null (frAnomalies fr)
               && List.null (stBad st)
+              && List.null (noFileVersion st)
+              && stVersion st /= Nothing
+
+-- Files whose own version clause did not read.
+noFileVersion :: CanonState -> [ByteString]
+noFileVersion st = [ p | (p, Nothing) <- stFileVersions st ]
 
 -- A tree path on a terminal: escaped for display, and injectively, so two paths
 -- that differ read differently. A path is a stranger's bytes, and one with a

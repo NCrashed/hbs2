@@ -32,6 +32,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
+import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import System.Environment (getEnvironment)
@@ -100,6 +101,12 @@ gitCanonWith bounds cwd = CanonSource
       -- difference (rev-parse without --quiet warns "ignoring broken ref") and
       -- exposes it only as prose, which is not something to branch on. So this
       -- answers NoCanonRef for both, and the advice for it names both causes.
+      --
+      -- A Left is git NOT HAVING RUN, which on the first call cannot be told from
+      -- a directory that is not a repository, and after it can: git ran a moment
+      -- ago. Every later Left is therefore a local failure and says so. It read as
+      -- NoRepository, which under a process limit advised somebody to fix
+      -- safe.directory in a repository git had successfully read one call earlier.
       isRepo <- git ["rev-parse", "--git-dir"]
       case isRepo of
         Left e -> pure (Left (NoRepository (msg e)))
@@ -107,12 +114,12 @@ gitCanonWith bounds cwd = CanonSource
         Right (ExitSuccess, _) -> do
           here <- git ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
           case here of
-            Left e -> pure (Left (NoRepository (msg e)))
+            Left e -> pure (Left (ReaderFailed (msg e)))
             Right (ExitFailure 1, _) -> pure (Left NoCanonRef)
             Right (ExitFailure _, e) -> pure (Left (RefUnresolved (msg e)))
             Right (ExitSuccess, _) ->
               git ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] <&> \case
-                Left e -> Left (NoRepository (msg e))
+                Left e -> Left (ReaderFailed (msg e))
                 Right (ExitSuccess, out) -> Right (Text.strip out)
                 Right (_, e) -> Left (RefUnresolved (msg e))
 
@@ -122,6 +129,10 @@ gitCanonWith bounds cwd = CanonSource
       -- and reported clean empty canon. -l for the size and the object id, so a
       -- bound can refuse a blob unfetched and a blob can be fetched without
       -- naming a path. -z because a path may hold any byte but NUL.
+      --
+      -- "Unfetched" is true only because GIT_NO_LAZY_FETCH is set for every call
+      -- here: -l has to know a size, and without that flag a blobless clone
+      -- FETCHES each blob to answer. See the note on the environment below.
       --
       -- Read to a bound as it arrives, which is the one call here that is not
       -- 'raw'. Every bound downstream is computed FROM this listing, so none of
@@ -148,20 +159,43 @@ gitCanonWith bounds cwd = CanonSource
             | recs out > gbListingFiles bounds -> Left (CanonTooMany (recs out))
             | otherwise -> Right (parseListing out)
           Right (_, Just e) -> Left (TreeUnreadable (msg (decodeS e)))
-          Left e -> Left (TreeUnreadable (msg e))
+          -- Again: git not having run at all, four calls in, is local.
+          Left e -> Left (ReaderFailed (msg e))
 
   , csBlob = \oid ->
       raw ["cat-file", "blob", Text.unpack oid] <&> \case
         Right (ExitSuccess, out) -> BlobText (decode out)
-        -- git ran and said no, so the object is not here. Distinct from git not
-        -- having run, below, which says nothing about canon: read as one answer,
-        -- a fork that failed on EAGAIN became an unreadable event file and exit 2,
-        -- which is the code for an audit that ran.
-        Right (_, _) -> BlobAbsent
+        -- git ran and would not give it, and its words are kept: a pruned object,
+        -- a corrupt pack and EACCES on an object file are all exit 128 here, and
+        -- calling them all "gone" put "fetch, or unshallow" under a permission
+        -- error. Distinct from git not having run, below, which says nothing about
+        -- canon at all: read as one answer, a fork that failed on EAGAIN became an
+        -- unreadable event file and exit 2, the code for an audit that ran.
+        Right (_, e) -> BlobRefused (msg (decode e))
         Left e -> BlobUnavailable (msg e)
   }
   where
-    -- Where git is to run, and it is not just a chdir.
+    -- Where git is to run, and what it is allowed to do while it runs.
+    --
+    -- GIT_NO_LAZY_FETCH is the important one, and it is why this is on EVERY call
+    -- rather than only when a directory is named. @ls-tree -l@ has to know the
+    -- size of every entry, so in a blobless or partial clone it drives a lazy
+    -- fetch per missing blob: measured on git 2.55, listing a three-file tree in
+    -- a @--filter=blob:none@ clone ran a git fetch per blob and left three blobs
+    -- on disk that were not there before. The flag whose entire purpose is to let
+    -- a bound refuse a blob WITHOUT fetching it was fetching everything.
+    --
+    -- So every bound downstream was a claim about a fetch that had already
+    -- happened, and an audit that PEP-22 calls read-only and peerless was opening
+    -- connections named by the audited repository's own config: remote urls,
+    -- core.sshCommand, credential.helper. With the flag, the same listing prints
+    -- BAD in the size column and fetches nothing, and BAD is already the case
+    -- this reader reports as "the object is not in this clone; fetch".
+    --
+    -- GIT_TERMINAL_PROMPT for the same reason one step further: git asks for a
+    -- password on /dev/tty, which setStdin closed does not cover, so a hook could
+    -- stop dead waiting for a human who is not there. Nothing here should be
+    -- reaching anything that authenticates in the first place.
     --
     -- setWorkingDir does NOT beat GIT_DIR: with one set, git reads that
     -- repository from any directory, so a caller that named a repository got
@@ -170,21 +204,34 @@ gitCanonWith bounds cwd = CanonSource
     -- hook auditing a repository other than the one it was invoked for is the
     -- kind of wrong that reads as correct.
     --
-    -- Only when a directory was named. With none, the environment is the caller's
-    -- whole answer to "which repository", and a hook's GIT_DIR is then the right
-    -- one to obey.
-    inDir p = case cwd of
-      Nothing -> pure p
-      Just d -> do
-        env0 <- liftIO getEnvironment
-        pure (setEnv (List.filter (not . override . fst) env0) (setWorkingDir d p))
+    -- The stripping is only for a NAMED directory. With none, the environment is
+    -- the caller's whole answer to "which repository", and a hook's GIT_DIR is
+    -- then the right one to obey.
+    inDir p = do
+      env0 <- liftIO getEnvironment
+      let kept = case cwd of
+                   Nothing -> env0
+                   Just _  -> List.filter (not . override . fst) env0
+          here = maybe id setWorkingDir cwd
+      pure (setEnv (kept <> forced) (here p))
 
-    -- The variables that name a repository, or part of one, from outside it.
-    -- GIT_CONFIG_* are not here: a config that turns off gpg signing or sets
-    -- safe.directory is the caller's business and this only reads.
+    -- Not negotiable by the environment, so appended: setEnv takes the last
+    -- binding of a name.
+    forced = [ ("GIT_NO_LAZY_FETCH", "1"), ("GIT_TERMINAL_PROMPT", "0") ]
+
+    -- The variables that answer "which repository" from outside it. The ceiling
+    -- and the filesystem-crossing flag are in here with the GIT_DIR family
+    -- because they change the answer for a directory that WAS named: under a CI
+    -- harness or `git bisect run` that sets a ceiling above the named directory,
+    -- git refuses to find a perfectly healthy repository and this reported code 4.
+    --
+    -- GIT_CONFIG_* are NOT here: a config that turns off gpg signing or sets
+    -- safe.directory is the caller's business, and this only reads.
     override k = k `elem` [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
                           , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
                           , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                          , "GIT_CEILING_DIRECTORIES"
+                          , "GIT_DISCOVERY_ACROSS_FILESYSTEM"
                           ]
 
     -- Lenient, so a blob that is not UTF-8 becomes replacement characters rather
@@ -247,7 +294,15 @@ gitCanonWith bounds cwd = CanonSource
                      Nothing -> pure (ExitFailure 1, Nothing)
                      Just bs -> do
                        code <- waitExitCode p
-                       err  <- wait errA
+                       -- The message is only wanted when git failed, and waiting
+                       -- for it is bounded even then: stderr EOFs when the last
+                       -- holder of the fd closes it, and a grandchild (an ssh
+                       -- ControlPersist master, say) inherits it and outlives
+                       -- git. On the success path there is nothing to wait for at
+                       -- all, and withAsync cancels the drain on the way out.
+                       err <- if code == ExitSuccess
+                                then pure mempty
+                                else fromMaybe mempty <$> timeout 2000000 (wait errA)
                        pure (code, Just (if code == ExitSuccess then bs else err))
               writeIORef answer (Just a)
               pure a

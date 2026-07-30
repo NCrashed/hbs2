@@ -17,10 +17,12 @@ it; they produce the same binaries. Pick whichever fits your setup.
 The fastest path. No toolchain, no build. Pulls a statically linked
 (musl) tarball from the GitHub release page.
 
-One runtime dependency, and only for one tool: `hbs2-hub` reads a
-repository's issue tracker out of an ordinary git ref by running
-`git`, so `hub verify` needs `git` on PATH. Everything else in the
-tarball needs nothing.
+One runtime dependency, and only for the git-facing tools: `hbs2-hub`
+reads a repository's issue tracker out of an ordinary git ref by
+running `git`, and `hbs2-git3` and `git-remote-hbs23` run it too (the
+latter is by construction: git invokes it). So `git` has to be on
+PATH. `hbs2-peer`, `hbs2-cli`, `hbs2-keyman`, `hbs2-sync` and `ncq3`
+need nothing.
 
 ```
 TAG=0.25.3.0  # set to the release you want
@@ -52,8 +54,9 @@ This puts the full binary set on PATH: `hbs2-peer`, `hbs2-cli`,
 `hbs2-sync`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`,
 `git-hbs2` (so `git hbs2 ...` works), `hbs2-hub`/`hub`, and `ncq3`.
 
-`hub verify` runs `git`, which macOS ships with the Xcode command
-line tools; `xcode-select --install` if `git --version` fails.
+The git-facing tools (`hub verify`, `hbs2-git3`, `git-remote-hbs23`)
+run `git`, which macOS ships with the Xcode command line tools;
+`xcode-select --install` if `git --version` fails.
 
 To run the peer as a background service via launchd:
 
@@ -84,10 +87,10 @@ alongside the daemon. You get `hbs2-peer` (the daemon) plus
 `hbs2-cli`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`, `git-hbs2`,
 `hbs2-hub`/`hub`, `hbs2-sync`, and `ncq3` ready for `docker exec`.
 
-It also carries `gitMinimal`, which is the one non-hbs2 program in it:
-`hbs2-hub` reads a repository's issue tracker out of an ordinary git
-ref by running `git`. That is why the image is no longer the ~40 MB it
-was before the forge CLI shipped.
+It also carries `gitMinimal`, the one non-hbs2 program in it: the
+git-facing tools run `git`, and `hbs2-hub` reads a repository's issue
+tracker out of an ordinary git ref that way. That is why the image is
+no longer the ~40 MB it was before the forge CLI shipped.
 
 Pull and run:
 
