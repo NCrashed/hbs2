@@ -53,6 +53,7 @@ module HBS2.Hub.Types
   , validHashRef
   , validHubKey
   , safeText
+  , pathText
   , hashRefBytes
   , PartSecret
   , mkPartSecret
@@ -90,6 +91,7 @@ import Data.Maybe (isJust)
 import Data.List qualified as List
 import Data.List (sort)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextE
 import Data.Int (Int64)
 import Data.Word (Word32,Word64)
 
@@ -394,24 +396,56 @@ normalizeAttr k v
 -- with an ESC in it is an attribute name with an ESC in it; printing that to a
 -- terminal hands a stranger the terminal. PEP-22 makes this the renderer's duty
 -- and this is the renderer's half of it.
--- Control characters, and also the four Unicode characters that reorder or break
--- a line without being control characters. 'Char.isControl' does not cover those,
--- so a right-to-left override in an attribute name could still reverse the tail
--- of a report line, and a line or paragraph separator could still break it in two
--- on a terminal that honours them. The whole point here is that one line of
--- output stays one line and reads as what it is.
+--
+-- Control characters, and also the marks, embeddings, overrides, isolates and
+-- separators that reorder or break a line without being control characters.
+-- 'Char.isControl' does not cover those, so a right-to-left override in an
+-- attribute name could still reverse the tail of a report line, and a line or
+-- paragraph separator could still break it in two on a terminal that honours
+-- them. The whole point here is that one line of output stays one line and reads
+-- as what it is.
+--
+-- The backslash is escaped too, which is what makes this injective: without it a
+-- name containing the four characters @\\x0a@ printed exactly like a name
+-- containing a newline, so the escaping that was supposed to show what a field
+-- holds could be spelled out by the field itself.
 safeText :: Text -> Text
 safeText = Text.concatMap esc
   where
-    esc c | Char.isControl c || bidi c = Text.pack ("\\x" <> hex (Char.ord c))
-          | otherwise                  = Text.singleton c
+    esc c | Char.isControl c || bidi c || c == '\\' = escChar c
+          | otherwise                              = Text.singleton c
 
     bidi c = c `elem` [ '\x200E', '\x200F'   -- LEFT/RIGHT-TO-LEFT MARK
+                      , '\x061C'             -- ARABIC LETTER MARK
                       , '\x202A', '\x202B', '\x202C', '\x202D', '\x202E'
                       , '\x2066', '\x2067', '\x2068', '\x2069'  -- isolates
                       , '\x2028', '\x2029'   -- LINE/PARAGRAPH SEPARATOR
                       ]
 
+-- | A path out of a stranger's git tree, on its way to a terminal.
+--
+-- Two paths that differ must print differently, and that is the whole of why
+-- this is not 'Data.Text.Encoding.decodeUtf8Lenient' followed by 'safeText'. A
+-- lenient decode maps every invalid byte to the same replacement character, so
+-- two paths differing only in an invalid byte printed as one line each, both
+-- identical; reporting a file is telling somebody which file to go and look at,
+-- and one of those two lines named a file that is not there. A tree path is any
+-- bytes but NUL, so anybody who can write canon can arrange it.
+pathText :: ByteString -> Text
+pathText bs = case TextE.decodeUtf8' bs of
+  Right t -> safeText t
+  -- Not UTF-8, so there is no text to escape and no encoding to guess at: every
+  -- byte that is not printable ASCII is spelled out. It cannot collide with the
+  -- branch above, where a backslash is itself escaped.
+  Left _  -> Text.concat [ escByte b | b <- BS.unpack bs ]
+  where
+    escByte b | b >= 0x20, b < 0x7f, b /= 0x5c = Text.singleton (Char.chr (fromIntegral b))
+              | otherwise                      = escChar (Char.chr (fromIntegral b))
+
+-- One character as @\\xNN@, in as few digits as hold it.
+escChar :: Char -> Text
+escChar c = Text.pack ("\\x" <> hex (Char.ord c))
+  where
     hex n | n < 256   = pad 2 n
           | n < 65536 = pad 4 n
           | otherwise = pad 6 n

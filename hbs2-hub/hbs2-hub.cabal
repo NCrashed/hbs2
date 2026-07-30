@@ -158,6 +158,7 @@ test-suite spec
                  , filepath
                  , temporary
                  , typed-process
+                 , prettyprinter
   other-modules:
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec
@@ -168,3 +169,4 @@ test-suite spec
       HBS2.Hub.IngressSpec
       HBS2.Hub.RepoSpec
       HBS2.Hub.GitRepoSpec
+      HBS2.Hub.VerifySpec

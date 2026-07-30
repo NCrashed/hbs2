@@ -220,6 +220,30 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       ln -s hbs2-hub $out/bin/hub
     '';
 
+    # git on hbs2-hub's own PATH, for the outputs that are a nix closure.
+    #
+    # `hub verify` runs git: canon is an ordinary git ref, and reading it is four
+    # plumbing calls. A nix profile is the one install path where "the user surely
+    # has git" is not an argument, since the point of installing from a flake is
+    # that the closure says what is needed.
+    #
+    # A wrapper rather than gitMinimal in the joined output, because that would
+    # put a `git` binary in the profile: a collision with the user's own, and this
+    # project has no business shipping one. --suffix, so a git already on PATH
+    # still wins and this is only a floor.
+    #
+    # NOT applied to `.#static`. That output is the source of the musl tarball,
+    # whose promise is a binary that depends on nothing, and the release archive
+    # copies bin/* with `cp -L`: a wrapper script would arrive as a shell script
+    # naming /nix/store paths that are not in the archive. INSTALL.md states the
+    # git requirement for that path instead.
+    hubWithGit = drv: pkgs.runCommand "hbs2-hub-git-path"
+      { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+      mkdir -p $out/bin
+      makeWrapper ${drv}/bin/hbs2-hub $out/bin/hbs2-hub \
+        --suffix PATH : ${pkgs.gitMinimal}/bin
+    '';
+
     dockerImageFor = imagePackages: pkgs.dockerTools.buildImage {
       name = "hbs2-peer";
       tag = imagePackages.hbs2-peer.version;
@@ -247,8 +271,9 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           # hbs2-hub reads canon out of an ordinary git ref by running git. A
           # forge CLI in an image with no git can announce a verb and not run it.
           #
-          # gitMinimal and not git: the full package pulls perl with sixteen
-          # modules, python3, curl and openssl, some 400 MB, into an image built
+          # gitMinimal and not git: measured with `nix path-info -S`, the full
+          # package's closure is 402 MB against gitMinimal's 167 MB, and the
+          # difference is perl with 39 modules and a python, in an image built
           # from packagesStatic precisely so that it carries no glibc userspace.
           # What is used here is rev-parse, show-ref, ls-tree and cat-file.
           pkgs.gitMinimal
@@ -292,7 +317,12 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         default =
         pkgs.symlinkJoin {
           name = "hbs2-all";
-          paths = builtins.attrValues packagesDynamic ++ [ hubAlias ];
+          # hbs2-hub replaced by the wrapped one, not added alongside it: two
+          # derivations both offering bin/hbs2-hub is a collision symlinkJoin
+          # resolves by whichever it saw first.
+          paths = builtins.attrValues (packagesDynamic // {
+                    hbs2-hub = hubWithGit packagesDynamic.hbs2-hub;
+                  }) ++ [ hubAlias ];
         };
         static =
         pkgs.symlinkJoin {

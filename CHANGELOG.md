@@ -29,13 +29,28 @@
         `refs/hbs2/meta`, re-runs the fold over it, and reports every
         event the rules did not admit, every anomaly in the ones they
         did, and every file it could not read at all. Exit 2 when any
-        of the three is non-empty, so it works in a hook; 3 and up when
-        the audit could not run at all, one code per reason, because an
-        unfetched ref, a directory that is not a repository, a ref that
-        does not resolve, canon folded under newer rules and a tree
-        past the reader's bounds each call for something different.
-        Reaches nothing but the local repository, and does not probe
-        for a peer, so a wedged daemon cannot hang the hook.
+        of the three is non-empty, so it works in a hook; 3 to 10 when
+        the audit could not run at all, one code per reason and every
+        one of them with advice on stderr, because an unfetched ref, a
+        directory that is not a repository, a ref that does not
+        resolve, an unreadable `version` file, canon folded under newer
+        rules, a tree that will not list and a tree past either of the
+        reader's bounds each call for something different. The exit
+        codes are a table in PEP-22. Reaches nothing but the local
+        repository, and does not probe for a peer, so a wedged daemon
+        cannot hang the hook; that also holds for a script arriving on
+        stdin, which is how a hook usually invokes one.
+
+        A path in the report is a stranger's bytes, so it is escaped
+        injectively: two paths differing in one invalid byte print as
+        two different lines. Output is UTF-8 whatever the locale says,
+        because canon does not have a locale and an audit that dies
+        halfway through printing is worse than one that never ran.
+
+        A blob whose object this clone does not have is reported as
+        that. Read as "not a blob" it came out as a submodule in canon,
+        which blames the owner for what is really a blobless or partial
+        clone, and the fix (fetch) went unsaid.
 
         The repository key is an argument: the owner key is the root of
         the trust chain, so canon that named its own owner would be

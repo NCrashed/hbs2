@@ -31,7 +31,10 @@ module HBS2.Hub.Repo
   , sortCanon
   , maxCanonBytes
   , maxCanonFiles
+  , maxListingBytes
   , versionPath
+  , assumedMetaVersion
+  , EntryKind(..)
   ) where
 
 import HBS2.Hub.Types
@@ -45,26 +48,38 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.List (sortOn)
 import Data.Text (Text)
-import Data.Text qualified as Text
-import Data.Text.Encoding qualified as Text
 import Data.Word (Word32)
 
 -- | One entry a tree listing reported.
---
--- The object id is what a blob is fetched by, so a path never reaches a process
--- argument; the size comes from the listing, so a bound can refuse a blob before
--- anything pays for it.
---
--- Both are 'Nothing' for an entry that is not a readable blob: a submodule, which
--- has no size in a listing, or a record the listing parser could not read at all.
--- Neither is dropped. A gitlink under @threads\/@ is something somebody put in
--- canon, and a record nobody can parse is the one thing a reader must not swallow
--- silently: dropping those would empty the listing and report a clean, empty
--- audit, which is what a broken read looks like when nobody is checking.
 data TreeEntry = TreeEntry
   { teePath :: ByteString
-  , teeBlob :: Maybe (Text, Int)   -- ^ (object id, size in bytes)
+  , teeKind :: EntryKind
   }
+  deriving stock (Eq,Show)
+
+-- | What a listing said an entry is.
+--
+-- Four cases, and every one of them was once folded into "not a blob". The one
+-- that mattered: a listing gives a blob whose object is not present the size
+-- @BAD@, not a number, so in a blobless or partial clone every event file read
+-- as a submodule and the fetch that would have brought the object was never tried.
+-- That is the partial-clone case this module has a name for, arriving under the
+-- wrong one.
+data EntryKind =
+    -- | A blob that is here: object id, and size in bytes. The id is what a blob
+    -- is fetched by, so a path never reaches a process argument; the size comes
+    -- from the listing, so a bound can refuse a blob before anything pays for it.
+    Blob Text Int
+    -- | A blob whose object the listing could not size, which is how it says the
+    -- object is not in this clone.
+  | BlobMissing Text
+    -- | Any other type: a submodule, or a tree. Something somebody put in canon.
+  | NotABlob
+    -- | The listing RECORD could not be read. Kept rather than dropped, and this
+    -- is the one that is about this reader rather than about the tree: if the
+    -- listing format ever shifts, every entry becomes this, which is a visible
+    -- failure instead of a clean empty audit.
+  | Unparsed
   deriving stock (Eq,Show)
 
 -- | Where the canon files come from.
@@ -149,10 +164,11 @@ data FileProblem =
     -- arrives here as a very small event file and is refused as malformed. That
     -- is the right answer and it is worth knowing it is not this one.
   | FileNotABlob
-    -- | The listing record itself could not be read. The one problem that is
-    -- about this reader rather than about the tree, and reported loudly for that
-    -- reason: if the listing format ever shifts, every entry becomes this, which
-    -- is a visible failure instead of an empty audit.
+    -- | A blob whose object this clone does not have: a blobless or partial
+    -- clone, or a pruned object. Distinct from the two above because it is the
+    -- one that fetching fixes, and it used to report as a submodule.
+  | FileObjectMissing
+    -- | The listing record itself could not be read. See 'Unparsed'.
   | FileListingUnparsed
     -- | Somewhere the tree layout does not put files. PEP-19 fixes the layout, so
     -- a path outside it is somebody's addition, and a reader that only looked
@@ -167,6 +183,7 @@ instance Pretty FileProblem where
     FileTooLarge n      -> "over the bound this reader will read:" <+> pretty n
                              <+> "bytes"
     FileNotABlob        -> "not a blob: a submodule, in a canon tree"
+    FileObjectMissing   -> "the object is not in this clone; fetch, or unshallow"
     FileListingUnparsed -> "this reader could not parse the tree listing record"
     FileUnexpected      -> "not a path the canon tree layout has"
 
@@ -190,23 +207,45 @@ metaRef = "refs/hbs2/meta"
 versionPath :: ByteString
 versionPath = "version"
 
+-- | What rules a tree with no version file was folded under.
+--
+-- The OLDEST, not this build's. They are the same number today, and the day
+-- hub-meta becomes 2 they stop being: reading an unstamped tree as "whatever
+-- this build implements" would make deleting one unsigned file a way to choose
+-- the rules canon is folded under, and hub verify would report that choice as a
+-- parenthesis and a zero exit. A tree that does not say cannot claim newer.
+assumedMetaVersion :: Word32
+assumedMetaVersion = 1
+
 -- | How much of a tree this reader will take in, and how many files.
 --
--- Two bounds, because they bound different costs. The bytes bound what the reader
--- holds: the fold sorts the whole log, so every admitted event is resident at
--- once, and a per-file bound does not imply a total one. The count bounds how
--- many times a 'CanonSource' is asked for a blob.
+-- Three bounds, because they bound three different costs.
 --
--- Both are measured over the EVENT files only, and only over those whose size the
--- listing gave. A README somebody committed next to canon is not something this
--- reader fetches, so counting it towards a bound would refuse an audit over a
--- file the audit does not read. And both are checked before a byte is fetched,
--- which is what makes them bounds on the reader rather than notes about it.
+-- 'maxCanonBytes' bounds what the reader HOLDS: the fold sorts the whole log, so
+-- every admitted event is resident at once, and a per-file bound does not imply a
+-- total one. It is measured over the event files only, and only over those whose
+-- size the listing gave: a README somebody committed next to canon is not
+-- something this reader fetches, so counting it would refuse an audit over a file
+-- the audit does not read. It is checked before a byte is fetched, which is what
+-- makes it a bound on the reader rather than a note about it.
+--
+-- 'maxCanonFiles' bounds the LISTING, every entry of it, and not the event files
+-- alone. Each entry is parsed, sorted and possibly printed whether or not this
+-- reader would fetch it, and each entry's path is a slice of one listing buffer,
+-- so holding any one of them holds the whole.
+--
+-- 'maxListingBytes' bounds what reading that listing PEAKS at. Necessary because
+-- the other two are computed from the listing and so cannot refuse it, and
+-- sufficient only if it is enforced while the bytes arrive; see 'HBS2.Hub.Repo.Git'.
+-- 512 bytes an entry is about twice the width of a canon path.
 maxCanonBytes :: Int
 maxCanonBytes = 256 * 1024 * 1024
 
 maxCanonFiles :: Int
 maxCanonFiles = 200000
+
+maxListingBytes :: Int
+maxListingBytes = maxCanonFiles * 512
 
 -- | Split a listing into the event files to read and the entries to refuse.
 --
@@ -219,27 +258,36 @@ sortCanon :: [TreeEntry] -> ([(ByteString, Text, Int)], [(ByteString, FileProble
 sortCanon = go [] []
   where
     go evs bad [] = (reverse evs, reverse bad)
-    go evs bad (e:rest)
-      | not (isEvent (teePath e)) =
-          -- The version file and the index have their own readers; anything else
-          -- outside the layout is reported.
-          if teePath e == versionPath || teePath e == B8.pack numberIndexPath
-            then go evs bad rest
-            else go evs ((teePath e, FileUnexpected) : bad) rest
-      | otherwise = case teeBlob e of
-          Nothing -> go evs ((teePath e, notBlob (teePath e)) : bad) rest
-          Just (oid, n)
-            | n > maxEventBytes -> go evs ((teePath e, FileTooLarge n) : bad) rest
-            | otherwise -> go ((teePath e, oid, n) : evs) bad rest
+    go evs bad (e:rest) = case teeKind e of
+      -- Before the layout question, because a record nobody could read has no
+      -- reliable path to ask it about.
+      Unparsed -> go evs ((teePath e, FileListingUnparsed) : bad) rest
+      kind
+        | not (isEvent (teePath e)) ->
+            -- The version file and the index have their own readers; anything
+            -- else outside the layout is somebody's addition and is reported.
+            if teePath e `elem` [versionPath, B8.pack numberIndexPath]
+              then go evs bad rest
+              else go evs ((teePath e, FileUnexpected) : bad) rest
+        | otherwise -> case kind of
+            NotABlob      -> go evs ((teePath e, FileNotABlob) : bad) rest
+            BlobMissing _ -> go evs ((teePath e, FileObjectMissing) : bad) rest
+            -- Unparsed was answered above, before the layout question: a record
+            -- nobody could read has no reliable path to ask it about.
+            Blob oid n
+              | n > maxEventBytes -> go evs ((teePath e, FileTooLarge n) : bad) rest
+              | otherwise -> go ((teePath e, oid, n) : evs) bad rest
 
-    -- A listing this reader could not parse has neither an id nor a size, and so
-    -- does a submodule. The listing parser is expected to mark the difference; a
-    -- path with no separator at all is the record it could not read.
-    notBlob p | B8.null p = FileListingUnparsed
-              | otherwise = FileNotABlob
-
-    isEvent p = B8.pack "threads/" `B8.isPrefixOf` p
-             || B8.pack "repo/" `B8.isPrefixOf` p
+    -- A path under threads/ must name a thread directory and a file in it, and a
+    -- path under repo/ a file. A bare prefix match folded /x@ as an event
+    -- and then reported it as malformed, where it is really a path the layout does
+    -- not have.
+    isEvent p = under "threads/" 2 p || under "repo/" 1 p
+      where
+        under pfx depth q =
+          B8.pack pfx `B8.isPrefixOf` q
+            && length (Prelude.filter (not . B8.null)
+                        (B8.split '/' (B8.drop (length pfx) q))) == depth
 
 -- | Read canon and fold it.
 --
@@ -253,12 +301,21 @@ readCanon cs owner = csCommit cs >>= \case
   Left e -> pure (Left e)
   Right commit -> csEntries cs commit >>= \case
     Left e -> pure (Left e)
+    Right entries
+      -- The COUNT is over the whole listing, and the bytes over the event files.
+      -- Two different costs: every entry becomes a TreeEntry, is sorted and is
+      -- printed, so ten million paths outside the layout cost ten million lines
+      -- whether or not this reader would fetch any of them, and the paths are
+      -- slices of one listing buffer, so holding any of them holds all of it. The
+      -- bytes are what the reader will HOLD, which only the event files are.
+      | length entries > maxCanonFiles ->
+          pure (Left (CanonTooMany (length entries)))
     Right entries -> do
       let (evEntries, refused) = sortCanon entries
           bytes = sum [ n | (_,_,n) <- evEntries ]
 
-      -- Both bounds before any blob is fetched.
-      case bounds bytes (length evEntries) of
+      -- Before any blob is fetched.
+      case (if bytes > maxCanonBytes then Just (CanonTooBig bytes) else Nothing) of
        Just refusal -> pure (Left refusal)
        Nothing -> do
         -- The version decides whether the rest may be folded at all, so its
@@ -268,10 +325,12 @@ readCanon cs owner = csCommit cs >>= \case
         -- have. Before the listing was consulted, a pruned version blob read as
         -- "no version file" and the tree was folded under this build's rules,
         -- which is the gate below being skipped in silence.
-        ver <- case [ b | e <- entries, teePath e == versionPath, let b = teeBlob e ] of
+        ver <- case [ teeKind e | e <- entries, teePath e == versionPath ] of
                  [] -> pure (Right Nothing)
-                 (Nothing : _) -> pure (Left FileNotABlob)
-                 (Just (oid, n) : _)
+                 (NotABlob : _)      -> pure (Left FileNotABlob)
+                 (Unparsed : _)      -> pure (Left FileListingUnparsed)
+                 (BlobMissing _ : _) -> pure (Left FileObjectMissing)
+                 (Blob oid n : _)
                    | n > maxEventBytes -> pure (Left (FileTooLarge n))
                    | otherwise -> csBlob cs oid >>= \case
                        Nothing -> pure (Left FileUnreadable)
@@ -293,7 +352,7 @@ readCanon cs owner = csCommit cs >>= \case
 
             -- foldCanon and not foldEvents: the tree's version governs the
             -- admission rules, which is the whole reason it is a tree-level file.
-            pure $ case foldCanon (maybe hubMetaVersion id declared) owner evs of
+            pure $ case foldCanon (maybe assumedMetaVersion id declared) owner evs of
               Left (MetaTooNew n) -> Left (CanonTooNewHere n)
               Right fr -> Right CanonState
                 { stCommit  = commit
@@ -304,11 +363,6 @@ readCanon cs owner = csCommit cs >>= \case
                 }
 
   where
-    bounds bytes n
-      | bytes > maxCanonBytes = Just (CanonTooBig bytes)
-      | n > maxCanonFiles     = Just (CanonTooMany n)
-      | otherwise             = Nothing
-
     readOne (evs, vers, bad) (p, oid, _) = csBlob cs oid >>= \case
       Nothing -> pure (evs, vers, (p, FileUnreadable) : bad)
       Just t  -> pure $ case parseEvent t of

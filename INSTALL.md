@@ -14,8 +14,13 @@ it; they produce the same binaries. Pick whichever fits your setup.
 
 ## Option 1: Prebuilt static binary (Linux x86_64)
 
-The fastest path. No toolchain, no dependencies, no build. Pulls a
-statically linked (musl) tarball from the GitHub release page.
+The fastest path. No toolchain, no build. Pulls a statically linked
+(musl) tarball from the GitHub release page.
+
+One runtime dependency, and only for one tool: `hbs2-hub` reads a
+repository's issue tracker out of an ordinary git ref by running
+`git`, so `hub verify` needs `git` on PATH. Everything else in the
+tarball needs nothing.
 
 ```
 TAG=0.25.3.0  # set to the release you want
@@ -28,10 +33,10 @@ sudo cp hbs2-${TAG}-x86_64-linux-musl/bin/* /usr/local/bin/
 
 Skip ahead to "Verifying the install" below.
 
-The binaries depend on nothing at runtime; they will work on any
-modern Linux distribution. Note that releases prior to 0.25.3.1 may
-not have a binary tarball attached; for those use the source paths
-below.
+The binaries depend on nothing at runtime except the `git` noted
+above; they will work on any modern Linux distribution. Note that
+releases prior to 0.25.3.1 may not have a binary tarball attached;
+for those use the source paths below.
 
 ## Option 2: Homebrew (macOS, Apple Silicon)
 
@@ -45,7 +50,10 @@ brew install ncrashed/hbs2/hbs2-peer
 
 This puts the full binary set on PATH: `hbs2-peer`, `hbs2-cli`,
 `hbs2-sync`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`,
-`git-hbs2` (so `git hbs2 ...` works), and `ncq3`.
+`git-hbs2` (so `git hbs2 ...` works), `hbs2-hub`/`hub`, and `ncq3`.
+
+`hub verify` runs `git`, which macOS ships with the Xcode command
+line tools; `xcode-select --install` if `git --version` fails.
 
 To run the peer as a background service via launchd:
 
@@ -185,10 +193,18 @@ cabal install \
     exe:hbs2-peer exe:hbs2-cli exe:hbs2-sync \
     exe:hbs2-keyman \
     exe:hbs2-git3 exe:git-remote-hbs23 \
+    exe:hbs2-hub \
     exe:ncq3
 ```
 
 Make sure `~/.local/bin` is on your PATH.
+
+The `hub` spelling PEP-22 documents is a symlink, which the nix and
+release builds create and `cabal install` does not. If you want it:
+
+```
+ln -s hbs2-hub ~/.local/bin/hub
+```
 
 The old monolithic `hbs2` binary has been split into specialised
 tools: `hbs2-cli` for general operations, `hbs2-git3` for git

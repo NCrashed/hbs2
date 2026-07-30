@@ -48,7 +48,7 @@ inMemory files = CanonSource
     -- are in. Text.length counts characters, so a fixture measured that way is
     -- measured in a different unit from production.
   , csEntries = const (pure (Right
-      [ TreeEntry (encPath p) (Just (oidOf i, utf8Len t))
+      [ TreeEntry (encPath p) (Blob (oidOf i) (utf8Len t))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
   , csBlob    = \oid -> pure (lookup oid byOid)
   }
@@ -116,7 +116,7 @@ spec = do
       -- Both are read by their own readers and would fail an event parse, so a
       -- reader that fed every path to one would report two corrupt files in
       -- every healthy tree.
-      let entries = [ TreeEntry (B8.pack p) (Just ("oid", 10))
+      let entries = [ TreeEntry (B8.pack p) (Blob "oid" 10)
                     | p <- ["version", numberIndexPath
                            , "repo/1-x", "threads/t/2-y"] ]
           (evs, bad) = sortCanon entries
@@ -190,7 +190,7 @@ spec = do
       let repo = fst owner
           p = B8.pack "threads/t/00000000000000000001-x"
           listed = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Right [TreeEntry p (Just ("oid", 10))])))
+                     (const (pure (Right [TreeEntry p (Blob "oid" 10)])))
                      (const (pure Nothing))
       st <- readOk listed repo
       stBad st `shouldBe` [(p, FileUnreadable)]
@@ -244,7 +244,7 @@ spec = do
           huge = B8.pack "threads/t/00000000000000000001-x"
           src = CanonSource (pure (Right "deadbeef"))
                   (const (pure (Right
-                    [TreeEntry huge (Just ("oid", maxEventBytes + 1))])))
+                    [TreeEntry huge (Blob "oid" (maxEventBytes + 1))])))
                   (\_ -> do modifyIORef fetched succ
                             pure (Just "whatever"))
       st <- readOk src repo
@@ -263,7 +263,7 @@ spec = do
       -- before parseMeta said it was not a version.
       let big = CanonSource (pure (Right "deadbeef"))
                   (const (pure (Right
-                    [TreeEntry versionPath (Just ("oid", maxEventBytes + 1))])))
+                    [TreeEntry versionPath (Blob "oid" (maxEventBytes + 1))])))
                   (\_ -> modifyIORef fetched succ >> pure (Just renderMeta))
       readCanon big (fst owner) >>= \r ->
         fmap (const ()) r
@@ -278,7 +278,7 @@ spec = do
       -- under newer ones would have been folded in silence. The listing is what
       -- tells them apart.
       let listed = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Right [TreeEntry versionPath (Just ("oid", 13))])))
+                     (const (pure (Right [TreeEntry versionPath (Blob "oid" 13)])))
                      (const (pure Nothing))
       readCanon listed (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (VersionUnreadable FileUnreadable)
@@ -289,7 +289,7 @@ spec = do
     it "refuses a tree past either bound, counting only the files it reads" $ do
       owner <- kp
       let ev n = TreeEntry (B8.pack ("threads/t/" <> show n))
-                   (Just (Text.pack (show n), maxEventBytes))
+                   (Blob (Text.pack (show n)) maxEventBytes)
           src es = CanonSource (pure (Right "deadbeef"))
                      (const (pure (Right es))) (const (pure (Just "x")))
           n = maxCanonBytes `div` maxEventBytes + 1
@@ -299,9 +299,24 @@ spec = do
       -- files this reader fetches: it is reported, not fetched, so refusing the
       -- whole audit over its size would refuse an audit over something the audit
       -- does not read.
-      let readme = TreeEntry "README" (Just ("r", maxCanonBytes))
+      let readme = TreeEntry "README" (Blob "r" maxCanonBytes)
       st <- readOk (src [readme]) (fst owner)
       stBad st `shouldBe` [("README", FileUnexpected)]
+
+    it "counts the whole listing, not the files it would fetch" $ do
+      owner <- kp
+      -- The bytes bound and the count bound are over different things, because
+      -- they bound different costs. Every entry in a listing is parsed, sorted and
+      -- possibly printed whether or not this reader fetches it, and every path is
+      -- a slice of one buffer, so holding one holds all: a tree of ten million
+      -- paths outside the layout cost ten million lines and the whole buffer while
+      -- a count over event files alone said it was empty.
+      let junk n = TreeEntry (B8.pack ("junk/" <> show n)) (Blob "x" 1)
+          n = maxCanonFiles + 1
+          src es = CanonSource (pure (Right "deadbeef"))
+                     (const (pure (Right es))) (const (pure (Just "x")))
+      readCanon (src (fmap junk [1..n])) (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooMany n)
 
     it "reports a path the tree layout does not have" $ do
       owner <- kp
@@ -310,9 +325,9 @@ spec = do
       -- which is the reader that lets a tree carry what it pretends not to see.
       let src = CanonSource (pure (Right "deadbeef"))
                   (const (pure (Right
-                    [ TreeEntry versionPath (Just ("v", 13))
-                    , TreeEntry "evil/plans" (Just ("e", 4))
-                    , TreeEntry (B8.pack numberIndexPath) (Just ("i", 4))
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "evil/plans" (Blob "e" 4)
+                    , TreeEntry (B8.pack numberIndexPath) (Blob "i" 4)
                     ])))
                   (\oid -> pure (if oid == "v" then Just renderMeta else Just "junk"))
       st <- readOk src (fst owner)

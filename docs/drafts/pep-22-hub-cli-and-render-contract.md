@@ -79,6 +79,42 @@ derivable. It is not derivable: the owner key is the root of the trust chain
 could rename it, and the whole audit would then be an audit against whatever the
 tree claimed.
 
+It reads canon out of the git ref directly and talks to no peer, so it runs in a
+hook, in CI, and in a clone whose peer is down. That is the reason its exit code
+is a contract rather than "non-zero on trouble": a hook has to tell "the audit
+ran and found things" from "the audit could not run", and one code for both told
+a hook that an unfetched ref and a tree full of forged events were the same
+event.
+
+| code | meaning                                              |
+|------|------------------------------------------------------|
+| 0    | the audit ran and found nothing                       |
+| 1    | usage: a bad argument, an unknown verb                 |
+| 2    | the audit ran and found drops, anomalies or unreadable files |
+| 3    | `refs/hbs2/meta` is not here (a plain clone; fetch it) |
+| 4    | not a git repository, or git could not be run          |
+| 5    | the ref is here and does not resolve to a commit       |
+| 6    | canon is stamped `(hub-meta N)` newer than this build  |
+| 7    | the `version` file is here and does not read           |
+| 8    | canon is past the reader's byte bound                  |
+| 9    | the tree will not list (a pruned object, a permission) |
+| 10   | canon is past the reader's file-count bound            |
+
+3 and up is "could not run", so a hook that only cares about the distinction
+tests `>= 3`. Every one of them prints what to do about it on stderr.
+
+Three things the report says that are worth naming, because each was once
+silently dropped:
+
+  - A file under `threads/` or `repo/` that is not an event file is reported by
+    path, not skipped. Something somebody put in canon is a finding.
+  - A path the layout does not have at all is reported the same way. The two
+    exceptions are `version` and `index/number.sexp`, which have their own
+    readers; the number index is not otherwise read, since the fold assigns
+    numbers itself and a file cannot be allowed to change what the fold decided.
+  - A blob whose object this clone does not have is reported as that, and not as
+    a submodule. It is the one of these that fetching fixes.
+
 Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 
 ```

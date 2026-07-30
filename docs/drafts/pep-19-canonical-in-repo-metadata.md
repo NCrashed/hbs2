@@ -621,7 +621,7 @@ The tree under a `refs/hbs2/meta` commit:
 Events come in two scopes. Thread-scope events (`open`/`comment`/`revise`/
 `set`/`close`/`reopen`/`merge`/`redact`) live under `threads/<thread-id>/`.
 Repo-scope events that belong to no thread (`delegate`/`revoke`, and a public
-triage ban if PEP-21 records one) live under `repo/`. `readEventLog` reads
+triage ban if PEP-21 records one) live under `repo/`. The tree reader reads
 both, and the fold merges them into one `seq`-ordered stream (repo-scope
 `delegate`/`revoke` must be seen in `seq` order alongside thread events so the
 maintainer set is correct at each event, see the fold).
@@ -1375,7 +1375,8 @@ Read contract for renderers
 The hub layer is a library plus CLI; the web UI (PEP-22) is a pure view over
 what they expose. The contract:
 
-  - `readEventLog  :: CommitChain -> [Event]`   parse the meta tree
+  - `readCanon     :: CanonSource m -> RepoRef -> m (Either CanonUnreadable
+    CanonState)`   read the meta tree and fold it, in one step
   - `materialize   :: [Event] -> Map ThreadId ThreadState`  the fold above
   - `ThreadState` fields: number, kind, title, status, labels, assignees,
     author, created_at, updated_at, comments[], and for PRs the source/onto

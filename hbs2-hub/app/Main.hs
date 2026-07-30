@@ -42,6 +42,25 @@ main :: IO ()
 main = do
   setupLogger
 
+  -- The output encoding is chosen here rather than inherited, because what this
+  -- program prints is not this program's text: a thread title, an attribute name
+  -- and a tree path all come out of a stranger's signed bytes, and canon does not
+  -- have a locale. Under LC_ALL=C (a git hook, a cron job, a Docker image with no
+  -- locale archive) GHC picks ASCII, and `hub verify` on a repository holding one
+  -- Cyrillic path died with "commitBuffer: invalid argument" AFTER printing part
+  -- of the report: an audit that exits non-zero having said something true and
+  -- incomplete, which is the worst answer an audit has.
+  --
+  -- TransliterateCodingFailure and not utf8 alone, so a handle redirected
+  -- somewhere that will not take UTF-8 degrades a character instead of killing the
+  -- report. Paths still read back byte-for-byte: they go through 'pathText',
+  -- which escapes anything outside printable ASCII.
+  --
+  -- stdin for the same reason in the other direction: a script piped in may hold
+  -- a title in any language, and under the C locale reading it threw.
+  utf8Translit <- IO.mkTextEncoding "UTF-8//TRANSLIT"
+  for_ [IO.stdin, IO.stdout, IO.stderr] (`IO.hSetEncoding` utf8Translit)
+
   argv <- getArgs
 
   let dict = makeDict do
@@ -99,7 +118,14 @@ main = do
         then liftIO (hubHelp dict)
         else liftIO getContents
                >>= either (liftIO . die . show) pure . parseTop
-               >>= \what -> recover (run dict what >>= eatNil display) >> silence
+               -- The same question as for a command line, and it was not asked
+               -- here: a script whose whole content is one audit paid the peer
+               -- probe anyway, which is the cost this branch exists to avoid in a
+               -- git hook, and a hook is exactly where a script arrives on stdin.
+               >>= \what ->
+                     if all (peerFree dict) what
+                       then (run dict what >>= eatNil display) >> silence
+                       else recover (run dict what >>= eatNil display) >> silence
 
     -- Arguments that name nothing. Distinguished from the empty case, which it
     -- used to share: falling into the stdin branch made a typo exit zero after
@@ -114,7 +140,7 @@ main = do
     -- to be runnable without one. Measured at 1.55 s with a live peer and 6.0 s
     -- against a stub, for a verb that needs neither.
     (_, Just form)
-      | peerFree form -> runHBS2Cli (run dict [form] >>= eatNil display >> silence)
+      | peerFree dict form -> runHBS2Cli (run dict [form] >>= eatNil display >> silence)
       | otherwise -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
 
   where
@@ -140,9 +166,23 @@ main = do
     -- declared per verb, because the list is short and a wrong entry fails loudly
     -- (the verb reports "not connected" the first time anybody runs it), whereas a
     -- verb wrongly absent from it fails quietly by being slow.
-    peerFree = \case
-      ListVal (SymbolVal k : _) -> k `elem` ["hub:verify"]
-      _ -> False
+    peerFreeNames :: [Id]
+    peerFreeNames = ["hub:verify"]
+
+    -- The WHOLE form, not its head. A head-symbol test said yes to
+    -- @(hub:verify (hub:inbox:show X))@, whose argument reaches the peer and then
+    -- failed as "not connected" inside a verb that had been declared not to need
+    -- one. An argument is a form here, and this is a script interpreter.
+    --
+    -- Only names the dictionary actually holds are examined: everything else in a
+    -- form is data, and a repository key parses as a symbol like any other word.
+    -- Unknown names are somebody else's error to report, not a reason to guess.
+    peerFree dict = go
+      where
+        go = \case
+          ListVal xs -> all go xs
+          SymbolVal k | HM.member k dict -> k `elem` peerFreeNames
+          _ -> True
 
     -- What this tool does, rather than what its interpreter can do.
     hubHelp dict = do
