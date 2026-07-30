@@ -677,8 +677,11 @@ spec = do
                                  UnauthorizedCanon))
       shown `shouldSatisfy` isInfixOf (show (pretty (AsBase58 (fst owner))))
       shown `shouldSatisfy` isInfixOf "not blessed by an authorized key"
-      -- control bytes are made visible rather than passed through
-      show (pretty (UnnormalizedAttr "a\ESCb")) `shouldSatisfy` isInfixOf "\\x1b"
+      -- control bytes are made visible rather than passed through. The escape is
+      -- delimited (\u{1b}, not \x1b) so that its digits cannot be continued by
+      -- the text after it: two digits for one value and four for another is what
+      -- let one field print exactly like another. See 'safeText'.
+      show (pretty (UnnormalizedAttr "a\ESCb")) `shouldSatisfy` isInfixOf "\\u{1b}"
       show (pretty (UnnormalizedAttr "a\ESCb")) `shouldSatisfy` (not . isInfixOf "\ESC")
 
     it "does not remember a number from a stamp it will not count" $ do

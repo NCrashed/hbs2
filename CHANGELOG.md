@@ -28,24 +28,37 @@
       - **`hbs2-hub verify <repo-key>`.** Reads canon out of
         `refs/hbs2/meta`, re-runs the fold over it, and reports every
         event the rules did not admit, every anomaly in the ones they
-        did, and every file it could not read at all. Exit 2 when any
-        of the three is non-empty, so it works in a hook; 3 to 10 when
-        the audit could not run at all, one code per reason and every
-        one of them with advice on stderr, because an unfetched ref, a
-        directory that is not a repository, a ref that does not
-        resolve, an unreadable `version` file, canon folded under newer
-        rules, a tree that will not list and a tree past either of the
-        reader's bounds each call for something different. The exit
-        codes are a table in PEP-22. Reaches nothing but the local
-        repository, and does not probe for a peer, so a wedged daemon
-        cannot hang the hook; that also holds for a script arriving on
-        stdin, which is how a hook usually invokes one.
+        did, every file it could not read at all, and a missing
+        `version` file, which PEP-19 requires. Exit 2 when any of those
+        is non-empty, so it works in a hook; 3 to 12 when the audit
+        could not run at all, one code per reason and every one of them
+        with advice on stderr, because an unfetched ref, a directory
+        that is not a repository, a ref that does not resolve, an
+        unreadable `version` file, canon folded under newer rules, a
+        tree that will not list, a tree past any of the reader's three
+        bounds, and a local failure to run git at all each call for
+        something different. The last of those is the one that is not
+        about canon: a fork that fails under a process limit used to be
+        reported as an unreadable file, which is a finding about
+        somebody else's repository. The exit codes are a table in
+        PEP-22 and are a contract: they may be added to, not
+        reassigned.
 
-        A path in the report is a stranger's bytes, so it is escaped
-        injectively: two paths differing in one invalid byte print as
-        two different lines. Output is UTF-8 whatever the locale says,
-        because canon does not have a locale and an audit that dies
-        halfway through printing is worse than one that never ran.
+        Reaches nothing but the local repository, and does not probe for
+        a peer, so a wedged daemon cannot hang the hook; that also
+        holds for a script arriving on stdin, which is how a hook
+        usually invokes one.
+
+        Everything a stranger chose that reaches a terminal is escaped
+        injectively, as `\u{...}` for a character and `\x{...}` for a
+        raw byte: two paths differing in one invalid byte, or a valid
+        U+0085 against the single byte 0x85, print as two different
+        lines. Reporting a file is telling somebody which file to open.
+        Text in and out is UTF-8 whatever the locale says, argv
+        included, because canon does not have a locale: under `LC_ALL=C`
+        an audit died halfway through printing a Cyrillic path, and a
+        title given on the command line would have been signed into an
+        append-only event as replacement characters.
 
         A blob whose object this clone does not have is reported as
         that. Read as "not a blob" it came out as a submodule in canon,

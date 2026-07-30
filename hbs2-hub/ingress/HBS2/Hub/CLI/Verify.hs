@@ -118,6 +118,15 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                           <> " large (PEP-19), not a bigger reader."
       CanonTooMany _ -> line <> "  Compaction is the answer to a canon this"
                           <> " large (PEP-19), not a bigger reader."
+      CanonListingTooBig _ -> line <> "  Compaction is the answer to a canon this"
+                                <> " large (PEP-19), not a bigger reader."
+      -- The one refusal that is not about canon. Said so, because the others all
+      -- are, and a reader who has seen the other nine will read this as the tenth
+      -- thing wrong with somebody else's tree.
+      ReaderFailed _ -> line <> "  This is local: no process slots, no file"
+                          <> " descriptors, or git gone from" <> line
+                          <> "  PATH mid-audit. Nothing was learned about canon,"
+                          <> " one way or the other."
 
 -- | What a refusal exits with.
 --
@@ -132,14 +141,19 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
 -- which bound there is to argue with.
 codeOf :: CanonUnreadable -> Int
 codeOf = \case
-  NoCanonRef          -> 3
-  NoRepository{}      -> 4
-  RefUnresolved{}     -> 5
-  CanonTooNewHere{}   -> 6
-  VersionUnreadable{} -> 7
-  CanonTooBig{}       -> 8
-  TreeUnreadable{}    -> 9
-  CanonTooMany{}      -> 10
+  NoCanonRef           -> 3
+  NoRepository{}       -> 4
+  RefUnresolved{}      -> 5
+  CanonTooNewHere{}    -> 6
+  VersionUnreadable{}  -> 7
+  CanonTooBig{}        -> 8
+  TreeUnreadable{}     -> 9
+  CanonTooMany{}       -> 10
+  CanonListingTooBig{} -> 11
+  -- Not a number about canon at all, and the highest on purpose: a script that
+  -- retries on it is retrying something local, which is the only one of these
+  -- worth retrying.
+  ReaderFailed{}       -> 12
 
 report :: CanonState -> IO ()
 report st = do
@@ -158,6 +172,15 @@ reportDoc :: CanonState -> [Doc ann]
 reportDoc st =
   [ "canon" <+> pretty (stCommit st)
       <+> parens (maybe "no version file" (("hub-meta" <+>) . pretty) (stVersion st)) ]
+
+  -- A line of its own, and a finding, because PEP-19 requires the file. As a
+  -- parenthesis on the header it was the only thing in this report that a reader
+  -- had to notice unprompted, and the audit exited zero over it. The fold used the
+  -- oldest rules, which is the safe guess and still a guess.
+  <> [ "no version file" <+> pathDoc versionPath <> ":"
+         <+> "PEP-19 requires it; folded under hub-meta"
+         <+> pretty assumedMetaVersion
+     | stVersion st == Nothing ]
 
   -- The unreadable files first: a file nothing could parse never became an
   -- event, so no drop or anomaly below can mention it, and a reader who stopped
@@ -193,11 +216,19 @@ reportDoc st =
 -- All three, and not only the drops: an anomaly is admitted canon that should not
 -- exist, which is exactly what an audit is for, and an unreadable file is a file
 -- somebody has to look at.
+--
+-- And a missing version file, which PEP-19 requires. It cannot be a refusal,
+-- because the tree still folds under the oldest rules and refusing would show
+-- less than canon holds; it cannot be nothing either, because what governs the
+-- admission rules is absent and unsigned.
 reportCode :: CanonState -> Int
 reportCode st
-  | List.null (frDropped fr) && List.null (frAnomalies fr) && List.null (stBad st) = 0
+  | clean && stVersion st /= Nothing = 0
   | otherwise = 2
-  where fr = stFold st
+  where
+    fr = stFold st
+    clean = List.null (frDropped fr) && List.null (frAnomalies fr)
+              && List.null (stBad st)
 
 -- A tree path on a terminal: escaped for display, and injectively, so two paths
 -- that differ read differently. A path is a stranger's bytes, and one with a

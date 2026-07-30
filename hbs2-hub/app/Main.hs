@@ -22,6 +22,7 @@ import Data.Text qualified as Text
 
 import System.Environment
 import System.Exit (die)
+import GHC.IO.Encoding qualified as Enc
 import System.IO qualified as IO
 
 setupLogger :: MonadIO m => m ()
@@ -51,15 +52,31 @@ main = do
   -- of the report: an audit that exits non-zero having said something true and
   -- incomplete, which is the worst answer an audit has.
   --
-  -- TransliterateCodingFailure and not utf8 alone, so a handle redirected
-  -- somewhere that will not take UTF-8 degrades a character instead of killing the
-  -- report. Paths still read back byte-for-byte: they go through 'pathText',
-  -- which escapes anything outside printable ASCII.
-  --
   -- stdin for the same reason in the other direction: a script piped in may hold
   -- a title in any language, and under the C locale reading it threw.
+  --
+  -- //TRANSLIT is not about UTF-8 being unable to represent something; it cannot
+  -- fail on a real character. It is for the lone surrogates that //ROUNDTRIP
+  -- below produces out of argv bytes that are not UTF-8: without it, printing an
+  -- argument nobody could decode kills the program in the encoder.
   utf8Translit <- IO.mkTextEncoding "UTF-8//TRANSLIT"
   for_ [IO.stdin, IO.stdout, IO.stderr] (`IO.hSetEncoding` utf8Translit)
+
+  -- And argv, which is not a Handle and so is not covered by any of the above.
+  -- getArgs decodes with the FILESYSTEM encoding, which the locale picks: under
+  -- LC_ALL=C that is ASCII, and `hub issue new --title <eight UTF-8 bytes>` became
+  -- eight replacement characters. For `hub verify` that would be cosmetic. It is
+  -- not cosmetic here: a title from argv goes into the signed author box and into
+  -- the event-id, so in a hook under the C locale a letter would be minted, sealed
+  -- and delivered with the corruption inside the signature, where canon is
+  -- append-only and nothing can repair it. The body, arriving on stdin, would be
+  -- intact in the same event.
+  --
+  -- //ROUNDTRIP rather than plain utf8, so an argument that genuinely is not UTF-8
+  -- survives as surrogates instead of throwing at the moment of decoding it.
+  utf8Roundtrip <- IO.mkTextEncoding "UTF-8//ROUNDTRIP"
+  Enc.setFileSystemEncoding utf8Roundtrip
+  Enc.setForeignEncoding utf8Roundtrip
 
   argv <- getArgs
 

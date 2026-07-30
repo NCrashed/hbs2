@@ -271,11 +271,18 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           # hbs2-hub reads canon out of an ordinary git ref by running git. A
           # forge CLI in an image with no git can announce a verb and not run it.
           #
-          # gitMinimal and not git: measured with `nix path-info -S`, the full
-          # package's closure is 402 MB against gitMinimal's 167 MB, and the
-          # difference is perl with 39 modules and a python, in an image built
-          # from packagesStatic precisely so that it carries no glibc userspace.
-          # What is used here is rev-parse, show-ref, ls-tree and cat-file.
+          # gitMinimal and not git: measured against the nixpkgs THIS FLAKE PINS
+          # (nix path-info -S --store https://cache.nixos.org on the two store
+          # paths its legacyPackages give), the full package's closure is 326 MB
+          # against gitMinimal's 123 MB, and the difference is perl with 35
+          # modules and a python, in an image built from packagesStatic precisely
+          # so that it carries no glibc userspace. What is used here is rev-parse,
+          # show-ref, ls-tree and cat-file.
+          #
+          # Measured on the pin and not on whatever nixpkgs is on the developer's
+          # path, which is where the previous numbers (402/167 MB, 39 modules)
+          # came from: they were true of a different nixpkgs than the one this
+          # builds with.
           pkgs.gitMinimal
         ];
         pathsToLink = [ "/bin" "/etc" "/share" ];

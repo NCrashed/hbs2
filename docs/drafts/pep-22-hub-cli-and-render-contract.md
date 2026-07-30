@@ -90,8 +90,8 @@ event.
 |------|------------------------------------------------------|
 | 0    | the audit ran and found nothing                       |
 | 1    | usage: a bad argument, an unknown verb                 |
-| 2    | the audit ran and found drops, anomalies or unreadable files |
-| 3    | `refs/hbs2/meta` is not here (a plain clone; fetch it) |
+| 2    | the audit ran and found drops, anomalies, unreadable files, or no `version` |
+| 3    | `refs/hbs2/meta` is not here, or is here and broken    |
 | 4    | not a git repository, or git could not be run          |
 | 5    | the ref is here and does not resolve to a commit       |
 | 6    | canon is stamped `(hub-meta N)` newer than this build  |
@@ -99,9 +99,27 @@ event.
 | 8    | canon is past the reader's byte bound                  |
 | 9    | the tree will not list (a pruned object, a permission) |
 | 10   | canon is past the reader's file-count bound            |
+| 11   | the tree listing is past the reader's byte bound       |
+| 12   | the reader could not run git at all: a local failure   |
 
 3 and up is "could not run", so a hook that only cares about the distinction
-tests `>= 3`. Every one of them prints what to do about it on stderr.
+tests `>= 3`. Every one of them prints what to do about it on stderr. The numbers
+are a contract: a hook branches on them, so they may be added to and not
+reassigned.
+
+Two of these are worth reading twice. 3 covers both an absent ref and a ref whose
+loose file is corrupt, because git offers no way to tell those apart: `show-ref
+--verify --quiet` exits 1 for both and both messages say "not a valid ref". A
+fetch is the remedy either way, which is why they can share a code and the advice
+names both. And 12 is the one refusal that is not about canon at all: no process
+slots, no file descriptors, git gone from `PATH` mid-audit. It used to be reported
+as an unreadable file, which exits 2, telling a hook that a local resource limit
+was a finding about somebody's repository.
+
+A missing `version` file exits 2 rather than 3-and-up: PEP-19 requires the file,
+so its absence is a finding, but the tree still folds, under the OLDEST rules this
+build knows. Not this build's newest, which would make deleting one unsigned file
+a way to choose which rules canon is folded under.
 
 Three things the report says that are worth naming, because each was once
 silently dropped:

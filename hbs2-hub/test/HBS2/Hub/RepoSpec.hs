@@ -50,7 +50,7 @@ inMemory files = CanonSource
   , csEntries = const (pure (Right
       [ TreeEntry (encPath p) (Blob (oidOf i) (utf8Len t))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
-  , csBlob    = \oid -> pure (lookup oid byOid)
+  , csBlob    = \oid -> pure (maybe BlobAbsent BlobText (lookup oid byOid))
   }
   where
     utf8Len = BS.length . Text.encodeUtf8
@@ -133,7 +133,7 @@ spec = do
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
       let noRef = CanonSource (pure (Left NoCanonRef))
-                    (const (pure (Right []))) (const (pure Nothing))
+                    (const (pure (Right []))) (const (pure BlobAbsent))
       readCanon noRef (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left NoCanonRef
 
@@ -191,7 +191,7 @@ spec = do
           p = B8.pack "threads/t/00000000000000000001-x"
           listed = CanonSource (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry p (Blob "oid" 10)])))
-                     (const (pure Nothing))
+                     (const (pure BlobAbsent))
       st <- readOk listed repo
       stBad st `shouldBe` [(p, FileUnreadable)]
 
@@ -202,7 +202,7 @@ spec = do
       -- exit, which is the one answer indistinguishable from a tracker that has
       -- nothing in it.
       let noTree = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure Nothing))
+                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure BlobAbsent))
       readCanon noTree (fst owner)
         >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "gone")
 
@@ -246,7 +246,7 @@ spec = do
                   (const (pure (Right
                     [TreeEntry huge (Blob "oid" (maxEventBytes + 1))])))
                   (\_ -> do modifyIORef fetched succ
-                            pure (Just "whatever"))
+                            pure (BlobText "whatever"))
       st <- readOk src repo
       stBad st `shouldBe` [(huge, FileTooLarge (maxEventBytes + 1))]
       -- Nothing was fetched at all. Not even the version file: it is looked up in
@@ -264,7 +264,7 @@ spec = do
       let big = CanonSource (pure (Right "deadbeef"))
                   (const (pure (Right
                     [TreeEntry versionPath (Blob "oid" (maxEventBytes + 1))])))
-                  (\_ -> modifyIORef fetched succ >> pure (Just renderMeta))
+                  (\_ -> modifyIORef fetched succ >> pure (BlobText renderMeta))
       readCanon big (fst owner) >>= \r ->
         fmap (const ()) r
           `shouldBe` Left (VersionUnreadable (FileTooLarge (maxEventBytes + 1)))
@@ -279,7 +279,7 @@ spec = do
       -- tells them apart.
       let listed = CanonSource (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry versionPath (Blob "oid" 13)])))
-                     (const (pure Nothing))
+                     (const (pure BlobAbsent))
       readCanon listed (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (VersionUnreadable FileUnreadable)
       -- ...and a tree that simply does not list one is read
@@ -291,7 +291,7 @@ spec = do
       let ev n = TreeEntry (B8.pack ("threads/t/" <> show n))
                    (Blob (Text.pack (show n)) maxEventBytes)
           src es = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Right es))) (const (pure (Just "x")))
+                     (const (pure (Right es))) (const (pure (BlobText "x")))
           n = maxCanonBytes `div` maxEventBytes + 1
       readCanon (src (fmap ev [1..n])) (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooBig (n * maxEventBytes))
@@ -314,9 +314,64 @@ spec = do
       let junk n = TreeEntry (B8.pack ("junk/" <> show n)) (Blob "x" 1)
           n = maxCanonFiles + 1
           src es = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Right es))) (const (pure (Just "x")))
+                     (const (pure (Right es))) (const (pure (BlobText "x")))
       readCanon (src (fmap junk [1..n])) (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooMany n)
+
+    it "carries each listing kind through to its own problem" $ do
+      owner <- kp
+      -- The composition, which is where the last round's bug lived: GitRepoSpec
+      -- proves git's output becomes the right EntryKind, and the tests above
+      -- prove readCanon folds a Blob, and between those two the three other kinds
+      -- were unmentioned in either file. A missing object was reported as a
+      -- submodule for a whole round with both halves passing.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "threads/t/0001-gone" (BlobMissing "abc")
+                    , TreeEntry "threads/t/0001-sub" NotABlob
+                    , TreeEntry "100644 blob abc 5 extra" Unparsed
+                      -- The index has its own reader and is skipped, but only when
+                      -- it IS a blob: a gitlink here was the one entry in the tree
+                      -- nothing looked at, because the skip was by path alone.
+                    , TreeEntry (B8.pack numberIndexPath) NotABlob
+                    ])))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+      st <- readOk src (fst owner)
+      stBad st `shouldBe`
+        [ ("100644 blob abc 5 extra", FileListingUnparsed)
+        , (B8.pack numberIndexPath, FileNotABlob)
+        , ("threads/t/0001-gone", FileObjectMissing)
+        , ("threads/t/0001-sub", FileNotABlob)
+        ]
+
+    it "says a version file is missing rather than only implying it" $ do
+      owner <- kp
+      -- PEP-19 requires the file. The tree still folds, under the oldest rules,
+      -- because refusing would hand a veto to whoever deleted one unsigned line;
+      -- but the absence is a finding, and it used to be a parenthesis on the
+      -- header line and a zero exit.
+      st <- readOk (inMemory []) (fst owner)
+      stVersion st `shouldBe` Nothing
+
+    it "says the tool failed rather than blaming the file it was reading" $ do
+      owner <- kp
+      -- A fork that fails under a pids limit, or on EMFILE, or git removed from
+      -- PATH mid-audit. Reported as an unreadable FILE it exited 2, which is the
+      -- code for an audit that ran and found something in somebody's canon.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right [TreeEntry "threads/t/0001-x" (Blob "o" 5)])))
+                  (const (pure (BlobUnavailable "fork: Resource exhausted")))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (ReaderFailed "fork: Resource exhausted")
+
+      -- And on the version file, where it used to exit 7 and tell whoever
+      -- published canon to rewrite a file this reader never managed to look at.
+      let onVersion = CanonSource (pure (Right "deadbeef"))
+                        (const (pure (Right [TreeEntry versionPath (Blob "v" 13)])))
+                        (const (pure (BlobUnavailable "fork: Resource exhausted")))
+      readCanon onVersion (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (ReaderFailed "fork: Resource exhausted")
 
     it "reports a path the tree layout does not have" $ do
       owner <- kp
@@ -329,7 +384,7 @@ spec = do
                     , TreeEntry "evil/plans" (Blob "e" 4)
                     , TreeEntry (B8.pack numberIndexPath) (Blob "i" 4)
                     ])))
-                  (\oid -> pure (if oid == "v" then Just renderMeta else Just "junk"))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
       st <- readOk src (fst owner)
       stBad st `shouldBe` [("evil/plans", FileUnexpected)]
 

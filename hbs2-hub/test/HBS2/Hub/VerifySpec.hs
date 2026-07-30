@@ -36,6 +36,10 @@ kp = do
   c <- newCredentials @'HBS2Basic
   pure (_peerSignPk c, _peerSignSk c)
 
+-- A literal as the bytes it reads as, not as Char8 truncation.
+utf8 :: String -> ByteString
+utf8 = TextE.encodeUtf8 . Text.pack
+
 -- A Doc as the one line it is meant to be.
 --
 -- Unbounded on purpose: the default layout wraps at 80 columns, which would make
@@ -51,26 +55,35 @@ byPath files = CanonSource
   , csEntries = const (pure (Right
       [ TreeEntry p (Blob (oidOf i) (BS.length (TextE.encodeUtf8 t)))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
-  , csBlob    = \oid -> pure (lookup oid byOid)
+  , csBlob    = \oid -> pure (maybe BlobAbsent BlobText (lookup oid byOid))
   }
   where
     oidOf i = Text.pack (show i)
     byOid = [ (oidOf i, t) | (i,(_,t)) <- zip [0 :: Int ..] files ]
 
--- Every constructor of CanonUnreadable, once. Not derived from anything: the
--- point is that adding one to the type does not silently leave it out of the
--- checks below, and the -Werror=incomplete-patterns in the module under test is
--- what makes forgetting it a build failure there.
-everyRefusal :: [CanonUnreadable]
+-- Every constructor of CanonUnreadable with the code it must exit with. The
+-- codes are PINNED, not merely required to differ: a script in somebody's hook
+-- branches on the number, so swapping two of them is a breaking change that a
+-- distinctness check waves through. This list is the contract, and PEP-22 prints
+-- the same table.
+--
+-- Handwritten, since the type has payloads and cannot be enumerated. The
+-- -Werror=incomplete-patterns in the module under test is what makes a new
+-- constructor a build failure there; what it cannot catch is a new constructor
+-- given a code that is already taken, which is what the distinctness check below
+-- is for.
+everyRefusal :: [(CanonUnreadable, Int)]
 everyRefusal =
-  [ NoCanonRef
-  , NoRepository "not a git repository"
-  , RefUnresolved "bad object"
-  , TreeUnreadable "missing blob"
-  , CanonTooNewHere 99
-  , VersionUnreadable FileUnreadable
-  , CanonTooBig (maxCanonBytes + 1)
-  , CanonTooMany (maxCanonFiles + 1)
+  [ (NoCanonRef,                          3)
+  , (NoRepository "not a git repository", 4)
+  , (RefUnresolved "bad object",          5)
+  , (CanonTooNewHere 99,                  6)
+  , (VersionUnreadable FileUnreadable,    7)
+  , (CanonTooBig (maxCanonBytes + 1),     8)
+  , (TreeUnreadable "missing blob",       9)
+  , (CanonTooMany (maxCanonFiles + 1),   10)
+  , (CanonListingTooBig maxListingBytes, 11)
+  , (ReaderFailed "fork: Resource exhausted", 12)
   ]
 
 spec :: Spec
@@ -78,14 +91,20 @@ spec = do
 
   describe "PEP-22 hub verify" $ do
 
-    it "gives every refusal its own exit code, all of them above the audit's" $ do
-      let codes = fmap codeOf everyRefusal
-      -- Distinct, because a script branches on these. Two pairs shared a code:
-      -- "the ref is broken" with "the tree will not list", and "too big" with
-      -- "too many", which differ in which bound there is to argue with.
+    it "exits with the exact code each refusal is documented to exit with" $ do
+      -- One at a time and by value, so a permutation fails. It used to check only
+      -- that the codes differ and are above 2, which swapping 3 and 4 passes: a
+      -- hook that treats 3 as "canon has not been fetched here" would then be
+      -- told that by a directory that is not a repository at all.
+      for_ everyRefusal $ \(u, code) -> codeOf u `shouldBe` code
+
+      let codes = fmap snd everyRefusal
+      -- Still distinct, which is what catches a constructor added with a code
+      -- that is already taken: the Werror in the module under test forces a case
+      -- for it, and nothing forces the case to be a new number.
       sort codes `shouldBe` sort (nub codes)
-      -- Above 2, which is a completed audit that found something, and above 1,
-      -- which is a usage error. A hook tells "could not run" from "ran and found
+      -- And all above 2, which is a completed audit that found something, and
+      -- above 1, a usage error. A hook tells "could not run" from "ran and found
       -- things" by the number alone.
       filter (< 3) codes `shouldBe` []
 
@@ -93,22 +112,42 @@ spec = do
       -- Two of these used to print a bare complaint through a wildcard: a
       -- directory that is not a repository, and a version file that will not
       -- read. They are the two a reader is least likely to work out unaided.
-      for_ everyRefusal $ \u ->
+      for_ everyRefusal $ \(u, _) ->
         length (Text.lines (render (refusalDoc u))) `shouldSatisfy` (> 1)
 
     it "escapes so that nothing can spell an escape" $ do
-      -- The escaping is only worth having if it is injective. Without escaping the
-      -- backslash itself, a title containing the four characters \x0a printed
-      -- exactly like a title containing a newline, so a field could spell out the
-      -- notation meant to expose it and a reader could not tell which they had.
-      safeText "a\\x0ab" `shouldNotBe` safeText "a\nb"
-      safeText "a\nb" `shouldBe` "a\\x0ab"
+      -- The escaping is only worth having if it is injective, and it took three
+      -- goes. Each line below is a pair that printed identically at some point.
+      --
+      -- The field spelling out the notation: the four characters \u{0a} against a
+      -- newline. Fixed by escaping the backslash.
+      safeText "a\\u{0a}b" `shouldNotBe` safeText "a\nb"
+      safeText "a\nb" `shouldBe` "a\\u{0a}b"
+      -- The digits running into the text after them: U+0006 then the literal "1c"
+      -- against U+061C, when the width was two digits under 256 and four above.
+      -- Fixed by delimiting instead of padding.
+      safeText "\x0006" <> "1c" `shouldNotBe` safeText "\x061C"
+      safeText "\x061C" `shouldBe` "\\u{61c}"
       -- A right-to-left override reverses the tail of a line on a terminal that
       -- honours it, and is not a control character, so isControl does not cover it.
-      safeText "ok\x202Elater" `shouldBe` "ok\\x202elater"
+      safeText "ok\x202Elater" `shouldBe` "ok\\u{202e}later"
       -- Ordinary text, including non-Latin text, is left alone: this is an escape
       -- for what breaks a line, not a transliteration.
       safeText "\1090\1077\1084\1072" `shouldBe` "\1090\1077\1084\1072"
+
+    it "keeps a character apart from a raw byte that hexes the same" $ do
+      -- The third pair, and the one an escape scheme with a single sigil cannot
+      -- separate at all: U+0085 is a control character, so the character branch
+      -- escapes it, and the single byte 0x85 is invalid UTF-8, so the byte branch
+      -- escapes that. Both are 85 in hex. Two entries in a tree, one line in the
+      -- report, and the report is how somebody decides which file to open.
+      pathText (utf8 "0001-\x0085-z") `shouldNotBe` pathText "0001-\x85-z"
+      pathText (utf8 "0001-\x0085-z") `shouldBe` "0001-\\u{85}-z"
+      pathText "0001-\x85-z" `shouldBe` "0001-\\x{85}-z"
+      -- Which branch wrote a line is readable off the line, because neither can
+      -- write the other's sigil: a backslash is escaped in both.
+      pathText "\\" `shouldBe` "\\u{5c}"
+      pathText "\\\xff" `shouldBe` "\\x{5c}\\x{ff}"
 
     it "keeps two paths that differ in one invalid byte on two distinct lines" $ do
       owner <- kp
@@ -143,7 +182,7 @@ spec = do
       for_ ls $ \l -> length (Text.lines l) `shouldBe` 1
       -- The newline is spelled out rather than obeyed, and the last line of the
       -- report is still the report's own summary.
-      any ("\\x0a" `Text.isInfixOf`) ls `shouldBe` True
+      any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` True
       fmap (Text.isPrefixOf "admitted") (lastOf ls) `shouldBe` Just True
 
     it "exits 2 for an audit that found something and 0 for a clean one" $ do

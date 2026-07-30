@@ -14,9 +14,10 @@ module HBS2.Hub.GitRepoSpec (spec) where
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 
-import Control.Exception (bracket)
+import Control.Exception (bracket,bracket_)
 import Control.Monad (void,forM)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.List (sort)
@@ -24,7 +25,7 @@ import Data.Maybe (fromMaybe,isJust)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Control.Monad (unless)
-import System.Directory (createDirectoryIfMissing,findExecutable)
+import System.Directory (createDirectoryIfMissing,findExecutable,getPermissions,setPermissions,setOwnerExecutable)
 import System.Environment qualified as Env
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
@@ -134,6 +135,61 @@ kindOf = \case
   NotABlob      -> NotBlob
   Unparsed      -> Bad
 
+-- A fake git on PATH, printing a fixed listing on stdout and n lines of noise on
+-- stderr, and a read of "canon" through it.
+--
+-- A shim because the real trigger for the thing being tested (a lazy fetch in a
+-- partial clone, chattering on stderr while ls-tree streams stdout) needs a
+-- promisor remote and a network, and what is under test is this reader's handling
+-- of two pipes, not git's.
+--
+-- PATH is set for the duration and put back, because 'gitCanonWith' looks git up
+-- through the environment on purpose and this is the only way in. Restored rather
+-- than left, and bracketed rather than assigned: the suite is sequential (hspec's
+-- default), so this is safe, and the bracket is what keeps it safe if that ever
+-- stops being true for the specs around it.
+shimmed :: Int -> ByteString
+        -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+shimmed = shimmedWith gitBounds
+
+shimmedWith :: GitBounds -> Int -> ByteString
+            -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+shimmedWith bounds noise out act =
+  withSystemTempDirectory "hub-shim" $ \dir -> do
+    let bin = dir </> "bin"
+    createDirectoryIfMissing True bin
+    BS.writeFile (bin </> "listing") out
+    writeFile (bin </> "git") (unlines
+      [ "#!/bin/sh"
+      , "case \"$*\" in"
+      , "  *ls-tree*)"
+      -- stderr FIRST and unread by design: the child has to be able to fill the
+      -- pipe before the parent has finished stdout, which is the deadlock.
+      , "    i=0; while [ $i -lt " <> show noise <> " ]; do"
+      , "      echo \"remote: enumerating objects $i, done.\" >&2; i=$((i+1)); done"
+      , "    cat " <> (bin </> "listing")
+      , "    ;;"
+      , "  *rev-parse*--git-dir*) echo .git ;;"
+      , "  *show-ref*) exit 0 ;;"
+      , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
+      , "  *) exit 1 ;;"
+      , "esac"
+      ])
+    perm <- getPermissions (bin </> "git")
+    setPermissions (bin </> "git") (setOwnerExecutable True perm)
+    old <- Env.lookupEnv "PATH"
+    bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
+             (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+             (act (readTreeWith bounds dir))
+
+-- Entries as the reader returns them, whole.
+readTreeWith :: GitBounds -> FilePath -> IO (Either CanonUnreadable [TreeEntry])
+readTreeWith bounds dir = do
+  let cs = gitCanonWith bounds (Just dir)
+  csCommit cs >>= \case
+    Left e  -> pure (Left e)
+    Right c -> csEntries cs c
+
 -- Read canon from a directory, with the process's own working directory left
 -- alone: gitCanon runs git, so the directory has to reach it some other way.
 readIn :: FilePath -> IO (Either CanonUnreadable [(ByteString, Kind)])
@@ -146,32 +202,47 @@ readIn dir = do
       Left e -> pure (Left e)
       Right es -> pure (Right (sort [ (teePath e, kindOf (teeKind e)) | e <- es ]))
 
+-- One test, with the environment it needs, put back afterwards.
+--
+-- The reads below go through the production 'gitCanonIn', so what it inherits
+-- from this process it inherits for real, and this is the only way to arrange
+-- what it inherits. The GIT_DIR family is deliberately NOT here: 'gitCanonIn'
+-- strips those itself when a directory is named, which is a property of the
+-- production code and is asserted below rather than arranged away.
+--
+-- What is left is what production cannot decide for a caller. The config files,
+-- because a global commit.gpgsign or core.hooksPath belongs to the developer;
+-- LC_ALL, because a test below matches on a message git writes; and the ceiling,
+-- because withSystemTempDirectory hands out a path under TMPDIR, and TMPDIR
+-- inside somebody's repository turns "this is not a git repository" into "it is".
+--
+-- Scoped and restored rather than assigned once at spec load, which is what it
+-- was. Assigning leaks LC_ALL=C into every spec that runs after this one, and
+-- the leak is invisible while hspec runs specs one at a time and immediate the
+-- day anything here or above is marked parallel.
+isolated :: IO () -> IO ()
+isolated act = do
+  tmp <- getCanonicalTemporaryDirectory
+  let wanted = [ ("GIT_CONFIG_GLOBAL", "/dev/null")
+               , ("GIT_CONFIG_SYSTEM", "/dev/null")
+               , ("LC_ALL", "C")
+               , ("GIT_CEILING_DIRECTORIES", tmp)
+               ]
+  before <- mapM (\(k,_) -> (,) k <$> Env.lookupEnv k) wanted
+  bracket_ (mapM_ (uncurry Env.setEnv) wanted)
+           (mapM_ (\(k,v) -> maybe (Env.unsetEnv k) (Env.setEnv k) v) before)
+           act
+
 spec :: Spec
 spec = do
-
-  -- The reads below go through the production 'gitCanonIn', so what it inherits
-  -- from this process it inherits for real. The GIT_DIR family is not in here:
-  -- 'gitCanonIn' strips those itself when a directory is named, which is a
-  -- correctness property of the production code and is asserted below rather than
-  -- arranged away here.
-  --
-  -- What is left is what production cannot decide for a caller. The config files,
-  -- because a global commit.gpgsign or core.hooksPath belongs to the developer;
-  -- LC_ALL, because a test below matches on a message git writes; and the ceiling,
-  -- because withSystemTempDirectory hands out a path under TMPDIR and TMPDIR
-  -- inside somebody's repository turns "this is not a git repository" into "it is".
-  _ <- runIO $ do
-    Env.setEnv "GIT_CONFIG_GLOBAL" "/dev/null"
-    Env.setEnv "GIT_CONFIG_SYSTEM" "/dev/null"
-    Env.setEnv "LC_ALL" "C"
-    getCanonicalTemporaryDirectory >>= Env.setEnv "GIT_CEILING_DIRECTORIES"
 
   -- Skipped rather than failed where git is not installed: this is the one spec
   -- in the suite that needs it, and a red suite on a machine without git says
   -- something false about the code.
   hasGit <- runIO (isJust <$> findExecutable "git")
 
-  before_ (unless hasGit (pendingWith "git is not on PATH")) $
+  around_ (\act -> if hasGit then isolated act
+                             else pendingWith "git is not on PATH") $
    describe "gitCanon against real git" $ do
 
     it "parses an ls-tree record into a path and a size" $ do
@@ -241,6 +312,20 @@ spec = do
                   (const (readIn named)) `shouldReturn`
             Right [ ("threads/t/0001-x", Sized 5), ("version", Sized 13) ]
 
+    it "obeys GIT_DIR when no directory was named" $ do
+      -- The other half of the pair above, and the half that is easy to break
+      -- while fixing that one: with no directory named, the environment IS the
+      -- caller's answer to "which repository", and a hook's GIT_DIR is the right
+      -- one to obey. gitCanon is what `hub verify` uses, so this is the path in
+      -- production and it had no test at all.
+      withCanon [("version", "(hub-meta 1)\n")] $ \dir ->
+        bracket_ (Env.setEnv "GIT_DIR" (dir </> ".git"))
+                 (Env.unsetEnv "GIT_DIR")
+                 (csCommit (gitCanon @IO) >>= \case
+                    Right c -> Text.length c `shouldBe` 40
+                    Left e -> expectationFailure
+                                ("expected a commit, got " <> show e))
+
     it "tells a blob whose object is gone from a submodule" $ do
       -- ls-tree -l prints BAD, not a number, in the size column of a blob it
       -- cannot find, which is what a blobless or partial clone looks like from
@@ -269,11 +354,12 @@ spec = do
         let oids = [ oid | e <- es, Blob oid _ <- [teeKind e]
                          , teePath e /= versionPath ]
         case oids of
-          [oid] -> csBlob cs oid `shouldReturn` Just "\1087\1088\1080\1074\1077\1090"
+          [oid] -> csBlob cs oid `shouldReturn` BlobText "\1087\1088\1080\1074\1077\1090"
           _ -> expectationFailure ("expected one event blob, got " <> show oids)
 
-        -- An object that is not there is Nothing, not an exception and not "".
-        csBlob cs (Text.pack (replicate 40 'a')) `shouldReturn` Nothing
+        -- An object that is not there is BlobAbsent: git ran and said no. Not an
+        -- exception, not "", and not the answer for git having failed to run.
+        csBlob cs (Text.pack (replicate 40 'a')) `shouldReturn` BlobAbsent
 
     it "says it could not read a listing record rather than calling it a submodule" $ do
       -- Not reachable through git today, and that is the point: this is the
@@ -286,6 +372,37 @@ spec = do
       kindOf . teeKind <$> parseListing "no tabs here"
         `shouldBe` [Bad]
       teePath <$> parseListing "no tabs here" `shouldBe` ["no tabs here"]
+
+    it "reads a listing whose stderr is larger than a pipe buffer" $ do
+      -- THE DEADLOCK. Reading stdout to the end and stderr afterwards stops
+      -- forever the moment the child fills the 64 KiB stderr pipe: it blocks on
+      -- write, the reader blocks on read, and no bound fires because what is
+      -- blocked is the stdout read.
+      --
+      -- The real trigger is not exotic: ls-tree -l must size every entry, so in a
+      -- blobless or partial clone it drives a lazy fetch per missing blob and that
+      -- progress goes to stderr. Measured at 39 KB of stdout against 1.1 MB of
+      -- stderr. A promisor remote is more machinery than this test needs, so the
+      -- shape is reproduced with a shim: 2000 lines of stderr hung the suite until
+      -- the timeout, 500 passed, which is the pipe buffer to the byte.
+      shimmed 4000 "100644 blob deadbeef      5\tthreads/t/0001-x\0" $ \readIt ->
+        (fmap (fmap teePath) <$> readIt) `shouldReturn` Right ["threads/t/0001-x"]
+
+    it "refuses a listing past the byte bound while it is still arriving" $ do
+      -- The bound has to hold before the bytes are all in memory, so it cannot be
+      -- a check on a buffer. With the real 102 MB bound nothing could afford to
+      -- exercise this, which is why the bounds are a parameter.
+      let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
+      shimmedWith (gitBounds { gbListingBytes = 200 }) 0 (mconcat (replicate 40 entry))
+        $ \readIt -> readIt `shouldReturn` Left (CanonListingTooBig 200)
+
+    it "counts the records before it builds them" $ do
+      -- Not one TreeEntry per record and then a count: the byte bound admits 1.6M
+      -- minimal records, eight times the file bound, and counting the parsed list
+      -- refused them after the allocation the bound exists to prevent.
+      let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
+      shimmedWith (gitBounds { gbListingFiles = 3 }) 0 (mconcat (replicate 10 entry))
+        $ \readIt -> readIt `shouldReturn` Left (CanonTooMany 10)
 
     it "tells an absent ref from a directory that is not a repository" $ do
       -- rev-parse exits 1 for the first and 128 for the second, and collapsing

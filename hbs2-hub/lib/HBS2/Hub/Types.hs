@@ -405,10 +405,18 @@ normalizeAttr k v
 -- them. The whole point here is that one line of output stays one line and reads
 -- as what it is.
 --
--- The backslash is escaped too, which is what makes this injective: without it a
+-- Injective, and it took three tries. The backslash is escaped, without which a
 -- name containing the four characters @\\x0a@ printed exactly like a name
--- containing a newline, so the escaping that was supposed to show what a field
--- holds could be spelled out by the field itself.
+-- containing a newline. The digits are DELIMITED rather than padded to a
+-- value-dependent width, without which @\\x06@ followed by the literal text
+-- @1c@ printed exactly like U+061C. And characters use a different letter from
+-- the raw bytes in 'pathText', without which U+0085 printed exactly like the
+-- single invalid byte 0x85.
+--
+-- Every one of those is a different pair of fields that print the same, and each
+-- was found by asking the same question of a slightly different part of the
+-- scheme. The escape is now @\\u{H+}@ for a character, @\\x{HH}@ for a byte, and
+-- nothing else in either output can produce a brace after a backslash.
 safeText :: Text -> Text
 safeText = Text.concatMap esc
   where
@@ -431,25 +439,41 @@ safeText = Text.concatMap esc
 -- identical; reporting a file is telling somebody which file to go and look at,
 -- and one of those two lines named a file that is not there. A tree path is any
 -- bytes but NUL, so anybody who can write canon can arrange it.
+--
+-- The two branches print into DIFFERENT escapes, @\\u{...}@ for a character and
+-- @\\x{...}@ for a byte, and that is load-bearing: sharing one escape, the valid
+-- UTF-8 path @0001-\\xc2\\x85-z@ (U+0085, a control character) and the invalid
+-- @0001-\\x85-z@ printed byte-for-byte the same line. Two entries in one tree,
+-- one line in the report. The earlier note here argued no collision was possible
+-- because the character branch escapes its backslashes, which is true and is
+-- about a different collision.
 pathText :: ByteString -> Text
 pathText bs = case TextE.decodeUtf8' bs of
   Right t -> safeText t
   -- Not UTF-8, so there is no text to escape and no encoding to guess at: every
-  -- byte that is not printable ASCII is spelled out. It cannot collide with the
-  -- branch above, where a backslash is itself escaped.
+  -- byte that is not printable ASCII is spelled out, and so is the backslash, so
+  -- this branch can never write @\\u{@ and the branch above can never write
+  -- @\\x{@. Which branch produced a line is therefore readable off the line.
   Left _  -> Text.concat [ escByte b | b <- BS.unpack bs ]
   where
     escByte b | b >= 0x20, b < 0x7f, b /= 0x5c = Text.singleton (Char.chr (fromIntegral b))
-              | otherwise                      = escChar (Char.chr (fromIntegral b))
+              | otherwise = Text.pack ("\\x{" <> pad 2 (fromIntegral b) <> "}")
 
--- One character as @\\xNN@, in as few digits as hold it.
+-- One character as @\\u{H+}@: delimited, so the digits cannot run into the text
+-- after them, and lower case so the two escapes cannot be told apart by case
+-- alone.
 escChar :: Char -> Text
-escChar c = Text.pack ("\\x" <> hex (Char.ord c))
+escChar c = Text.pack ("\\u{" <> pad 2 (Char.ord c) <> "}")
+
+-- Hex, in at least w digits. The width is cosmetic now that the digits are
+-- delimited; it was not, and two digits for one value against four for another
+-- is what let one escape's digits be continued by the text after it.
+pad :: Int -> Int -> String
+pad w n = replicate (max 0 (w - length s)) '0' <> s
   where
-    hex n | n < 256   = pad 2 n
-          | n < 65536 = pad 4 n
-          | otherwise = pad 6 n
-    pad w n = [ digit ((n `div` (16 ^ i)) `mod` 16) | i <- [w-1, w-2 .. 0] ]
+    s = hexOf n
+    hexOf m | m < 16    = [digit m]
+            | otherwise = hexOf (m `div` 16) <> [digit (m `mod` 16)]
     digit d = "0123456789abcdef" !! d
 
 -- | Is this a hash at all?

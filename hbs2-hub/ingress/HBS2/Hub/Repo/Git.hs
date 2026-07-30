@@ -17,6 +17,9 @@
 module HBS2.Hub.Repo.Git
   ( gitCanon
   , gitCanonIn
+  , gitCanonWith
+  , GitBounds(..)
+  , gitBounds
   , parseListing
   ) where
 
@@ -34,6 +37,24 @@ import Data.Text.Encoding qualified as Text
 import System.Environment (getEnvironment)
 import System.Process.Typed
 
+-- | What this reader will not go past.
+--
+-- A parameter, because the real numbers make the refusals cost a hundred
+-- megabytes and two hundred thousand files to reach, and a refusal nothing can
+-- afford to exercise is a refusal nothing has exercised.
+data GitBounds = GitBounds
+  { gbListingBytes :: Int   -- ^ 'maxListingBytes'
+  , gbListingFiles :: Int   -- ^ 'maxCanonFiles', counted before anything is built
+  , gbToolMessage  :: Int   -- ^ how much of a tool's complaint to keep
+  }
+
+gitBounds :: GitBounds
+gitBounds = GitBounds
+  { gbListingBytes = maxListingBytes
+  , gbListingFiles = maxCanonFiles
+  , gbToolMessage  = 64 * 1024
+  }
+
 -- | Canon from the repository the process is standing in.
 gitCanon :: MonadUnliftIO m => CanonSource m
 gitCanon = gitCanonIn Nothing
@@ -45,7 +66,11 @@ gitCanon = gitCanonIn Nothing
 -- moving the suite it runs in, cannot use a global. It is also what makes the
 -- git-facing half testable.
 gitCanonIn :: MonadUnliftIO m => Maybe FilePath -> CanonSource m
-gitCanonIn cwd = CanonSource
+gitCanonIn = gitCanonWith gitBounds
+
+-- | As 'gitCanonIn', with the bounds named. For the test suite.
+gitCanonWith :: MonadUnliftIO m => GitBounds -> Maybe FilePath -> CanonSource m
+gitCanonWith bounds cwd = CanonSource
   { csCommit = do
       -- Three questions, one call each, because each answer calls for something
       -- different and any two of them collapsed together lose a diagnostic. Is
@@ -59,12 +84,16 @@ gitCanonIn cwd = CanonSource
       --
       -- Measured against git 2.55, for refs/hbs2/meta in five states:
       --
-      --   state                 show-ref --quiet   rev-parse ^{commit}
-      --   absent                1                  1
-      --   loose ref is garbage  1                  1
-      --   names a blob          0                  1
-      --   names a gone object   128                1
-      --   names a commit        0                  0
+      --   state                 show-ref   rev-parse ^{commit}   with --quiet
+      --   absent                1          128                   1
+      --   loose ref is garbage  1          128                   1
+      --   names a blob          0          128                   1
+      --   names a gone object   128        128                   1
+      --   names a commit        0          0                     0
+      --
+      -- The middle column is the one this code reads, because it calls rev-parse
+      -- WITHOUT --quiet: the message is wanted. The third column is there because
+      -- an earlier version of this table quoted it while the code did not use it.
       --
       -- A broken loose ref is therefore NOT distinguishable from an absent one:
       -- both are 1, and both stderrs say "not a valid ref". git knows the
@@ -104,21 +133,32 @@ gitCanonIn cwd = CanonSource
       listing ["ls-tree", "-r", "-z", "-l", "--full-tree", Text.unpack commit]
         <&> \case
           -- The bound first: past it the process is torn down, so its exit code
-          -- says how it was killed and not anything about the tree.
-          Right (_, Left n) ->
-            Left (TreeUnreadable
-                   ( "the tree listing is over "
-                     <> Text.pack (show n) <> " bytes"
-                     <> "; compaction is the answer to a canon this large"
-                     <> " (PEP-19), not a bigger reader" ))
-          Right (ExitSuccess, Right out) -> Right (parseListing out)
-          Right (_, Right e) -> Left (TreeUnreadable (msg (decodeS e)))
+          -- says how it was killed and not anything about the tree. It carries
+          -- the BOUND: reading stops mid-chunk, so the byte count at that moment
+          -- is neither the bound nor the size of the tree, and printing it said
+          -- "over 102404096 bytes" where the bound is 102400000.
+          Right (_, Nothing) -> Left (CanonListingTooBig (gbListingBytes bounds))
+          Right (ExitSuccess, Just out)
+            -- Counted on the RAW BYTES, before one TreeEntry exists. Records are
+            -- NUL-terminated, so this is a single memchr scan. Counting the parsed
+            -- list left the byte bound as the only thing between a listing of
+            -- minimal 63-byte records and 1.6M entries built, sorted and held:
+            -- eight times the file bound, refused after the allocation the bound
+            -- exists to prevent.
+            | recs out > gbListingFiles bounds -> Left (CanonTooMany (recs out))
+            | otherwise -> Right (parseListing out)
+          Right (_, Just e) -> Left (TreeUnreadable (msg (decodeS e)))
           Left e -> Left (TreeUnreadable (msg e))
 
   , csBlob = \oid ->
-      git ["cat-file", "blob", Text.unpack oid] <&> \case
-        Right (ExitSuccess, out) -> Just out
-        _                        -> Nothing
+      raw ["cat-file", "blob", Text.unpack oid] <&> \case
+        Right (ExitSuccess, out) -> BlobText (decode out)
+        -- git ran and said no, so the object is not here. Distinct from git not
+        -- having run, below, which says nothing about canon: read as one answer,
+        -- a fork that failed on EAGAIN became an unreadable event file and exit 2,
+        -- which is the code for an audit that ran.
+        Right (_, _) -> BlobAbsent
+        Left e -> BlobUnavailable (msg e)
   }
   where
     -- Where git is to run, and it is not just a chdir.
@@ -164,27 +204,57 @@ gitCanonIn cwd = CanonSource
     -- Decoded output, for the calls whose result is text.
     git args = raw args <&> fmap (fmap decode)
 
-    -- The listing, read to 'maxListingBytes' and no further: @Left n@ is "there
-    -- was more than n", and the process is dead by the time it is returned.
+    -- Records in a raw listing: one NUL each.
+    recs = BS.count 0
+
+    -- The listing, read to 'gbListingBytes' and no further: @Nothing@ is "there
+    -- was more than that", and the process is dead by the time it is returned.
     --
-    -- stdout to the bound, then stderr whole, then the exit code. Sequential and
-    -- so deadlockable in principle, if git filled the stderr pipe while this was
-    -- still reading stdout; it cannot here, because ls-tree's stderr is a line or
-    -- two and a pipe buffer is 64 KiB. Anything with real output on both is a
-    -- reason to go back to 'raw', which reads them concurrently.
+    -- BOTH PIPES ARE READ AT ONCE, and this is the whole of why this is not five
+    -- lines. Reading stdout to the end and stderr afterwards deadlocks the moment
+    -- the child fills the 64 KiB stderr pipe: it blocks on write, this blocks on
+    -- read, and neither the byte bound nor anything else fires, because what is
+    -- blocked is the stdout read.
+    --
+    -- Not hypothetical, and the trigger is the very case this reader was taught
+    -- about last: @ls-tree -l@ must know the size of every entry, so in a blobless
+    -- or partial clone it drives a lazy fetch per missing blob, and that fetch's
+    -- progress goes to the inherited stderr. Measured on git 2.55: 39 561 bytes of
+    -- stdout against 1 129 712 bytes of stderr, which hung forever. The comment
+    -- that used to be here reasoned it away with "ls-tree's stderr is a line or
+    -- two".
+    --
+    -- The stderr reader is 'drain', which reads to EOF even past its keep-bound: a
+    -- reader that stopped would leave the child blocked on a full pipe, which is
+    -- the same deadlock one step over. It is an async, so a stdout read that
+    -- returns early (the bound) cancels it rather than waiting for an EOF that a
+    -- terminated process will never send.
     listing args = do
       cfg <- inDir (proc "git" args)
       let piped = setStdin closed (setStdout createPipe (setStderr createPipe cfg))
-      try @_ @SomeException
-        ( withProcessTerm piped $ \p -> do
-            out <- upTo maxListingBytes (getStdout p)
-            case out of
-              Left n -> pure (ExitFailure 1, Left n)
-              Right bs -> do
-                err  <- liftIO (BS.hGetContents (getStderr p))
-                code <- waitExitCode p
-                pure (code, Right (if code == ExitSuccess then bs else err))
-        ) <&> either (Left . Text.pack . show) Right
+      -- The answer is recorded the moment it is reached, because tearing the
+      -- process down can fail AFTER that and the failure would otherwise replace
+      -- it. Refusing at the bound means killing a git that is still writing, and
+      -- the wait in the teardown then raced the RTS reaping it: "waitForProcess:
+      -- does not exist (No child processes)", reported as a tree that will not
+      -- list, over a listing this reader had already read enough of to refuse.
+      answer <- newIORef Nothing
+      r <- tryAny
+        ( withProcessTerm piped $ \p ->
+            withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA -> do
+              out <- upTo (gbListingBytes bounds) (getStdout p)
+              a <- case out of
+                     Nothing -> pure (ExitFailure 1, Nothing)
+                     Just bs -> do
+                       code <- waitExitCode p
+                       err  <- wait errA
+                       pure (code, Just (if code == ExitSuccess then bs else err))
+              writeIORef answer (Just a)
+              pure a
+        )
+      case r of
+        Right a -> pure (Right a)
+        Left e  -> readIORef answer <&> maybe (Left (Text.pack (show e))) Right
 
     -- Read a handle to a bound. Stops at the first chunk that crosses it and does
     -- not read the rest, which is the whole point.
@@ -193,11 +263,23 @@ gitCanonIn cwd = CanonSource
         go seen chunks = do
           c <- liftIO (BS.hGetSome h 65536)
           if BS.null c
-            then pure (Right (BS.concat (List.reverse chunks)))
+            then pure (Just (BS.concat (List.reverse chunks)))
             else do
               let seen' = seen + BS.length c
-              if seen' > n then pure (Left seen')
+              if seen' > n then pure Nothing
                            else go seen' (c : chunks)
+
+    -- Read a handle to the END, keeping only the first n bytes. For a stream whose
+    -- content is a message rather than data: the bound is on what is remembered,
+    -- never on what is read, because not reading is what deadlocks the writer.
+    drain n h = go 0 []
+      where
+        go seen chunks = do
+          c <- liftIO (BS.hGetSome h 65536)
+          if BS.null c
+            then pure (BS.concat (List.reverse chunks))
+            else go (seen + BS.length c)
+                   (if seen < n then BS.take (n - seen) c : chunks else chunks)
 
     -- Raw output. The listing is bytes: decoding it first merged two paths that
     -- differ only in an invalid byte, after which the same blob was read for both.
@@ -208,7 +290,10 @@ gitCanonIn cwd = CanonSource
     -- in it while claiming stderr was what a human needs.
     raw args = do
       cfg <- inDir (proc "git" args)
-      try @_ @SomeException (readProcess (setStdin closed cfg))
+      -- tryAny and not try @SomeException: the latter also caught UserInterrupt and
+      -- AsyncCancelled, so Ctrl-C during an audit came back as a file that will
+      -- not read and the audit went on to report it.
+      tryAny (readProcess (setStdin closed cfg))
         <&> \case
           Left e -> Left (Text.pack (show e))
           Right (code, out, errOut) ->
