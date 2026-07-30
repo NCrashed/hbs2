@@ -80,8 +80,11 @@ jobs:
           # Include a small README so the archive is self-explanatory.
           cat > "${DIR}/README.txt" <<EOF
           hbs2 ${TAG}, statically linked against musl libc.
-          Built for ${{ matrix.arch }}. No runtime dependencies; copy the bin/
-          contents anywhere on PATH.
+          Built for ${{ matrix.arch }}. Copy the bin/ contents anywhere on PATH.
+
+          The binaries need no shared libraries. One of them needs a PROGRAM:
+          hbs2-hub runs git, because a repository's issue tracker is an ordinary
+          git ref (PEP-19). Everything else here is self-contained.
           Source: https://github.com/NCrashed/hbs2
           EOF
           ARCHIVE="${DIR}.tar.gz"

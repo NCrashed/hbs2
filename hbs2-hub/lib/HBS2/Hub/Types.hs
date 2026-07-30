@@ -394,13 +394,29 @@ normalizeAttr k v
 -- with an ESC in it is an attribute name with an ESC in it; printing that to a
 -- terminal hands a stranger the terminal. PEP-22 makes this the renderer's duty
 -- and this is the renderer's half of it.
+-- Control characters, and also the four Unicode characters that reorder or break
+-- a line without being control characters. 'Char.isControl' does not cover those,
+-- so a right-to-left override in an attribute name could still reverse the tail
+-- of a report line, and a line or paragraph separator could still break it in two
+-- on a terminal that honours them. The whole point here is that one line of
+-- output stays one line and reads as what it is.
 safeText :: Text -> Text
 safeText = Text.concatMap esc
   where
-    esc c | Char.isControl c = Text.pack ("\\x" <> showHex (Char.ord c))
-          | otherwise        = Text.singleton c
-    showHex n = let d = "0123456789abcdef"
-                in [ d !! (n `div` 16 `mod` 16), d !! (n `mod` 16) ]
+    esc c | Char.isControl c || bidi c = Text.pack ("\\x" <> hex (Char.ord c))
+          | otherwise                  = Text.singleton c
+
+    bidi c = c `elem` [ '\x200E', '\x200F'   -- LEFT/RIGHT-TO-LEFT MARK
+                      , '\x202A', '\x202B', '\x202C', '\x202D', '\x202E'
+                      , '\x2066', '\x2067', '\x2068', '\x2069'  -- isolates
+                      , '\x2028', '\x2029'   -- LINE/PARAGRAPH SEPARATOR
+                      ]
+
+    hex n | n < 256   = pad 2 n
+          | n < 65536 = pad 4 n
+          | otherwise = pad 6 n
+    pad w n = [ digit ((n `div` (16 ^ i)) `mod` 16) | i <- [w-1, w-2 .. 0] ]
+    digit d = "0123456789abcdef" !! d
 
 -- | Is this a hash at all?
 --

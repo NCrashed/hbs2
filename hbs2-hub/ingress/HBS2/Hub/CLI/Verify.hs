@@ -1,3 +1,9 @@
+-- codeOf and the advice below dispatch on every constructor of CanonUnreadable
+-- with no wildcard: a new one must say what it costs a hook and what to do about
+-- it, and a missing case here is a pattern-match failure at the moment somebody
+-- is trying to find out why their audit will not run.
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
 -- | @hub verify@: re-run the fold's checks over canon and report (PEP-22).
 --
 -- The audit tool, and the one verb whose whole output is what a fold REFUSED.
@@ -20,7 +26,8 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import Data.List qualified as List
-import Data.Text qualified as Text
+import Data.ByteString (ByteString)
+import Data.Text.Encoding qualified as Text
 import System.Exit (exitWith,ExitCode(..))
 
 verifyEntries :: forall c m . ( IsContext c
@@ -78,13 +85,14 @@ refused u = do
     -- found something. 1 is left to the argument and usage failures every verb
     -- shares.
     codeOf = \case
-      NoCanonRef        -> 3
-      NoRepository{}    -> 4
-      TreeUnreadable{}  -> 5
-      CanonTooNewHere{} -> 6
-      VersionUnreadable -> 7
-      CanonTooBig{}     -> 8
-      CanonTooMany{}    -> 8
+      NoCanonRef          -> 3
+      NoRepository{}      -> 4
+      RefUnresolved{}     -> 5
+      TreeUnreadable{}    -> 5
+      CanonTooNewHere{}   -> 6
+      VersionUnreadable{} -> 7
+      CanonTooBig{}       -> 8
+      CanonTooMany{}      -> 8
 
 report :: CanonState -> IO ()
 report st = do
@@ -100,13 +108,13 @@ report st = do
   -- with a newline and a plausible summary line forged the last line of this
   -- report. Every other stranger's text in this project already goes through it.
   for_ (stBad st) $ \(p, e) ->
-    print $ "unreadable" <+> pretty (safeText (Text.pack p)) <> ":" <+> pretty e
+    print $ "unreadable" <+> pathDoc p <> ":" <+> pretty e
 
   -- Files whose own version clause did not read. Reported and never obeyed
   -- (PEP-19), and reported at all because a writer that appends to this tree is
   -- about to rewrite those files with its own version.
   for_ [ p | (p, Nothing) <- stFileVersions st ] $ \p ->
-    print $ "no file version" <+> pretty (safeText (Text.pack p))
+    print $ "no file version" <+> pathDoc p
 
   for_ dropped (print . pretty)
   for_ anomalies (print . pretty)
@@ -129,3 +137,9 @@ report st = do
     fr = stFold st
     dropped = frDropped fr
     anomalies = frAnomalies fr
+
+-- A tree path on a terminal. Bytes, so it is decoded leniently for DISPLAY only
+-- and then escaped: a path is a stranger's bytes, and one with a newline in it
+-- forged the summary line of this report before safeText was here.
+pathDoc :: ByteString -> Doc ann
+pathDoc = pretty . safeText . Text.decodeUtf8Lenient

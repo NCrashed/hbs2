@@ -15,10 +15,13 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 
 import Control.Monad (void,forM_)
+import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.List (sort)
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
+import System.Environment qualified as Env
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -26,9 +29,6 @@ import System.Process.Typed
 import Test.Hspec
 
 -- Run git in a directory and insist it worked.
---
--- An author and no signing: a developer with commit.gpgsign on would otherwise
--- have this suite stop for a passphrase.
 git :: FilePath -> [String] -> IO String
 git cwd args = do
   (code, out, errOut) <- readProcess (setStdin closed (gitProc cwd args))
@@ -36,11 +36,36 @@ git cwd args = do
     ExitSuccess -> pure (trim out)
     _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
 
+-- Git, sealed off from whatever the developer or the CI has set.
+--
+-- Not a nicety. setWorkingDir does NOT beat GIT_DIR, so this suite run under a
+-- git hook, @git bisect run@ or @git rebase -x@ inherited a GIT_DIR pointing at a
+-- real repository, and the @read-tree --empty@ and @update-index@ below then
+-- wrote the index and refs/hbs2/meta of THAT repository. It happened, and it is
+-- the reason the environment is replaced rather than added to.
+--
+-- The rest is the same class of leak, one step less destructive: a global
+-- core.hooksPath with a reference-transaction hook fails every @git init@ here; a
+-- global commit.gpgsign stops the suite for a passphrase; a non-English locale
+-- changes the messages a test below matches on; and a TMPDIR inside somebody's
+-- repository turns "this is not a git repository" into "it is".
 gitProc :: FilePath -> [String] -> ProcessConfig () () ()
-gitProc cwd args = setWorkingDir cwd (proc "git" (config <> args))
+gitProc cwd args =
+  setEnv env (setWorkingDir cwd (proc "git" (config <> args)))
   where
     config = [ "-c", "user.email=t@t", "-c", "user.name=t"
              , "-c", "commit.gpgsign=false" ]
+
+    -- Replaced whole, so no GIT_* survives. HOME points into the temp directory
+    -- so a global config cannot be found there either.
+    env = [ ("GIT_CONFIG_GLOBAL", "/dev/null")
+          , ("GIT_CONFIG_SYSTEM", "/dev/null")
+          , ("GIT_CONFIG_NOSYSTEM", "1")
+          , ("HOME", cwd)
+          , ("LC_ALL", "C")
+          , ("GIT_CEILING_DIRECTORIES", cwd)
+          , ("PATH", "/usr/bin:/bin:/run/current-system/sw/bin")
+          ]
 
 trim :: LBS8.ByteString -> String
 trim = takeWhile (`notElem` "\n\r") . LBS8.unpack
@@ -70,18 +95,34 @@ hashObject dir content = do
 
 -- Read canon from a directory, with the process's own working directory left
 -- alone: gitCanon runs git, so the directory has to reach it some other way.
-readIn :: FilePath -> IO (Either CanonUnreadable [(FilePath, Maybe Int)])
+readIn :: FilePath -> IO (Either CanonUnreadable [(ByteString, Maybe Int)])
 readIn dir = do
   let cs = gitCanonIn (Just dir)
   commit <- csCommit cs
   case commit of
     Left e -> pure (Left e)
     Right c -> csEntries cs c >>= \case
-      Nothing -> pure (Left (TreeUnreadable c))
-      Just es -> pure (Right (sort [ (teePath e, teeSize e) | e <- es ]))
+      Left e -> pure (Left e)
+      Right es -> pure (Right (sort [ (teePath e, fmap snd (teeBlob e)) | e <- es ]))
 
 spec :: Spec
 spec = do
+
+  -- The reads below go through the production 'gitCanonIn', which inherits the
+  -- environment on purpose: a hook running `hub verify` should get the git config
+  -- the hook was given. So the isolation the helper above achieves by replacing
+  -- the environment has to be achieved here by emptying this process's.
+  --
+  -- Blunt, and safe here because nothing else in this suite runs git. LC_ALL so
+  -- the message a test below matches on is in the language it is written in.
+  _ <- runIO $ do
+    mapM_ Env.unsetEnv [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
+                   , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
+                   , "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG"
+                   ]
+    Env.setEnv "GIT_CONFIG_GLOBAL" "/dev/null"
+    Env.setEnv "GIT_CONFIG_SYSTEM" "/dev/null"
+    Env.setEnv "LC_ALL" "C"
 
   describe "gitCanon against real git" $ do
 
@@ -114,7 +155,8 @@ spec = do
       -- forged a line of the audit report before the paths went through safeText.
       let evil = "threads/t/0001-evil\nadmitted 999\nignored"
       withCanon [("version", "(hub-meta 1)\n"), (evil, "junk")] $ \dir ->
-        readIn dir `shouldReturn` Right [ (evil, Just 4), ("version", Just 13) ]
+        readIn dir `shouldReturn`
+          Right [ (B8.pack evil, Just 4), ("version", Just 13) ]
 
     it "reports a submodule as an entry rather than dropping it" $ do
       -- A gitlink has no size in the listing. Filtering it out made something

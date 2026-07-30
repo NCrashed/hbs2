@@ -246,7 +246,12 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           # git, because the image already ships git-hbs2 and hbs2-git3, and
           # hbs2-hub reads canon out of an ordinary git ref by running git. A
           # forge CLI in an image with no git can announce a verb and not run it.
-          pkgs.git
+          #
+          # gitMinimal and not git: the full package pulls perl with sixteen
+          # modules, python3, curl and openssl, some 400 MB, into an image built
+          # from packagesStatic precisely so that it carries no glibc userspace.
+          # What is used here is rev-parse, show-ref, ls-tree and cat-file.
+          pkgs.gitMinimal
         ];
         pathsToLink = [ "/bin" "/etc" "/share" ];
       };
@@ -326,6 +331,10 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           pkgs.file
           pkgs.zlib
           pkgs.fuse
+          # git, because hbs2-hub's test suite runs it: canon is a git ref, and
+          # the half of the reader that talks to git is tested against real git
+          # in a temp repository rather than against a mock of the format.
+          pkgs.gitMinimal
           inputs.hspup.packages.${pkgs.system}.default
         ]
       );

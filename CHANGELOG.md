@@ -25,14 +25,31 @@
         author box, seals it to the recipient sigils and hands it to
         the peer. Prints the message hash and the event-id, which the
         sender can compute before any maintainer has looked.
-      - **`hbs2-hub verify`.** Reads canon out of `refs/hbs2/meta`,
-        re-runs the fold over it, and reports every event the rules did
-        not admit, every anomaly in the ones they did, and every file
-        it could not read at all; non-zero when any of the three is
-        non-empty, so it works in a hook. Needs no peer: canon is a git
-        ref. It reports an absent ref as absent rather than as empty
-        canon, because git's default refspec does not fetch it and a
-        tracker that is merely not here is not a tracker that is empty.
+      - **`hbs2-hub verify <repo-key>`.** Reads canon out of
+        `refs/hbs2/meta`, re-runs the fold over it, and reports every
+        event the rules did not admit, every anomaly in the ones they
+        did, and every file it could not read at all. Exit 2 when any
+        of the three is non-empty, so it works in a hook; 3 and up when
+        the audit could not run at all, one code per reason, because an
+        unfetched ref, a directory that is not a repository, a ref that
+        does not resolve, canon folded under newer rules and a tree
+        past the reader's bounds each call for something different.
+        Reaches nothing but the local repository, and does not probe
+        for a peer, so a wedged daemon cannot hang the hook.
+
+        The repository key is an argument: the owner key is the root of
+        the trust chain, so canon that named its own owner would be
+        canon that could rename it.
+
+        Canon is fetched explicitly, since git's default refspec covers
+        only heads and tags:
+
+        ```
+        git fetch <remote> '+refs/hbs2/meta:refs/hbs2/meta'
+        ```
+
+        Requires `git` on PATH, the only non-hbs2 program any of this
+        needs.
       - **Canon (PEP-19).** One shared signed content record for both
         trust tiers, wrapped in two independent boxes: an author box
         (who said it, kept verbatim from the contributor's letter) and a

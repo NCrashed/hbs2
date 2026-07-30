@@ -14,7 +14,7 @@ import Data.ByteString qualified as BS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word64)
+import Data.Word (Word32,Word64)
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
@@ -397,22 +397,18 @@ spec = do
       parseNumberIndex ("(number 1 " <> Text.replicate 300 "z" <> ")")
         `shouldBe` Left (TooLarge "index-line")
 
-    it "reads a whole tree, keeping what parsed and naming what did not" $ do
+    it "reads a file at a time, keeping what parsed and naming what did not" $ do
       owner <- kp
       alice <- kp
-      -- The seam both hub sync and hub verify go through, so that there is one
-      -- of them: a file that cannot be read has no identity but its path, and
-      -- the version of every file is what an operator is owed even when the
-      -- file read fine.
+      -- One file at a time is the whole interface now. There used to be a
+      -- readEventLog beside this that took a whole tree, and it was a second
+      -- reader of one format: the module warns against exactly that, and the
+      -- only thing left calling it was this test. 'HBS2.Hub.Repo' parses each
+      -- file as it fetches it, so the text can be let go.
       let repo = fst owner
           ev n = mkEvent alice owner
                    (AOpen repo HubIssue (Text.pack (show n)) [] Nothing Nothing Nothing n)
                    (canon repo n (Just n) Nothing Nothing)
-          files = [ ("threads/a/1", renderEvent (ev 1))
-                  , ("threads/a/2", "(hub-event 1)\n(author-box zz)\n")
-                  , ("threads/a/3", renderEvent (ev 3))
-                  ]
-          got = readEventLog files
-      crEvents got `shouldBe` [ev 1, ev 3]
-      crBad got `shouldBe` [("threads/a/2", BadClause "author-box")]
-      crVersions got `shouldBe` [("threads/a/1",Just 1),("threads/a/3",Just 1)]
+      parseEvent (renderEvent (ev 1)) `shouldBe` Right (Just 1, ev 1)
+      parseEvent "(hub-event 1)\n(author-box zz)\n"
+        `shouldBe` (Left (BadClause "author-box") :: Either CanonError (Maybe Word32, Event))

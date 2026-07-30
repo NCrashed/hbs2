@@ -109,7 +109,13 @@ main = do
 
     -- recover is what probes for the peer socket and builds the RPC clients;
     -- without it every verb that talks to hbs2-peer fails as "not connected".
-    (_, Just form) -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
+    -- Skipped for the verbs that do not: it pokes hbs2-peer with no timeout, so a
+    -- wedged peer hung the audit hook that reading canon out of a git ref exists
+    -- to be runnable without one. Measured at 1.55 s with a live peer and 6.0 s
+    -- against a stub, for a verb that needs neither.
+    (_, Just form)
+      | peerFree form -> runHBS2Cli (run dict [form] >>= eatNil display >> silence)
+      | otherwise -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
 
   where
     -- A prefix search that says so when it matches nothing, instead of printing
@@ -129,6 +135,14 @@ main = do
       SymbolVal (Id t) -> Text.unpack t
       LitStrVal t      -> Text.unpack t
       x                -> show (pretty x)
+
+    -- Verbs that reach nothing but the local repository. Named here rather than
+    -- declared per verb, because the list is short and a wrong entry fails loudly
+    -- (the verb reports "not connected" the first time anybody runs it), whereas a
+    -- verb wrongly absent from it fails quietly by being slow.
+    peerFree = \case
+      ListVal (SymbolVal k : _) -> k `elem` ["hub:verify"]
+      _ -> False
 
     -- What this tool does, rather than what its interpreter can do.
     hubHelp dict = do

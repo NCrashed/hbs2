@@ -69,12 +69,17 @@ Skip ahead to "Verifying the install" below.
 
 ## Option 3: Docker image (running hbs2-peer as a service)
 
-Targeted at server deployments. The image (~40 MB compressed) bundles
-the full hbs2 binary set on top of musl-static binaries, following the
-same convention as official postgres/redis/mysql images that ship
-their admin CLI alongside the daemon. You get `hbs2-peer` (the
-daemon) plus `hbs2-cli`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`,
-`git-hbs2`, `hbs2-sync`, and `ncq3` ready for `docker exec`.
+Targeted at server deployments. The image bundles the full hbs2 binary
+set on top of musl-static binaries, following the same convention as
+official postgres/redis/mysql images that ship their admin CLI
+alongside the daemon. You get `hbs2-peer` (the daemon) plus
+`hbs2-cli`, `hbs2-keyman`, `hbs2-git3`, `git-remote-hbs23`, `git-hbs2`,
+`hbs2-hub`/`hub`, `hbs2-sync`, and `ncq3` ready for `docker exec`.
+
+It also carries `gitMinimal`, which is the one non-hbs2 program in it:
+`hbs2-hub` reads a repository's issue tracker out of an ordinary git
+ref by running `git`. That is why the image is no longer the ~40 MB it
+was before the forge CLI shipped.
 
 Pull and run:
 

@@ -11,6 +11,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.Text (Text)
 import Data.IORef
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as B8
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
@@ -26,18 +27,35 @@ kp = do
 canon :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
 canon repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
 
+-- A path as bytes, the way git reports it.
+--
+-- NOT B8.pack, which truncates each character to one byte: a path with anything
+-- above U+00FF became different bytes from the ones production would see, and the
+-- multibyte test below is what caught it.
+encPath :: FilePath -> BS.ByteString
+encPath = Text.encodeUtf8 . Text.pack
+
 -- A canon tree in memory: the same files a writer will put in git, served from
 -- a list. This is why 'CanonSource' is a record of functions, not a git call.
+--
+-- The object id stands in for a path, exactly as it does in production: a blob is
+-- fetched by id and a path is only a label. Here the id is the path's index, which
+-- is enough to be distinct.
 inMemory :: [(FilePath, Text)] -> CanonSource IO
 inMemory files = CanonSource
   { csCommit  = pure (Right "deadbeef")
     -- UTF-8 bytes, because that is the unit git reports and the unit the bounds
     -- are in. Text.length counts characters, so a fixture measured that way is
     -- measured in a different unit from production.
-  , csEntries = const (pure (Just [ TreeEntry p (Just (utf8Len t)) | (p,t) <- files ]))
-  , csBlob    = \_ p -> pure (lookup p files)
+  , csEntries = const (pure (Right
+      [ TreeEntry (encPath p) (Just (oidOf i, utf8Len t))
+      | (i,(p,t)) <- zip [0 :: Int ..] files ]))
+  , csBlob    = \oid -> pure (lookup oid byOid)
   }
-  where utf8Len = BS.length . Text.encodeUtf8
+  where
+    utf8Len = BS.length . Text.encodeUtf8
+    oidOf i = Text.pack (show i)
+    byOid = [ (oidOf i, t) | (i,(_,t)) <- zip [0 :: Int ..] files ]
 
 -- Read a tree that is expected to read.
 readOk :: CanonSource IO -> RepoRef -> IO CanonState
@@ -89,7 +107,7 @@ spec = do
                   , (threadDir thr <> "/junk", "not an event at all")
                   ]
       st <- readOk (inMemory files) repo
-      fmap fst (stBad st) `shouldBe` [threadDir thr <> "/junk"]
+      fmap fst (stBad st) `shouldBe` [encPath (threadDir thr <> "/junk")]
       -- and the good file still folded
       frDropped (stFold st) `shouldBe` []
       HM.size (frThreads (stFold st)) `shouldBe` 1
@@ -98,9 +116,15 @@ spec = do
       -- Both are read by their own readers and would fail an event parse, so a
       -- reader that fed every path to one would report two corrupt files in
       -- every healthy tree.
-      let entries = [ TreeEntry p (Just 10) | p <- ["version", numberIndexPath
-                                                  , "repo/1-x", "threads/t/2-y"] ]
-      fst (eventEntries entries) `shouldBe` ["repo/1-x", "threads/t/2-y"]
+      let entries = [ TreeEntry (B8.pack p) (Just ("oid", 10))
+                    | p <- ["version", numberIndexPath
+                           , "repo/1-x", "threads/t/2-y"] ]
+          (evs, bad) = sortCanon entries
+      [ p | (p,_,_) <- evs ] `shouldBe` ["repo/1-x", "threads/t/2-y"]
+      -- ...and neither of the two is reported as an intruder either: they have
+      -- their own readers, and a report naming them would name two files in every
+      -- healthy tree.
+      bad `shouldBe` []
 
     it "answers an absent ref as absent, not as empty canon" $ do
       owner <- kp
@@ -109,7 +133,7 @@ spec = do
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
       let noRef = CanonSource (pure (Left NoCanonRef))
-                    (const (pure (Just []))) (\_ _ -> pure Nothing)
+                    (const (pure (Right []))) (const (pure Nothing))
       readCanon noRef (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left NoCanonRef
 
@@ -164,10 +188,10 @@ spec = do
       -- malformed file and reported all the same: the first is a broken read of
       -- something that exists, and the path is what `hbs2-peer download` takes.
       let repo = fst owner
-          p = "threads/t/00000000000000000001-x"
+          p = B8.pack "threads/t/00000000000000000001-x"
           listed = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Just [TreeEntry p (Just 10)])))
-                     (\_ _ -> pure Nothing)
+                     (const (pure (Right [TreeEntry p (Just ("oid", 10))])))
+                     (const (pure Nothing))
       st <- readOk listed repo
       stBad st `shouldBe` [(p, FileUnreadable)]
 
@@ -178,9 +202,9 @@ spec = do
       -- exit, which is the one answer indistinguishable from a tracker that has
       -- nothing in it.
       let noTree = CanonSource (pure (Right "deadbeef"))
-                     (const (pure Nothing)) (\_ _ -> pure Nothing)
+                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure Nothing))
       readCanon noTree (fst owner)
-        >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "deadbeef")
+        >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "gone")
 
     it "will not fold a tree whose rules are newer than this build" $ do
       owner <- kp
@@ -207,7 +231,8 @@ spec = do
       -- is not an event, so it never reaches the fold, and swallowing the parse
       -- error made a corrupt stamp and an absent one the same observation.
       readCanon (inMemory [("version", "(hub-meta not-a-number)")]) (fst owner)
-        >>= \r -> fmap (const ()) r `shouldBe` Left VersionUnreadable
+        >>= \r -> fmap (const ()) r
+                    `shouldBe` Left (VersionUnreadable (FileMalformed (BadClause "hub-meta")))
 
     it "refuses an oversized blob from the listing, without fetching it" $ do
       owner <- kp
@@ -216,12 +241,12 @@ spec = do
       -- Comparing after the fetch is comparing after paying: a tree of files just
       -- under the limit is inside every per-file bound and is gigabytes of text.
       let repo = fst owner
-          huge = "threads/t/00000000000000000001-x"
+          huge = B8.pack "threads/t/00000000000000000001-x"
           src = CanonSource (pure (Right "deadbeef"))
-                  (const (pure (Just [TreeEntry huge (Just (maxEventBytes + 1))])))
-                  (\_ p -> do modifyIORef fetched succ
-                              pure (if p == "version" then Just renderMeta
-                                                      else Just "whatever"))
+                  (const (pure (Right
+                    [TreeEntry huge (Just ("oid", maxEventBytes + 1))])))
+                  (\_ -> do modifyIORef fetched succ
+                            pure (Just "whatever"))
       st <- readOk src repo
       stBad st `shouldBe` [(huge, FileTooLarge (maxEventBytes + 1))]
       -- Nothing was fetched at all. Not even the version file: it is looked up in
@@ -229,3 +254,83 @@ spec = do
       -- ask for a blob whose size it has no way to know.
       readIORef fetched `shouldReturn` 0
 
+
+    it "refuses an oversized version file without fetching it" $ do
+      owner <- kp
+      fetched <- newIORef (0 :: Int)
+      -- The version file was the last blob read blind: fetched by name, so its
+      -- size was unknown until it was resident. A 200 MB one peaked at 658 MiB
+      -- before parseMeta said it was not a version.
+      let big = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [TreeEntry versionPath (Just ("oid", maxEventBytes + 1))])))
+                  (\_ -> modifyIORef fetched succ >> pure (Just renderMeta))
+      readCanon big (fst owner) >>= \r ->
+        fmap (const ()) r
+          `shouldBe` Left (VersionUnreadable (FileTooLarge (maxEventBytes + 1)))
+      readIORef fetched `shouldReturn` 0
+
+    it "tells an absent version file from one it could not read" $ do
+      owner <- kp
+      -- These were the same observation, and the difference decides whether the
+      -- hub-meta gate runs at all: a pruned version blob read as "no version
+      -- file", the tree was folded under this build's rules, and canon written
+      -- under newer ones would have been folded in silence. The listing is what
+      -- tells them apart.
+      let listed = CanonSource (pure (Right "deadbeef"))
+                     (const (pure (Right [TreeEntry versionPath (Just ("oid", 13))])))
+                     (const (pure Nothing))
+      readCanon listed (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (VersionUnreadable FileUnreadable)
+      -- ...and a tree that simply does not list one is read
+      st <- readOk (inMemory []) (fst owner)
+      stVersion st `shouldBe` Nothing
+
+    it "refuses a tree past either bound, counting only the files it reads" $ do
+      owner <- kp
+      let ev n = TreeEntry (B8.pack ("threads/t/" <> show n))
+                   (Just (Text.pack (show n), maxEventBytes))
+          src es = CanonSource (pure (Right "deadbeef"))
+                     (const (pure (Right es))) (const (pure (Just "x")))
+          n = maxCanonBytes `div` maxEventBytes + 1
+      readCanon (src (fmap ev [1..n])) (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooBig (n * maxEventBytes))
+      -- A stranger's file next to canon does not count towards a bound over the
+      -- files this reader fetches: it is reported, not fetched, so refusing the
+      -- whole audit over its size would refuse an audit over something the audit
+      -- does not read.
+      let readme = TreeEntry "README" (Just ("r", maxCanonBytes))
+      st <- readOk (src [readme]) (fst owner)
+      stBad st `shouldBe` [("README", FileUnexpected)]
+
+    it "reports a path the tree layout does not have" $ do
+      owner <- kp
+      -- PEP-19 fixes the layout, so anything else is somebody's addition. A
+      -- reader that looked only under threads/ and repo/ could not see it at all,
+      -- which is the reader that lets a tree carry what it pretends not to see.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Just ("v", 13))
+                    , TreeEntry "evil/plans" (Just ("e", 4))
+                    , TreeEntry (B8.pack numberIndexPath) (Just ("i", 4))
+                    ])))
+                  (\oid -> pure (if oid == "v" then Just renderMeta else Just "junk"))
+      st <- readOk src (fst owner)
+      stBad st `shouldBe` [("evil/plans", FileUnexpected)]
+
+    it "keeps a multibyte path and reports the bytes, not the characters" $ do
+      owner <- kp
+      alice <- kp
+      -- A path is bytes. The fixture measures UTF-8 like git does, and this is
+      -- the one that would catch a return to counting characters: a thread name
+      -- in Cyrillic is two bytes a letter.
+      let repo = fst owner
+          e = mkEvent alice owner
+                (AOpen repo HubIssue "\1090\1077\1084\1072" [] Nothing Nothing Nothing 1000)
+                (canon repo 1 (Just 1))
+          thr = eventId e
+          p = "threads/\1090\1077\1084\1072/" <> eventFileName 1 thr
+      st <- readOk (inMemory [("version", renderMeta), (p, renderEvent e)]) repo
+      -- read as an event, and its path came back as the bytes it is
+      fmap fst (stFileVersions st) `shouldBe` [Text.encodeUtf8 (Text.pack p)]
+      stBad st `shouldBe` []

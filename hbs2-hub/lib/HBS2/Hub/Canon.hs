@@ -34,8 +34,6 @@ module HBS2.Hub.Canon
   , parseMeta
   , renderNumberIndex
   , parseNumberIndex
-  , CanonRead(..)
-  , readEventLog
   ) where
 
 import HBS2.Hub.Types
@@ -291,48 +289,6 @@ parseEvent txt = do
                (B64.decode (Text.encodeUtf8 sym))
       either (const (Left (BadClause name))) Right (decodeChecked raw)
 
--- | What reading a whole canon tree produced.
---
--- Three lists rather than a list of events, because two of them are what
--- @hub verify@ exists to print (PEP-22) and what a writer has to look at before
--- it appends: a file this build could not read at all, named by its path since
--- that is the only identity an unreadable file has, and the version every file
--- declared, including the ones that read fine.
---
--- 'Nothing' in the third list is a file whose boxes read but whose version
--- clause did not: readable, and worth saying so, since a writer appending to
--- that tree is about to rewrite the file and would otherwise silently stamp its
--- own version onto it.
-data CanonRead = CanonRead
-  { crEvents   :: [Event]
-  , crBad      :: [(FilePath, CanonError)]
-  , crVersions :: [(FilePath, Maybe Word32)]
-  }
-  deriving stock (Eq,Show)
-
--- | Read every file of a canon tree.
---
--- The seam between the tree and the fold, and it is here so that there is one
--- of it: @hub sync@ and @hub verify@ both need "parse these files, keep what
--- parsed, report what did not", and two copies of that would disagree about
--- which files count on the day one of them grew a special case. The IO that
--- lists the tree stays outside; this is the whole of the decision.
---
--- Order does not matter, and this used to claim it did: that handing the paths in
--- lexical order made the events arrive in the fold's own order. It does not, and
--- nothing needs it to. The zero-padding in a file name makes a DIRECTORY listing
--- agree with the seq order within one thread, but canon is two directory trees
--- merged, and the fold sorts the whole set by (seq, event-id, canon-box hash)
--- regardless of what order it was handed. 'HBS2.Hub.Repo', the only caller, does
--- not sort.
-readEventLog :: [(FilePath, Text)] -> CanonRead
-readEventLog = foldr one (CanonRead [] [] [])
-  where
-    one (path, txt) acc = case parseEvent txt of
-      Left err -> acc { crBad = (path, err) : crBad acc }
-      Right (v, e) -> acc { crEvents = e : crEvents acc
-                          , crVersions = (path, v) : crVersions acc
-                          }
 
 -- | The tree's @version@ file: the consensus version of the whole canon.
 --
