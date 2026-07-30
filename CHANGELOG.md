@@ -25,6 +25,14 @@
         author box, seals it to the recipient sigils and hands it to
         the peer. Prints the message hash and the event-id, which the
         sender can compute before any maintainer has looked.
+      - **`hbs2-hub verify`.** Reads canon out of `refs/hbs2/meta`,
+        re-runs the fold over it, and reports every event the rules did
+        not admit, every anomaly in the ones they did, and every file
+        it could not read at all; non-zero when any of the three is
+        non-empty, so it works in a hook. Needs no peer: canon is a git
+        ref. It reports an absent ref as absent rather than as empty
+        canon, because git's default refspec does not fetch it and a
+        tracker that is merely not here is not a tracker that is empty.
       - **Canon (PEP-19).** One shared signed content record for both
         trust tiers, wrapped in two independent boxes: an author box
         (who said it, kept verbatim from the contributor's letter) and a

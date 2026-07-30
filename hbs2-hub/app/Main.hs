@@ -7,6 +7,7 @@ module Main where
 
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
+import HBS2.Hub.CLI.Verify
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run
@@ -47,6 +48,7 @@ main = do
         internalEntries
         inboxEntries
         composeEntries
+        verifyEntries
 
         -- BEFORE helpEntries, because the dictionary is a left-biased union and
         -- the first binding of a name wins. Overrides the inherited `help`, which

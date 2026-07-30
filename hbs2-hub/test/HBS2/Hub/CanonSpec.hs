@@ -11,7 +11,6 @@ import HBS2.Data.Types.Refs (HashRef)
 import Data.Config.Suckless
 
 import Data.ByteString qualified as BS
-import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text

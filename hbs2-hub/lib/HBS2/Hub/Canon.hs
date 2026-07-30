@@ -73,7 +73,9 @@ data CanonError =
     -- its clause count, or one token. Not a judgement about the content, which
     -- is exactly the point: it is refused before anything reads it.
   | TooLarge Text
-  deriving stock (Eq,Show)
+    -- Ord so a caller can sort a report by path and reason. The order means
+    -- nothing beyond the constructor order; it is not a severity.
+  deriving stock (Eq,Ord,Show)
 
 -- | What a reader says about a file it would not read, on a terminal.
 instance Pretty CanonError where

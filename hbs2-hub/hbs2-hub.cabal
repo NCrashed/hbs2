@@ -98,12 +98,15 @@ library hub-ingress
                     , bytestring
                     , serialise
                     , time
+                    , typed-process
                     , unordered-containers
                     , text
     exposed-modules:
       HBS2.Hub.Ingress
+      HBS2.Hub.Repo
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Inbox
+      HBS2.Hub.CLI.Verify
 
 -- The CLI itself.
 --
@@ -158,3 +161,4 @@ test-suite spec
       HBS2.Hub.CanonSpec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
+      HBS2.Hub.RepoSpec

@@ -439,6 +439,14 @@ Must be built:
     verified flags, since only admitted events materialize), plus the
     `folded-ts` and issue-number checks described above.
 
+    The reading half of this exists: canon comes out of the git ref, the fold
+    runs over it, and drops, anomalies and unreadable files are reported with a
+    non-zero exit. What is not built is the part that needs canon to have been
+    WRITTEN by something, which is the accept path, so the verb has so far only
+    been run against trees assembled by hand. Reading canon is also the piece
+    both remaining branches stand on: the accept path needs the view it mints
+    against, and the render contract is a projection of the same fold.
+
 
 Rejected alternatives
 ===================
