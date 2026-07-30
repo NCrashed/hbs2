@@ -54,11 +54,23 @@
         raw byte: two paths differing in one invalid byte, or a valid
         U+0085 against the single byte 0x85, print as two different
         lines. Reporting a file is telling somebody which file to open.
-        Text in and out is UTF-8 whatever the locale says, argv
-        included, because canon does not have a locale: under `LC_ALL=C`
-        an audit died halfway through printing a Cyrillic path, and a
-        title given on the command line would have been signed into an
-        append-only event as replacement characters.
+        What is escaped is a Unicode CATEGORY and not a list somebody
+        wrote out: category Cf has over 160 members and the list had
+        twelve, so a zero-width space in a path printed as nothing at
+        all and two tree entries came out as one line. A path is also
+        quoted, because the report prints it before a colon and a
+        reason, and a path may contain ": ".
+
+        Text out is UTF-8 whatever the locale says, and so is argv,
+        because canon does not have a locale: under `LC_ALL=C` an audit
+        died halfway through printing a Cyrillic path, and a title given
+        on the command line would have been signed into an append-only
+        event as replacement characters. An argument that is not valid
+        UTF-8 is now refused before anything is signed rather than
+        carried as surrogates, which `Data.Text` silently collapses.
+        Input is UTF-8 and NOT lenient: a letter body arriving in some
+        other encoding stops the program instead of being signed full of
+        replacement characters.
 
         A blob whose object this clone does not have is reported as
         that. Read as "not a blob" it came out as a submodule in canon,
@@ -84,9 +96,15 @@
         clone carries those refs. And no prompting: `GIT_ASKPASS`,
         `SSH_ASKPASS` and `GIT_TERMINAL_PROMPT` in that order, because
         git tries them in that order and only the last is a terminal.
-        Every git call is bounded in time, since waiting for EOF on a
-        pipe is waiting for the last holder of the fd and that need not
-        be git.
+
+        Every git call is bounded, since waiting for EOF on a pipe is
+        waiting for the last holder of the fd and that need not be git.
+        The four small ones have a total bound; the listing, which may
+        legitimately take as long as a huge tree takes, has an IDLE
+        one: what is never legitimate is silence. Reaching either
+        abandons the read rather than waiting for the child, because a
+        process in uninterruptible sleep does not answer SIGKILL either,
+        and waiting for it would make the bound no bound at all.
 
         A path the tree lists twice is named rather than resolved by
         order; on `version` it is a refusal, since the first entry

@@ -108,9 +108,12 @@ and a tree full of forged events were the same event.
 | 10   | canon is past the reader's file-count bound            |
 | 11   | the tree listing is past the reader's byte bound       |
 | 12   | the reader could not run git at all: a local failure   |
+| 13   | the `version` file is here and THIS CLONE cannot read it |
+| 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
-3 and up is "could not run", so a hook that only cares about the distinction
-tests `>= 3`. Every one of them prints what to do about it on stderr. The numbers
+3 to 13 is "could not run", so a hook that only cares about the distinction tests
+for that range. 141 is neither: it is what a shell reports for a program a pipe
+killed, and it used to be 1, which this table gives to usage errors. Every one of them prints what to do about it on stderr. The numbers
 are a contract: a hook branches on them, so they may be added to and not
 reassigned.
 
@@ -127,6 +130,17 @@ A missing `version` file exits 2 rather than 3-and-up: PEP-19 requires the file,
 so its absence is a finding, but the tree still folds, under the OLDEST rules this
 build knows. Not this build's newest, which would make deleting one unsigned file
 a way to choose which rules canon is folded under.
+
+13 against 7 is the same distinction one level down: 7 says the file is wrong, 13
+says this clone cannot read it, which is the ordinary state of a `--filter=blob:none`
+clone and not a complaint about anybody's canon.
+
+The report is read by people and by scripts, so two things about its shape are
+fixed. A path is printed QUOTED, with a quote inside it escaped, because a path
+may contain ": " and the line is `unreadable <path>: <reason>`: unquoted, the
+author of a tree chose what the reason field said. And a tool's own words are
+printed as an indented block with each line marked `|`, never as a field value,
+because this program prints its own advice at the same indent underneath.
 
 Three things the report says that are worth naming, because each was once
 silently dropped:

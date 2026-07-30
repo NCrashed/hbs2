@@ -60,6 +60,10 @@ done
 rm -f "${BUNDLE}/bin/git-hbs2"
 ln -s hbs2-git3 "${BUNDLE}/bin/git-hbs2"
 
+# The bundle needs `git` at run time for hbs2-hub, hbs2-git3 and
+# git-remote-hbs23; macOS ships one with the Xcode command line tools.
+# Stated in the README written below.
+
 # hub -> hbs2-hub. PEP-22 spells the forge CLI `hub`; the binary is named
 # hbs2-hub like everything else here, because `hub` is also a widely installed
 # GitHub tool and claiming it in PATH is not ours to do. The symlink gives the
@@ -122,6 +126,9 @@ Notes:
   - hbs2-sync's "mount" subcommand requires macFUSE
     (https://osxfuse.github.io/). All other hbs2-sync subcommands
     work without it.
+  - hbs2-hub, hbs2-git3 and git-remote-hbs23 run "git" and need one on
+    PATH. macOS ships git with the Xcode command line tools; run
+    "xcode-select --install" if "git --version" fails.
   - Source: https://github.com/NCrashed/hbs2
 EOF
 

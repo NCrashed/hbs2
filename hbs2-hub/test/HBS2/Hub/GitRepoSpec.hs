@@ -32,6 +32,7 @@ import System.Environment qualified as Env
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory,getCanonicalTemporaryDirectory)
+import System.Timeout (timeout)
 import System.Process.Typed
 import Test.Hspec
 
@@ -136,6 +137,37 @@ gitStdin dir input args = do
     ExitSuccess -> pure (trim out)
     _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
 
+-- A blobless clone of a canon-carrying repository, and a count of the blobs it
+-- holds. Both files are absent from it until something fetches them, which is the
+-- whole point: the count is how a test says "and nothing was fetched".
+--
+-- A local file:// promisor with uploadpack.allowFilter, so no network.
+partial :: (FilePath -> IO Int -> IO a) -> IO a
+partial act = withSystemTempDirectory "hub-partial" $ \root -> do
+  let origin = root </> "origin"
+      clone  = root </> "clone"
+  createDirectoryIfMissing True origin
+  void $ git origin ["init", "-q", "."]
+  void $ git origin ["config", "uploadpack.allowFilter", "true"]
+  h <- hashObject origin "(hub-meta 1)\n"
+  e <- hashObject origin "not an event"
+  void $ gitStdin origin
+           (LBS8.pack ("100644 " <> h <> "\tversion\0"
+                       <> "100644 " <> e <> "\tthreads/t/0001-x\0"))
+           ["update-index", "-z", "--index-info"]
+  tree <- git origin ["write-tree"]
+  commit <- git origin ["commit-tree", tree, "-m", "canon"]
+  void $ git origin ["update-ref", "refs/hbs2/meta", commit]
+  void $ git root [ "clone", "-q", "--filter=blob:none", "--no-checkout"
+                  , "--no-local", "file://" <> origin, clone ]
+  void $ git clone ["fetch", "-q", "origin", "+refs/hbs2/meta:refs/hbs2/meta"]
+  -- gitAll, not git: the latter keeps the FIRST LINE of the output, so counting
+  -- blobs in it counted at most one, and the assertion this exists for passed
+  -- whenever the lowest-oid object was not a blob.
+  act clone (length . filter (== "blob")
+               <$> gitAll clone [ "cat-file", "--batch-all-objects"
+                                , "--batch-check=%(objecttype)" ])
+
 -- A kind, without the object id, which varies from run to run.
 data Kind = Sized Int | Missing | NotBlob | Bad
   deriving stock (Eq,Ord,Show)
@@ -146,6 +178,19 @@ kindOf = \case
   BlobMissing _ -> Missing
   NotABlob      -> NotBlob
   Unparsed      -> Bad
+
+-- A test that must not HANG when it regresses.
+--
+-- Two of the tests below are about a reader that stops: if either regresses, the
+-- reader waits for ever and hspec waits with it, so CI burns its six-hour limit
+-- instead of going red. hspec has no per-example timeout, so it is here.
+within :: Int -> String -> IO () -> IO ()
+within secs what act =
+  timeout (secs * 1000000) act >>= \case
+    Just () -> pure ()
+    Nothing -> expectationFailure
+                 (what <> ": did not finish in " <> show secs <> "s, which for this"
+                       <> " test means the reader stopped stopping")
 
 -- A fake git on PATH, printing a fixed listing on stdout and n lines of noise on
 -- stderr, and a read of "canon" through it.
@@ -425,34 +470,8 @@ spec = do
       -- credential.helper. PEP-22 calls this verb read-only and peerless.
       --
       -- A local file:// promisor, so this needs no network to prove it.
-      withSystemTempDirectory "hub-partial" $ \root -> do
-        let origin = root </> "origin"
-            clone  = root </> "clone"
-        createDirectoryIfMissing True origin
-        void $ git origin ["init", "-q", "."]
-        void $ git origin ["config", "uploadpack.allowFilter", "true"]
-        h <- hashObject origin "(hub-meta 1)\n"
-        e <- hashObject origin "not an event"
-        void $ gitStdin origin
-                 (LBS8.pack ("100644 " <> h <> "\tversion\0"
-                             <> "100644 " <> e <> "\tthreads/t/0001-x\0"))
-                 ["update-index", "-z", "--index-info"]
-        tree <- git origin ["write-tree"]
-        commit <- git origin ["commit-tree", tree, "-m", "canon"]
-        void $ git origin ["update-ref", "refs/hbs2/meta", commit]
-
-        void $ git root [ "clone", "-q", "--filter=blob:none", "--no-checkout"
-                        , "--no-local", "file://" <> origin, clone ]
-        void $ git clone ["fetch", "-q", "origin", "+refs/hbs2/meta:refs/hbs2/meta"]
-
-        -- gitAll, not git: the latter keeps the FIRST LINE of the output, so
-        -- counting blobs in it counted at most one, and the assertion this whole
-        -- test exists for passed whenever the lowest-oid object was not a blob.
-        let blobs = length . filter (== "blob")
-              <$> gitAll clone [ "cat-file", "--batch-all-objects"
-                               , "--batch-check=%(objecttype)" ]
-        before <- blobs
-        before `shouldBe` 0
+      partial $ \clone blobs -> do
+        blobs `shouldReturn` 0
 
         -- The listing still reports both files, and reports the ones whose
         -- objects are absent as absent: BAD in the size column, which is what
@@ -462,6 +481,41 @@ spec = do
 
         -- And nothing was fetched. This is the assertion the whole test is for.
         blobs `shouldReturn` 0
+
+    it "fetches nothing even when the caller's environment says to" $ do
+      -- The fix above is a set of variables, and setting them is not the same as
+      -- them taking effect: with two bindings of one name in envp, getenv returns
+      -- the FIRST, so appending them to the inherited environment did nothing at
+      -- all whenever the caller already had one. A reader that appends passes the
+      -- test above and fails this one.
+      partial $ \clone blobs -> do
+        bracket_ (Env.setEnv "GIT_NO_LAZY_FETCH" "0")
+                 (Env.unsetEnv "GIT_NO_LAZY_FETCH") $ do
+          readIn clone `shouldReturn`
+            Right [ ("threads/t/0001-x", Missing), ("version", Missing) ]
+          blobs `shouldReturn` 0
+
+    it "reads the tree the commit names, not the one refs/replace substitutes" $ do
+      -- refs/replace rewrites what a commit IS, for every git command that reads
+      -- it. So canon could be read out of a planted tree while the report printed
+      -- the honest commit id in its header: nothing in the output would say a
+      -- substitution had happened. The documented fetch refspec does not carry
+      -- those refs, but `clone --mirror` does, and so does a push into a bare
+      -- repository.
+      withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
+        honest <- git dir ["rev-parse", "refs/hbs2/meta"]
+        planted <- hashObject dir "planted"
+        void $ gitStdin dir
+                 (LBS8.pack ("100644 " <> planted <> "\tthreads/evil/0001-planted\0"))
+                 ["update-index", "-z", "--index-info"]
+        tree <- git dir ["write-tree"]
+        evil <- git dir ["commit-tree", tree, "-m", "evil"]
+        void $ git dir ["replace", honest, evil]
+        -- git itself honours it, which is what makes this worth a test.
+        gitAll dir ["ls-tree", "-r", "--name-only", "refs/hbs2/meta"]
+          >>= \ls -> ls `shouldContain` ["threads/evil/0001-planted"]
+        -- And this reader does not.
+        readIn dir `shouldReturn` Right [("version", Sized 13)]
 
     it "tells a blob whose object is gone from a submodule" $ do
       -- ls-tree -l prints BAD, not a number, in the size column of a blob it
@@ -529,8 +583,9 @@ spec = do
       -- listing that fits in the stdout buffer is the case a sequential reader
       -- survives, so sizing it below one would test nothing.
       let entry = "100644 blob deadbeef      5\tthreads/t/0001-x\0"
-      shimmed 8000 (mconcat (replicate 8000 entry)) $ \readIt ->
-        (fmap (length . fmap teePath) <$> readIt) `shouldReturn` Right 8000
+      within 60 "the two-pipe read" $
+        shimmed 8000 (mconcat (replicate 8000 entry)) $ \readIt ->
+          (fmap (length . fmap teePath) <$> readIt) `shouldReturn` Right 8000
 
     it "refuses a listing past the byte bound while it is still arriving" $ do
       -- The bound has to hold before the bytes are all in memory, so it cannot be

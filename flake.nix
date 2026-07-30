@@ -113,10 +113,22 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         })
     );
 
-    ourHaskellPackages = pkgs: ({}
-      // makePkgsFromDirWithMan pkgs topLevelPackages (n: n)
-      // makePkgsFromDirWithMan pkgs keymanPackages (name: "hbs2-keyman/${name}")
-      // makePkgsFromDir pkgs miscellaneous (name: "miscellaneous/${name}")
+    # git for hbs2-hub's test suite, in the OVERLAY and not only in the devShell.
+    #
+    # The shipped packages are all dontCheck, so nix never runs the suite for
+    # them; the overlay this flake exports is not, and anybody building
+    # haskellPackages.hbs2-hub through it runs the suite in a sandbox with no git,
+    # where GitRepoSpec's twenty-one examples turn into pendingWith and hspec
+    # calls that a pass. A green run that tested none of the git-facing half.
+    withGitForTests = pkgs: p:
+      pkgs.haskell.lib.addTestToolDepends p [ pkgs.gitMinimal ];
+
+    ourHaskellPackages = pkgs: (
+      let base = {}
+            // makePkgsFromDirWithMan pkgs topLevelPackages (n: n)
+            // makePkgsFromDirWithMan pkgs keymanPackages (name: "hbs2-keyman/${name}")
+            // makePkgsFromDir pkgs miscellaneous (name: "miscellaneous/${name}");
+      in base // { hbs2-hub = withGitForTests pkgs base.hbs2-hub; }
     );
 
     overlay = final: prev: {
@@ -240,11 +252,6 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         # documented in INSTALL.md.
         paths = (map stripPackageToBin (builtins.attrValues
                   (removeAttrs imagePackages [ "bf6-git-hbs2" ]))) ++ [
-          (pkgs.runCommand "git-hbs2-symlink" { } ''
-            mkdir -p $out/bin
-            ln -s hbs2-git3 $out/bin/git-hbs2
-          '')
-          hubAlias
           pkgs.cacert
           pkgs.tzdata
           # git, because the image already ships git-hbs2 and hbs2-git3, and
@@ -268,6 +275,20 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           pkgs.gitMinimal
         ];
         pathsToLink = [ "/bin" "/etc" "/share" ];
+
+        # The two aliases are made HERE and not brought in as a path, which is
+        # what hubAlias and a git-hbs2-symlink derivation used to be. buildEnv
+        # does not copy a symlink, it links to it, so a relative `hub -> hbs2-hub`
+        # inside an alias derivation became
+        # /bin/hub -> /nix/store/...-alias/bin/hub -> hbs2-hub, resolved next to
+        # the alias, where there is no hbs2-hub: a dangling link, in the one
+        # channel this whole stage put git into. symlinkJoin (used by .#default
+        # and .#static) keeps them relative and was fine, which is why the two
+        # smoke tests added last round did not see it.
+        postBuild = ''
+          ln -sf hbs2-hub /bin/hub
+          ln -sf hbs2-git3 /bin/git-hbs2
+        '';
       };
 
       config = {

@@ -199,7 +199,13 @@ toolSaid e
   -- its message being collected leaves nothing here. A bare indent under "read
   -- the message above" is worse than saying there is none.
   | Text.null (Text.strip e) = " (it said nothing)"
-  | otherwise = nest 2 (line <> vsep [ "|" <+> pretty (safeText l) | l <- Text.lines e ])
+  -- TAB is kept, alone among the control characters: the line structure is
+  -- already decided here (one Doc per line of the message), so a tab cannot forge
+  -- anything, and escaped it broke the one thing these blocks exist to carry.
+  -- git's dubious-ownership refusal indents the safe.directory command with one,
+  -- and it arrived as \\u{09}git config --global ..., which does not paste.
+  | otherwise = nest 2 (line <> vsep [ "|" <+> pretty (safeWith (== '\t') l)
+                                     | l <- Text.lines e ])
 
 instance Pretty CanonUnreadable where
   pretty = \case
@@ -352,10 +358,24 @@ maxListingBytes = maxCanonFiles * 512
 -- it duplicateEntries, a hand-built tree can carry it, and nothing downstream can
 -- see it, since every later step works one entry at a time.
 sortCanon :: [TreeEntry] -> ([(ByteString, Text, Int)], [(ByteString, FileProblem)])
-sortCanon entries = let (evs, bad) = go [] [] entries in (evs, dups <> bad)
+sortCanon entries = (evs, dups <> bad)
   where
+    (evs, bad) = go [] [] (nubPaths [] entries)
+
     dups = [ (p, FileDuplicated)
            | p : _ : _ <- List.group (List.sort (fmap teePath entries)) ]
+
+    -- The SECOND entry for a path is dropped, not merely reported. Kept, both
+    -- were fetched, both were parsed, both went into the fold and the byte bound
+    -- counted the object twice; with the same oid on both, the report said
+    -- "listed more than once" and then dropped one as a duplicate event-id, which
+    -- is an accusation about canon that the reader had manufactured. The version
+    -- file is refused outright for the same ambiguity, and this is the rest of
+    -- that rule.
+    nubPaths _ [] = []
+    nubPaths seen (e:rest)
+      | teePath e `elem` seen = nubPaths seen rest
+      | otherwise = e : nubPaths (teePath e : seen) rest
 
     go evs bad [] = (reverse evs, reverse bad)
     go evs bad (e:rest) = case teeKind e of
@@ -462,6 +482,18 @@ readCanon cs owner = csCommit cs >>= \case
           -- A tool that would not run is not a version file that will not read.
           Left (Left u) -> pure (Left u)
           Left (Right p) -> pure (Left (VersionUnreadable p))
+          -- Zero is not a version this or any build implements, and it read as
+          -- one: the gate only ever looked for NEWER, so (hub-meta 0) folded
+          -- silently under today's rules with a clean report.
+          Right (Just 0) -> pure (Left (VersionUnreadable (FileMalformed
+                              (BadClause "hub-meta"))))
+          -- BEFORE the blobs, not after them. The gate lives inside foldCanon,
+          -- which runs last, so a tree stamped newer than this build was read in
+          -- full first: measured at one cat-file per event, all of it thrown away.
+          -- Worse, a fork failing anywhere in that loop turned the answer into
+          -- ReaderFailed and "nothing was learned about canon", when the version
+          -- file had been read and the answer was already known.
+          Right (Just n) | n > hubMetaVersion -> pure (Left (CanonTooNewHere n))
           Right declared -> do
 
             -- Parsed inside the loop, so a file's TEXT dies as soon as it has

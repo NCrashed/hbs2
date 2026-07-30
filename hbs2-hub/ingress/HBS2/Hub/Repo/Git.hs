@@ -158,8 +158,13 @@ gitCanonWith bounds cwd = CanonSource
           -- the BOUND: reading stops mid-chunk, so the byte count at that moment
           -- is neither the bound nor the size of the tree, and printing it said
           -- "over 102404096 bytes" where the bound is 102400000.
-          Right (_, Nothing) -> Left (CanonListingTooBig (gbListingBytes bounds))
-          Right (ExitSuccess, Just out)
+          Right (_, Right Nothing) -> Left (CanonListingTooBig (gbListingBytes bounds))
+          -- Silence, which is local: a stalled read tells nothing about the tree.
+          Right (_, Left ()) ->
+            Left (ReaderFailed ( "git ls-tree produced nothing for "
+                                   <> Text.pack (show (gbCallSeconds bounds))
+                                   <> "s and was given up on" ))
+          Right (ExitSuccess, Right (Just out))
             -- Counted on the RAW BYTES, before one TreeEntry exists. Records are
             -- NUL-terminated, so this is a single memchr scan. Counting the parsed
             -- list left the byte bound as the only thing between a listing of
@@ -167,12 +172,28 @@ gitCanonWith bounds cwd = CanonSource
             -- eight times the file bound, refused after the allocation the bound
             -- exists to prevent.
             | recs out > gbListingFiles bounds -> Left (CanonTooMany (recs out))
+            -- Output with no terminator in it at all is not a listing of one
+            -- entry, it is the format having shifted: the count is then zero, so
+            -- the bound above says nothing, and parseListing makes ONE entry whose
+            -- path is the whole hundred megabytes, printed through pathText at up
+            -- to six bytes a byte. This is the shift that haddock calls the case
+            -- the parser exists for, arriving where the parser never sees it.
+            | not (BS.null out) && recs out == 0 ->
+                Left (TreeUnreadable "the tree listing has no record terminator in it")
             | otherwise -> Right (parseListing out)
-          Right (_, Just e) -> Left (TreeUnreadable (msg (decodeS e)))
+          Right (_, Right (Just e)) -> Left (TreeUnreadable (msg (decodeS e)))
           -- Again: git not having run at all, four calls in, is local.
           Left e -> Left (ReaderFailed (msg e))
 
-  , csBlob = \oid ->
+  , csBlob = \oid -> if not (isObjectId oid)
+      -- An object id is hex, and this is where that gets checked, because the
+      -- whole argument for fetching blobs by id rather than by path is that an id
+      -- cannot carry anything an exec cares about. Nothing enforced it: an id
+      -- beginning with a dash would have been read by cat-file as an option, and
+      -- a non-ASCII one throws at exec under the C locale, arriving as
+      -- ReaderFailed and ending the audit over one entry in a listing.
+      then pure (BlobRefused "not an object id")
+      else
       raw ["cat-file", "blob", Text.unpack oid] <&> \case
         Right (ExitSuccess, out) -> BlobText (decode out)
         -- git ran and would not give it, and its words are kept: a pruned object,
@@ -221,9 +242,8 @@ gitCanonWith bounds cwd = CanonSource
     -- the rest is about which one.
     inDir p = do
       env0 <- liftIO getEnvironment
-      let dropped = fmap fst forced <> refuseToLook
-                      <> (case cwd of Nothing -> [] ; Just _ -> whichRepository)
-          kept = List.filter ((`notElem` dropped) . fst) env0
+      let kept = List.filter ((`notElem` (fmap fst forced <> named)) . fst) env0
+          named = case cwd of Nothing -> [] ; Just _ -> whichRepository
           here = maybe id setWorkingDir cwd
       pure (setEnv (kept <> forced) (here p))
 
@@ -262,25 +282,33 @@ gitCanonWith bounds cwd = CanonSource
                       , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
                       ]
 
-    -- Variables that stop git looking at all. Dropped ALWAYS, including the path
-    -- the CLI actually takes, which is the one with no directory named: they do
-    -- not answer "which repository", they refuse the question, and the answer
-    -- here is already given by the caller's own working directory. Under a CI
-    -- harness or `git bisect run` that sets a ceiling above it, a healthy
-    -- repository reported "not a git repository" and exit 4.
+    -- GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM are LEFT ALONE,
+    -- in both cases, and two earlier versions of this got it wrong in opposite
+    -- directions.
     --
-    -- The cost is honest: a caller who set a ceiling to keep git off a slow
-    -- network mount does not get that protection here. This reader only ever
-    -- looks where it was pointed.
-    refuseToLook = [ "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM" ]
+    -- Dropping them was wrong: the ceiling is how a caller says "do not walk up
+    -- past here", which is a thing this reader should obey and not override, and
+    -- the discovery flag was described as stopping git from looking when it does
+    -- the reverse (it lets git cross a filesystem boundary), so removing it is
+    -- how a bind mount inside a working tree becomes "not a git repository".
+    --
+    -- Setting a ceiling at the named directory's parent was also wrong: discovery
+    -- walking up is not a bug, it is how every git command behaves in a
+    -- subdirectory, and `hub verify` run three directories deep in a working tree
+    -- has to find the repository the way `git status` does. A caller who does not
+    -- want the walk sets a ceiling, and it is obeyed.
 
-    -- GIT_CONFIG_* are in NEITHER list: a config that turns off gpg signing or
-    -- sets safe.directory is the caller's business, and this only reads.
+    -- GIT_CONFIG_* are in NO list: a config that turns off gpg signing or sets
+    -- safe.directory is the caller's business, and this only reads.
 
     -- Lenient, so a blob that is not UTF-8 becomes replacement characters rather
-    -- than an exception. It costs up to three bytes per invalid one, which the
-    -- per-file bound does not account for since git reports the encoded size; the
-    -- tree-wide bound does, being the sum of those same sizes.
+    -- than an exception.
+    --
+    -- It costs up to three bytes per invalid one, and NEITHER bound accounts for
+    -- that: both are sums of the sizes git reported, which are the sizes on disk.
+    -- A tree at the byte bound made of invalid UTF-8 is three times that in
+    -- memory. The comment here used to claim the tree-wide bound covered it,
+    -- which it cannot, being made of the same numbers as the per-file one.
     decode = decodeS . LBS.toStrict
     decodeS = Text.decodeUtf8Lenient
 
@@ -334,8 +362,9 @@ gitCanonWith bounds cwd = CanonSource
             withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA -> do
               out <- upTo (gbListingBytes bounds) (getStdout p)
               a <- case out of
-                     Nothing -> pure (ExitFailure 1, Nothing)
-                     Just bs -> do
+                     Left () -> pure (ExitFailure 1, Left ())
+                     Right Nothing -> pure (ExitFailure 1, Right Nothing)
+                     Right (Just bs) -> do
                        code <- waitExitCode p
                        -- The message is only wanted when git failed, and waiting
                        -- for it is bounded even then: stderr EOFs when the last
@@ -346,7 +375,7 @@ gitCanonWith bounds cwd = CanonSource
                        err <- if code == ExitSuccess
                                 then pure mempty
                                 else fromMaybe mempty <$> timeout 2000000 (wait errA)
-                       pure (code, Just (if code == ExitSuccess then bs else err))
+                       pure (code, Right (Just (if code == ExitSuccess then bs else err)))
               writeIORef answer (Just a)
               pure a
         )
@@ -356,16 +385,25 @@ gitCanonWith bounds cwd = CanonSource
 
     -- Read a handle to a bound. Stops at the first chunk that crosses it and does
     -- not read the rest, which is the whole point.
+    --
+    --  ()@ is the IDLE bound: no bytes for gbCallSeconds. A total time limit
+    -- is the wrong shape here, because a legitimately enormous tree takes as long
+    -- as it takes and refusing it on a clock would be a bound on the machine
+    -- rather than on the tree; what is never legitimate is silence. Reached with
+    -- a FIFO in place of a tree object: three calls answer and the fourth waited
+    -- for ever, taking the hook with it, with no output and no diagnostic.
     upTo n h = go 0 []
       where
         go seen chunks = do
-          c <- liftIO (BS.hGetSome h 65536)
-          if BS.null c
-            then pure (Just (BS.concat (List.reverse chunks)))
-            else do
-              let seen' = seen + BS.length c
-              if seen' > n then pure Nothing
-                           else go seen' (c : chunks)
+          c <- timeout (gbCallSeconds bounds * 1000000) (liftIO (BS.hGetSome h 65536))
+          case c of
+            Nothing -> pure (Left ())
+            Just c'
+              | BS.null c' -> pure (Right (Just (BS.concat (List.reverse chunks))))
+              | otherwise -> do
+                  let seen' = seen + BS.length c'
+                  if seen' > n then pure (Right Nothing)
+                               else go seen' (c' : chunks)
 
     -- Read a handle to the END, keeping only the first n bytes. For a stream whose
     -- content is a message rather than data: the bound is on what is remembered,
@@ -396,19 +434,38 @@ gitCanonWith bounds cwd = CanonSource
     -- one blob read, all local, all off the network by construction.
     raw args = do
       cfg <- inDir (proc "git" args)
-      -- tryAny and not try @SomeException: the latter also caught UserInterrupt and
-      -- AsyncCancelled, so Ctrl-C during an audit came back as a file that will
-      -- not read and the audit went on to report it.
-      tryAny (timeout (gbCallSeconds bounds * 1000000)
-                      (readProcess (setStdin closed cfg)))
-        <&> \case
-          Left e -> Left (Text.pack (show e))
-          Right Nothing ->
-            Left ( "git " <> Text.pack (unwords (take 2 args))
-                     <> " did not finish in "
-                     <> Text.pack (show (gbCallSeconds bounds)) <> "s" )
-          Right (Just (code, out, errOut)) ->
-            Right (code, if code == ExitSuccess then out else errOut)
+      -- ABANDONED, not cancelled, when the bound is reached. readProcess tears the
+      -- process down in its own cleanup, and that teardown WAITS; a git stuck in
+      -- uninterruptible sleep on a dead mount does not answer a signal, not even
+      -- SIGKILL, so cancelling here would block in the cleanup and the bound would
+      -- be no bound at all. The read is left running on its own thread and this
+      -- returns; the thread and its child go when the kernel lets them.
+      --
+      -- tryAny and not try @SomeException: the latter also caught UserInterrupt
+      -- and AsyncCancelled, so Ctrl-C during an audit came back as a file that
+      -- will not read and the audit went on to report it. (In this prelude `try`
+      -- IS UnliftIO's; the name is spelled out because the distinction is the
+      -- point and the two are not the same function.)
+      r <- tryAny do
+             a <- async (readProcess (setStdin closed cfg))
+             timeout (gbCallSeconds bounds * 1000000) (wait a)
+      pure case r of
+        Left e -> Left (Text.pack (show e))
+        Right Nothing ->
+          Left ( "git " <> Text.pack (unwords (take 2 args))
+                   <> " did not finish in "
+                   <> Text.pack (show (gbCallSeconds bounds))
+                   <> "s and was given up on" )
+        Right (Just (code, out, errOut)) ->
+          Right (code, if code == ExitSuccess then out else errOut)
+
+-- | Is this hex of a plausible object-id length? sha1 is 40, sha256 is 64, and
+-- git accepts an unambiguous prefix, so the low end is where ambiguity starts
+-- rather than a spec.
+isObjectId :: Text -> Bool
+isObjectId t = Text.length t >= 4 && Text.length t <= 64 && Text.all hex t
+  where hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                  || (c >= 'A' && c <= 'F')
 
 -- | Parse the output of @ls-tree -r -z -l@.
 --

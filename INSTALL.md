@@ -138,6 +138,10 @@ pinned tag in production; `latest` follows the most recent release.
 
 The path with the broadest reach. Does not require Nix.
 
+As with every other option, `git` has to be on PATH at RUN time for
+`hbs2-hub`, `hbs2-git3` and `git-remote-hbs23`; the build needs it
+too, to clone this repository.
+
 ### System libraries
 
 On Debian or Ubuntu:
@@ -233,6 +237,11 @@ this step is only needed for the cabal install path.
 
 For users who already have Nix with flakes enabled.
 
+The flake does not put `git` in your profile, since almost everyone
+already has one and shipping a second would collide with it. The
+git-facing tools (`hbs2-hub`, `hbs2-git3`, `git-remote-hbs23`) expect
+to find yours on PATH.
+
 To install the binaries into your user profile:
 ```
 git clone https://github.com/NCrashed/hbs2.git
@@ -271,17 +280,31 @@ Then enable the module:
 ```
 This installs the binaries and starts a user-level `hbs2-peer.service`.
 
+The module installs the whole binary set, `hbs2-hub` among them, and
+adds no `git`: a machine that only runs the peer does not need one,
+and a machine that runs the git-facing tools almost certainly has one
+already. Add `pkgs.git` to your own packages if it does not.
+
 ## Verifying the install
 
 Check that the main binaries are visible:
+
 ```
-    hbs2-peer --help
-    hbs2-cli --help
-    hbs2-keyman --help
-    git-hbs2 --help
+hbs2-peer --help
+hbs2-cli --help
+hbs2-keyman --help
+hbs2-hub --help
+git-hbs2 --help
 ```
+
 If any of these fail with "command not found", verify that the
 install directory is on your PATH.
+
+The git-facing tools also need `git` itself:
+
+```
+git --version
+```
 
 ## Next steps
 

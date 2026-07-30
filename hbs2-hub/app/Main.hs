@@ -21,7 +21,8 @@ import Data.List (intercalate,isPrefixOf,sort)
 import Data.Text qualified as Text
 
 import System.Environment
-import System.Exit (die)
+import System.Exit (die,exitWith,ExitCode(..))
+import System.IO.Error (isResourceVanishedError)
 import GHC.IO.Encoding qualified as Enc
 import System.IO qualified as IO
 
@@ -52,33 +53,45 @@ main = do
   -- of the report: an audit that exits non-zero having said something true and
   -- incomplete, which is the worst answer an audit has.
   --
-  -- stdin for the same reason in the other direction: a script piped in may hold
-  -- a title in any language, and under the C locale reading it threw.
-  --
-  -- //TRANSLIT is not about UTF-8 being unable to represent something; it cannot
-  -- fail on a real character. It is for the lone surrogates that //ROUNDTRIP
-  -- below produces out of argv bytes that are not UTF-8: without it, printing an
-  -- argument nobody could decode kills the program in the encoder.
+  -- //TRANSLIT on the way OUT only, and it is not about UTF-8 being unable to
+  -- represent something (it cannot fail on a real character). It is for the lone
+  -- surrogates //ROUNDTRIP below produces out of argv bytes that are not UTF-8:
+  -- without it, printing an argument nobody could decode kills the program in the
+  -- encoder, halfway through a report.
   utf8Translit <- IO.mkTextEncoding "UTF-8//TRANSLIT"
-  for_ [IO.stdin, IO.stdout, IO.stderr] (`IO.hSetEncoding` utf8Translit)
+  for_ [IO.stdout, IO.stderr] (`IO.hSetEncoding` utf8Translit)
 
-  -- And argv, which is not a Handle and so is not covered by any of the above.
+  -- stdin is UTF-8 and NOT lenient. It carries the body of a letter, which is
+  -- about to be signed and published, and //TRANSLIT there turns a body somebody
+  -- typed in KOI8 or Latin-1 into a body full of U+FFFD, signs it, and sends it,
+  -- where an exception would have told them to convert the file. Being strict is
+  -- the whole difference between a bad afternoon and an unfixable event.
+  IO.hSetEncoding IO.stdin IO.utf8
+
+  -- And argv, which is not a Handle and so is covered by none of the above.
   -- getArgs decodes with the FILESYSTEM encoding, which the locale picks: under
   -- LC_ALL=C that is ASCII, and `hub issue new --title <eight UTF-8 bytes>` became
   -- eight replacement characters. For `hub verify` that would be cosmetic. It is
   -- not cosmetic here: a title from argv goes into the signed author box and into
   -- the event-id, so in a hook under the C locale a letter would be minted, sealed
   -- and delivered with the corruption inside the signature, where canon is
-  -- append-only and nothing can repair it. The body, arriving on stdin, would be
-  -- intact in the same event.
-  --
-  -- //ROUNDTRIP rather than plain utf8, so an argument that genuinely is not UTF-8
-  -- survives as surrogates instead of throwing at the moment of decoding it.
+  -- append-only and nothing can repair it.
   utf8Roundtrip <- IO.mkTextEncoding "UTF-8//ROUNDTRIP"
   Enc.setFileSystemEncoding utf8Roundtrip
   Enc.setForeignEncoding utf8Roundtrip
 
   argv <- getArgs
+
+  -- And then refused if it did not decode. //ROUNDTRIP represents an undecodable
+  -- byte as a lone surrogate, which survives a String and does NOT survive
+  -- Text.pack: text collapses it to U+FFFD, silently, on the first conversion,
+  -- which every word of argv goes through on its way to a signed box. So the
+  -- corruption the block above exists to prevent came back one layer down. There
+  -- is no repair to offer, only a refusal before anything is signed.
+  for_ argv $ \a ->
+    when (any (\c -> c >= '\xD800' && c <= '\xDFFF') a) $
+      die ( "an argument is not valid UTF-8, and this tool signs what you type."
+              <> "\nRe-run under a UTF-8 locale, or pass the text on stdin." )
 
   let dict = makeDict do
         internalEntries
@@ -127,7 +140,14 @@ main = do
              | [StringLike s] <- ws -> found dict s
              | otherwise -> liftIO (hubHelp dict)
 
-  case (argv, verbOf dict argv) of
+  -- A closed pipe is not a usage error, and 1 is what usage errors exit with:
+  -- `hub verify | head -1` gave 1, which PEP-22 assigns to a bad argument. 141 is
+  -- 128 plus SIGPIPE, which is what a shell reports for a program a pipe killed,
+  -- and it is out of the way of every code the audit assigns.
+  handleJust (\e -> if isResourceVanishedError e then Just () else Nothing)
+             (\_ -> exitWith (ExitFailure 141)) do
+
+   case (argv, verbOf dict argv) of
     -- No arguments: a script on stdin, or the help if there is no stdin either.
     ([], _) -> runHBS2Cli do
       -- A TERMINAL means there is no script coming: a person typed the name of
@@ -209,15 +229,25 @@ main = do
     peerFree dict = \case
       -- help NAMES a verb, it does not run it, so what it names says nothing
       -- about whether a peer is needed: `help hub:inbox` paid the probe to print
-      -- a paragraph. The head decides for this one form, which is the only place
-      -- a head is enough.
-      ListVal (SymbolVal k : _) | k `elem` helpNames -> True
+      -- a paragraph.
+      --
+      -- Only for BARE names. help is an ordinary binding and the interpreter
+      -- evaluates arguments before calling it, so `help (hub:inbox <key>)` really
+      -- does run hub:inbox; declaring the whole form peer-free took the RPC
+      -- clients away from it and turned a working command into a bare
+      -- PeerNotConnectedException.
+      ListVal (SymbolVal k : as) | k `elem` helpNames -> all bare as
       form -> go form
       where
         go = \case
           ListVal xs -> all go xs
           SymbolVal k | HM.member k dict -> k `elem` peerFreeNames
           _ -> True
+
+        -- An atom. A form here is a call, and a call is not a name.
+        bare = \case
+          ListVal _ -> False
+          _         -> True
 
     -- What this tool does, rather than what its interpreter can do.
     hubHelp dict = do

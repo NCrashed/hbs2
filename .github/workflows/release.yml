@@ -343,6 +343,14 @@ jobs:
           # `docker load` reads the gzipped OCI tarball produced by buildImage.
           IMAGE_LOCAL=$(docker load -i ./result | awk '/Loaded image:/ {print $NF}')
           echo "Loaded: ${IMAGE_LOCAL}"
+          # Nothing ever ran this image before pushing it, and it shipped two
+          # dangling symlinks: buildEnv rewrites a relative alias into an absolute
+          # one pointing back at the alias derivation, where the target is not.
+          # The other two channels had smoke tests and were the two that were fine.
+          docker run --rm "${IMAGE_LOCAL}" hbs2-peer version
+          docker run --rm "${IMAGE_LOCAL}" hub --help >/dev/null
+          docker run --rm "${IMAGE_LOCAL}" git-hbs2 --help >/dev/null || true
+          docker run --rm "${IMAGE_LOCAL}" git --version >/dev/null
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
           # Per-arch tag only; the manifest list pinning :TAG / :latest is
           # done by the docker-manifest job once both arches are pushed.

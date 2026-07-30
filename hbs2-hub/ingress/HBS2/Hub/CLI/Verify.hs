@@ -74,6 +74,14 @@ refused u = do
   hPutDoc stderr (refusalDoc u <> line)
   exitWith (ExitFailure (codeOf u))
 
+-- Is this a problem with the CLONE rather than with the tree? Both mean "not
+-- readable here" and neither means the publisher did anything wrong.
+notHere :: FileProblem -> Bool
+notHere = \case
+  FileObjectMissing -> True
+  FileUnreadable _  -> True
+  _                 -> False
+
 -- | What a refusal says: the reason, and what to do about it.
 refusalDoc :: CanonUnreadable -> Doc ann
 refusalDoc u = "hub:" <+> pretty u <> advice u
@@ -114,11 +122,22 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                              <> " rules it does not implement."
       -- The one problem whose file cannot be named in the report, because it is
       -- not an event and the report is a report about events.
-      VersionUnreadable _ -> line <> "  " <> pathDoc versionPath
-                               <> " governs the admission rules, so this reader"
-                               <> " will not guess" <> line
-                               <> "  at them. Whoever published canon has to"
-                               <> " rewrite that file."
+      --
+      -- Two different remedies, and the wrong one used to be printed under a
+      -- message that contradicted it: in a blobless clone the line above reads
+      -- "the object is not in this clone; fetch, or unshallow" and the advice
+      -- under it told the reader to go and ask whoever published canon to rewrite
+      -- the file. That is the ordinary state after clone --filter=blob:none.
+      VersionUnreadable p
+        | notHere p -> line <> "  " <> pathDoc versionPath
+                         <> " is listed and this CLONE cannot read it. Fetch, or"
+                         <> " unshallow." <> line
+                         <> "  Nothing is known to be wrong with canon."
+        | otherwise -> line <> "  " <> pathDoc versionPath
+                         <> " governs the admission rules, so this reader"
+                         <> " will not guess" <> line
+                         <> "  at them. Whoever published canon has to"
+                         <> " rewrite that file."
       CanonTooBig _  -> line <> "  Compaction is the answer to a canon this"
                           <> " large (PEP-19), not a bigger reader."
       CanonTooMany _ -> line <> "  Compaction is the answer to a canon this"
@@ -146,6 +165,9 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
 -- which bound there is to argue with.
 codeOf :: CanonUnreadable -> Int
 codeOf = \case
+  -- Split from 7 for the reason the advice is: the file being unreadable HERE is
+  -- not the file being wrong, and 7 says canon is wrong.
+  VersionUnreadable p | notHere p -> 13
   NoCanonRef           -> 3
   NoRepository{}       -> 4
   RefUnresolved{}      -> 5
@@ -205,17 +227,26 @@ reportDoc st =
   -- Files whose own version clause did not read. Reported and never obeyed
   -- (PEP-19), and reported at all because a writer that appends to this tree is
   -- about to rewrite those files with its own version.
-  <> [ "no file version" <+> pathDoc p | p <- noFileVersion st ]
+  -- "no READABLE file version": the clause may be absent, unreadable or listed
+  -- twice, and the parser answers Nothing to all three, so the line said the one
+  -- of them that is not always true.
+  <> [ "no readable file version" <+> pathDoc p | p <- noFileVersion st ]
 
   <> fmap pretty dropped
   <> fmap pretty anomalies
 
   -- Counts, not a partition, and said so: an event with two anomalies adds one
   -- to admitted and two to anomalies.
+  -- EVERY finding, because a hook reads this line and the exit code, and the two
+  -- disagreed: three "no readable file version" lines above, all zeroes here, and
+  -- exit 2. A summary that omits two of the five things reportCode counts is a
+  -- summary of a different audit.
   <> [ "admitted" <+> pretty (length (frLog fr))
          <+> "dropped" <+> pretty (length dropped)
          <+> "anomalies" <+> pretty (length anomalies)
-         <+> "unreadable" <+> pretty (length (stBad st)) ]
+         <+> "unreadable" <+> pretty (length (stBad st))
+         <+> "unversioned" <+> pretty (length (noFileVersion st))
+         <+> "tree-version" <+> maybe "missing" (const "ok") (stVersion st) ]
   where
     fr = stFold st
     dropped = frDropped fr

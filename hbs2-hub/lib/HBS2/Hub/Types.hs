@@ -53,6 +53,7 @@ module HBS2.Hub.Types
   , validHashRef
   , validHubKey
   , safeText
+  , safeWith
   , pathText
   , hashRefBytes
   , PartSecret
@@ -418,17 +419,33 @@ normalizeAttr k v
 -- scheme. The escape is now @\\u{H+}@ for a character, @\\x{HH}@ for a byte, and
 -- nothing else in either output can produce a brace after a backslash.
 safeText :: Text -> Text
-safeText = Text.concatMap esc
-  where
-    esc c | Char.isControl c || bidi c || c == '\\' = escChar c
-          | otherwise                              = Text.singleton c
+safeText = safeWith (const False)
 
-    bidi c = c `elem` [ '\x200E', '\x200F'   -- LEFT/RIGHT-TO-LEFT MARK
-                      , '\x061C'             -- ARABIC LETTER MARK
-                      , '\x202A', '\x202B', '\x202C', '\x202D', '\x202E'
-                      , '\x2066', '\x2067', '\x2068', '\x2069'  -- isolates
-                      , '\x2028', '\x2029'   -- LINE/PARAGRAPH SEPARATOR
-                      ]
+-- | 'safeText', with characters this caller wants left alone.
+--
+-- One caller has one: a tool's complaint is printed as a quoted block, one line
+-- per line, so a TAB in it is layout and cannot forge anything. Escaped, the
+-- @safe.directory@ command git offers arrived as @\\u{09}git config ...@ and
+-- would not copy and paste.
+safeWith :: (Char -> Bool) -> Text -> Text
+safeWith allow = Text.concatMap esc
+  where
+    esc c | allow c   = Text.singleton c
+          | unsafe c  = escChar c
+          | otherwise = Text.singleton c
+
+    -- BY CATEGORY, not by a list of the ones somebody thought of. The list was
+    -- twelve characters and the category Cf holds over 160: a ZERO WIDTH SPACE in
+    -- a path printed as nothing at all, so two different tree entries came out as
+    -- the same line, which is the exact failure 'pathText' exists to prevent.
+    -- Cf also covers ZWNJ, ZWJ, WORD JOINER, the BOM, the interlinear annotation
+    -- marks and the whole TAG block, which spells invisible ASCII inside a path.
+    --
+    -- isControl is category Cc and nothing else, which is why it was never enough
+    -- on its own.
+    unsafe c = Char.isControl c || c == '\\'
+                 || Char.generalCategory c `elem`
+                      [ Char.Format, Char.LineSeparator, Char.ParagraphSeparator ]
 
 -- | A path out of a stranger's git tree, on its way to a terminal.
 --
@@ -447,17 +464,26 @@ safeText = Text.concatMap esc
 -- one line in the report. The earlier note here argued no collision was possible
 -- because the character branch escapes its backslashes, which is true and is
 -- about a different collision.
+-- Quoted, and the quote is escaped inside, so the path is one FIELD and cannot
+-- run into the next. The report prints @unreadable <path>: <reason>@, and a path
+-- containing ": " supplied its own reason: the real one survived at the end of
+-- the line, and the first thing a reader saw was the author's.
 pathText :: ByteString -> Text
-pathText bs = case TextE.decodeUtf8' bs of
-  Right t -> safeText t
+pathText bs = "\"" <> body <> "\""
+  where
+   body = case TextE.decodeUtf8' bs of
+    Right t -> quoted (safeText t)
   -- Not UTF-8, so there is no text to escape and no encoding to guess at: every
   -- byte that is not printable ASCII is spelled out, and so is the backslash, so
   -- this branch can never write @\\u{@ and the branch above can never write
   -- @\\x{@. Which branch produced a line is therefore readable off the line.
-  Left _  -> Text.concat [ escByte b | b <- BS.unpack bs ]
-  where
-    escByte b | b >= 0x20, b < 0x7f, b /= 0x5c = Text.singleton (Char.chr (fromIntegral b))
-              | otherwise = Text.pack ("\\x{" <> pad 2 (fromIntegral b) <> "}")
+    Left _  -> Text.concat [ escByte b | b <- BS.unpack bs ]
+
+   quoted = Text.replace "\"" "\\u{22}"
+
+   escByte b | b >= 0x20, b < 0x7f, b /= 0x5c, b /= 0x22 =
+                 Text.singleton (Char.chr (fromIntegral b))
+             | otherwise = Text.pack ("\\x{" <> pad 2 (fromIntegral b) <> "}")
 
 -- One character as @\\u{H+}@: delimited, so the digits cannot run into the text
 -- after them, and lower case so the two escapes cannot be told apart by case

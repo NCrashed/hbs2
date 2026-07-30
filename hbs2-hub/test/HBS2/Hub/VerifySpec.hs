@@ -12,6 +12,7 @@ module HBS2.Hub.VerifySpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Canon
+import HBS2.Hub.Canon (CanonError(..))
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.CLI.Verify
@@ -80,7 +81,11 @@ everyRefusal =
   , (NoRepository "not a git repository", 4)
   , (RefUnresolved "bad object",          5)
   , (CanonTooNewHere 99,                  6)
-  , (VersionUnreadable (FileUnreadable "x"),    7)
+  , (VersionUnreadable (FileMalformed (BadClause "hub-meta")), 7)
+  -- Not the file being wrong but this clone not having it: the ordinary state
+  -- after clone --filter=blob:none, and 7 says canon is broken.
+  , (VersionUnreadable FileObjectMissing, 13)
+  , (VersionUnreadable (FileUnreadable "cannot read"), 13)
   , (CanonTooBig (maxCanonBytes + 1),     8)
   , (TreeUnreadable "missing blob",       9)
   , (CanonTooMany (maxCanonFiles + 1),   10)
@@ -101,10 +106,11 @@ spec = do
       for_ everyRefusal $ \(u, code) -> codeOf u `shouldBe` code
 
       let codes = fmap snd everyRefusal
-      -- Still distinct, which is what catches a constructor added with a code
-      -- that is already taken: the Werror in the module under test forces a case
-      -- for it, and nothing forces the case to be a new number.
-      sort codes `shouldBe` sort (nub codes)
+      -- Still distinct PER CONSTRUCTOR, which is what catches a new one given a
+      -- code that is already taken: the Werror in the module under test forces a
+      -- case for it and nothing forces the case to be a new number. Two entries
+      -- here share 13 on purpose, being two spellings of one constructor.
+      sort (nub codes) `shouldBe` nub (sort codes)
       -- And all above 2, which is a completed audit that found something, and
       -- above 1, a usage error. A hook tells "could not run" from "ran and found
       -- things" by the number alone.
@@ -144,12 +150,16 @@ spec = do
       -- escapes that. Both are 85 in hex. Two entries in a tree, one line in the
       -- report, and the report is how somebody decides which file to open.
       pathText (utf8 "0001-\x0085-z") `shouldNotBe` pathText "0001-\x85-z"
-      pathText (utf8 "0001-\x0085-z") `shouldBe` "0001-\\u{85}-z"
-      pathText "0001-\x85-z" `shouldBe` "0001-\\x{85}-z"
+      -- Quoted, so the path is one field: the report prints it before a colon and
+      -- a reason, and a path containing ": " supplied its own reason.
+      pathText (utf8 "0001-\x0085-z") `shouldBe` "\"0001-\\u{85}-z\""
+      pathText "0001-\x85-z" `shouldBe` "\"0001-\\x{85}-z\""
       -- Which branch wrote a line is readable off the line, because neither can
       -- write the other's sigil: a backslash is escaped in both.
-      pathText "\\" `shouldBe` "\\u{5c}"
-      pathText "\\\xff" `shouldBe` "\\x{5c}\\x{ff}"
+      pathText "\\" `shouldBe` "\"\\u{5c}\""
+      pathText "\\\xff" `shouldBe` "\"\\x{5c}\\x{ff}\""
+      -- And a quote inside is escaped, so the field cannot be closed early.
+      pathText "a\"b" `shouldBe` "\"a\\u{22}b\""
 
     it "prints a tool's own complaint as a block, not as a field value" $ do
       -- git's complaints are multi-line on purpose: the remedy for a
@@ -249,6 +259,44 @@ spec = do
       -- report is still the report's own summary.
       any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` True
       fmap (Text.isPrefixOf "admitted") (lastOf ls) `shouldBe` Just True
+
+    it "gives every refusal its own words, not just some words" $ do
+      -- Pairwise distinct, because "more than one line" is satisfied by any two
+      -- texts, including two identical ones: swapping the advice of any two
+      -- constructors passed. What a reader gets told is the whole product of a
+      -- refusal, and there are twelve of them.
+      let said = [ (codeOf u, render (refusalDoc u)) | (u, _) <- everyRefusal ]
+      for_ [ (x, y) | x <- said, y <- said, fst x < fst y ] $ \((_, a), (_, b)) ->
+        a `shouldNotBe` b
+
+    it "exits 2 for a fold that dropped something, and prints the drop" $ do
+      owner <- kp
+      mallory <- kp
+      -- The verb's whole product, and nothing reached it: every reportCode test
+      -- got its 2 from an unreadable FILE, so deleting frDropped and frAnomalies
+      -- from the clean check left an audit with fifty-seven refused events exiting
+      -- zero, with the suite green. The lines themselves were never rendered.
+      let repo = fst owner
+          -- Signed by a key that is not the owner and was never delegated: the
+          -- fold's rule 3, which is what an audit is for.
+          ev = mkEvent mallory mallory
+                 (AOpen repo HubIssue "planted" [] Nothing Nothing Nothing 1000)
+                 (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
+          thr = eventId ev
+      st <- readCanon (byPath
+              [ ("version", renderMeta)
+              , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent ev) ])
+              repo >>= either (fail . show) pure
+
+      stBad st `shouldBe` []
+      length (frDropped (stFold st)) `shouldBe` 1
+      reportCode st `shouldBe` 2
+      -- And the drop is a line in the report, with a reason a reader can act on.
+      let ls = fmap render (reportDoc st)
+      any ("not blessed by an authorized key" `Text.isInfixOf`) ls `shouldBe` True
+      -- The summary counts it, which it did not: three of the five findings were
+      -- printed and two were left out, so a hook saw zeroes beside a non-zero code.
+      last ls `shouldSatisfy` Text.isInfixOf "dropped 1"
 
     it "exits 2 for an audit that found something and 0 for a clean one" $ do
       owner <- kp
