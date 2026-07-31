@@ -1,5 +1,26 @@
 # Unreleased
 
+## Fixed in the release artifacts
+
+Three things that were wrong in every artifact up to and including
+0.25.5.0, and are user-visible on an install rather than in a source
+tree:
+
+  - The linux musl tarball shipped `bin/git-hbs2` as a one-line shebang
+    script naming a `/nix/store` path that does not exist on the machine
+    unpacking it, so `git hbs2 ...` and `git-hbs2 --help` (which
+    INSTALL.md offers as an install check) failed with "no such file or
+    directory". It is a symlink to `hbs2-git3` now, as it already was in
+    the docker image and the macOS bundle.
+  - The docker image carried `/bin/hub` and `/bin/git-hbs2` as symlinks
+    into a store path that is not in the image, so both were dangling:
+    `docker exec ... hub` could never have worked. Nothing ran the image
+    before pushing it; the release job does now.
+  - The docker image grew by about 123 MB, because it now carries
+    `gitMinimal`: `hbs2-hub` reads a repository's issue tracker by
+    running `git`, and a forge CLI in an image with no git can announce
+    a verb and not run it.
+
 ## Packages
 
   - **`hbs2-hub` (new).** The core of the decentralized forge specified

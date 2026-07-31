@@ -130,10 +130,16 @@ data BlobResult =
 -- a broken repository, an unlistable tree and canon from the future all arrived
 -- as an empty fold with a zero exit.
 data CanonUnreadable =
-    -- | @refs\/hbs2\/meta@ is not here. The ordinary state of a fresh clone:
-    -- git's default refspec covers heads and tags, so canon is fetched
-    -- explicitly. Not an error, and not an empty tracker either.
-    NoCanonRef
+    -- | @refs\/hbs2\/meta@ is not here, and WHERE it is not: the absolute path of
+    -- the repository this reader ended up in.
+    --
+    -- The path is not decoration. This verb obeys an inherited GIT_DIR on purpose,
+    -- because a hook should audit the repository the hook was invoked for, and a
+    -- hook is also where GIT_DIR is set to somewhere the operator is not standing.
+    -- Without the path the message is "no refs\/hbs2\/meta in this repository", so
+    -- they fetch canon into the tree they can see, run it again, and get the same
+    -- sentence for ever.
+    NoCanonRef Text
     -- | Not a git repository, or git could not be run. Distinct from the above
     -- because the advice differs: fetching canon into a directory that is not a
     -- repository will not help. Carries what the tool said, whole.
@@ -213,7 +219,7 @@ toolSaid e
 
 instance Pretty CanonUnreadable where
   pretty = \case
-    NoCanonRef        -> "no" <+> pretty metaRef <+> "in this repository"
+    NoCanonRef w      -> "no" <+> pretty metaRef <+> "in" <+> pretty (safeText w)
     NoRepository e    -> "cannot read this git repository:" <> toolSaid e
     RefUnresolved e   -> pretty metaRef <+> "does not resolve to a commit:"
                            <> toolSaid e
@@ -495,8 +501,20 @@ readCanon cs owner = csCommit cs >>= \case
         -- of entries in somebody else's tree choose the rules canon is folded
         -- under, with nothing said and a zero exit.
         ver <- case [ teeKind e | e <- entries, teePath e == versionPath ] of
+                 -- A DIRECTORY where the version file goes is not "no version
+                 -- file": ls-tree -r recurses, so a tree there yields version/x
+                 -- and no version at all, and one nothing wore the other's face.
+                 -- Its children are reported as unexpected paths either way; this
+                 -- says which nothing it is.
+                 [] | any ((B8.pack "version/" `B8.isPrefixOf`) . teePath) entries ->
+                        pure (Left (Right FileNotABlob))
                  [] -> pure (Right Nothing)
-                 (_ : _ : _) -> pure (Left (Right FileDuplicated))
+                 -- Two entries for one path. Identical ones collapse, as they do
+                 -- for events: it is one file listed twice, and the tree is
+                 -- malformed either way (reported by sortCanon). Different ones
+                 -- are refused, because choosing would let the order of entries
+                 -- pick the rules canon is folded under.
+                 (k : ks) | not (all (== k) ks) -> pure (Left (Right FileDuplicated))
                  (NotABlob : _)      -> pure (Left (Right FileNotABlob))
                  (Unparsed : _)      -> pure (Left (Right FileListingUnparsed))
                  (BlobMissing _ : _) -> pure (Left (Right FileObjectMissing))

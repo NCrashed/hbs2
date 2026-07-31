@@ -39,6 +39,7 @@ import Data.Maybe (isJust)
 import Control.Concurrent qualified as Conc
 import System.Environment (getEnvironment)
 import System.Posix.Signals (signalProcess,sigKILL)
+import System.Process qualified as P
 import System.Process (terminateProcess)
 import System.Process.Typed
 
@@ -60,6 +61,13 @@ data GitBounds = GitBounds
     -- tree takes, it is how long the stream may be SILENT. Two meanings, and one
     -- earlier haddock claimed the listing had no bound at all.
   , gbCallSeconds  :: Int
+    -- | How long the whole listing may take, however busy it is. The idle bound
+    -- alone is not enough: @ls-tree -r@ walks the tree as a TREE, so a commit
+    -- whose subtrees all point at the same subtree costs 64^12 traversals for
+    -- 116 KB of objects, and a variant that emits a record now and then resets
+    -- the idle counter for ever. Measured: twelve levels of 64 entries produced
+    -- zero bytes at 99% of a core.
+  , gbListingSeconds :: Int
     -- | How long each step of tearing a process down may take: closing the pipes,
     -- then SIGTERM, then SIGKILL. Short, because by the time it is used something
     -- has already gone wrong and the caller is owed an answer.
@@ -73,6 +81,7 @@ gitBounds = GitBounds
   , gbToolMessage  = 64 * 1024
   , gbBlobMessage  = 512
   , gbCallSeconds  = 60
+  , gbListingSeconds = 600
   , gbTeardownSeconds = 2
   }
 
@@ -127,15 +136,18 @@ gitCanonWith bounds cwd = CanonSource
       -- ago. Every later Left is therefore a local failure and says so. It read as
       -- NoRepository, which under a process limit advised somebody to fix
       -- safe.directory in a repository git had successfully read one call earlier.
-      isRepo <- git ["rev-parse", "--git-dir"]
+      -- --absolute-git-dir, because the answer is put in front of the operator
+      -- when the ref is missing, and a relative ".git" printed by a hook whose
+      -- GIT_DIR points elsewhere is the sentence that sent them in circles.
+      isRepo <- git ["rev-parse", "--absolute-git-dir"]
       case isRepo of
         Left e -> pure (Left (NoRepository (msg e)))
         Right (ExitFailure _, e) -> pure (Left (NoRepository (msg e)))
-        Right (ExitSuccess, _) -> do
+        Right (ExitSuccess, gitDir) -> do
           here <- git ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
           case here of
             Left e -> pure (Left (ReaderFailed (msg e)))
-            Right (ExitFailure 1, _) -> pure (Left NoCanonRef)
+            Right (ExitFailure 1, _) -> pure (Left (NoCanonRef (Text.strip gitDir)))
             Right (ExitFailure _, e) -> pure (Left (RefUnresolved (msg e)))
             Right (ExitSuccess, _) ->
               git ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] <&> \case
@@ -161,7 +173,14 @@ gitCanonWith bounds cwd = CanonSource
       -- resident before the file-count bound got a chance to say no. Checking the
       -- length of a buffer already read would bound what this reader HOLDS and not
       -- what it peaks at, which is the thing that was wrong.
-      listing ["ls-tree", "-r", "-z", "-l", "--full-tree", Text.unpack commit]
+      -- The commit is checked and then passed after --, for the reason csBlob's
+      -- object id is: today it comes from rev-parse and is hex, and the first verb
+      -- that takes a revision from a user (a `verify --at <rev>`) makes it an
+      -- option-injection point. Cheap now, impossible to remember later.
+      listing (if not (isObjectId commit)
+                 then ["ls-tree", "--", "/dev/null/not-a-commit"]
+                 else ["ls-tree", "-r", "-z", "-l", "--full-tree"
+                      , Text.unpack commit, "--" ])
         <&> \case
           -- The bound first: past it the process is torn down, so its exit code
           -- says how it was killed and not anything about the tree. It carries
@@ -174,11 +193,18 @@ gitCanonWith bounds cwd = CanonSource
           -- and has simply stopped saying anything -- a retry buys another minute
           -- and another stuck child. The message says what was seen, since the
           -- bound is per chunk and the stream may have delivered plenty first.
+          -- Either bound: silence for gbCallSeconds, or gbListingSeconds in total
+          -- however busy it was. The message does not say which, because from
+          -- here they are one thing: git was asked for a listing and did not
+          -- produce one in the time this reader will wait.
           Right (_, Left seen) ->
-            Left (TreeUnreadable ( "git ls-tree sent nothing for "
+            Left (TreeUnreadable ( "git ls-tree did not finish: it sent "
+                                     <> Text.pack (show seen)
+                                     <> " bytes, then nothing for "
                                      <> Text.pack (show (gbCallSeconds bounds))
-                                     <> "s after " <> Text.pack (show seen)
-                                     <> " bytes, and was given up on" ))
+                                     <> "s or ran past "
+                                     <> Text.pack (show (gbListingSeconds bounds))
+                                     <> "s in total, and was given up on" ))
           Right (ExitSuccess, Right (Just out))
             -- Counted on the RAW BYTES, before one TreeEntry exists. Records are
             -- NUL-terminated, so this is a single memchr scan. Counting the parsed
@@ -374,7 +400,11 @@ gitCanonWith bounds cwd = CanonSource
         tryAny (liftIO (terminateProcess (unsafeProcessHandle p)))
         harder <- settle
         unless harder do
-          pid <- liftIO (getPid p)
+          -- getPid on the ProcessHandle, not typed-process's Process: the latter
+          -- only exists in newer typed-process, and the static (musl, GHC 9.4.8)
+          -- package set pins an older one. The dynamic build was green and the
+          -- release build would not have been.
+          pid <- liftIO (P.getPid (unsafeProcessHandle p))
           for_ pid $ \pid' -> tryAny (liftIO (signalProcess sigKILL pid'))
           void settle
 
@@ -463,18 +493,27 @@ gitCanonWith bounds cwd = CanonSource
     -- rather than on the tree; what is never legitimate is silence. Reached with
     -- a FIFO in place of a tree object: three calls answer and the fourth waited
     -- for ever, taking the hook with it, with no output and no diagnostic.
-    upTo n h = go 0 []
+    upTo n h = do
+      started <- getMonotonicTime
+      go started 0 []
       where
-        go seen chunks = do
-          c <- timeout (gbCallSeconds bounds * 1000000) (liftIO (BS.hGetSome h 65536))
-          case c of
-            Nothing -> pure (Left seen)
-            Just c'
-              | BS.null c' -> pure (Right (Just (BS.concat (List.reverse chunks))))
-              | otherwise -> do
-                  let seen' = seen + BS.length c'
-                  if seen' > n then pure (Right Nothing)
-                               else go seen' (c' : chunks)
+        go started seen chunks = do
+          now <- getMonotonicTime
+          if now - started > fromIntegral (gbListingSeconds bounds)
+            -- The DEADLINE, which the idle bound cannot replace: a listing that
+            -- keeps dribbling bytes is never idle and can still be a tree walk
+            -- that will not finish this century.
+            then pure (Left seen)
+            else do
+             c <- timeout (gbCallSeconds bounds * 1000000) (liftIO (BS.hGetSome h 65536))
+             case c of
+              Nothing -> pure (Left seen)
+              Just c'
+                | BS.null c' -> pure (Right (Just (BS.concat (List.reverse chunks))))
+                | otherwise -> do
+                    let seen' = seen + BS.length c'
+                    if seen' > n then pure (Right Nothing)
+                                 else go started seen' (c' : chunks)
 
     -- Read a handle to the END, keeping only the first n bytes. For a stream whose
     -- content is a message rather than data: the bound is on what is remembered,
@@ -522,15 +561,27 @@ gitCanonWith bounds cwd = CanonSource
       -- arriving as a file that will not read. An earlier comment here drew a
       -- distinction between the two that does not exist (tryAny is try at
       -- SomeException); the name is kept for what it says, not for what it fixes.
+      -- withAsync for BOTH readers, not async, and this is the whole difference
+      -- between a bounded call and a hang that Ctrl-C cannot end.
+      --
+      -- A bare async is never cancelled, so when the bound fires the readers are
+      -- still sitting in hGetSome holding their Handles' MVars. The first thing
+      -- the teardown does is hClose those same Handles, which takes the same MVar
+      -- and blocks; and the teardown is a bracket release, which unliftio runs
+      -- under uninterruptibleMask_, so it never reaches TERM, never reaches KILL,
+      -- and does not answer Ctrl-C. Measured: 19.7 s against 68 microseconds with
+      -- the reader cancelled, and the whole construction not returning in 90 s.
+      -- withAsync cancels on the way out of its scope, which is INSIDE withGit's,
+      -- so both readers are gone before a handle is closed.
       r <- tryAny do
-             withGit piped $ \p -> do
-               out <- async (drain (gbToolMessage bounds * 16) (getStdout p))
-               err <- async (drain (gbToolMessage bounds) (getStderr p))
-               timeout (gbCallSeconds bounds * 1000000) do
-                 code <- waitExitCode p
-                 o <- wait out
-                 e <- wait err
-                 pure (code, if code == ExitSuccess then o else e)
+             withGit piped $ \p ->
+               withAsync (drain (gbToolMessage bounds * 16) (getStdout p)) $ \out ->
+               withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \err ->
+                 timeout (gbCallSeconds bounds * 1000000) do
+                   code <- waitExitCode p
+                   o <- wait out
+                   e <- wait err
+                   pure (code, if code == ExitSuccess then o else e)
       pure case r of
         Left e -> Left (Text.pack (show e))
         Right Nothing ->

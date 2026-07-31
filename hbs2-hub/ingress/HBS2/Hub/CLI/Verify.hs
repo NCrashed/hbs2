@@ -35,8 +35,11 @@ import HBS2.Hub.Repo.Git
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
+import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Text qualified as Text
 import System.Exit (exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
 
@@ -81,6 +84,10 @@ notHere :: FileProblem -> Bool
 notHere = \case
   FileObjectMissing   -> True
   FileUnreadable _    -> True
+  -- About THIS READER, says its own haddock: the listing record could not be
+  -- parsed. Exit 7 told whoever published canon to rewrite a file that may be
+  -- perfectly good, over a format this build does not know how to read.
+  FileListingUnparsed -> True
   -- Total, with no wildcard, for the reason the module header gives: a new
   -- FileProblem falling into a default here would exit 7 and tell whoever
   -- published canon to rewrite a file that is fine. FileListingUnparsed already
@@ -88,7 +95,6 @@ notHere = \case
   FileMalformed _     -> False
   FileTooLarge _      -> False
   FileNotABlob        -> False
-  FileListingUnparsed -> False
   FileUnexpected      -> False
   FileDuplicated      -> False
 
@@ -101,7 +107,7 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
     -- that is not one and an unreadable version file, which are the two a reader
     -- is least likely to work out unaided.
     advice = \case
-      NoCanonRef -> line <> "  Fetch it, which a plain clone does not:" <> line
+      NoCanonRef _ -> line <> "  Fetch it, which a plain clone does not:" <> line
                       <> "    git fetch <remote> '+" <> pretty metaRef
                       <> ":" <> pretty metaRef <> "'" <> line
                       -- Three causes, and git gives this reader no way to tell
@@ -181,7 +187,7 @@ codeOf = \case
   -- Split from 7 for the reason the advice is: the file being unreadable HERE is
   -- not the file being wrong, and 7 says canon is wrong.
   VersionUnreadable p | notHere p -> 13
-  NoCanonRef           -> 3
+  NoCanonRef{}         -> 3
   NoRepository{}       -> 4
   RefUnresolved{}      -> 5
   CanonTooNewHere{}    -> 6
@@ -269,6 +275,14 @@ reportDoc st =
   -- disagreed: three "no readable file version" lines above, all zeroes here, and
   -- exit 2. A summary that omits two of the five things reportCode counts is a
   -- summary of a different audit.
+  -- What the fold DECIDED, not only what it refused. A tree with one valid
+  -- version file and nothing else printed "admitted 0 dropped 0 anomalies 0" and
+  -- exited zero, which is indistinguishable from a healthy tracker: the two
+  -- numbers that tell them apart are how many keys may write and how many events
+  -- are withheld.
+  <> [ "maintainers" <+> pretty (HS.size (frMaintainers fr))
+         <+> "redacted" <+> pretty (HS.size (frRedacted fr)) ]
+
   <> [ "admitted" <+> pretty (length (frLog fr))
          <+> "dropped" <+> pretty (length dropped)
          <+> "anomalies" <+> pretty (length anomalies)
@@ -313,5 +327,17 @@ noFileVersion st = [ p | (p, Nothing) <- stFileVersions st ]
 -- that differ read differently. A path is a stranger's bytes, and one with a
 -- newline in it forged the summary line of this report before this was here. See
 -- 'pathText'.
+--
+-- TRUNCATED, because a git tree entry may hold a path of any length (measured: a
+-- single 1 048 638-byte record) and pathText spends up to six characters on a
+-- byte, so one entry could put six megabytes on somebody's terminal and a full
+-- listing six hundred. The head is what identifies a file; the tail is what an
+-- author chose to make it unreadable with.
 pathDoc :: ByteString -> Doc ann
-pathDoc = pretty . pathText
+pathDoc p
+  | Text.length shown <= keep = pretty shown
+  | otherwise = pretty (Text.take keep shown)
+                  <+> parens ("truncated," <+> pretty (BS.length p) <+> "bytes")
+  where
+    shown = pathText p
+    keep = 300

@@ -132,10 +132,10 @@ spec = do
       -- until somebody asks for it: git's default refspec covers heads and tags
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
-      let noRef = CanonSource (pure (Left NoCanonRef))
+      let noRef = CanonSource (pure (Left (NoCanonRef "/tmp/x/.git")))
                     (const (pure (Right []))) (const (pure (BlobRefused "no such object")))
       readCanon noRef (fst owner) >>= \r ->
-        fmap (const ()) r `shouldBe` Left NoCanonRef
+        fmap (const ()) r `shouldBe` Left (NoCanonRef "/tmp/x/.git")
 
     it "reads a tree with no version file, and says the version is missing" $ do
       owner <- kp

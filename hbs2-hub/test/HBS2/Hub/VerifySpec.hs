@@ -77,7 +77,7 @@ byPath files = CanonSource
 -- is for.
 everyRefusal :: [(CanonUnreadable, Int)]
 everyRefusal =
-  [ (NoCanonRef,                          3)
+  [ (NoCanonRef "/somewhere/.git",        3)
   , (NoRepository "not a git repository", 4)
   , (RefUnresolved "bad object",          5)
   , (CanonTooNewHere 99,                  6)

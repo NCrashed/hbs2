@@ -11,6 +11,9 @@ it; they produce the same binaries. Pick whichever fits your setup.
 - About 4 GB of disk space for the dependency build (only required
   for the source-build options below).
 - A network connection for the first build (deps come from Hackage).
+- `git` 2.36 or newer on PATH at run time, for `hbs2-hub`, `hbs2-git3`
+  and `git-remote-hbs23`. Older git ignores `GIT_NO_LAZY_FETCH`, which
+  `hub verify` relies on to stay offline in a partial clone.
 
 ## Option 1: Prebuilt static binary (Linux x86_64)
 
@@ -25,7 +28,7 @@ PATH. `hbs2-peer`, `hbs2-cli`, `hbs2-keyman`, `hbs2-sync` and `ncq3`
 need nothing.
 
 ```
-TAG=0.25.3.0  # set to the release you want
+TAG=0.25.5.0  # set to the release you want
 curl -fL -o hbs2.tar.gz "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz"
 curl -fL -o hbs2.tar.gz.sha256 "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz.sha256"
 sha256sum -c hbs2.tar.gz.sha256
@@ -280,6 +283,11 @@ Then enable the module:
 }
 ```
 This installs the binaries and starts a user-level `hbs2-peer.service`.
+
+The NixOS module (`nixosModules.default`) installs `hbs2-peer` only,
+not the rest of the set: it exists to run the daemon as a system
+service. Add the other binaries to `environment.systemPackages`
+yourself if you want them.
 
 The module installs the whole binary set, `hbs2-hub` among them, and
 adds no `git`: a machine that only runs the peer does not need one,

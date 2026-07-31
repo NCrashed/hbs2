@@ -102,8 +102,8 @@ jobs:
           "${DIR}/bin/hbs2-cli" --help >/dev/null
           "${DIR}/bin/hbs2-hub" --help >/dev/null
           "${DIR}/bin/hub" --help >/dev/null
-          test -L "${DIR}/bin/hub"
-          test -L "${DIR}/bin/git-hbs2"
+          test -L "${DIR}/bin/hub" && test -e "${DIR}/bin/hub"
+          test -L "${DIR}/bin/git-hbs2" && test -e "${DIR}/bin/git-hbs2"
           ARCHIVE="${DIR}.tar.gz"
           tar czf "${ARCHIVE}" "${DIR}"
           echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
@@ -222,9 +222,17 @@ jobs:
           "${BUNDLE}/bin/hbs2-hub" --help >/dev/null
           "${BUNDLE}/bin/hub" --help >/dev/null
           "${BUNDLE}/bin/hbs2-keyman" --help >/dev/null
-          "${BUNDLE}/bin/git-hbs2" --help >/dev/null || true
-          test -L "${BUNDLE}/bin/hub"
-          test -L "${BUNDLE}/bin/git-hbs2"
+          # NOT `|| true`: that swallows 127, which is what a shell returns for a
+          # binary that is not there, so the check for a dangling symlink passed
+          # on a dangling symlink. hbs2-git3 --help may legitimately exit
+          # non-zero, so 127 is the thing tested for and nothing else.
+          set +e; "${BUNDLE}/bin/git-hbs2" --help >/dev/null 2>&1; rc=$?; set -e
+          [ "$rc" -ne 127 ] || { echo "::error::git-hbs2 does not run"; exit 1; }
+          # -e, not -L: -L is true of a link that points at nothing, which is the
+          # exact failure these two lines exist to catch. -L as well, so that a
+          # dereferenced 19 MiB copy is caught too.
+          test -L "${BUNDLE}/bin/hub" && test -e "${BUNDLE}/bin/hub"
+          test -L "${BUNDLE}/bin/git-hbs2" && test -e "${BUNDLE}/bin/git-hbs2"
 
       - name: Upload to GitHub Release (assets only)
         uses: softprops/action-gh-release@v2

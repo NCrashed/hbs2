@@ -1380,7 +1380,7 @@ what they expose. The contract:
   - `foldEvents    :: HubKey -> [Event] -> FoldResult`  the fold above, against
     an owner key, which is the root of the trust chain and so is an argument
     rather than something the tree supplies
-  - `foldCanon     :: Word32 -> HubKey -> [Event] -> Either MetaTooNew FoldResult`
+  - `foldCanon     :: Word32 -> HubKey -> [Event] -> Either CanonTooNew FoldResult`
     the same, gated on the tree's own `(hub-meta N)`: a version this build does
     not implement is refused rather than folded under the rules it does
   - `FoldResult` holds `frThreads` (the map below), `frRedacted` (events a

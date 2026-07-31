@@ -142,8 +142,9 @@ gitStdin dir input args = do
 -- Both halves matter: the silence is what the idle bound is for, and refusing to
 -- die is what the teardown escalation is for. A shim that stopped on SIGTERM
 -- would pass on a reader whose cleanup waits without limit.
-stalling :: GitBounds -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
-stalling bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
+stalling :: String -> GitBounds
+         -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+stalling what bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
   let bin = dir </> "bin"
   createDirectoryIfMissing True bin
   sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
@@ -151,10 +152,15 @@ stalling bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
     [ "#!/bin/sh"
     , "trap '' TERM"
     , "case \"$*\" in"
-    , "  *ls-tree*)"
+      -- WHICH command stalls is a parameter, because the listing and the four
+      -- small calls are different code with different failure modes. A shim that
+      -- only ever stalled ls-tree left the small calls' timeout branch unexecuted
+      -- by the entire suite, which is how a deadlock lived in it: the test written
+      -- to cover that branch passed against the bug, because it never reached it.
+    , "  *" <> what <> "*)"
     , "    printf '100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef      5\\tthreads/t/0001-x\\000'"
     , "    " <> sleep <> " 600 ;;"
-    , "  *rev-parse*--git-dir*) echo .git ;;"
+    , "  *rev-parse*git-dir*) echo .git ;;"
     , "  *show-ref*) exit 0 ;;"
     , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
     , "  *) exit 1 ;;"
@@ -255,7 +261,7 @@ vanishing act =
     writeFile (bin </> "git") (unlines
       [ "#!/bin/sh"
       , "case \"$*\" in"
-      , "  *rev-parse*--git-dir*) echo .git; " <> rm <> " -f \"$0\" ;;"
+      , "  *rev-parse*git-dir*) echo .git; " <> rm <> " -f \"$0\" ;;"
       , "  *) exit 1 ;;"
       , "esac"
       ])
@@ -308,7 +314,7 @@ shimmedWith bounds noise showRefCode out act =
       | i <- [0 .. length pieces - 1] ] <>
       [ "    noise " <> show (noise - noise `div` 2)
       , "    ;;"
-      , "  *rev-parse*--git-dir*) echo .git ;;"
+      , "  *rev-parse*git-dir*) echo .git ;;"
       , "  *show-ref*)"
       , "    if [ " <> show showRefCode <> " -ne 0 ]; then"
       -- Two lines, like git's own: the complaint, and what to run about it.
@@ -694,18 +700,38 @@ spec = do
       -- would have waited for it for ever, which is the bound not being a bound.
       -- One second here; sixty in production.
       within 30 "the idle bound and the teardown" $
-        stalling (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 }) $ \readIt ->
+        stalling "ls-tree" (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 }) $ \readIt ->
           readIt >>= \case
             Left (TreeUnreadable m) -> do
               -- Not ReaderFailed: git ran, is running, and is simply quiet. That
               -- code means "could not run git" and is the one documented as worth
               -- retrying, which here buys another minute and another stuck child.
-              Text.unpack m `shouldContain` "sent nothing"
+              Text.unpack m `shouldContain` "did not finish"
               -- The count is in it, because the bound is per chunk and the stream
               -- may have delivered plenty before it stopped.
-              Text.unpack m `shouldContain` "bytes"
+              Text.unpack m `shouldContain` "77 bytes"
             other -> expectationFailure
                        ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
+
+    it "gives up on a SMALL call that hangs, and can still be interrupted" $ do
+      -- The other reader, and the one the suite never ran: the four small calls go
+      -- through a different function from the listing, and its readers were
+      -- started with a bare async and never cancelled. When the bound fired they
+      -- were still inside hGetSome holding their Handles' MVars, and the first
+      -- thing the teardown does is hClose those Handles -- the same MVar, taken
+      -- inside a bracket release, which unliftio runs under uninterruptibleMask_.
+      -- So it blocked before SIGTERM, before SIGKILL, and did not answer Ctrl-C.
+      -- Measured at 19.7s against 68 microseconds with the reader cancelled.
+      --
+      -- rev-parse is the first call this reader makes, so this covers the path all
+      -- four take, cat-file included, which an audit runs once per event file.
+      within 30 "a small call that hangs" $
+        stalling "rev-parse" (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 })
+          $ \readIt -> readIt >>= \case
+              -- git ran and said nothing, four calls' worth of nothing: what
+              -- matters here is that an answer arrives at all.
+              Left _  -> pure ()
+              Right _ -> expectationFailure "expected a refusal from a hung call"
 
     it "refuses a listing with no record terminator in it" $ do
       -- Not one entry with a hundred-megabyte path: the count is then zero, so the
@@ -744,7 +770,10 @@ spec = do
       -- the problem.
       withSystemTempDirectory "hub-git" $ \dir -> do
         void $ git dir ["init", "-q", "."]
-        readIn dir `shouldReturn` Left NoCanonRef
+        readIn dir >>= \case
+          Left (NoCanonRef w) -> Text.unpack w `shouldContain` dir
+          other -> expectationFailure
+                     ("expected NoCanonRef, got " <> show (fmap (const ()) other))
 
       withSystemTempDirectory "hub-nogit" $ \dir ->
         readIn dir >>= \case
@@ -774,7 +803,10 @@ spec = do
       -- If a future git separates them, this test is what will notice.
       withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
         writeFile (dir </> ".git" </> "refs" </> "hbs2" </> "meta") "not-a-sha\n"
-        readIn dir `shouldReturn` Left NoCanonRef
+        readIn dir >>= \case
+          Left (NoCanonRef w) -> Text.unpack w `shouldContain` dir
+          other -> expectationFailure
+                     ("expected NoCanonRef, got " <> show (fmap (const ()) other))
 
     it "refuses a tree whose objects are gone, rather than calling it empty" $ do
       -- A partial clone, a pruned object, a killed ls-tree. Empty canon is the

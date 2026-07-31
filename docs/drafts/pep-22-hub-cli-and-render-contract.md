@@ -111,6 +111,18 @@ and a tree full of forged events were the same event.
 | 13   | the `version` file is here and THIS CLONE cannot read it |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
+The last two lines of a clean run are normative, because a hook parses them:
+
+```
+maintainers <n> redacted <n>
+admitted <n> dropped <n> anomalies <n> unreadable <n> unversioned <n> tree-version ok|missing
+```
+
+Every number the exit code counts is on those lines. Two of them are about what
+the fold DECIDED rather than what it refused: a tree holding one valid version
+file and nothing else otherwise prints all zeroes and exits 0, which reads
+exactly like a healthy tracker.
+
 3 to 13 is "could not run", so a hook that only cares about the distinction tests
 for that range. 141 is neither: it is what a shell reports for a program a pipe
 killed, and it used to be 1, which this table gives to usage errors. It is also

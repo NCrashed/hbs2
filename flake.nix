@@ -120,6 +120,10 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     # haskellPackages.hbs2-hub through it runs the suite in a sandbox with no git,
     # where GitRepoSpec's twenty-one examples turn into pendingWith and hspec
     # calls that a pass. A green run that tested none of the git-facing half.
+    # Applied to the static package set as well, which sounds like it would build
+    # a musl git and does not: nixpkgs only includes testToolDepends when doCheck
+    # is on, and every shipped package is dontCheck. It matters for the exported
+    # overlay, which is not.
     withGitForTests = pkgs: p:
       pkgs.haskell.lib.addTestToolDepends p [ pkgs.gitMinimal ];
 
