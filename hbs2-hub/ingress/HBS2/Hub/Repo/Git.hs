@@ -15,22 +15,22 @@
 -- under a non-Latin thread name was reported unreadable, in exactly the image
 -- this stage added git to.
 module HBS2.Hub.Repo.Git
-  ( gitCanon
-  , gitCanonIn
-  , gitCanonWith
+  ( withGitCanon
+  , withGitCanonIn
+  , withGitCanonWith
   , GitBounds(..)
   , gitBounds
   , parseListing
   ) where
 
 import HBS2.Hub.Repo
+import HBS2.Hub.Canon (maxEventBytes)
 
 import HBS2.CLI.Prelude hiding (filter)
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
-import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
@@ -68,6 +68,19 @@ data GitBounds = GitBounds
     -- the idle counter for ever. Measured: twelve levels of 64 entries produced
     -- zero bytes at 99% of a core.
   , gbListingSeconds :: Int
+    -- | How long the whole of reading canon may take, blobs included. The listing
+    -- has its own two bounds and they say nothing about the walk that follows.
+    --
+    -- Blobs are read through one batch process, so this is a bound on I/O and
+    -- parsing rather than on forks: the tree that made this necessary (45000
+    -- paths, 172 KB, one git per path, 82 seconds) is seconds now. It is still
+    -- here because a walk can be made expensive in other ways, and because this
+    -- verb is meant for a pre-receive hook, where a minute is a minute somebody
+    -- is waiting.
+    --
+    -- A tree this refuses is refused with a code and a message that names
+    -- compaction, which is what PEP-19 says to do about a canon this large.
+  , gbReadSeconds  :: Int
     -- | How long each step of tearing a process down may take: closing the pipes,
     -- then SIGTERM, then SIGKILL. Short, because by the time it is used something
     -- has already gone wrong and the caller is owed an answer.
@@ -82,12 +95,33 @@ gitBounds = GitBounds
   , gbBlobMessage  = 512
   , gbCallSeconds  = 60
   , gbListingSeconds = 600
+  , gbReadSeconds  = 180
   , gbTeardownSeconds = 2
   }
 
 -- | Canon from the repository the process is standing in.
-gitCanon :: MonadUnliftIO m => CanonSource m
-gitCanon = gitCanonIn Nothing
+--
+-- Bracketed, and that is not a style choice: blobs are read through ONE
+-- @cat-file --batch@ for the whole walk, so there is a process to close.
+--
+-- A fork per blob was what made a small tree expensive. 45000 paths whose
+-- entries all point at one shared subtree is five objects and 172 KB on disk,
+-- and the listing bounds cannot see it: 3.6 MB against 102 MB, 45001 records
+-- against 200000. Measured at 82 seconds, about six minutes at the file bound,
+-- in a verb whose whole point is that it runs in a pre-receive hook. With batch
+-- reading the same tree is one process and the walk is I/O.
+withGitCanon :: MonadUnliftIO m => (CanonSource m -> m a) -> m a
+withGitCanon = withGitCanonIn Nothing
+
+withGitCanonIn :: MonadUnliftIO m => Maybe FilePath -> (CanonSource m -> m a) -> m a
+withGitCanonIn = withGitCanonWith gitBounds
+
+-- | As 'withGitCanonIn', with the bounds named. For the test suite.
+withGitCanonWith :: MonadUnliftIO m
+                 => GitBounds -> Maybe FilePath -> (CanonSource m -> m a) -> m a
+withGitCanonWith bounds cwd act = do
+  cs <- gitCanonWith bounds cwd
+  act cs `finally` csClose cs
 
 -- | Canon from a named repository.
 --
@@ -95,12 +129,25 @@ gitCanon = gitCanonIn Nothing
 -- library: a caller reading two repositories, or a test reading one without
 -- moving the suite it runs in, cannot use a global. It is also what makes the
 -- git-facing half testable.
-gitCanonIn :: MonadUnliftIO m => Maybe FilePath -> CanonSource m
+gitCanonIn :: MonadUnliftIO m => Maybe FilePath -> m (CanonSource m)
 gitCanonIn = gitCanonWith gitBounds
 
 -- | As 'gitCanonIn', with the bounds named. For the test suite.
-gitCanonWith :: forall m . MonadUnliftIO m => GitBounds -> Maybe FilePath -> CanonSource m
-gitCanonWith bounds cwd = CanonSource
+--
+-- Monadic, because a budget over the whole read needs somewhere to count: the
+-- deadline starts when the source is built and the bytes accumulate across every
+-- blob. Without that there is no bound on the WALK at all, only on the listing,
+-- and a tree of 45000 paths sharing one subtree (five objects, 164 KB) passed
+-- every listing bound and then took 82 seconds of one git per path.
+gitCanonWith :: forall m . MonadUnliftIO m
+             => GitBounds -> Maybe FilePath -> m (CanonSource m)
+gitCanonWith bounds cwd = do
+  started <- getMonotonicTime
+  spent   <- newIORef (0 :: Int)
+  batch   <- newIORef Nothing
+  pure (source started spent batch)
+ where
+ source started spent batch = CanonSource
   { csCommit = do
       -- Three questions, one call each, because each answer calls for something
       -- different and any two of them collapsed together lose a diagnostic. Is
@@ -243,26 +290,119 @@ gitCanonWith bounds cwd = CanonSource
           -- Again: git not having run at all, four calls in, is local.
           Left e -> Left (ReaderFailed (msg e))
 
-  , csBlob = \oid -> if not (isObjectId oid)
+  , csClose = readIORef batch >>= \case
+      Nothing -> pure ()
+      Just p  -> do
+        writeIORef batch Nothing
+        -- stdin first: cat-file --batch ends on EOF, which is the graceful way
+        -- out and the common one, so the signals below are for a git that does
+        -- not take it.
+        tryAny (liftIO (hClose (getStdin p)))
+        teardown p
+
+  , csBlob = \oid -> budgeted $ if not (isObjectId oid)
       -- Belt and braces: the listing parser already turns a non-hex id into
       -- Unparsed, so nothing should reach here. If something does, git is not
-      -- called (an id beginning with a dash is an option to cat-file, and a
-      -- non-ASCII one throws at exec under the C locale), and the answer says
-      -- what is true: this reader could not ask.
+      -- asked (an id beginning with a dash is an option, and a non-ASCII one
+      -- throws at exec under the C locale) and the answer says what is true.
       then pure (BlobUnavailable "not an object id")
-      else
-      raw ["cat-file", "blob", Text.unpack oid] <&> \case
-        Right (ExitSuccess, out) -> BlobText (decodeS out)
-        -- git ran and would not give it, and its words are kept: a pruned object,
-        -- a corrupt pack and EACCES on an object file are all exit 128 here, and
-        -- calling them all "gone" put "fetch, or unshallow" under a permission
-        -- error. Distinct from git not having run, below, which says nothing about
-        -- canon at all: read as one answer, a fork that failed on EAGAIN became an
-        -- unreadable event file and exit 2, the code for an audit that ran.
-        Right (_, e) -> BlobRefused (Text.take (gbBlobMessage bounds) (msg (decodeS e)))
-        Left e -> BlobUnavailable (msg e)
+      else tryAny (askBatch oid) <&> \case
+             Right r -> r
+             Left e -> BlobUnavailable (msg (Text.pack (show e)))
   }
-  where
+
+   where
+    -- One `cat-file --batch` for the whole walk, started on first use and kept.
+    --
+    -- The protocol, pinned against git 2.55: write "<oid>\n", read one line back.
+    -- Either "<oid> <type> <size>", then exactly <size> bytes and a newline, or
+    -- "<oid> missing" and nothing else. Nothing in it is optional, so a reply
+    -- this cannot parse means the format moved and the reader says so rather than
+    -- guessing.
+    --
+    -- Batch also ends the lying-size hazard by construction: git writes the size
+    -- it decided and exactly that many bytes, so a loose object whose header says
+    -- ten over two megabytes of body hands over ten bytes here. The ceiling below
+    -- is still enforced, because a size this reader will not hold is refused
+    -- before the bytes are read rather than after.
+    askBatch oid = do
+      p <- readIORef batch >>= \case
+             Just p -> pure p
+             Nothing -> do
+               cfg <- inDir (proc "git" ["cat-file", "--batch"])
+               p <- startProcess (setStdin createPipe
+                                   (setStdout createPipe
+                                     (setStderr createPipe cfg)))
+               writeIORef batch (Just p)
+               pure p
+      liftIO (B8.hPutStrLn (getStdin p) (Text.encodeUtf8 oid))
+      liftIO (hFlush (getStdin p))
+      header <- lineFrom (getStdout p)
+      case fmap B8.words header of
+        Nothing -> restart p (BlobUnavailable "cat-file --batch stopped")
+        Just [_, "missing"] -> pure (BlobRefused "missing from this clone")
+        Just [_, _, szB] | Just n <- readMay (B8.unpack szB) ->
+          if n > maxEventBytes
+            -- The stream is now out of step by n+1 bytes, and skipping them is
+            -- work this reader has just refused to do. Cheaper and safer to start
+            -- a new process for whatever comes next.
+            then restart p (BlobOversize n)
+            else do
+              body <- exactly (getStdout p) n
+              _ <- exactly (getStdout p) 1   -- the trailing newline
+              case body of
+                Nothing -> restart p (BlobUnavailable "cat-file --batch stopped")
+                Just bs -> pure (BlobText (decodeS bs))
+        Just _ -> restart p (BlobUnavailable "cat-file --batch said something else")
+
+    restart p answer = do
+      writeIORef batch Nothing
+      tryAny (liftIO (hClose (getStdin p)))
+      teardown p
+      pure answer
+
+    -- One line, bounded in time like every other read here.
+    lineFrom h = go mempty
+      where
+        go acc = timeout (gbCallSeconds bounds * 1000000)
+                         (liftIO (BS.hGetSome h 1)) >>= \case
+          Nothing -> pure Nothing
+          Just c | BS.null c -> pure Nothing
+                 | c == "\n" -> pure (Just acc)
+                 | BS.length acc > 4096 -> pure Nothing
+                 | otherwise -> go (acc <> c)
+
+    exactly h n = go n mempty
+      where
+        go 0 acc = pure (Just acc)
+        go k acc = timeout (gbCallSeconds bounds * 1000000)
+                           (liftIO (BS.hGetSome h k)) >>= \case
+          Nothing -> pure Nothing
+          Just c | BS.null c -> pure Nothing
+                 | otherwise -> go (k - BS.length c) (acc <> c)
+
+    -- The budget on the WHOLE read, checked before each blob: a wall-clock
+    -- deadline and a ceiling on the bytes handed back. Neither can live in
+    -- readCanon, which is pure and has no clock, and neither can be a listing
+    -- bound, because the listing of a tree that costs six minutes to walk is 3.6
+    -- MB and passes every bound there is.
+    budgeted act = do
+      now <- getMonotonicTime
+      used <- readIORef spent
+      if now - started > fromIntegral (gbReadSeconds bounds)
+        then pure (BlobBudget ( "reading canon passed "
+                                  <> Text.pack (show (gbReadSeconds bounds))
+                                  <> "s" ))
+        else if used > maxCanonBytes
+          then pure (BlobBudget ( "reading canon passed "
+                                    <> Text.pack (show maxCanonBytes) <> " bytes" ))
+          else do
+            r <- act
+            case r of
+              BlobText t -> modifyIORef' spent (+ Text.length t)
+              _ -> pure ()
+            pure r
+
     -- Where git is to run, and what it is allowed to do while it runs.
     --
     -- GIT_NO_LAZY_FETCH is the important one, and it is why this is on EVERY call
@@ -406,7 +546,7 @@ gitCanonWith bounds cwd = CanonSource
             -> (Process () Handle Handle -> m a) -> m a
     withGit cfg = bracket (startProcess cfg) teardown
 
-    teardown :: Process () Handle Handle -> m ()
+    teardown :: forall i . Process i Handle Handle -> m ()
     teardown p = do
       -- Our ends of the pipes, first: a child blocked writing into a pipe nobody
       -- reads dies of EPIPE without needing a signal at all.
@@ -491,12 +631,16 @@ gitCanonWith bounds cwd = CanonSource
                        -- Bounded, like every other wait in this module. A child
                        -- that writes a record, closes stdout, catches SIGTERM and
                        -- sleeps leaves this waiting: measured at over 20s, and it
-                       -- was the only unbounded wait left. Through a real git it
-                       -- is unlikely; through a shim or a wrapper on PATH it is
-                       -- one line of shell.
-                       code <- fromMaybe (ExitFailure 1)
-                                 <$> timeout (gbCallSeconds bounds * 1000000)
-                                             (waitExitCode p)
+                       -- was the only unbounded wait left.
+                       --
+                       -- And a wait that times out KEEPS THE LISTING: stdout was
+                       -- read to EOF, so the listing is complete whatever the
+                       -- process does next. Treating the timeout as a failed exit
+                       -- threw a whole good listing away and printed "cannot list
+                       -- the canon tree: (it said nothing)" with advice to fetch.
+                       waited <- timeout (gbCallSeconds bounds * 1000000)
+                                         (waitExitCode p)
+                       let code = fromMaybe ExitSuccess waited
                        -- The message is only wanted when git failed, and waiting
                        -- for it is bounded even then: stderr EOFs when the last
                        -- holder of the fd closes it, and a grandchild (an ssh
@@ -583,7 +727,13 @@ gitCanonWith bounds cwd = CanonSource
     --
     -- Generous, because none of these is allowed to be slow: three ref lookups and
     -- one blob read, all local, all off the network by construction.
-    raw args = do
+    -- The four small calls, with stdout kept whole.
+    raw args = fmap (fmap (fmap (fromMaybe mempty))) (rawUpTo maxBound args)
+
+    -- As 'raw', but stdout is read to a ceiling and the process stopped there:
+    -- @ is "there was more than that". Used for cat-file, where the only
+    -- number saying how much to expect comes from the tree being audited.
+    rawUpTo cap args = do
       cfg <- inDir (proc "git" args)
       let piped = setStdin closed (setStdout createPipe (setStderr createPipe cfg))
       -- Both pipes read at once, for the reason 'listing' spells out, and the
@@ -616,13 +766,21 @@ gitCanonWith bounds cwd = CanonSource
       -- so both readers are gone before a handle is closed.
       r <- tryAny do
              withGit piped $ \p ->
-               withAsync (drain (gbToolMessage bounds * 16) (getStdout p)) $ \out ->
+               withAsync (upTo cap (getStdout p)) $ \out ->
                withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \err ->
                  timeout (gbCallSeconds bounds * 1000000) do
-                   code <- waitExitCode p
                    o <- wait out
-                   e <- wait err
-                   pure (code, if code == ExitSuccess then o else e)
+                   case o of
+                     -- Past the ceiling: the answer is known and the process is
+                     -- about to be killed, so its exit code says nothing.
+                     Right Nothing -> pure (ExitFailure 1, Nothing)
+                     _ -> do
+                       code <- waitExitCode p
+                       e <- wait err
+                       pure ( code
+                            , Just (case o of
+                                      Right (Just bs) | code == ExitSuccess -> bs
+                                      _ -> e) )
       pure case r of
         Left e -> Left (Text.pack (show e))
         Right Nothing ->

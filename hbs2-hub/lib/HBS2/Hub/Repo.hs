@@ -98,6 +98,13 @@ data CanonSource m = CanonSource
   , csEntries :: Text -> m (Either CanonUnreadable [TreeEntry])
     -- | One blob by object id. Not by path: see the note on paths above.
   , csBlob    :: Text -> m BlobResult
+    -- | Release whatever the source is holding.
+    --
+    -- The git source keeps ONE -file --batch@ for the whole walk, because a
+    -- process per blob is what made a 172 KB tree cost 82 seconds, so there is
+    -- something to close and a caller that forgets leaks it. 'withGitCanon' is
+    -- the shape that does not forget; this field is what it calls.
+  , csClose   :: m ()
   }
 
 -- | What asking for one blob comes back as.
@@ -122,6 +129,14 @@ data BlobResult =
   | BlobRefused Text
     -- | The source could not run. Says nothing about canon.
   | BlobUnavailable Text
+    -- | The blob is larger than the reader will read, with what it read before it
+    -- stopped. NOT the same as 'FileTooLarge', which is the listing's number: a
+    -- tree can say ten and hand over two megabytes, and the size column is the
+    -- audited tree's word for it.
+  | BlobOversize Int
+    -- | The reader has spent as much as it will on this tree, and stopped. Says
+    -- nothing about any one file.
+  | BlobBudget Text
   deriving stock (Eq,Show)
 
 -- | Why there is no canon to fold.
@@ -180,6 +195,14 @@ data CanonUnreadable =
     -- wrapped as a tree that will not list it also drew the advice for a pruned
     -- object, printed directly under a message about compaction.
   | CanonListingTooBig Int
+    -- | Reading this tree cost more than the reader will spend. A budget on the
+    -- WALK, which the listing bounds cannot give: 45000 paths pointing at one
+    -- shared subtree is five objects and 164 KB on disk, and the listing is 3.6 MB
+    -- against a 102 MB bound, 45000 records against 200000 -- every bound passed,
+    -- and then one git per path. Measured at 82 seconds; at maxCanonFiles it is
+    -- about six minutes. In a pre-receive hook that is a push blocked for six
+    -- minutes by a repository that fits in an email.
+  | CanonTooSlow Text
     -- | The reader could not run the tool at all: no process slots, no file
     -- descriptors, the tool gone from PATH mid-audit. Nothing is known about
     -- canon, which is why this is not a finding about it.
@@ -246,6 +269,7 @@ instance Pretty CanonUnreadable where
                            <+> "will take in"
     CanonListingTooBig n -> "the canon tree listing is over" <+> pretty n
                               <+> "bytes, past what this reader will read"
+    CanonTooSlow e    -> "this reader gave up on canon:" <+> pretty (safeText e)
     ReaderFailed e    -> "this reader could not run git:" <> toolSaid e
 
 -- | Whose words a message is.
@@ -546,6 +570,8 @@ readCanon cs owner = csCommit cs >>= \case
                    | n > maxEventBytes -> pure (Left (Right (FileTooLarge n)))
                    | otherwise -> csBlob cs oid >>= \case
                        BlobUnavailable e -> pure (Left (Left (ReaderFailed e)))
+                       BlobBudget e -> pure (Left (Left (CanonTooSlow e)))
+                       BlobOversize n -> pure (Left (Right (FileTooLarge n)))
                        BlobRefused e -> pure (Left (Right (FileUnreadable e)))
                        BlobText t -> pure (either (Left . Right . FileMalformed)
                                                   (Right . Just)
@@ -601,6 +627,10 @@ readCanon cs owner = csCommit cs >>= \case
     readOne acc@(Left _) _ = pure acc
     readOne (Right (evs, vers, bad)) (p, oid, _) = csBlob cs oid >>= \case
       BlobUnavailable e -> pure (Left (ReaderFailed e))
+      -- Both about the WHOLE read, so both end it: a budget spent is spent, and a
+      -- tree that lied about one size will lie about the next.
+      BlobBudget e -> pure (Left (CanonTooSlow e))
+      BlobOversize n -> pure (Right (evs, vers, (p, FileTooLarge n) : bad))
       BlobRefused e -> pure (Right (evs, vers, (p, FileUnreadable e) : bad))
       BlobText t -> pure $ case parseEvent t of
         Left e        -> Right (evs, vers, (p, FileMalformed e) : bad)

@@ -41,7 +41,7 @@ import Data.List qualified as List
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Text qualified as Text
-import System.Exit (exitWith,ExitCode(..))
+import System.Exit (exitWith,ExitCode(..),die)
 import System.IO.Error (isResourceVanishedError)
 
 verifyEntries :: forall c m . ( IsContext c
@@ -66,9 +66,25 @@ verifyEntries = do
              <> line <> "canon that could rename it." )
     $ entry $ bindMatch "hub:verify" $ nil_ \case
         [ SignPubKeyLike repo ] -> lift do
-          readCanon gitCanon repo >>= liftIO . either refused report
+          withGitCanon $ \cs ->
+            readCanon cs repo >>= liftIO . either refused report
 
-        _ -> throwIO (BadFormException @c nil)
+        -- Its own message, not a BadFormException: PEP-22 says every refusal
+        -- prints what to do about it, and the commonest attempt of all --
+        -- `hub verify --help` -- landed on "hbs2-hub: BadFormException
+        -- (hub:verify --help)", which names an internal type and a spelling the
+        -- caller did not type.
+        _ -> liftIO (die (show (usage :: Doc ())))
+
+-- What this verb takes, in the words somebody typing it would use.
+usage :: Doc ann
+usage = "usage: hub verify <repo-key>" <> line
+          <> "  the repository's key in base58, which is what `hbs2-git3` calls"
+          <> " the repo key." <> line
+          <> "  It is an argument because the owner key is the root of the trust"
+          <> " chain: canon" <> line
+          <> "  that named its own owner would be canon that could rename it."
+          <> line <> "  `hub help verify` says more."
 
 -- There is nothing to audit, and which nothing it is decides both the advice and
 -- the exit code. One code for all of them told a hook that an unfetched ref, a
@@ -132,10 +148,19 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
       -- No single cause, so no single remedy: the message above is git's own, and
       -- claiming "a pruned object" over a permission error or a listing past the
       -- bound sent people to fetch what was already there.
-      TreeUnreadable _ -> line <> "  Read the message above: a pruned object or a"
-                            <> " partial clone is fixed by" <> line
-                            <> "  fetching, a permission or ownership complaint is"
-                            <> " not."
+      -- Split on WHO said it: git's complaints have several causes and only some
+      -- are fixed by fetching, while this reader's own refusals (a bound reached,
+      -- a format it cannot parse) are not fixed by fetching at all, and were
+      -- getting "a pruned object or a partial clone".
+      TreeUnreadable (ToolSaid _) ->
+        line <> "  Read the message above: a pruned object or a partial clone is"
+             <> " fixed by" <> line
+             <> "  fetching, a permission or ownership complaint is not."
+      TreeUnreadable (ReaderSays _) ->
+        line <> "  This reader gave up or could not parse what it was given."
+             <> " Fetching will not help;" <> line
+             <> "  compaction (PEP-19) will, and so will reporting the git version"
+             <> " if the format" <> line <> "  has moved."
       CanonTooNewHere _ -> line <> "  Upgrade; this build would fold it under"
                              <> " rules it does not implement."
       -- The one problem whose file cannot be named in the report, because it is
@@ -172,6 +197,14 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                           <> " large (PEP-19), not a bigger reader."
       CanonListingTooBig _ -> line <> "  Compaction is the answer to a canon this"
                                 <> " large (PEP-19), not a bigger reader."
+      -- Not "too big" and not local: the tree is small and expensive, which is a
+      -- shape a bound on size cannot see.
+      CanonTooSlow _ -> line <> "  The tree is not large; walking it is. A tree"
+                          <> " whose entries share subtrees" <> line
+                          <> "  costs a git per PATH, not per object. Compaction"
+                          <> " (PEP-19) is the answer;" <> line
+                          <> "  so is not running this in a pre-receive hook on"
+                          <> " somebody else's tree."
       -- The one refusal that is not about canon. Said so, because the others all
       -- are, and a reader who has seen the other nine will read this as the tenth
       -- thing wrong with somebody else's tree.
@@ -205,6 +238,7 @@ codeOf = \case
   TreeUnreadable{}     -> 9
   CanonTooMany{}       -> 10
   CanonListingTooBig{} -> 11
+  CanonTooSlow{}       -> 14
   -- Not a number about canon at all: a script that retries on it is retrying
   -- something local, which is the only one of these worth retrying. (It is no
   -- longer the highest, 13 having been added after it; the numbers are a

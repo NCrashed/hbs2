@@ -395,22 +395,22 @@ chunksOf n bs
 -- Entries as the reader returns them, whole.
 readTreeWith :: GitBounds -> FilePath -> IO (Either CanonUnreadable [TreeEntry])
 readTreeWith bounds dir = do
-  let cs = gitCanonWith bounds (Just dir)
-  csCommit cs >>= \case
-    Left e  -> pure (Left e)
-    Right c -> csEntries cs c
+  withGitCanonWith bounds (Just dir) $ \cs ->
+    csCommit cs >>= \case
+      Left e  -> pure (Left e)
+      Right c -> csEntries cs c
 
 -- Read canon from a directory, with the process's own working directory left
 -- alone: gitCanon runs git, so the directory has to reach it some other way.
 readIn :: FilePath -> IO (Either CanonUnreadable [(ByteString, Kind)])
 readIn dir = do
-  let cs = gitCanonIn (Just dir)
-  commit <- csCommit cs
-  case commit of
-    Left e -> pure (Left e)
-    Right c -> csEntries cs c >>= \case
+  withGitCanonIn (Just dir) $ \cs -> do
+    commit <- csCommit cs
+    case commit of
       Left e -> pure (Left e)
-      Right es -> pure (Right (sort [ (teePath e, kindOf (teeKind e)) | e <- es ]))
+      Right c -> csEntries cs c >>= \case
+        Left e -> pure (Left e)
+        Right es -> pure (Right (sort [ (teePath e, kindOf (teeKind e)) | e <- es ]))
 
 -- One test, with the environment it needs, put back afterwards.
 --
@@ -532,7 +532,7 @@ spec = do
         wanted <- git dir ["rev-parse", "refs/hbs2/meta"]
         bracket_ (Env.setEnv "GIT_DIR" (dir </> ".git"))
                  (Env.unsetEnv "GIT_DIR")
-                 (csCommit (gitCanon @IO) >>= \case
+                 (withGitCanon csCommit >>= \case
                     -- The commit itself, not its length: a reader that answered
                     -- with any forty characters would pass a length check, and
                     -- what this is about is WHICH repository was read.
@@ -621,20 +621,22 @@ spec = do
       -- non-Latin thread name read as unreadable.
       withCanon [ ("version", "(hub-meta 1)\n")
                 , (utf8 "threads/\1090\1077\1084\1072/0001-x", utf8 "\1087\1088\1080\1074\1077\1090") ] $ \dir -> do
-        let cs = gitCanonIn (Just dir)
-        Right commit <- csCommit cs
-        Right es <- csEntries cs commit
-        let oids = [ oid | e <- es, Blob oid _ <- [teeKind e]
-                         , teePath e /= versionPath ]
-        case oids of
-          [oid] -> csBlob cs oid `shouldReturn` BlobText "\1087\1088\1080\1074\1077\1090"
-          _ -> expectationFailure ("expected one event blob, got " <> show oids)
+        withGitCanonIn (Just dir) $ \cs -> do
+          Right commit <- csCommit cs
+          Right es <- csEntries cs commit
+          let oids = [ oid | e <- es, Blob oid _ <- [teeKind e]
+                           , teePath e /= versionPath ]
+          case oids of
+            [oid] -> csBlob cs oid `shouldReturn` BlobText "\1087\1088\1080\1074\1077\1090"
+            _ -> expectationFailure ("expected one event blob, got " <> show oids)
 
-        -- An object that is not there is BlobRefused "no such object": git ran and said no. Not an
-        -- exception, not "", and not the answer for git having failed to run.
-        csBlob cs (Text.pack (replicate 40 'a')) >>= \case
-          BlobRefused m -> Text.unpack m `shouldContain` "bad file"
-          other -> expectationFailure ("expected BlobRefused, got " <> show other)
+          -- An object that is not there: git ran and said so. Not an exception,
+          -- not "", and not the answer for git having failed to run. Through
+          -- cat-file --batch that answer is the literal word "missing", which is
+          -- one line of a protocol rather than an exit code and a complaint.
+          csBlob cs (Text.pack (replicate 40 'a')) >>= \case
+            BlobRefused m -> Text.unpack m `shouldContain` "missing"
+            other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
     it "says it could not read a listing record rather than calling it a submodule" $ do
       -- Not reachable through git today, and that is the point: this is the
@@ -806,8 +808,7 @@ spec = do
       -- advice to fetch a pruned object and the name of an internal path the
       -- caller never typed.
       withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
-        let cs = gitCanonIn (Just dir)
-        csEntries cs "--upload-pack=evil" >>= \case
+        withGitCanonIn (Just dir) (\cs -> csEntries cs "--upload-pack=evil") >>= \case
           Left (RefUnresolved m) -> Text.unpack m `shouldContain` "not an object id"
           other -> expectationFailure
                      ("expected RefUnresolved, got " <> show (fmap (const ()) other))

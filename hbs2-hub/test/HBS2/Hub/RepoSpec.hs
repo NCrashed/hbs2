@@ -44,6 +44,7 @@ encPath = Text.encodeUtf8 . Text.pack
 inMemory :: [(FilePath, Text)] -> CanonSource IO
 inMemory files = CanonSource
   { csCommit  = pure (Right "deadbeef")
+  , csClose   = pure ()
     -- UTF-8 bytes, because that is the unit git reports and the unit the bounds
     -- are in. Text.length counts characters, so a fixture measured that way is
     -- measured in a different unit from production.
@@ -56,6 +57,15 @@ inMemory files = CanonSource
     utf8Len = BS.length . Text.encodeUtf8
     oidOf i = Text.pack (show i)
     byOid = [ (oidOf i, t) | (i,(_,t)) <- zip [0 :: Int ..] files ]
+
+-- A source with nothing to close: an in-memory fixture holds no process, unlike
+-- the git one, which keeps a cat-file --batch for the whole walk.
+inMem :: Applicative m
+      => m (Either CanonUnreadable Text)
+      -> (Text -> m (Either CanonUnreadable [TreeEntry]))
+      -> (Text -> m BlobResult)
+      -> CanonSource m
+inMem c e b = CanonSource c e b (pure ())
 
 -- Read a tree that is expected to read.
 readOk :: CanonSource IO -> RepoRef -> IO CanonState
@@ -132,7 +142,7 @@ spec = do
       -- until somebody asks for it: git's default refspec covers heads and tags
       -- only. Reporting an empty fold would tell a maintainer their tracker is
       -- empty when it is merely not here.
-      let noRef = CanonSource (pure (Left (NoCanonRef "/tmp/x/.git")))
+      let noRef = inMem (pure (Left (NoCanonRef "/tmp/x/.git")))
                     (const (pure (Right []))) (const (pure (BlobRefused "no such object")))
       readCanon noRef (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (NoCanonRef "/tmp/x/.git")
@@ -189,7 +199,7 @@ spec = do
       -- something that exists, and the path is what `hbs2-peer download` takes.
       let repo = fst owner
           p = B8.pack "threads/t/00000000000000000001-x"
-          listed = CanonSource (pure (Right "deadbeef"))
+          listed = inMem (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry p (Blob "oid" 10)])))
                      (const (pure (BlobRefused "no such object")))
       st <- readOk listed repo
@@ -201,7 +211,7 @@ spec = do
       -- object, a killed ls-tree. This used to answer an empty fold and a zero
       -- exit, which is the one answer indistinguishable from a tracker that has
       -- nothing in it.
-      let noTree = CanonSource (pure (Right "deadbeef"))
+      let noTree = inMem (pure (Right "deadbeef"))
                      (const (pure (Left (TreeUnreadable (ToolSaid "gone"))))) (const (pure (BlobRefused "no such object")))
       readCanon noTree (fst owner)
         >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable (ToolSaid "gone"))
@@ -242,7 +252,7 @@ spec = do
       -- under the limit is inside every per-file bound and is gigabytes of text.
       let repo = fst owner
           huge = B8.pack "threads/t/00000000000000000001-x"
-          src = CanonSource (pure (Right "deadbeef"))
+          src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [TreeEntry huge (Blob "oid" (maxEventBytes + 1))])))
                   (\_ -> do modifyIORef fetched succ
@@ -261,7 +271,7 @@ spec = do
       -- The version file was the last blob read blind: fetched by name, so its
       -- size was unknown until it was resident. A 200 MB one peaked at 658 MiB
       -- before parseMeta said it was not a version.
-      let big = CanonSource (pure (Right "deadbeef"))
+      let big = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [TreeEntry versionPath (Blob "oid" (maxEventBytes + 1))])))
                   (\_ -> modifyIORef fetched succ >> pure (BlobText renderMeta))
@@ -277,7 +287,7 @@ spec = do
       -- file", the tree was folded under this build's rules, and canon written
       -- under newer ones would have been folded in silence. The listing is what
       -- tells them apart.
-      let listed = CanonSource (pure (Right "deadbeef"))
+      let listed = inMem (pure (Right "deadbeef"))
                      (const (pure (Right [TreeEntry versionPath (Blob "oid" 13)])))
                      (const (pure (BlobRefused "no such object")))
       readCanon listed (fst owner) >>= \r ->
@@ -290,7 +300,7 @@ spec = do
       owner <- kp
       let ev n = TreeEntry (B8.pack ("threads/t/" <> show n))
                    (Blob (Text.pack (show n)) maxEventBytes)
-          src es = CanonSource (pure (Right "deadbeef"))
+          src es = inMem (pure (Right "deadbeef"))
                      (const (pure (Right es))) (const (pure (BlobText "x")))
           n = maxCanonBytes `div` maxEventBytes + 1
       readCanon (src (fmap ev [1..n])) (fst owner) >>= \r ->
@@ -313,7 +323,7 @@ spec = do
       -- a count over event files alone said it was empty.
       let junk n = TreeEntry (B8.pack ("junk/" <> show n)) (Blob "x" 1)
           n = maxCanonFiles + 1
-          src es = CanonSource (pure (Right "deadbeef"))
+          src es = inMem (pure (Right "deadbeef"))
                      (const (pure (Right es))) (const (pure (BlobText "x")))
       readCanon (src (fmap junk [1..n])) (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooMany n)
@@ -325,7 +335,7 @@ spec = do
       -- prove readCanon folds a Blob, and between those two the three other kinds
       -- were unmentioned in either file. A missing object was reported as a
       -- submodule for a whole round with both halves passing.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "v" 13)
                     , TreeEntry "threads/t/0001-gone" (BlobMissing "abc")
@@ -353,7 +363,7 @@ spec = do
       -- failing anywhere in that loop turned the answer into ReaderFailed, "nothing
       -- was learned about canon", when the version file had already answered.
       let newer = Text.pack "(hub-meta 99)\n"
-          src = CanonSource (pure (Right "deadbeef"))
+          src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     ( TreeEntry versionPath (Blob "v" 14)
                     : [ TreeEntry (B8.pack ("threads/t/0000" <> show i <> "-x"))
@@ -371,7 +381,7 @@ spec = do
       -- The gate only ever looked for NEWER, so (hub-meta 0) folded silently under
       -- this build's rules and the report was clean. Zero is not a version any
       -- build implements.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right [TreeEntry versionPath (Blob "v" 13)])))
                   (const (pure (BlobText "(hub-meta 0)\n")))
       readCanon src (fst owner) >>= \r ->
@@ -385,7 +395,7 @@ spec = do
       -- in somebody else's tree chose which of two signed events the fold saw, and
       -- the other was never read, never folded and never named.
       fetched <- newIORef ([] :: [Text])
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "v" 13)
                     , TreeEntry "threads/t/0001-x" (Blob "a" 4)
@@ -403,7 +413,7 @@ spec = do
       -- The other half: identical entries are one entry, and are still named,
       -- because git fsck calls a duplicate an error whatever it holds.
       fetched <- newIORef (0 :: Int)
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "v" 13)
                     , TreeEntry "threads/t/0001-x" (Blob "a" 4)
@@ -421,7 +431,7 @@ spec = do
       -- git fsck calls it duplicateEntries and a hand-built tree can carry it.
       -- Taking the head of the list let the ORDER of entries in somebody else's
       -- tree pick the rules canon is folded under, silently, exit 0.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "a" 13)
                     , TreeEntry versionPath (Blob "b" 13)
@@ -435,7 +445,7 @@ spec = do
       -- A bare prefix match folded threads/x as an event and then reported it as
       -- malformed, where it is really a path the layout does not have. The depth
       -- is what tells those apart, and both directions matter.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "v" 13)
                     , TreeEntry "threads/x" (Blob "a" 4)
@@ -464,7 +474,7 @@ spec = do
       -- A fork that fails under a pids limit, or on EMFILE, or git removed from
       -- PATH mid-audit. Reported as an unreadable FILE it exited 2, which is the
       -- code for an audit that ran and found something in somebody's canon.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right [TreeEntry "threads/t/0001-x" (Blob "o" 5)])))
                   (const (pure (BlobUnavailable "fork: Resource exhausted")))
       readCanon src (fst owner) >>= \r ->
@@ -472,7 +482,7 @@ spec = do
 
       -- And on the version file, where it used to exit 7 and tell whoever
       -- published canon to rewrite a file this reader never managed to look at.
-      let onVersion = CanonSource (pure (Right "deadbeef"))
+      let onVersion = inMem (pure (Right "deadbeef"))
                         (const (pure (Right [TreeEntry versionPath (Blob "v" 13)])))
                         (const (pure (BlobUnavailable "fork: Resource exhausted")))
       readCanon onVersion (fst owner) >>= \r ->
@@ -483,7 +493,7 @@ spec = do
       -- PEP-19 fixes the layout, so anything else is somebody's addition. A
       -- reader that looked only under threads/ and repo/ could not see it at all,
       -- which is the reader that lets a tree carry what it pretends not to see.
-      let src = CanonSource (pure (Right "deadbeef"))
+      let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [ TreeEntry versionPath (Blob "v" 13)
                     , TreeEntry "evil/plans" (Blob "e" 4)

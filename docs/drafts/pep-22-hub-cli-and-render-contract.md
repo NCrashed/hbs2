@@ -109,6 +109,7 @@ and a tree full of forged events were the same event.
 | 11   | the tree listing is past the reader's byte bound       |
 | 12   | the reader could not run git at all: a local failure   |
 | 13   | the `version` file is here and THIS CLONE cannot read it |
+| 14   | reading canon cost more than the reader will spend      |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 The last two lines of a clean run are normative, because a hook parses them:
@@ -123,7 +124,7 @@ the fold DECIDED rather than what it refused: a tree holding one valid version
 file and nothing else otherwise prints all zeroes and exits 0, which reads
 exactly like a healthy tracker.
 
-3 to 13 is "could not run", so a hook that only cares about the distinction tests
+3 to 14 is "could not run", so a hook that only cares about the distinction tests
 for that range. 141 is neither: it is what a shell reports for a program a pipe
 killed, and it used to be 1, which this table gives to usage errors. It is also
 the one code that prints nothing: by the time it happens there is nowhere left to
@@ -139,6 +140,18 @@ names both. And 12 is the one refusal that is not about canon at all: no process
 slots, no file descriptors, git gone from `PATH` mid-audit. It used to be reported
 as an unreadable file, which exits 2, telling a hook that a local resource limit
 was a finding about somebody's repository.
+
+14 is a bound on the WALK, which the three listing bounds cannot give: a tree of
+45000 paths whose entries share one subtree is five objects and 172 KB on disk,
+and its listing is 3.6 MB against a 102 MB bound and 45001 records against
+200000. Every listing bound passes, and then the reader runs one git per PATH.
+Measured at 82 seconds, and about six minutes at the file bound. It matters
+because this verb is meant for a hook, where that is a push blocked for minutes
+by a repository that fits in an email.
+
+The budget is a stopgap and is documented as one: the real fix is to read blobs
+in batch (one `cat-file --batch` for the whole walk instead of one process per
+path), after which a strict budget costs a legitimate large canon nothing.
 
 A missing `version` file exits 2 rather than 3-and-up: PEP-19 requires the file,
 so its absence is a finding, but the tree still folds, under the OLDEST rules this

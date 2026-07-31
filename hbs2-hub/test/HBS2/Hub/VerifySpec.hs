@@ -56,6 +56,7 @@ render = renderStrict . layoutPretty (LayoutOptions Unbounded)
 byPath :: [(ByteString, Text)] -> CanonSource IO
 byPath files = CanonSource
   { csCommit  = pure (Right "deadbeef")
+  , csClose   = pure ()
   , csEntries = const (pure (Right
       [ TreeEntry p (Blob (oidOf i) (BS.length (TextE.encodeUtf8 t)))
       | (i,(p,t)) <- zip [0 :: Int ..] files ]))
@@ -94,6 +95,7 @@ everyRefusal =
   , (CanonTooMany (maxCanonFiles + 1),   10)
   , (CanonListingTooBig maxListingBytes, 11)
   , (ReaderFailed "fork: Resource exhausted", 12)
+  , (CanonTooSlow "passed 180s", 14)
   ]
 
 spec :: Spec
