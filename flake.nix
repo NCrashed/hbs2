@@ -286,8 +286,8 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         # and .#static) keeps them relative and was fine, which is why the two
         # smoke tests added last round did not see it.
         postBuild = ''
-          ln -sf hbs2-hub /bin/hub
-          ln -sf hbs2-git3 /bin/git-hbs2
+          ln -sf hbs2-hub $out/bin/hub
+          ln -sf hbs2-git3 $out/bin/git-hbs2
         '';
       };
 

@@ -35,7 +35,11 @@ import Data.List qualified as List
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Maybe (isJust)
+import Control.Concurrent qualified as Conc
 import System.Environment (getEnvironment)
+import System.Posix.Signals (signalProcess,sigKILL)
+import System.Process (terminateProcess)
 import System.Process.Typed
 
 -- | What this reader will not go past.
@@ -51,10 +55,15 @@ data GitBounds = GitBounds
     -- orders, because it is kept until the report is printed and there can be
     -- 'maxCanonFiles' of them: 64 KiB apiece would be twelve gigabytes.
   , gbBlobMessage  :: Int
-    -- | How long any single git call may take. Not the listing, which streams
-    -- under its own byte bound; the four small ones, which have no reason to be
-    -- slow and every reason not to hang.
+    -- | How long a git call may take. For the four small ones it is the whole
+    -- call; for the listing, which may legitimately run as long as an enormous
+    -- tree takes, it is how long the stream may be SILENT. Two meanings, and one
+    -- earlier haddock claimed the listing had no bound at all.
   , gbCallSeconds  :: Int
+    -- | How long each step of tearing a process down may take: closing the pipes,
+    -- then SIGTERM, then SIGKILL. Short, because by the time it is used something
+    -- has already gone wrong and the caller is owed an answer.
+  , gbTeardownSeconds :: Int
   }
 
 gitBounds :: GitBounds
@@ -64,6 +73,7 @@ gitBounds = GitBounds
   , gbToolMessage  = 64 * 1024
   , gbBlobMessage  = 512
   , gbCallSeconds  = 60
+  , gbTeardownSeconds = 2
   }
 
 -- | Canon from the repository the process is standing in.
@@ -80,7 +90,7 @@ gitCanonIn :: MonadUnliftIO m => Maybe FilePath -> CanonSource m
 gitCanonIn = gitCanonWith gitBounds
 
 -- | As 'gitCanonIn', with the bounds named. For the test suite.
-gitCanonWith :: MonadUnliftIO m => GitBounds -> Maybe FilePath -> CanonSource m
+gitCanonWith :: forall m . MonadUnliftIO m => GitBounds -> Maybe FilePath -> CanonSource m
 gitCanonWith bounds cwd = CanonSource
   { csCommit = do
       -- Three questions, one call each, because each answer calls for something
@@ -159,11 +169,16 @@ gitCanonWith bounds cwd = CanonSource
           -- is neither the bound nor the size of the tree, and printing it said
           -- "over 102404096 bytes" where the bound is 102400000.
           Right (_, Right Nothing) -> Left (CanonListingTooBig (gbListingBytes bounds))
-          -- Silence, which is local: a stalled read tells nothing about the tree.
-          Right (_, Left ()) ->
-            Left (ReaderFailed ( "git ls-tree produced nothing for "
-                                   <> Text.pack (show (gbCallSeconds bounds))
-                                   <> "s and was given up on" ))
+          -- A stall. NOT ReaderFailed: that one says git could not be run and is
+          -- documented as the one worth retrying, and here git ran, is running,
+          -- and has simply stopped saying anything -- a retry buys another minute
+          -- and another stuck child. The message says what was seen, since the
+          -- bound is per chunk and the stream may have delivered plenty first.
+          Right (_, Left seen) ->
+            Left (TreeUnreadable ( "git ls-tree sent nothing for "
+                                     <> Text.pack (show (gbCallSeconds bounds))
+                                     <> "s after " <> Text.pack (show seen)
+                                     <> " bytes, and was given up on" ))
           Right (ExitSuccess, Right (Just out))
             -- Counted on the RAW BYTES, before one TreeEntry exists. Records are
             -- NUL-terminated, so this is a single memchr scan. Counting the parsed
@@ -186,23 +201,22 @@ gitCanonWith bounds cwd = CanonSource
           Left e -> Left (ReaderFailed (msg e))
 
   , csBlob = \oid -> if not (isObjectId oid)
-      -- An object id is hex, and this is where that gets checked, because the
-      -- whole argument for fetching blobs by id rather than by path is that an id
-      -- cannot carry anything an exec cares about. Nothing enforced it: an id
-      -- beginning with a dash would have been read by cat-file as an option, and
-      -- a non-ASCII one throws at exec under the C locale, arriving as
-      -- ReaderFailed and ending the audit over one entry in a listing.
-      then pure (BlobRefused "not an object id")
+      -- Belt and braces: the listing parser already turns a non-hex id into
+      -- Unparsed, so nothing should reach here. If something does, git is not
+      -- called (an id beginning with a dash is an option to cat-file, and a
+      -- non-ASCII one throws at exec under the C locale), and the answer says
+      -- what is true: this reader could not ask.
+      then pure (BlobUnavailable "not an object id")
       else
       raw ["cat-file", "blob", Text.unpack oid] <&> \case
-        Right (ExitSuccess, out) -> BlobText (decode out)
+        Right (ExitSuccess, out) -> BlobText (decodeS out)
         -- git ran and would not give it, and its words are kept: a pruned object,
         -- a corrupt pack and EACCES on an object file are all exit 128 here, and
         -- calling them all "gone" put "fetch, or unshallow" under a permission
         -- error. Distinct from git not having run, below, which says nothing about
         -- canon at all: read as one answer, a fork that failed on EAGAIN became an
         -- unreadable event file and exit 2, the code for an audit that ran.
-        Right (_, e) -> BlobRefused (Text.take (gbBlobMessage bounds) (msg (decode e)))
+        Right (_, e) -> BlobRefused (Text.take (gbBlobMessage bounds) (msg (decodeS e)))
         Left e -> BlobUnavailable (msg e)
   }
   where
@@ -265,11 +279,18 @@ gitCanonWith bounds cwd = CanonSource
         -- documented fetch refspec, but a mirror clone carries refs/replace.
       , ("GIT_NO_REPLACE_OBJECTS", "1")
         -- No prompting, in three places, because git tries them in order and only
-        -- the last is a terminal: core.askPass, then GIT_ASKPASS (which overrides
-        -- it), then /dev/tty, which `setStdin closed` does not cover. A hook that
-        -- stops for a password nobody is there to type is a hung hook.
-      , ("GIT_ASKPASS", "/bin/false")
-      , ("SSH_ASKPASS", "/bin/false")
+        -- the last is a terminal: GIT_ASKPASS, then core.askPass, then
+        -- SSH_ASKPASS, then /dev/tty, which `setStdin closed` does not cover. A
+        -- hook that stops for a password nobody is there to type is a hung hook.
+        --
+        -- EMPTY, not a path to a program that fails. git's check is `askpass &&
+        -- *askpass`, so an empty value means "no askpass" and skips the rest of
+        -- the chain, while a path means "run this": /bin/false was the first
+        -- attempt and does not exist on NixOS, so git would have complained about
+        -- a missing helper and that complaint would have been printed to the user
+        -- as what git said about their repository.
+      , ("GIT_ASKPASS", "")
+      , ("SSH_ASKPASS", "")
       , ("GIT_TERMINAL_PROMPT", "0")
       ]
 
@@ -309,21 +330,70 @@ gitCanonWith bounds cwd = CanonSource
     -- A tree at the byte bound made of invalid UTF-8 is three times that in
     -- memory. The comment here used to claim the tree-wide bound covered it,
     -- which it cannot, being made of the same numbers as the per-file one.
-    decode = decodeS . LBS.toStrict
     decodeS = Text.decodeUtf8Lenient
 
     -- A tool's complaint as a message. Its trailing newline is not part of what
     -- it said, and it survived into a report where every newline is escaped, so
     -- every one of these lines ended in a literal \x0a. Only the end: the interior
-    -- newlines are kept, because the second line of a dubious-ownership complaint
-    -- is the command that fixes it.
+    -- newlines are kept, because the LAST line of a dubious-ownership complaint is
+    -- the command that fixes it, three lines below the complaint itself.
     msg = Text.stripEnd
 
     -- Decoded output, for the calls whose result is text.
-    git args = raw args <&> fmap (fmap decode)
+    git args = raw args <&> fmap (fmap decodeS)
 
     -- Records in a raw listing: one NUL each.
     recs = BS.count 0
+
+    -- A git process, torn down WITHIN A BOUND on the way out.
+    --
+    -- Not 'withProcessTerm', whose cleanup is stopProcess: SIGTERM and then an
+    -- unbounded waitForProcess. Everything above this line was made to give up in
+    -- bounded time and then handed the process to a cleanup that does not, so a
+    -- git ignoring SIGTERM (or sitting in uninterruptible sleep on a dead mount)
+    -- took the audit with it after every bound had already fired. Measured on a
+    -- shim that ignores SIGTERM: the read returned at 2002 ms and the call never
+    -- did.
+    --
+    -- The escalation is the usual one and each step is bounded: close the pipes so
+    -- the child sees EOF and EPIPE, TERM, KILL, and then give up on it. Giving up
+    -- is not tidy and it is the only honest end: a process in D state does not
+    -- answer SIGKILL either, and there is nothing further anybody can do to it.
+    withGit :: forall a . ProcessConfig () Handle Handle
+            -> (Process () Handle Handle -> m a) -> m a
+    withGit cfg = bracket (startProcess cfg) teardown
+
+    teardown :: Process () Handle Handle -> m ()
+    teardown p = do
+      -- Our ends of the pipes, first: a child blocked writing into a pipe nobody
+      -- reads dies of EPIPE without needing a signal at all.
+      for_ [getStdout p, getStderr p] $ \h ->
+        tryAny (liftIO (hClose h))
+      done <- settle
+      unless done do
+        tryAny (liftIO (terminateProcess (unsafeProcessHandle p)))
+        harder <- settle
+        unless harder do
+          pid <- liftIO (getPid p)
+          for_ pid $ \pid' -> tryAny (liftIO (signalProcess sigKILL pid'))
+          void settle
+
+      where
+        -- Wait for the process to be gone, or give up. POLLED, and that is the
+        -- whole point: this runs as a bracket's RELEASE action, and unliftio runs
+        -- release under uninterruptibleMask, where the async exception `timeout`
+        -- throws is deferred and does nothing at all. Measured: a one-second
+        -- timeout around waitExitCode in here returned after thirty, when the
+        -- child happened to finish on its own, so a git ignoring SIGTERM took the
+        -- audit with it exactly as it had before the bound was written.
+        -- getExitCode does not block, so a poll gets out on its own.
+        settle = poll (max 1 (gbTeardownSeconds bounds * 1000000 `div` step))
+        step = 20000
+        poll :: Int -> m Bool
+        poll 0 = isJust <$> getExitCode p
+        poll n = getExitCode p >>= \case
+                   Just _  -> pure True
+                   Nothing -> liftIO (Conc.threadDelay step) >> poll (n - 1)
 
     -- The listing, read to 'gbListingBytes' and no further: @Nothing@ is "there
     -- was more than that", and the process is dead by the time it is returned.
@@ -358,11 +428,11 @@ gitCanonWith bounds cwd = CanonSource
       -- list, over a listing this reader had already read enough of to refuse.
       answer <- newIORef Nothing
       r <- tryAny
-        ( withProcessTerm piped $ \p ->
+        ( withGit piped $ \p ->
             withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA -> do
               out <- upTo (gbListingBytes bounds) (getStdout p)
               a <- case out of
-                     Left () -> pure (ExitFailure 1, Left ())
+                     Left seen -> pure (ExitFailure 1, Left seen)
                      Right Nothing -> pure (ExitFailure 1, Right Nothing)
                      Right (Just bs) -> do
                        code <- waitExitCode p
@@ -386,7 +456,8 @@ gitCanonWith bounds cwd = CanonSource
     -- Read a handle to a bound. Stops at the first chunk that crosses it and does
     -- not read the rest, which is the whole point.
     --
-    --  ()@ is the IDLE bound: no bytes for gbCallSeconds. A total time limit
+    -- @Left n@ is the IDLE bound: no bytes for gbCallSeconds, with n the count so
+    -- far. A total time limit
     -- is the wrong shape here, because a legitimately enormous tree takes as long
     -- as it takes and refusing it on a clock would be a bound on the machine
     -- rather than on the tree; what is never legitimate is silence. Reached with
@@ -397,7 +468,7 @@ gitCanonWith bounds cwd = CanonSource
         go seen chunks = do
           c <- timeout (gbCallSeconds bounds * 1000000) (liftIO (BS.hGetSome h 65536))
           case c of
-            Nothing -> pure (Left ())
+            Nothing -> pure (Left seen)
             Just c'
               | BS.null c' -> pure (Right (Just (BS.concat (List.reverse chunks))))
               | otherwise -> do
@@ -434,21 +505,32 @@ gitCanonWith bounds cwd = CanonSource
     -- one blob read, all local, all off the network by construction.
     raw args = do
       cfg <- inDir (proc "git" args)
-      -- ABANDONED, not cancelled, when the bound is reached. readProcess tears the
-      -- process down in its own cleanup, and that teardown WAITS; a git stuck in
-      -- uninterruptible sleep on a dead mount does not answer a signal, not even
-      -- SIGKILL, so cancelling here would block in the cleanup and the bound would
-      -- be no bound at all. The read is left running on its own thread and this
-      -- returns; the thread and its child go when the kernel lets them.
+      let piped = setStdin closed (setStdout createPipe (setStderr createPipe cfg))
+      -- Both pipes read at once, for the reason 'listing' spells out, and the
+      -- process torn down within a bound whatever happens, which is 'withGit'.
       --
-      -- tryAny and not try @SomeException: the latter also caught UserInterrupt
-      -- and AsyncCancelled, so Ctrl-C during an audit came back as a file that
-      -- will not read and the audit went on to report it. (In this prelude `try`
-      -- IS UnliftIO's; the name is spelled out because the distinction is the
-      -- point and the two are not the same function.)
+      -- An earlier version left the read running on an abandoned thread when the
+      -- bound was reached, on the theory that waiting for a child in
+      -- uninterruptible sleep is waiting for the disk. The theory is right and the
+      -- code was wrong: readProcess is a bracket, and a thread abandoned inside it
+      -- never leaves it, so the cleanup never ran at all. No SIGTERM, no closed
+      -- handles: two descriptors and one live child per timeout, and at a limit of
+      -- 64 the audit died of "no file descriptors" and blamed the machine for its
+      -- own leak. A bounded teardown is the answer, not the absence of one.
+      -- tryAny, and in THIS prelude that is UnliftIO's: its try and tryAny both
+      -- rethrow asynchronous exceptions, so Ctrl-C still ends the audit instead of
+      -- arriving as a file that will not read. An earlier comment here drew a
+      -- distinction between the two that does not exist (tryAny is try at
+      -- SomeException); the name is kept for what it says, not for what it fixes.
       r <- tryAny do
-             a <- async (readProcess (setStdin closed cfg))
-             timeout (gbCallSeconds bounds * 1000000) (wait a)
+             withGit piped $ \p -> do
+               out <- async (drain (gbToolMessage bounds * 16) (getStdout p))
+               err <- async (drain (gbToolMessage bounds) (getStderr p))
+               timeout (gbCallSeconds bounds * 1000000) do
+                 code <- waitExitCode p
+                 o <- wait out
+                 e <- wait err
+                 pure (code, if code == ExitSuccess then o else e)
       pure case r of
         Left e -> Left (Text.pack (show e))
         Right Nothing ->
@@ -456,8 +538,7 @@ gitCanonWith bounds cwd = CanonSource
                    <> " did not finish in "
                    <> Text.pack (show (gbCallSeconds bounds))
                    <> "s and was given up on" )
-        Right (Just (code, out, errOut)) ->
-          Right (code, if code == ExitSuccess then out else errOut)
+        Right (Just x) -> Right x
 
 -- | Is this hex of a plausible object-id length? sha1 is 40, sha256 is 64, and
 -- git accepts an unambiguous prefix, so the low end is where ambiguity starts
@@ -495,11 +576,20 @@ parseListing = fmap entry . filter (not . B8.null) . B8.split '\0'
     kindOf meta = case B8.words meta of
       [_, ty, oid, sz]
         | ty /= "blob" -> NotABlob
-        | Just n <- readMay (B8.unpack sz) -> Blob (Text.decodeUtf8Lenient oid) n
-        -- A blob with no number where the size goes. BAD today; anything that is
-        -- not a number lands here, which is the safe side: it says fetch, and a
-        -- fetch that finds nothing missing costs nothing.
-        | otherwise -> BlobMissing (Text.decodeUtf8Lenient oid)
+        -- An id that is not hex is a listing this reader cannot use, not a blob it
+        -- could ask for: refusing it later, at the fetch, reported "the source ran
+        -- and would not give it" about a source that was never asked.
+        | not (isObjectId (Text.decodeUtf8Lenient oid)) -> Unparsed
+        -- A size that is not a NON-NEGATIVE number is the same kind of nonsense.
+        -- readMay takes a leading minus quite happily, and a negative size sails
+        -- under every  > maxEventBytes@ bound there is.
+        | Just n <- readMay (B8.unpack sz), n >= 0 -> Blob (Text.decodeUtf8Lenient oid) n
+        -- git's exact spelling for a blob it could not size, and nothing else. A
+        -- negative size is not a size and an unknown word is not BAD: both are the
+        -- format having shifted, which is Unparsed and is loud, rather than "the
+        -- object is missing, go and fetch", which is quiet and would be a guess.
+        | sz == "BAD" -> BlobMissing (Text.decodeUtf8Lenient oid)
+        | otherwise -> Unparsed
       -- A record with the right shape but the wrong number of words is a format
       -- shift, and is reported as one rather than as a tree full of submodules.
       _ -> Unparsed

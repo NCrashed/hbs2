@@ -28,88 +28,50 @@
       - **`hbs2-hub verify <repo-key>`.** Reads canon out of
         `refs/hbs2/meta`, re-runs the fold over it, and reports every
         event the rules did not admit, every anomaly in the ones they
-        did, every file it could not read at all, and a missing
-        `version` file, which PEP-19 requires. Exit 2 when any of those
-        is non-empty, so it works in a hook; 3 to 12 when the audit
-        could not run at all, one code per reason and every one of them
-        with advice on stderr, because an unfetched ref, a directory
-        that is not a repository, a ref that does not resolve, an
-        unreadable `version` file, canon folded under newer rules, a
-        tree that will not list, a tree past any of the reader's three
-        bounds, and a local failure to run git at all each call for
-        something different. The last of those is the one that is not
-        about canon: a fork that fails under a process limit used to be
-        reported as an unreadable file, which is a finding about
-        somebody else's repository. The exit codes are a table in
-        PEP-22 and are a contract: they may be added to, not
-        reassigned.
+        did, every file it could not read, every file with no readable
+        version clause, and a missing `version` file, which PEP-19
+        requires. Exit 2 when it found any of those, so it works in a
+        hook; 3 to 13 when the audit could not run, one code per reason
+        and each with advice on stderr; 141 for a closed pipe. The codes
+        are a table in PEP-22 and are a contract: they may be added to,
+        not reassigned.
 
-        Reaches nothing but the local repository, and does not probe for
-        a peer, so a wedged daemon cannot hang the hook; that also
-        holds for a script arriving on stdin, which is how a hook
-        usually invokes one.
+        Read-only, peerless and OFFLINE. It reaches nothing but the
+        local repository and does not probe for a peer, so a wedged
+        daemon cannot hang a hook, and it opens no network connection:
+        `ls-tree -l` would otherwise drive a lazy fetch per missing blob
+        in a partial clone, through the audited repository's own remote
+        urls, `core.sshCommand` and `credential.helper`. The reader
+        sets `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS` (so canon
+        cannot be read out of a tree `refs/replace` substituted) and
+        three variables that disable password prompting, and it REMOVES
+        each of them from the inherited environment before setting it,
+        since `getenv` returns the first of two bindings.
+
+        Bounded in every direction: the listing's bytes as they arrive,
+        the file count before any entry is built, the event bytes and
+        each event's size from the listing, how much of a tool's
+        complaint is kept, how long a call may take, and how long its
+        teardown may take (close the pipes, SIGTERM, SIGKILL, give up).
 
         Everything a stranger chose that reaches a terminal is escaped
-        injectively, as `\u{...}` for a character and `\x{...}` for a
-        raw byte: two paths differing in one invalid byte, or a valid
-        U+0085 against the single byte 0x85, print as two different
-        lines. Reporting a file is telling somebody which file to open.
-        What is escaped is a Unicode CATEGORY and not a list somebody
-        wrote out: category Cf has over 160 members and the list had
-        twelve, so a zero-width space in a path printed as nothing at
-        all and two tree entries came out as one line. A path is also
-        quoted, because the report prints it before a colon and a
-        reason, and a path may contain ": ".
+        injectively: `\u{...}` for a character, `\x{...}` for a raw
+        byte, so two paths differing in one invalid byte print as two
+        lines. What is escaped is chosen by Unicode category, not by a
+        list: the control characters, the format and separator classes,
+        surrogates, private use, non-ASCII spaces, and the
+        default-ignorables that no category covers. A path is quoted,
+        because the report prints it before a colon and a reason and a
+        path may contain ": ". Text out is UTF-8 whatever the locale
+        says, and so is argv; an argument that is not valid UTF-8 is
+        refused before anything is signed, and stdin is strict, so a
+        letter body in another encoding stops the program rather than
+        being signed full of replacement characters.
 
-        Text out is UTF-8 whatever the locale says, and so is argv,
-        because canon does not have a locale: under `LC_ALL=C` an audit
-        died halfway through printing a Cyrillic path, and a title given
-        on the command line would have been signed into an append-only
-        event as replacement characters. An argument that is not valid
-        UTF-8 is now refused before anything is signed rather than
-        carried as surrogates, which `Data.Text` silently collapses.
-        Input is UTF-8 and NOT lenient: a letter body arriving in some
-        other encoding stops the program instead of being signed full of
-        replacement characters.
-
-        A blob whose object this clone does not have is reported as
-        that. Read as "not a blob" it came out as a submodule in canon,
-        which blames the owner for what is really a blobless or partial
-        clone, and the fix (fetch) went unsaid.
-
-        No network, and this had to be arranged: `ls-tree -l` needs the
-        size of every entry, so in a blobless or partial clone it drives
-        a lazy fetch per missing blob, through the audited repository's
-        own remote urls, `core.sshCommand` and `credential.helper`. The
-        flag that is there so a bound can refuse a blob without fetching
-        it was fetching everything, before any bound could speak. The
-        reader sets `GIT_NO_LAZY_FETCH=1`, so the same listing reports a
-        missing object as missing, and every bound is a bound on what
-        reaches the disk. Every variable it sets is REMOVED from the
-        inherited environment first: with two bindings of one name,
-        `getenv` returns the first, so a caller with `GIT_NO_LAZY_FETCH=0`
-        already set got the old behaviour back in full.
-
-        It also sets `GIT_NO_REPLACE_OBJECTS=1`. `refs/replace` rewrites
-        what a commit's tree is, so canon was read out of a substituted
-        tree while the report printed the honest commit id; a mirror
-        clone carries those refs. And no prompting: `GIT_ASKPASS`,
-        `SSH_ASKPASS` and `GIT_TERMINAL_PROMPT` in that order, because
-        git tries them in that order and only the last is a terminal.
-
-        Every git call is bounded, since waiting for EOF on a pipe is
-        waiting for the last holder of the fd and that need not be git.
-        The four small ones have a total bound; the listing, which may
-        legitimately take as long as a huge tree takes, has an IDLE
-        one: what is never legitimate is silence. Reaching either
-        abandons the read rather than waiting for the child, because a
-        process in uninterruptible sleep does not answer SIGKILL either,
-        and waiting for it would make the bound no bound at all.
-
-        A path the tree lists twice is named rather than resolved by
-        order; on `version` it is a refusal, since the first entry
-        winning let the order of entries in somebody else's tree choose
-        the rules canon is folded under.
+        A path listed twice is named; if the two entries differ, neither
+        is read, because choosing between them would let the order of
+        entries in somebody else's tree decide which signed event the
+        fold sees. On `version` it is a refusal.
 
         The repository key is an argument: the owner key is the root of
         the trust chain, so canon that named its own owner would be
@@ -122,8 +84,7 @@
         git fetch <remote> '+refs/hbs2/meta:refs/hbs2/meta'
         ```
 
-        Requires `git` on PATH, the only non-hbs2 program any of this
-        needs.
+        Needs `git` on PATH, as `hbs2-git3` and `git-remote-hbs23` do.
       - **Canon (PEP-19).** One shared signed content record for both
         trust tiers, wrapped in two independent boxes: an author box
         (who said it, kept verbatim from the contributor's letter) and a

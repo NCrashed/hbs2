@@ -38,6 +38,7 @@ import HBS2.CLI.Run.Internal
 import Data.List qualified as List
 import Data.ByteString (ByteString)
 import System.Exit (exitWith,ExitCode(..))
+import System.IO.Error (isResourceVanishedError)
 
 verifyEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
@@ -78,9 +79,18 @@ refused u = do
 -- readable here" and neither means the publisher did anything wrong.
 notHere :: FileProblem -> Bool
 notHere = \case
-  FileObjectMissing -> True
-  FileUnreadable _  -> True
-  _                 -> False
+  FileObjectMissing   -> True
+  FileUnreadable _    -> True
+  -- Total, with no wildcard, for the reason the module header gives: a new
+  -- FileProblem falling into a default here would exit 7 and tell whoever
+  -- published canon to rewrite a file that is fine. FileListingUnparsed already
+  -- did, and it is documented as being about this reader, not about the tree.
+  FileMalformed _     -> False
+  FileTooLarge _      -> False
+  FileNotABlob        -> False
+  FileListingUnparsed -> False
+  FileUnexpected      -> False
+  FileDuplicated      -> False
 
 -- | What a refusal says: the reason, and what to do about it.
 refusalDoc :: CanonUnreadable -> Doc ann
@@ -130,9 +140,12 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
       -- the file. That is the ordinary state after clone --filter=blob:none.
       VersionUnreadable p
         | notHere p -> line <> "  " <> pathDoc versionPath
-                         <> " is listed and this CLONE cannot read it. Fetch, or"
-                         <> " unshallow." <> line
-                         <> "  Nothing is known to be wrong with canon."
+                         <> " is listed and this clone did not read it. Fetching"
+                         <> " may be the answer" <> line
+                         <> "  (a partial or shallow clone); so may git fsck, if"
+                         <> " the object is here and broken." <> line
+                         <> "  Nothing is known to be wrong with what was"
+                         <> " published."
         | otherwise -> line <> "  " <> pathDoc versionPath
                          <> " governs the admission rules, so this reader"
                          <> " will not guess" <> line
@@ -177,14 +190,25 @@ codeOf = \case
   TreeUnreadable{}     -> 9
   CanonTooMany{}       -> 10
   CanonListingTooBig{} -> 11
-  -- Not a number about canon at all, and the highest on purpose: a script that
-  -- retries on it is retrying something local, which is the only one of these
-  -- worth retrying.
+  -- Not a number about canon at all: a script that retries on it is retrying
+  -- something local, which is the only one of these worth retrying. (It is no
+  -- longer the highest, 13 having been added after it; the numbers are a
+  -- contract, so they are appended to and not renumbered.)
   ReaderFailed{}       -> 12
 
 report :: CanonState -> IO ()
 report st = do
-  for_ (reportDoc st) print
+  -- A closed pipe is not a usage error, and 1 is what usage errors exit with:
+  -- `hub verify | head -1` on a report past the buffer gave 1, which PEP-22
+  -- assigns to a bad argument. 141 is 128 plus SIGPIPE, what a shell reports for
+  -- a program a pipe killed.
+  --
+  -- Scoped to the printing of the report and nothing else. Wrapped around the
+  -- whole dispatcher it also caught a usage error whose stderr had been closed,
+  -- turning a documented 1 into a silent 141.
+  handleJust (\e -> if isResourceVanishedError e then Just () else Nothing)
+             (\_ -> exitWith (ExitFailure 141))
+             (for_ (reportDoc st) print)
   -- Non-zero when there is anything to act on, so this is usable in a hook.
   case reportCode st of
     0 -> pure ()
@@ -230,7 +254,11 @@ reportDoc st =
   -- "no READABLE file version": the clause may be absent, unreadable or listed
   -- twice, and the parser answers Nothing to all three, so the line said the one
   -- of them that is not always true.
-  <> [ "no readable file version" <+> pathDoc p | p <- noFileVersion st ]
+  -- "no single readable": absent, malformed and listed twice all arrive here as
+  -- Nothing, and the line used to name only the first of the three. A maintainer
+  -- who opened the file, saw a perfectly good clause and stopped believing the
+  -- audit was reading a file with two of them.
+  <> [ "no single readable file version" <+> pathDoc p | p <- noFileVersion st ]
 
   <> fmap pretty dropped
   <> fmap pretty anomalies

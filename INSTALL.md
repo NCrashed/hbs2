@@ -138,9 +138,10 @@ pinned tag in production; `latest` follows the most recent release.
 
 The path with the broadest reach. Does not require Nix.
 
-As with every other option, `git` has to be on PATH at RUN time for
-`hbs2-hub`, `hbs2-git3` and `git-remote-hbs23`; the build needs it
-too, to clone this repository.
+`git` has to be on PATH at RUN time for `hbs2-hub`, `hbs2-git3` and
+`git-remote-hbs23`, and the build needs it too, to clone this
+repository. (Option 3 is the exception: the Docker image carries its
+own `gitMinimal`.)
 
 ### System libraries
 

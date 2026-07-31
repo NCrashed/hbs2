@@ -143,6 +143,39 @@ spec = do
       -- for what breaks a line, not a transliteration.
       safeText "\1090\1077\1084\1072" `shouldBe` "\1090\1077\1084\1072"
 
+    it "escapes what is invisible, by category and not by a list" $ do
+      -- A list of characters somebody thought of is a list somebody will get
+      -- wrong twice: it held twelve, and it was Cf (over 160 members) and then Zs
+      -- that got through. Every character below is one a reader cannot see, in a
+      -- DIFFERENT category, so a return to enumerating them fails here.
+      for_ [ ('\x200B', "Cf zero width space")
+           , ('\x00A0', "Zs no-break space")
+           , ('\x2028', "Zl line separator")
+           , ('\x3164', "Lo hangul filler, default-ignorable")
+           , ('\xFE00', "Mn variation selector, default-ignorable")
+           , ('\x034F', "Mn combining grapheme joiner")
+           , ('\xE0041', "Cf tag latin A, invisible ASCII in a path")
+           ] $ \(c, what) ->
+        (what, safeText (Text.pack ['a', c, 'b'])) `shouldSatisfy`
+          \(_, out) -> out /= Text.pack ['a', c, 'b']
+
+      -- And the ordinary space is NOT escaped: it is the one character in Zs a
+      -- reader recognises, and escaping it would wreck every title in the report.
+      safeText "a b" `shouldBe` "a b"
+
+      -- Nor is anything ordinary, including scripts nobody on this project reads.
+      safeText "\1090\1077\1084\1072 \20320\22909" `shouldBe` "\1090\1077\1084\1072 \20320\22909"
+
+    it "keeps a tab in a quoted tool block and escapes it in a field" $ do
+      -- git indents the safe.directory command it offers with a tab. Escaped, the
+      -- command arrives as \u{09}git config --global ... and does not paste. In a
+      -- block the line structure is already decided, so a tab cannot forge
+      -- anything; in a one-line field it can, and there it is still escaped.
+      safeWith (== '\t') "a\tb" `shouldBe` "a\tb"
+      safeText "a\tb" `shouldBe` "a\\u{09}b"
+      -- The exemption is that character and no other.
+      safeWith (== '\t') "a\nb" `shouldBe` "a\\u{0a}b"
+
     it "keeps a character apart from a raw byte that hexes the same" $ do
       -- The third pair, and the one an escape scheme with a single sigil cannot
       -- separate at all: U+0085 is a control character, so the character branch
@@ -265,9 +298,18 @@ spec = do
       -- texts, including two identical ones: swapping the advice of any two
       -- constructors passed. What a reader gets told is the whole product of a
       -- refusal, and there are twelve of them.
-      let said = [ (codeOf u, render (refusalDoc u)) | (u, _) <- everyRefusal ]
-      for_ [ (x, y) | x <- said, y <- said, fst x < fst y ] $ \((_, a), (_, b)) ->
-        a `shouldNotBe` b
+      -- The ADVICE, not the whole doc: the first line is `hub: <pretty u>`, which
+      -- differs per constructor for free, so comparing whole docs passed while
+      -- three refusals gave word-for-word identical advice.
+      let advice u = Text.unlines (drop 1 (Text.lines (render (refusalDoc u))))
+          said = [ (codeOf u, advice u) | (u, _) <- everyRefusal ]
+          -- The three bounds are allowed to share: compaction really is the one
+          -- answer to all three, and pretending otherwise would be padding.
+          bounds' = [8, 10, 11]
+      for_ [ (x, y) | x <- said, y <- said, fst x < fst y
+                    , not (fst x `elem` bounds' && fst y `elem` bounds') ] $
+        \((ca, a), (cb, b)) ->
+          (ca, cb, a) `shouldSatisfy` \_ -> a /= b
 
     it "exits 2 for a fold that dropped something, and prints the drop" $ do
       owner <- kp
@@ -297,6 +339,48 @@ spec = do
       -- The summary counts it, which it did not: three of the five findings were
       -- printed and two were left out, so a hook saw zeroes beside a non-zero code.
       last ls `shouldSatisfy` Text.isInfixOf "dropped 1"
+
+    it "prints an anomaly, which is admitted canon nobody should have written" $ do
+      owner <- kp
+      alice <- kp
+      -- The other half of what the verb is for, and the half nothing rendered: an
+      -- anomaly is fold-LEGAL, so it cannot be a drop, and PEP-19 says to show it
+      -- rather than hide it. An unnormalised attribute value is one: the fold
+      -- cannot fix it (the author box is signed) and must not drop it.
+      let repo = fst owner
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                 (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
+          thr = eventId ev
+          -- Owner-signed, so it is admitted; labels not in canonical form, so it
+          -- is an anomaly.
+          bad = mkEvent owner owner (ASet thr "labels" "b,a,b" 2000)
+                  (\eid -> CanonContent repo eid 2 Nothing Nothing Nothing 2 Nothing)
+      st <- readCanon (byPath
+              [ ("version", renderMeta)
+              , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent ev)
+              , (encodePath (threadDir thr <> "/" <> eventFileName 2 (eventId bad))
+                , renderEvent bad) ]) repo
+              >>= either (fail . show) pure
+
+      frDropped (stFold st) `shouldBe` []
+      length (frAnomalies (stFold st)) `shouldBe` 1
+      reportCode st `shouldBe` 2
+      let ls = fmap render (reportDoc st)
+      any ("canonical form" `Text.isInfixOf`) ls `shouldBe` True
+      last ls `shouldSatisfy` Text.isInfixOf "anomalies 1"
+
+    it "puts the commit, the tree version and the owner key in the header" $ do
+      owner <- kp
+      -- The header is the only line that says what was audited, and every part of
+      -- it was added after somebody could not tell from a report what it had read.
+      st <- readCanon (byPath [("version", renderMeta)]) (fst owner)
+              >>= either (fail . show) pure
+      let header = head (fmap render (reportDoc st))
+      header `shouldSatisfy` Text.isInfixOf "canon deadbeef"
+      header `shouldSatisfy` Text.isInfixOf "(hub-meta 1)"
+      header `shouldSatisfy`
+        Text.isInfixOf (Text.pack (show (pretty (AsBase58 (fst owner)))))
 
     it "exits 2 for an audit that found something and 0 for a clean one" $ do
       owner <- kp

@@ -1377,7 +1377,15 @@ what they expose. The contract:
 
   - `readCanon     :: CanonSource m -> RepoRef -> m (Either CanonUnreadable
     CanonState)`   read the meta tree and fold it, in one step
-  - `materialize   :: [Event] -> Map ThreadId ThreadState`  the fold above
+  - `foldEvents    :: HubKey -> [Event] -> FoldResult`  the fold above, against
+    an owner key, which is the root of the trust chain and so is an argument
+    rather than something the tree supplies
+  - `foldCanon     :: Word32 -> HubKey -> [Event] -> Either MetaTooNew FoldResult`
+    the same, gated on the tree's own `(hub-meta N)`: a version this build does
+    not implement is refused rather than folded under the rules it does
+  - `FoldResult` holds `frThreads` (the map below), `frRedacted` (events a
+    renderer must withhold), `frDropped` and `frAnomalies` (what the audit
+    prints), `frLog` and `frOwner`
   - `ThreadState` fields: number, kind, title, status, labels, assignees,
     author, created_at, updated_at, comments[], and for PRs the source/onto
     coordinates and merge result.

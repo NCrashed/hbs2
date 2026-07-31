@@ -434,18 +434,38 @@ safeWith allow = Text.concatMap esc
           | unsafe c  = escChar c
           | otherwise = Text.singleton c
 
-    -- BY CATEGORY, not by a list of the ones somebody thought of. The list was
-    -- twelve characters and the category Cf holds over 160: a ZERO WIDTH SPACE in
-    -- a path printed as nothing at all, so two different tree entries came out as
-    -- the same line, which is the exact failure 'pathText' exists to prevent.
-    -- Cf also covers ZWNJ, ZWJ, WORD JOINER, the BOM, the interlinear annotation
-    -- marks and the whole TAG block, which spells invisible ASCII inside a path.
+    -- BY CATEGORY, not by a list of the ones somebody thought of, and it took two
+    -- goes to get the categories right. The list was twelve characters; Cf alone
+    -- holds over 160, so a ZERO WIDTH SPACE printed as nothing at all and two
+    -- different tree entries came out as one line, which is the exact failure
+    -- 'pathText' exists to prevent. Naming Cf then left Zs, where U+00A0 printed
+    -- as an ordinary space and did it again.
     --
     -- isControl is category Cc and nothing else, which is why it was never enough
     -- on its own.
-    unsafe c = Char.isControl c || c == '\\'
-                 || Char.generalCategory c `elem`
-                      [ Char.Format, Char.LineSeparator, Char.ParagraphSeparator ]
+    --
+    -- Zs MINUS the ASCII space, because a space is how words are separated and
+    -- escaping it would wreck every title to fix a collision nobody has: U+0020
+    -- is the one character in that class a reader can be expected to recognise.
+    -- Cs and Co because a surrogate or a private-use character renders as whatever
+    -- the font decides, which includes nothing. NotAssigned is deliberately NOT
+    -- here: GHC's tables lag Unicode, so a character assigned after this compiler
+    -- would be escaped for no reason and the output would change on an upgrade.
+    unsafe c = Char.isControl c || c == '\\' || ignorable c
+                 || cat `elem` [ Char.Format, Char.LineSeparator
+                               , Char.ParagraphSeparator, Char.Surrogate
+                               , Char.PrivateUse ]
+                 || (cat == Char.Space && c /= ' ')
+      where cat = Char.generalCategory c
+
+    -- Default-ignorable characters that are in NONE of those categories, because
+    -- Unicode assigns them by property and not by category: the fillers are Lo,
+    -- the variation selectors and the grapheme joiner are Mn. A HANGUL FILLER in a
+    -- path is a character that takes up space and prints nothing.
+    ignorable c = c `elem` [ '\x034F', '\x115F', '\x1160', '\x17B4', '\x17B5'
+                           , '\x3164', '\xFFA0' ]
+                    || (c >= '\xFE00' && c <= '\xFE0F')
+                    || (c >= '\xE0100' && c <= '\xE01EF')
 
 -- | A path out of a stranger's git tree, on its way to a terminal.
 --

@@ -349,7 +349,13 @@ jobs:
           # The other two channels had smoke tests and were the two that were fine.
           docker run --rm "${IMAGE_LOCAL}" hbs2-peer version
           docker run --rm "${IMAGE_LOCAL}" hub --help >/dev/null
-          docker run --rm "${IMAGE_LOCAL}" git-hbs2 --help >/dev/null || true
+          # NOT `|| true`: that swallows 127, which is exactly what docker returns
+          # for a binary that is not there, so the check for a dangling symlink
+          # passed on a dangling symlink. hbs2-git3 --help may legitimately exit
+          # non-zero, so 127 is the thing tested for and nothing else.
+          set +e; docker run --rm "${IMAGE_LOCAL}" git-hbs2 --help >/dev/null 2>&1
+          rc=$?; set -e
+          [ "$rc" -ne 127 ] || { echo "::error::git-hbs2 missing from the image"; exit 1; }
           docker run --rm "${IMAGE_LOCAL}" git --version >/dev/null
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
           # Per-arch tag only; the manifest list pinning :TAG / :latest is

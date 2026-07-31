@@ -48,7 +48,8 @@ import Control.Monad (foldM)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.List (sortOn)
-import Data.List qualified as List
+import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -188,7 +189,10 @@ data CanonUnreadable =
 -- complaint and this program's instruction have to be told apart at a glance.
 --
 -- git's complaints are multi-line on purpose: the remedy for a dubious-ownership
--- refusal is the safe.directory command on the SECOND line. Rendered as a field
+-- refusal is the safe.directory command on the LAST line, after a blank one and
+-- indented with a tab (git's own template: "detected dubious ownership...", then
+-- "To add an exception for this directory, call:", then the command). Rendered
+-- as a field
 -- value those newlines went through 'safeText' and came out as \\u{0a}, so the
 -- fix arrived spelled as an escape in the middle of a sentence. The escaping is
 -- right (one line of a report must stay one line); what was wrong is putting a
@@ -245,9 +249,13 @@ data FileProblem =
     -- arrives here as a very small event file and is refused as malformed. That
     -- is the right answer and it is worth knowing it is not this one.
   | FileNotABlob
-    -- | A blob whose object this clone does not have: a blobless or partial
-    -- clone, or a pruned object. Distinct from the two above because it is the
-    -- one that fetching fixes, and it used to report as a submodule.
+    -- | A blob the listing could not size, which git spells BAD.
+    --
+    -- USUALLY the object is not in this clone (a blobless or partial clone, or a
+    -- pruned object), and then fetching is the answer. Not always: a corrupt zlib
+    -- stream and an object file this user may not read both print BAD too, with
+    -- git's reason on a stderr that this reader threw away because ls-tree still
+    -- exited zero. So the wording hedges, and the advice with it.
   | FileObjectMissing
     -- | The listing record itself could not be read. See 'Unparsed'.
   | FileListingUnparsed
@@ -276,7 +284,8 @@ instance Pretty FileProblem where
     FileTooLarge n      -> "over the bound this reader will read:" <+> pretty n
                              <+> "bytes"
     FileNotABlob        -> "not a blob: a submodule, in a canon tree"
-    FileObjectMissing   -> "the object is not in this clone; fetch, or unshallow"
+    FileObjectMissing   -> "the listing could not size this object: absent from"
+                             <+> "this clone, corrupt, or unreadable"
     FileListingUnparsed -> "this reader could not parse the tree listing record"
     FileUnexpected      -> "not a path the canon tree layout has"
     FileDuplicated      -> "listed more than once in the tree"
@@ -301,13 +310,18 @@ metaRef = "refs/hbs2/meta"
 versionPath :: ByteString
 versionPath = "version"
 
--- | What rules a tree with no version file was folded under.
+-- | What version a tree with no version file is folded as.
 --
--- The OLDEST, not this build's. They are the same number today, and the day
--- hub-meta becomes 2 they stop being: reading an unstamped tree as "whatever
--- this build implements" would make deleting one unsigned file a way to choose
--- the rules canon is folded under, and hub verify would report that choice as a
--- parenthesis and a zero exit. A tree that does not say cannot claim newer.
+-- The OLDEST this build knows, not the newest. Today they are the same number,
+-- and the day hub-meta becomes 2 they stop being: taken as "whatever this build
+-- implements", deleting one unsigned file would be a way to have canon folded
+-- under newer rules. A tree that does not say cannot claim newer.
+--
+-- What this number DOES, exactly, is decide the gate: it is compared against
+-- 'hubMetaVersion' and nothing else looks at it. The fold itself does not take a
+-- version and does not vary with one, so this is not yet a choice of rules; it is
+-- the placeholder that becomes one the first time the rules fork, and the value
+-- is chosen now so that the fork does not have to remember to choose it.
 assumedMetaVersion :: Word32
 assumedMetaVersion = 1
 
@@ -360,22 +374,39 @@ maxListingBytes = maxCanonFiles * 512
 sortCanon :: [TreeEntry] -> ([(ByteString, Text, Int)], [(ByteString, FileProblem)])
 sortCanon entries = (evs, dups <> bad)
   where
-    (evs, bad) = go [] [] (nubPaths [] entries)
+    (evs, bad) = go [] [] (dedup HS.empty entries)
 
-    dups = [ (p, FileDuplicated)
-           | p : _ : _ <- List.group (List.sort (fmap teePath entries)) ]
+    -- Every path with more than one entry, and what those entries said. Built
+    -- once, in one pass, and then used for both the report and the dedup: an
+    -- earlier version walked a growing list with elem, which is O(n^2) and was
+    -- measured at 0.3 s for 5000 files, 4.6 s for 20000 and 20 s for 40000 --
+    -- about eight minutes of CPU at maxCanonFiles, before a single blob is read,
+    -- on a tree this reader calls acceptable.
+    listed :: HM.HashMap ByteString [EntryKind]
+    listed = HM.fromListWith (<>) [ (teePath e, [teeKind e]) | e <- entries ]
 
-    -- The SECOND entry for a path is dropped, not merely reported. Kept, both
-    -- were fetched, both were parsed, both went into the fold and the byte bound
-    -- counted the object twice; with the same oid on both, the report said
-    -- "listed more than once" and then dropped one as a duplicate event-id, which
-    -- is an accusation about canon that the reader had manufactured. The version
-    -- file is refused outright for the same ambiguity, and this is the rest of
-    -- that rule.
-    nubPaths _ [] = []
-    nubPaths seen (e:rest)
-      | teePath e `elem` seen = nubPaths seen rest
-      | otherwise = e : nubPaths (teePath e : seen) rest
+    duplicated = HM.filter (\ks -> length ks > 1) listed
+
+    dups = sortOn fst [ (p, FileDuplicated) | p <- HM.keys duplicated ]
+
+    -- A path listed twice with DIFFERENT entries is dropped entirely, and listed
+    -- twice with the same entry collapses to one.
+    --
+    -- Keeping the first was resolving the ambiguity, which is what this package
+    -- refuses to do everywhere else: with two different object ids, the ORDER of
+    -- entries in somebody else's tree chose which of two signed events the fold
+    -- would see, and the other was never read, never folded and never named. The
+    -- version file is refused outright for exactly this, and the comment here
+    -- used to claim event files followed the same rule while the code did not.
+    conflicting = HS.fromList
+      [ p | (p, ks) <- HM.toList duplicated, not (allSame ks) ]
+      where allSame ks = all (== head ks) ks
+
+    dedup _ [] = []
+    dedup seen (e:rest)
+      | teePath e `HS.member` conflicting = dedup seen rest
+      | teePath e `HS.member` seen        = dedup seen rest
+      | otherwise = e : dedup (HS.insert (teePath e) seen) rest
 
     go evs bad [] = (reverse evs, reverse bad)
     go evs bad (e:rest) = case teeKind e of

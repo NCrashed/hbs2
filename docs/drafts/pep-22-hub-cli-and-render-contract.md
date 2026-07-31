@@ -113,7 +113,9 @@ and a tree full of forged events were the same event.
 
 3 to 13 is "could not run", so a hook that only cares about the distinction tests
 for that range. 141 is neither: it is what a shell reports for a program a pipe
-killed, and it used to be 1, which this table gives to usage errors. Every one of them prints what to do about it on stderr. The numbers
+killed, and it used to be 1, which this table gives to usage errors. It is also
+the one code that prints nothing: by the time it happens there is nowhere left to
+print. Every other one prints what to do about it on stderr. The numbers
 are a contract: a hook branches on them, so they may be added to and not
 reassigned.
 

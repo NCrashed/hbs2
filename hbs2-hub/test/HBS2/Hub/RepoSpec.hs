@@ -345,6 +345,77 @@ spec = do
         , ("threads/t/0001-sub", FileNotABlob)
         ]
 
+    it "refuses a tree newer than this build BEFORE reading its blobs" $ do
+      owner <- kp
+      fetched <- newIORef (0 :: Int)
+      -- The gate lives inside foldCanon, which runs last, so the whole tree was
+      -- read and then thrown away: measured at one cat-file per event. And a fork
+      -- failing anywhere in that loop turned the answer into ReaderFailed, "nothing
+      -- was learned about canon", when the version file had already answered.
+      let newer = Text.pack "(hub-meta 99)\n"
+          src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    ( TreeEntry versionPath (Blob "v" 14)
+                    : [ TreeEntry (B8.pack ("threads/t/0000" <> show i <> "-x"))
+                                  (Blob (Text.pack (show i)) 10)
+                      | i <- [1 :: Int .. 5] ] ))))
+                  (\oid -> do modifyIORef fetched succ
+                              pure (BlobText (if oid == "v" then newer else "junk")))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooNewHere 99)
+      -- One: the version file. Not six.
+      readIORef fetched `shouldReturn` 1
+
+    it "refuses version zero rather than folding it under today's rules" $ do
+      owner <- kp
+      -- The gate only ever looked for NEWER, so (hub-meta 0) folded silently under
+      -- this build's rules and the report was clean. Zero is not a version any
+      -- build implements.
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right [TreeEntry versionPath (Blob "v" 13)])))
+                  (const (pure (BlobText "(hub-meta 0)\n")))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe`
+          Left (VersionUnreadable (FileMalformed (BadClause "hub-meta")))
+
+    it "reads neither copy of a path listed twice with different objects" $ do
+      owner <- kp
+      -- Keeping the FIRST resolved the ambiguity, and resolving it is what this
+      -- package refuses to do: with two different object ids, the order of entries
+      -- in somebody else's tree chose which of two signed events the fold saw, and
+      -- the other was never read, never folded and never named.
+      fetched <- newIORef ([] :: [Text])
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "threads/t/0001-x" (Blob "a" 4)
+                    , TreeEntry "threads/t/0001-x" (Blob "b" 4)
+                    ])))
+                  (\oid -> do modifyIORef fetched (oid:)
+                              pure (BlobText (if oid == "v" then renderMeta else "junk")))
+      st <- readOk src (fst owner)
+      ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
+      -- Neither object was read: not "a", which was first, and not "b".
+      readIORef fetched `shouldReturn` ["v"]
+
+    it "collapses a path listed twice with the SAME object" $ do
+      owner <- kp
+      -- The other half: identical entries are one entry, and are still named,
+      -- because git fsck calls a duplicate an error whatever it holds.
+      fetched <- newIORef (0 :: Int)
+      let src = CanonSource (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    [ TreeEntry versionPath (Blob "v" 13)
+                    , TreeEntry "threads/t/0001-x" (Blob "a" 4)
+                    , TreeEntry "threads/t/0001-x" (Blob "a" 4)
+                    ])))
+                  (\oid -> do modifyIORef fetched succ
+                              pure (BlobText (if oid == "v" then renderMeta else "junk")))
+      st <- readOk src (fst owner)
+      ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
+      -- The version file and the event once, not twice.
+      readIORef fetched `shouldReturn` 2
+
     it "refuses a tree that lists the version file twice" $ do
       owner <- kp
       -- git fsck calls it duplicateEntries and a hand-built tree can carry it.
@@ -358,20 +429,6 @@ spec = do
                   (const (pure (BlobText renderMeta)))
       readCanon src (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (VersionUnreadable FileDuplicated)
-
-    it "names a path the tree lists twice, wherever it is" $ do
-      owner <- kp
-      -- Not only the version file: nothing downstream can see a duplicate,
-      -- because every later step works one entry at a time.
-      let src = CanonSource (pure (Right "deadbeef"))
-                  (const (pure (Right
-                    [ TreeEntry versionPath (Blob "v" 13)
-                    , TreeEntry "threads/t/0001-x" (Blob "a" 4)
-                    , TreeEntry "threads/t/0001-x" (Blob "b" 4)
-                    ])))
-                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
-      st <- readOk src (fst owner)
-      ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
 
     it "reports a path under threads/ that is not a thread and a file" $ do
       owner <- kp

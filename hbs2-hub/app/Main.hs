@@ -21,8 +21,7 @@ import Data.List (intercalate,isPrefixOf,sort)
 import Data.Text qualified as Text
 
 import System.Environment
-import System.Exit (die,exitWith,ExitCode(..))
-import System.IO.Error (isResourceVanishedError)
+import System.Exit (die)
 import GHC.IO.Encoding qualified as Enc
 import System.IO qualified as IO
 
@@ -91,7 +90,12 @@ main = do
   for_ argv $ \a ->
     when (any (\c -> c >= '\xD800' && c <= '\xDFFF') a) $
       die ( "an argument is not valid UTF-8, and this tool signs what you type."
-              <> "\nRe-run under a UTF-8 locale, or pass the text on stdin." )
+              -- No advice about locales: the filesystem encoding is set above,
+              -- before getArgs, so these bytes decode the same under LC_ALL=C and
+              -- under C.UTF-8 and re-running changes nothing. And not "use stdin"
+              -- either: stdin is strict UTF-8 now and would refuse the same bytes.
+              -- What actually converts them is a converter.
+              <> "\nConvert it first, e.g. with iconv -f <encoding> -t UTF-8." )
 
   let dict = makeDict do
         internalEntries
@@ -119,7 +123,10 @@ main = do
           -- spelling help accepts cannot drift apart.
           ws | Just (ListVal (SymbolVal k : _)) <- verbOf dict (fmap asWord ws) ->
                  helpEntry k
-             | [StringLike s] <- ws -> helpList False (Just s)
+             -- found, not helpList: a word the dictionary does not hold printed one
+             -- empty line and exited zero, while --help said so. Two spellings of
+             -- one verb, and only one of them admitted it had found nothing.
+             | [StringLike s] <- ws -> found dict s
              | otherwise -> liftIO (hubHelp dict)
 
         helpEntries
@@ -140,14 +147,7 @@ main = do
              | [StringLike s] <- ws -> found dict s
              | otherwise -> liftIO (hubHelp dict)
 
-  -- A closed pipe is not a usage error, and 1 is what usage errors exit with:
-  -- `hub verify | head -1` gave 1, which PEP-22 assigns to a bad argument. 141 is
-  -- 128 plus SIGPIPE, which is what a shell reports for a program a pipe killed,
-  -- and it is out of the way of every code the audit assigns.
-  handleJust (\e -> if isResourceVanishedError e then Just () else Nothing)
-             (\_ -> exitWith (ExitFailure 141)) do
-
-   case (argv, verbOf dict argv) of
+  case (argv, verbOf dict argv) of
     -- No arguments: a script on stdin, or the help if there is no stdin either.
     ([], _) -> runHBS2Cli do
       -- A TERMINAL means there is no script coming: a person typed the name of

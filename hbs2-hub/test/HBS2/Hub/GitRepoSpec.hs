@@ -137,6 +137,36 @@ gitStdin dir input args = do
     ExitSuccess -> pure (trim out)
     _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
 
+-- A git that writes one record, then goes silent for ever, and ignores SIGTERM.
+--
+-- Both halves matter: the silence is what the idle bound is for, and refusing to
+-- die is what the teardown escalation is for. A shim that stopped on SIGTERM
+-- would pass on a reader whose cleanup waits without limit.
+stalling :: GitBounds -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+stalling bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
+  let bin = dir </> "bin"
+  createDirectoryIfMissing True bin
+  sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
+  writeFile (bin </> "git") (unlines
+    [ "#!/bin/sh"
+    , "trap '' TERM"
+    , "case \"$*\" in"
+    , "  *ls-tree*)"
+    , "    printf '100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef      5\\tthreads/t/0001-x\\000'"
+    , "    " <> sleep <> " 600 ;;"
+    , "  *rev-parse*--git-dir*) echo .git ;;"
+    , "  *show-ref*) exit 0 ;;"
+    , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
+    , "  *) exit 1 ;;"
+    , "esac"
+    ])
+  perm <- getPermissions (bin </> "git")
+  setPermissions (bin </> "git") (setOwnerExecutable True perm)
+  old <- Env.lookupEnv "PATH"
+  bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
+           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (act (readTreeWith bounds dir))
+
 -- A blobless clone of a canon-carrying repository, and a count of the blobs it
 -- holds. Both files are absent from it until something fetches them, which is the
 -- whole point: the count is how a test says "and nothing was fetched".
@@ -622,7 +652,7 @@ spec = do
       -- into a pack that is not there.
       --
       -- Two things are asserted about the message. It is kept WHOLE, because git
-      -- puts the remedy for a dubious-ownership refusal on the second line, and
+      -- puts the remedy for a dubious-ownership refusal on its last line, and
       -- one line of it is the half without the fix. And it renders as an indented
       -- block, not as a field value; that half is asserted in VerifySpec, which
       -- is where the renderer lives.
@@ -630,7 +660,7 @@ spec = do
         readIt >>= \case
           Left (RefUnresolved m) -> do
             Text.unpack m `shouldContain` "bad ref refs/hbs2/meta"
-            -- The SECOND line, which is where git puts what to run.
+            -- The last line, which is where git puts what to run.
             Text.unpack m `shouldContain` "git fsck"
             -- And no trailing newline of its own: it is a message, not a file.
             Text.unpack m `shouldNotContain` "\n\n"
@@ -652,6 +682,61 @@ spec = do
           Left (ReaderFailed _) -> pure ()
           other -> expectationFailure
                      ("expected ReaderFailed, got " <> show (fmap (const ()) other))
+
+    it "gives up on a listing that goes silent, and kills what will not stop" $ do
+      -- The listing had a byte bound and no time bound: a git that writes and then
+      -- says nothing (a FIFO in place of a tree object, an NFS mount that stopped
+      -- answering) waited for ever with no output and no diagnostic, and took the
+      -- hook with it. The bound is on SILENCE, not on total time, because a huge
+      -- tree may legitimately take as long as it takes.
+      --
+      -- The shim ignores SIGTERM, so this also covers the teardown: withProcessTerm
+      -- would have waited for it for ever, which is the bound not being a bound.
+      -- One second here; sixty in production.
+      within 30 "the idle bound and the teardown" $
+        stalling (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 }) $ \readIt ->
+          readIt >>= \case
+            Left (TreeUnreadable m) -> do
+              -- Not ReaderFailed: git ran, is running, and is simply quiet. That
+              -- code means "could not run git" and is the one documented as worth
+              -- retrying, which here buys another minute and another stuck child.
+              Text.unpack m `shouldContain` "sent nothing"
+              -- The count is in it, because the bound is per chunk and the stream
+              -- may have delivered plenty before it stopped.
+              Text.unpack m `shouldContain` "bytes"
+            other -> expectationFailure
+                       ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
+
+    it "refuses a listing with no record terminator in it" $ do
+      -- Not one entry with a hundred-megabyte path: the count is then zero, so the
+      -- file bound says nothing, and the parser makes a single TreeEntry whose path
+      -- is the whole output, printed through pathText at up to six bytes a byte.
+      -- This is the format shift the parser's haddock calls its reason to exist,
+      -- arriving where the parser never sees it.
+      shimmedWith gitBounds 0 0 "100644 blob deadbeef 5\tthreads/t/0001-x"
+        $ \readIt _ -> readIt >>= \case
+            Left (TreeUnreadable m) ->
+              Text.unpack m `shouldContain` "no record terminator"
+            other -> expectationFailure
+                       ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
+
+    it "will not hand a listing's object id to a process argument unchecked" $ do
+      -- The whole argument for fetching blobs by id rather than by path is that an
+      -- id is hex and cannot carry anything an exec cares about. Nothing enforced
+      -- it. An id beginning with a dash is an option to cat-file; a non-ASCII one
+      -- throws at exec under the C locale and ended the audit over one entry.
+      --
+      -- Refused in the PARSER, as a record this reader cannot use, which is what
+      -- FileListingUnparsed is for: refusing it at the fetch reported "the source
+      -- would not give it" about a source nobody asked.
+      kindOf . teeKind <$> parseListing "100644 blob --upload-pack=evil 5\tthreads/t/x"
+        `shouldBe` [Bad]
+      kindOf . teeKind <$> parseListing "100644 blob nothexatall 5\tthreads/t/x"
+        `shouldBe` [Bad]
+      -- And a negative size is not a size: readMay takes the minus happily, and a
+      -- negative number sails under every "larger than" bound there is.
+      kindOf . teeKind <$> parseListing "100644 blob deadbeef -5\tthreads/t/x"
+        `shouldBe` [Bad]
 
     it "tells an absent ref from a directory that is not a repository" $ do
       -- rev-parse exits 1 for the first and 128 for the second, and collapsing
