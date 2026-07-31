@@ -36,6 +36,7 @@ module HBS2.Hub.Repo
   , assumedMetaVersion
   , EntryKind(..)
   , BlobResult(..)
+  , Told(..)
   ) where
 
 import HBS2.Hub.Types
@@ -139,7 +140,7 @@ data CanonUnreadable =
     -- Without the path the message is "no refs\/hbs2\/meta in this repository", so
     -- they fetch canon into the tree they can see, run it again, and get the same
     -- sentence for ever.
-    NoCanonRef Text
+    NoCanonRef ByteString
     -- | Not a git repository, or git could not be run. Distinct from the above
     -- because the advice differs: fetching canon into a directory that is not a
     -- repository will not help. Carries what the tool said, whole.
@@ -148,10 +149,15 @@ data CanonUnreadable =
     -- partial clone, or a ref pointing at something else. Distinct from a missing
     -- ref for the same reason, and it used to share its answer.
   | RefUnresolved Text
-    -- | The commit is here and its tree cannot be listed. Carries the tool's own
-    -- words, because the reason ranges from a pruned object to a repository this
-    -- user is not allowed to read, and only one of those is fixed by fetching.
-  | TreeUnreadable Text
+    -- | The commit is here and its tree cannot be listed, and WHO SAID SO.
+    --
+    -- The distinction is not decoration: the report prints a tool's words as an
+    -- indented block with each line marked @|@, precisely so a stranger's text
+    -- cannot be read as this program's instruction. Both messages came through
+    -- that block, so "git ls-tree did not finish: it sent 77 bytes..." -- written
+    -- here, about this reader's own bound -- was printed as though git had said
+    -- it.
+  | TreeUnreadable Told
     -- | The tree's @(hub-meta N)@ is newer than this build's rules. Folding
     -- anyway would produce a view under rules this build does not implement,
     -- which is how one clone quietly disagrees with every other one.
@@ -219,11 +225,16 @@ toolSaid e
 
 instance Pretty CanonUnreadable where
   pretty = \case
-    NoCanonRef w      -> "no" <+> pretty metaRef <+> "in" <+> pretty (safeText w)
+    -- Through pathText, because a git directory is a PATH: a byte in it that is
+    -- not UTF-8 came out as U+FFFD, which is a name that does not exist and does
+    -- not paste back into a shell, and that is the whole reason pathText is not
+    -- decodeUtf8Lenient.
+    NoCanonRef w      -> "no" <+> pretty metaRef <+> "in" <+> pretty (pathText w)
     NoRepository e    -> "cannot read this git repository:" <> toolSaid e
     RefUnresolved e   -> pretty metaRef <+> "does not resolve to a commit:"
                            <> toolSaid e
-    TreeUnreadable e  -> "cannot list the canon tree:" <> toolSaid e
+    TreeUnreadable (ToolSaid e)   -> "cannot list the canon tree:" <> toolSaid e
+    TreeUnreadable (ReaderSays e) -> "cannot list the canon tree:" <+> pretty (safeText e)
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
     VersionUnreadable p -> "the version file is listed and does not read:"
@@ -236,6 +247,12 @@ instance Pretty CanonUnreadable where
     CanonListingTooBig n -> "the canon tree listing is over" <+> pretty n
                               <+> "bytes, past what this reader will read"
     ReaderFailed e    -> "this reader could not run git:" <> toolSaid e
+
+-- | Whose words a message is.
+data Told =
+    ToolSaid Text     -- ^ git's, printed as a quoted block
+  | ReaderSays Text   -- ^ this program's, printed as its own sentence
+  deriving stock (Eq,Show)
 
 -- | Why one file in the tree did not become an event.
 data FileProblem =
@@ -265,6 +282,12 @@ data FileProblem =
   | FileObjectMissing
     -- | The listing record itself could not be read. See 'Unparsed'.
   | FileListingUnparsed
+    -- | The path is a DIRECTORY in the tree. Its own problem, because ls-tree -r
+    -- recurses: a tree at @ produces /x@ entries and no @
+    -- entry at all, so the reader saw "no version file" and printed it, and when
+    -- that was fixed the nearest constructor to hand said "not a blob: a
+    -- submodule", sending somebody to look for a gitlink that is not there.
+  | FileIsADirectory
     -- | Somewhere the tree layout does not put files. PEP-19 fixes the layout, so
     -- a path outside it is somebody's addition, and a reader that only looked
     -- under the two event directories could not see it at all.
@@ -293,6 +316,7 @@ instance Pretty FileProblem where
     FileObjectMissing   -> "the listing could not size this object: absent from"
                              <+> "this clone, corrupt, or unreadable"
     FileListingUnparsed -> "this reader could not parse the tree listing record"
+    FileIsADirectory    -> "a directory in the tree, where a file belongs"
     FileUnexpected      -> "not a path the canon tree layout has"
     FileDuplicated      -> "listed more than once in the tree"
 
@@ -507,7 +531,7 @@ readCanon cs owner = csCommit cs >>= \case
                  -- Its children are reported as unexpected paths either way; this
                  -- says which nothing it is.
                  [] | any ((B8.pack "version/" `B8.isPrefixOf`) . teePath) entries ->
-                        pure (Left (Right FileNotABlob))
+                        pure (Left (Right FileIsADirectory))
                  [] -> pure (Right Nothing)
                  -- Two entries for one path. Identical ones collapse, as they do
                  -- for events: it is one file listed twice, and the tree is

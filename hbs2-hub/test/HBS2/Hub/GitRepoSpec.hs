@@ -32,6 +32,9 @@ import System.Environment qualified as Env
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory,getCanonicalTemporaryDirectory)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (MVar,newEmptyMVar,putMVar,takeMVar)
+import Control.Exception (try,throwIO,SomeException)
 import System.Timeout (timeout)
 import System.Process.Typed
 import Test.Hspec
@@ -159,7 +162,36 @@ stalling what bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
       -- to cover that branch passed against the bug, because it never reached it.
     , "  *" <> what <> "*)"
     , "    printf '100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef      5\\tthreads/t/0001-x\\000'"
-    , "    " <> sleep <> " 600 ;;"
+    -- Thirty seconds, not ten minutes: the bounds under test are one second, so
+    -- this is thirty times over, and sleeping for ten minutes left two orphans per
+    -- suite run. The sleep is a GRANDCHILD, and the teardown signals the child it
+    -- started, not the process group.
+    , "    " <> sleep <> " 30 ;;"
+    , "  *rev-parse*git-dir*) echo .git ;;"
+    , "  *show-ref*) exit 0 ;;"
+    , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
+    , "  *) exit 1 ;;"
+    , "esac"
+    ])
+  perm <- getPermissions (bin </> "git")
+  setPermissions (bin </> "git") (setOwnerExecutable True perm)
+  old <- Env.lookupEnv "PATH"
+  bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
+           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (act (readTreeWith bounds dir))
+
+-- A git that never stops talking and never finishes: one byte every tenth of a
+-- second, for ever. Never idle, so only a deadline catches it.
+dribbling :: GitBounds -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+dribbling bounds act = withSystemTempDirectory "hub-drip" $ \dir -> do
+  let bin = dir </> "bin"
+  createDirectoryIfMissing True bin
+  sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
+  writeFile (bin </> "git") (unlines
+    [ "#!/bin/sh"
+    , "case \"$*\" in"
+    , "  *ls-tree*)"
+    , "    i=0; while [ $i -lt 300 ]; do printf x; " <> sleep <> " 0.1; i=$((i+1)); done ;;"
     , "  *rev-parse*git-dir*) echo .git ;;"
     , "  *show-ref*) exit 0 ;;"
     , "  *rev-parse*) echo 0000000000000000000000000000000000000000 ;;"
@@ -221,9 +253,23 @@ kindOf = \case
 -- reader waits for ever and hspec waits with it, so CI burns its six-hour limit
 -- instead of going red. hspec has no per-example timeout, so it is here.
 within :: Int -> String -> IO () -> IO ()
-within secs what act =
-  timeout (secs * 1000000) act >>= \case
-    Just () -> pure ()
+within secs what act = do
+  -- The work runs on ANOTHER THREAD and this one waits on an MVar. `timeout` around
+  -- the work itself cannot help here, and that is the whole reason for the shape:
+  -- the hang being tested for is inside a bracket release, which unliftio runs
+  -- under uninterruptibleMask_, where the exception `timeout` throws is deferred.
+  -- Measured: the pre-fix version of the reader made this example HANG for ten
+  -- minutes instead of failing at thirty seconds, so the test that was written to
+  -- catch a deadlock could only ever have been caught by CI's own limit.
+  --
+  -- takeMVar here is not inside anybody's mask, so it interrupts, and the example
+  -- goes red on time. The forked thread is left running: it is stuck by
+  -- definition, and there is nothing to be done about that from here.
+  done <- newEmptyMVar :: IO (MVar (Either SomeException ()))
+  _ <- forkIO (try act >>= putMVar done)
+  timeout (secs * 1000000) (takeMVar done) >>= \case
+    Just (Right ()) -> pure ()
+    Just (Left e)   -> throwIO e
     Nothing -> expectationFailure
                  (what <> ": did not finish in " <> show secs <> "s, which for this"
                        <> " test means the reader stopped stopping")
@@ -702,7 +748,7 @@ spec = do
       within 30 "the idle bound and the teardown" $
         stalling "ls-tree" (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 }) $ \readIt ->
           readIt >>= \case
-            Left (TreeUnreadable m) -> do
+            Left (TreeUnreadable (ReaderSays m)) -> do
               -- Not ReaderFailed: git ran, is running, and is simply quiet. That
               -- code means "could not run git" and is the one documented as worth
               -- retrying, which here buys another minute and another stuck child.
@@ -733,6 +779,39 @@ spec = do
               Left _  -> pure ()
               Right _ -> expectationFailure "expected a refusal from a hung call"
 
+    it "gives up on a listing that dribbles for ever" $ do
+      -- The idle bound cannot see this one: the writer is never silent for a whole
+      -- second, it just never finishes. That is what an exponential tree walk
+      -- looks like from here -- 64 entries at 12 levels all pointing at one
+      -- subtree is 64^12 traversals of 116 KB of objects -- and a variant that
+      -- emits a record between them resets the idle counter for ever.
+      within 30 "the total deadline" $
+        dribbling (gitBounds { gbCallSeconds = 5, gbListingSeconds = 1
+                             , gbTeardownSeconds = 1 })
+          $ \readIt -> readIt >>= \case
+              Left (TreeUnreadable (ReaderSays m)) ->
+                Text.unpack m `shouldContain` "did not finish"
+              other -> expectationFailure
+                         ("expected a refusal, got " <> show (fmap (const ()) other))
+
+    it "refuses a revision that is not an object id without running git" $ do
+      -- The reader hands the revision to git as an argument, so it checks it
+      -- first: today it comes from rev-parse and is hex, and the first verb that
+      -- takes one from a user makes it an option-injection point. A trailing --
+      -- does not help, measured: git ls-tree --help -- exits 129, because
+      -- parse_options eats an option-shaped revision long before the --.
+      --
+      -- And refused WITHOUT running git: an earlier version ran ls-tree against a
+      -- placeholder path, which came back as "cannot list the tree", code 9, with
+      -- advice to fetch a pruned object and the name of an internal path the
+      -- caller never typed.
+      withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
+        let cs = gitCanonIn (Just dir)
+        csEntries cs "--upload-pack=evil" >>= \case
+          Left (RefUnresolved m) -> Text.unpack m `shouldContain` "not an object id"
+          other -> expectationFailure
+                     ("expected RefUnresolved, got " <> show (fmap (const ()) other))
+
     it "refuses a listing with no record terminator in it" $ do
       -- Not one entry with a hundred-megabyte path: the count is then zero, so the
       -- file bound says nothing, and the parser makes a single TreeEntry whose path
@@ -741,7 +820,7 @@ spec = do
       -- arriving where the parser never sees it.
       shimmedWith gitBounds 0 0 "100644 blob deadbeef 5\tthreads/t/0001-x"
         $ \readIt _ -> readIt >>= \case
-            Left (TreeUnreadable m) ->
+            Left (TreeUnreadable (ReaderSays m)) ->
               Text.unpack m `shouldContain` "no record terminator"
             other -> expectationFailure
                        ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
@@ -771,7 +850,7 @@ spec = do
       withSystemTempDirectory "hub-git" $ \dir -> do
         void $ git dir ["init", "-q", "."]
         readIn dir >>= \case
-          Left (NoCanonRef w) -> Text.unpack w `shouldContain` dir
+          Left (NoCanonRef w) -> B8.unpack w `shouldContain` dir
           other -> expectationFailure
                      ("expected NoCanonRef, got " <> show (fmap (const ()) other))
 
@@ -804,7 +883,7 @@ spec = do
       withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
         writeFile (dir </> ".git" </> "refs" </> "hbs2" </> "meta") "not-a-sha\n"
         readIn dir >>= \case
-          Left (NoCanonRef w) -> Text.unpack w `shouldContain` dir
+          Left (NoCanonRef w) -> B8.unpack w `shouldContain` dir
           other -> expectationFailure
                      ("expected NoCanonRef, got " <> show (fmap (const ()) other))
 

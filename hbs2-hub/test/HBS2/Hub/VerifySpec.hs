@@ -28,6 +28,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextE
 import Data.Foldable (for_)
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as B8
 import Prettyprinter
 import Prettyprinter.Render.Text (renderStrict)
 import Test.Hspec
@@ -85,9 +86,11 @@ everyRefusal =
   -- Not the file being wrong but this clone not having it: the ordinary state
   -- after clone --filter=blob:none, and 7 says canon is broken.
   , (VersionUnreadable FileObjectMissing, 13)
+  , (VersionUnreadable FileListingUnparsed, 13)
   , (VersionUnreadable (FileUnreadable "cannot read"), 13)
   , (CanonTooBig (maxCanonBytes + 1),     8)
-  , (TreeUnreadable "missing blob",       9)
+  , (TreeUnreadable (ToolSaid "missing blob"),   9)
+  , (TreeUnreadable (ReaderSays "gave up"),      9)
   , (CanonTooMany (maxCanonFiles + 1),   10)
   , (CanonListingTooBig maxListingBytes, 11)
   , (ReaderFailed "fork: Resource exhausted", 12)
@@ -106,11 +109,22 @@ spec = do
       for_ everyRefusal $ \(u, code) -> codeOf u `shouldBe` code
 
       let codes = fmap snd everyRefusal
-      -- Still distinct PER CONSTRUCTOR, which is what catches a new one given a
-      -- code that is already taken: the Werror in the module under test forces a
-      -- case for it and nothing forces the case to be a new number. Two entries
-      -- here share 13 on purpose, being two spellings of one constructor.
-      sort (nub codes) `shouldBe` nub (sort codes)
+      -- No code shared by two DIFFERENT constructors, which is the thing
+      -- -Werror=incomplete-patterns cannot catch: it forces a new constructor to
+      -- get a case in codeOf and does not force that case to be a new number.
+      --
+      -- The previous version of this line was `sort (nub codes) == nub (sort
+      -- codes)`, which is true of every list there is: it asserted nothing at all
+      -- while its comment claimed exactly this property. Two constructors sharing
+      -- a code passed under it.
+      --
+      -- VersionUnreadable appears three times on purpose, twice with 13: one
+      -- constructor whose code depends on its payload, which is why the grouping
+      -- is by constructor name and not by value.
+      let name = takeWhile (/= ' ') . show
+          shares = [ (a, b, c) | (ua, c) <- everyRefusal, (ub, c') <- everyRefusal
+                               , c == c', let a = name ua, let b = name ub, a /= b ]
+      shares `shouldBe` []
       -- And all above 2, which is a completed audit that found something, and
       -- above 1, a usage error. A hook tells "could not run" from "ran and found
       -- things" by the number alone.
@@ -256,6 +270,29 @@ spec = do
               >>= either (fail . show) pure
       [ p | (p, Nothing) <- stFileVersions st ] `shouldSatisfy` (not . null)
       reportCode st `shouldBe` 2
+
+    it "stays injective when a path is too long to print" $ do
+      owner <- kp
+      -- A tree entry may hold a path of any length (measured: one record of
+      -- 1 048 638 bytes), and pathText spends up to six characters on a byte, so
+      -- one entry could put six megabytes on a terminal. The first attempt at
+      -- bounding that cut the escaped text at 300 characters and appended the byte
+      -- length -- which made two paths of equal length sharing a 300-character
+      -- prefix print as ONE line, undoing the property three rounds of this went
+      -- into. The digest is what keeps it.
+      let long n = "threads/t/" <> BS.replicate 400 0x61 <> B8.pack (show (n :: Int))
+          p1 = long 1
+          p2 = long 2
+      BS.length p1 `shouldBe` BS.length p2
+      BS.take 300 p1 `shouldBe` BS.take 300 p2
+      st <- readCanon (byPath [ ("version", renderMeta)
+                              , (p1, "not an event"), (p2, "not an event") ])
+              (fst owner) >>= either (fail . show) pure
+      let ls = [ l | l <- fmap render (reportDoc st), "unreadable" `Text.isPrefixOf` l ]
+      length ls `shouldBe` 2
+      nub ls `shouldBe` ls
+      -- And the line is bounded: not four hundred characters of a.
+      for_ ls $ \l -> Text.length l `shouldSatisfy` (< 420)
 
     it "keeps two paths that differ in one invalid byte on two distinct lines" $ do
       owner <- kp

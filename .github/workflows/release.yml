@@ -102,8 +102,19 @@ jobs:
           "${DIR}/bin/hbs2-cli" --help >/dev/null
           "${DIR}/bin/hbs2-hub" --help >/dev/null
           "${DIR}/bin/hub" --help >/dev/null
-          test -L "${DIR}/bin/hub" && test -e "${DIR}/bin/hub"
-          test -L "${DIR}/bin/git-hbs2" && test -e "${DIR}/bin/git-hbs2"
+          # [ ] && [ ] || { exit }, not `test X && test Y`: under set -e bash exempts
+          # every command of an AND-list except the last, so `test -L X && test -e X`
+          # cannot fail the step. And -e as well as -L, because -L is true of a link
+          # that points at nothing, which is the failure these lines exist to catch.
+          [ -L "${DIR}/bin/hub" ] && [ -e "${DIR}/bin/hub" ] \
+            || { echo "::error::bin/hub is not a working symlink"; exit 1; }
+          [ -L "${DIR}/bin/git-hbs2" ] && [ -e "${DIR}/bin/git-hbs2" ] \
+            || { echo "::error::bin/git-hbs2 is not a working symlink"; exit 1; }
+          # And it RUNS, which is the check the musl tarball never had: it shipped
+          # git-hbs2 as a shebang script naming a nix store path in every release
+          # up to 0.25.5.0, and no step here ever executed it.
+          set +e; "${DIR}/bin/git-hbs2" --help >/dev/null 2>&1; rc=$?; set -e
+          [ "$rc" -ne 127 ] || { echo "::error::git-hbs2 does not run"; exit 1; }
           ARCHIVE="${DIR}.tar.gz"
           tar czf "${ARCHIVE}" "${DIR}"
           echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
@@ -231,8 +242,12 @@ jobs:
           # -e, not -L: -L is true of a link that points at nothing, which is the
           # exact failure these two lines exist to catch. -L as well, so that a
           # dereferenced 19 MiB copy is caught too.
-          test -L "${BUNDLE}/bin/hub" && test -e "${BUNDLE}/bin/hub"
-          test -L "${BUNDLE}/bin/git-hbs2" && test -e "${BUNDLE}/bin/git-hbs2"
+          # See the linux job: `test X && test Y` is exempt from set -e and cannot
+          # fail the step, and -L alone is true of a dangling link.
+          [ -L "${BUNDLE}/bin/hub" ] && [ -e "${BUNDLE}/bin/hub" ] \
+            || { echo "::error::bin/hub is not a working symlink"; exit 1; }
+          [ -L "${BUNDLE}/bin/git-hbs2" ] && [ -e "${BUNDLE}/bin/git-hbs2" ] \
+            || { echo "::error::bin/git-hbs2 is not a working symlink"; exit 1; }
 
       - name: Upload to GitHub Release (assets only)
         uses: softprops/action-gh-release@v2

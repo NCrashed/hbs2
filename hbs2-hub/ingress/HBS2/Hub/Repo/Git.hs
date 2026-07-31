@@ -139,15 +139,20 @@ gitCanonWith bounds cwd = CanonSource
       -- --absolute-git-dir, because the answer is put in front of the operator
       -- when the ref is missing, and a relative ".git" printed by a hook whose
       -- GIT_DIR points elsewhere is the sentence that sent them in circles.
-      isRepo <- git ["rev-parse", "--absolute-git-dir"]
+      isRepo <- raw ["rev-parse", "--absolute-git-dir"]
       case isRepo of
         Left e -> pure (Left (NoRepository (msg e)))
-        Right (ExitFailure _, e) -> pure (Left (NoRepository (msg e)))
-        Right (ExitSuccess, gitDir) -> do
+        Right (ExitFailure _, e) -> pure (Left (NoRepository (msg (decodeS e))))
+        Right (ExitSuccess, gitDirRaw) -> do
           here <- git ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
           case here of
             Left e -> pure (Left (ReaderFailed (msg e)))
-            Right (ExitFailure 1, _) -> pure (Left (NoCanonRef (Text.strip gitDir)))
+            -- The BYTES, and only the trailing newline taken off: Text.strip would
+            -- eat a real trailing space in a directory name, and decoding to Text
+            -- loses a byte that is not UTF-8 before pathText can escape it.
+            Right (ExitFailure 1, _) ->
+              pure (Left (NoCanonRef (B8.dropWhileEnd (`elem` ("\r\n" :: String))
+                                        gitDirRaw)))
             Right (ExitFailure _, e) -> pure (Left (RefUnresolved (msg e)))
             Right (ExitSuccess, _) ->
               git ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] <&> \case
@@ -173,13 +178,24 @@ gitCanonWith bounds cwd = CanonSource
       -- resident before the file-count bound got a chance to say no. Checking the
       -- length of a buffer already read would bound what this reader HOLDS and not
       -- what it peaks at, which is the thing that was wrong.
-      -- The commit is checked and then passed after --, for the reason csBlob's
-      -- object id is: today it comes from rev-parse and is hex, and the first verb
-      -- that takes a revision from a user (a `verify --at <rev>`) makes it an
-      -- option-injection point. Cheap now, impossible to remember later.
-      listing (if not (isObjectId commit)
-                 then ["ls-tree", "--", "/dev/null/not-a-commit"]
-                 else ["ls-tree", "-r", "-z", "-l", "--full-tree"
+      -- The commit is checked BEFORE git is run, and the check is what protects it:
+      -- measured,  ls-tree ... --help --@ exits 129, because parse_options eats
+      -- an option-shaped revision long before it reaches the 9118-@. The trailing
+      -- 9118-@ separates a revision from paths and protects nothing here; a comment
+      -- that credited it would invite the next person to keep it and delete the
+      -- guard.
+      --
+      -- Refused WITHOUT running git, like csBlob: an earlier version ran
+      -- -tree -- /dev/null/not-a-commit@ instead, which exits 128 with "Not a
+      -- valid object name" and arrives as TreeUnreadable, code 9, advising a fetch
+      -- for a pruned object, and naming an internal placeholder the caller never
+      -- typed. The honest answer is the ref does not resolve, which is code 5.
+      if not (isObjectId commit)
+        then pure (Left (RefUnresolved
+                          ( "not an object id: "
+                              <> Text.take 100 commit )))
+        else
+      listing (["ls-tree", "-r", "-z", "-l", "--full-tree"
                       , Text.unpack commit, "--" ])
         <&> \case
           -- The bound first: past it the process is torn down, so its exit code
@@ -198,13 +214,13 @@ gitCanonWith bounds cwd = CanonSource
           -- here they are one thing: git was asked for a listing and did not
           -- produce one in the time this reader will wait.
           Right (_, Left seen) ->
-            Left (TreeUnreadable ( "git ls-tree did not finish: it sent "
+            Left (TreeUnreadable (ReaderSays ( "git ls-tree did not finish: it sent "
                                      <> Text.pack (show seen)
                                      <> " bytes, then nothing for "
                                      <> Text.pack (show (gbCallSeconds bounds))
                                      <> "s or ran past "
                                      <> Text.pack (show (gbListingSeconds bounds))
-                                     <> "s in total, and was given up on" ))
+                                     <> "s in total, and was given up on" )))
           Right (ExitSuccess, Right (Just out))
             -- Counted on the RAW BYTES, before one TreeEntry exists. Records are
             -- NUL-terminated, so this is a single memchr scan. Counting the parsed
@@ -220,9 +236,10 @@ gitCanonWith bounds cwd = CanonSource
             -- to six bytes a byte. This is the shift that haddock calls the case
             -- the parser exists for, arriving where the parser never sees it.
             | not (BS.null out) && recs out == 0 ->
-                Left (TreeUnreadable "the tree listing has no record terminator in it")
+                Left (TreeUnreadable (ReaderSays
+                        "the tree listing has no record terminator in it"))
             | otherwise -> Right (parseListing out)
-          Right (_, Right (Just e)) -> Left (TreeUnreadable (msg (decodeS e)))
+          Right (_, Right (Just e)) -> Left (TreeUnreadable (ToolSaid (msg (decodeS e))))
           -- Again: git not having run at all, four calls in, is local.
           Left e -> Left (ReaderFailed (msg e))
 
@@ -400,10 +417,16 @@ gitCanonWith bounds cwd = CanonSource
         tryAny (liftIO (terminateProcess (unsafeProcessHandle p)))
         harder <- settle
         unless harder do
-          -- getPid on the ProcessHandle, not typed-process's Process: the latter
-          -- only exists in newer typed-process, and the static (musl, GHC 9.4.8)
-          -- package set pins an older one. The dynamic build was green and the
-          -- release build would not have been.
+          -- getPid on the ProcessHandle (from `process`, there since 1.6.3), not
+          -- typed-process's getPid on a Process, which only exists in
+          -- typed-process 0.2.12 and later.
+          --
+          -- The split is CABAL against NIX, not dynamic against static: the freeze
+          -- file pins typed-process 0.2.13.0 and nixpkgs gives 0.2.11.1 to both
+          -- the dynamic and the static package sets, so `cabal build` and the
+          -- whole suite were green while every nix output failed to compile. It is
+          -- the only version skew in this package's dependencies, and the next use
+          -- of a post-0.2.11 API will land in it again.
           pid <- liftIO (P.getPid (unsafeProcessHandle p))
           for_ pid $ \pid' -> tryAny (liftIO (signalProcess sigKILL pid'))
           void settle
@@ -465,7 +488,15 @@ gitCanonWith bounds cwd = CanonSource
                      Left seen -> pure (ExitFailure 1, Left seen)
                      Right Nothing -> pure (ExitFailure 1, Right Nothing)
                      Right (Just bs) -> do
-                       code <- waitExitCode p
+                       -- Bounded, like every other wait in this module. A child
+                       -- that writes a record, closes stdout, catches SIGTERM and
+                       -- sleeps leaves this waiting: measured at over 20s, and it
+                       -- was the only unbounded wait left. Through a real git it
+                       -- is unlikely; through a shim or a wrapper on PATH it is
+                       -- one line of shell.
+                       code <- fromMaybe (ExitFailure 1)
+                                 <$> timeout (gbCallSeconds bounds * 1000000)
+                                             (waitExitCode p)
                        -- The message is only wanted when git failed, and waiting
                        -- for it is bounded even then: stderr EOFs when the last
                        -- holder of the fd closes it, and a grandchild (an ssh
@@ -486,13 +517,23 @@ gitCanonWith bounds cwd = CanonSource
     -- Read a handle to a bound. Stops at the first chunk that crosses it and does
     -- not read the rest, which is the whole point.
     --
-    -- @Left n@ is the IDLE bound: no bytes for gbCallSeconds, with n the count so
-    -- far. A total time limit
-    -- is the wrong shape here, because a legitimately enormous tree takes as long
-    -- as it takes and refusing it on a clock would be a bound on the machine
-    -- rather than on the tree; what is never legitimate is silence. Reached with
-    -- a FIFO in place of a tree object: three calls answer and the fourth waited
-    -- for ever, taking the hook with it, with no output and no diagnostic.
+    -- @Left n@ is EITHER time bound, with n the bytes seen so far.
+    --
+    -- The idle one (gbCallSeconds without a byte) catches a reader that has
+    -- stopped: reached with a FIFO in place of a tree object, where three calls
+    -- answer and the fourth waits for ever with no output and no diagnostic.
+    --
+    -- The total one (gbListingSeconds) catches a reader that has not stopped and
+    -- will not finish. An earlier comment here argued a total limit was the wrong
+    -- shape, because a legitimately enormous tree takes as long as it takes; that
+    -- is true of the SIZE of a tree and false of the WALK, because @ls-tree -r@
+    -- walks it as a tree, so 64 entries at 12 levels all pointing at one subtree
+    -- is 64^12 traversals of 116 KB of objects. Dribbling one record between them
+    -- resets the idle bound for ever. So there are two bounds, and the deadline is
+    -- the one that answers the second case.
+    --
+    -- Checked BEFORE each read, so the worst case is gbListingSeconds plus one
+    -- gbCallSeconds, not gbListingSeconds exactly.
     upTo n h = do
       started <- getMonotonicTime
       go started 0 []

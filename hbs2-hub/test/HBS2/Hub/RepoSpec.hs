@@ -202,9 +202,9 @@ spec = do
       -- exit, which is the one answer indistinguishable from a tracker that has
       -- nothing in it.
       let noTree = CanonSource (pure (Right "deadbeef"))
-                     (const (pure (Left (TreeUnreadable "gone")))) (const (pure (BlobRefused "no such object")))
+                     (const (pure (Left (TreeUnreadable (ToolSaid "gone"))))) (const (pure (BlobRefused "no such object")))
       readCanon noTree (fst owner)
-        >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable "gone")
+        >>= \r -> fmap (const ()) r `shouldBe` Left (TreeUnreadable (ToolSaid "gone"))
 
     it "will not fold a tree whose rules are newer than this build" $ do
       owner <- kp

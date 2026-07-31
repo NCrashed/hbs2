@@ -27,6 +27,7 @@ module HBS2.Hub.CLI.Verify
   ) where
 
 import HBS2.Hub.Types (pathText)
+import HBS2.Hash (hashObject,HbSync)
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
@@ -95,6 +96,7 @@ notHere = \case
   FileMalformed _     -> False
   FileTooLarge _      -> False
   FileNotABlob        -> False
+  FileIsADirectory    -> False
   FileUnexpected      -> False
   FileDuplicated      -> False
 
@@ -144,6 +146,13 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
       -- "the object is not in this clone; fetch, or unshallow" and the advice
       -- under it told the reader to go and ask whoever published canon to rewrite
       -- the file. That is the ordinary state after clone --filter=blob:none.
+      -- Three remedies, and each of the three used to be printed under a message
+      -- that contradicted it.
+      VersionUnreadable FileListingUnparsed ->
+        line <> "  This build could not read the LISTING RECORD for"
+             <+> pathDoc versionPath <> ", not the file." <> line
+             <> "  Neither fetching nor git fsck is the answer: upgrade, or report"
+             <> " the git version." 
       VersionUnreadable p
         | notHere p -> line <> "  " <> pathDoc versionPath
                          <> " is listed and this clone did not read it. Fetching"
@@ -335,9 +344,20 @@ noFileVersion st = [ p | (p, Nothing) <- stFileVersions st ]
 -- author chose to make it unreadable with.
 pathDoc :: ByteString -> Doc ann
 pathDoc p
-  | Text.length shown <= keep = pretty shown
-  | otherwise = pretty (Text.take keep shown)
-                  <+> parens ("truncated," <+> pretty (BS.length p) <+> "bytes")
+  | BS.length p <= keep = pretty (pathText p)
+  -- Truncated AND still injective, which the first attempt at this was not: it
+  -- cut the escaped text at 300 characters and appended the byte length, so two
+  -- paths of equal length sharing a 300-character prefix printed as one line --
+  -- exactly the collision this whole notation exists to prevent, reintroduced by
+  -- the fix for the size of one line. It also cut off the closing quote, counted
+  -- escaped characters as if they were bytes, and could cut inside an escape.
+  --
+  -- The hash is what keeps the property: the prefix is cut on RAW BYTES (so no
+  -- escape is split), the length and the digest of the whole path follow, and two
+  -- paths that differ differ in at least one of the three.
+  | otherwise = pretty (pathText (BS.take keep p))
+                  <+> parens ( "truncated;" <+> pretty (BS.length p) <+> "bytes,"
+                                 <+> pretty (Text.take 16 (digest p)) )
   where
-    shown = pathText p
     keep = 300
+    digest = Text.pack . show . pretty . hashObject @HbSync

@@ -284,15 +284,14 @@ Then enable the module:
 ```
 This installs the binaries and starts a user-level `hbs2-peer.service`.
 
-The NixOS module (`nixosModules.default`) installs `hbs2-peer` only,
-not the rest of the set: it exists to run the daemon as a system
-service. Add the other binaries to `environment.systemPackages`
-yourself if you want them.
-
-The module installs the whole binary set, `hbs2-hub` among them, and
-adds no `git`: a machine that only runs the peer does not need one,
+It adds no `git`: a machine that only runs the peer does not need one,
 and a machine that runs the git-facing tools almost certainly has one
 already. Add `pkgs.git` to your own packages if it does not.
+
+The NixOS module (`nixosModules.default`) is a different thing from
+this Home Manager one: it runs the daemon as a system service and puts
+nothing on anybody's PATH. If you want the binaries there as well, add
+them to `environment.systemPackages` yourself.
 
 ## Verifying the install
 
