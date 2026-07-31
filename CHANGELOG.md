@@ -52,7 +52,7 @@ tree:
         did, every file it could not read, every file with no readable
         version clause, and a missing `version` file, which PEP-19
         requires. Exit 2 when it found any of those, so it works in a
-        hook; 3 to 13 when the audit could not run, one code per reason
+        hook; 3 to 14 when the audit could not run, one code per reason
         and each with advice on stderr; 141 for a closed pipe. The codes
         are a table in PEP-22 and are a contract: they may be added to,
         not reassigned.
@@ -74,6 +74,30 @@ tree:
         each event's size from the listing, how much of a tool's
         complaint is kept, how long a call may take, and how long its
         teardown may take (close the pipes, SIGTERM, SIGKILL, give up).
+        The walk that follows the listing has bounds of its own, in
+        seconds and in bytes handed back, because the listing of an
+        expensive tree is small: 45000 paths sharing one subtree is five
+        objects and 172 KB on disk, and every listing bound passes it.
+        And the report itself is bounded, at a thousand lines a section
+        with the count of what was not printed, since a path that is not
+        where canon puts things never becomes a blob and so no read
+        bound ever sees it.
+
+        Blobs are read through one `cat-file --batch` for the whole
+        walk rather than a process per path. That reply is not
+        self-delimiting and its announced size does not delimit it:
+        git writes the size out of the object's header and then the
+        whole body, and a loose object can be self-consistent and lie,
+        so a header of `blob 10` over two megabytes hashes to its own
+        name and `ls-tree -l` prints 10. Reading the announced number
+        would leave the rest in the pipe as the answer to the next
+        object, which is one path's content and verdict reported under
+        another's name. The reader checks the echoed object id, the
+        type, the newline after the body, and that nothing is pending
+        before it accepts a blob; the last of those is the one that
+        holds, since the first two are bytes a lying body can contain.
+        It also refuses a size larger than it will hold, or one too
+        wide for the number it is read into.
 
         Everything a stranger chose that reaches a terminal is escaped
         injectively: `\u{...}` for a character, `\x{...}` for a raw

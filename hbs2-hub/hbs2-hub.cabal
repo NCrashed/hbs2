@@ -161,6 +161,12 @@ test-suite spec
                  , temporary
                  , typed-process
                  , prettyprinter
+                 , unix
+                 -- For planting a loose object git would not write: one whose
+                 -- header announces a size its body does not have. See
+                 -- 'lyingObject' in HBS2.Hub.GitRepoSpec.
+                 , zlib
+                 , cryptohash-sha1
   other-modules:
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec

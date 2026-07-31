@@ -144,14 +144,30 @@ was a finding about somebody's repository.
 14 is a bound on the WALK, which the three listing bounds cannot give: a tree of
 45000 paths whose entries share one subtree is five objects and 172 KB on disk,
 and its listing is 3.6 MB against a 102 MB bound and 45001 records against
-200000. Every listing bound passes, and then the reader runs one git per PATH.
-Measured at 82 seconds, and about six minutes at the file bound. It matters
-because this verb is meant for a hook, where that is a push blocked for minutes
-by a repository that fits in an email.
+200000. Every listing bound passes, and the walk that follows is bounded by none
+of them. It matters because this verb is meant for a hook, where an expensive
+walk is a push blocked by a repository that fits in an email.
 
-The budget is a stopgap and is documented as one: the real fix is to read blobs
-in batch (one `cat-file --batch` for the whole walk instead of one process per
-path), after which a strict budget costs a legitimate large canon nothing.
+Blobs are read through one `cat-file --batch` for the whole walk. The same tree
+took 82 seconds when it was one process per path, and about six minutes at the
+file bound; it is seconds now. The budget stays, because a fast path and a bound
+answer different questions: the fast path decides what a walk usually costs, the
+bound decides what it may cost at worst, on a tree chosen by whoever is being
+audited.
+
+Batch reading is not free of its own hazards, and the reader carries the cost of
+that. A `cat-file --batch` reply is NOT self-delimiting: git writes the size from
+the object's header and then the whole body, and a loose object can be
+self-consistent and lie -- a header of `blob 10` over two megabytes hashes to its
+own name, so `cat-file -s` answers 10 and `ls-tree -l` prints 10. Reading the
+announced number leaves the rest of the body in the pipe as the answer to the next
+object, which is one path's content and verdict reported under another's name.
+Checking the echoed object id and the newline after the body does not close that:
+both are bytes the lying body can contain. What closes it is that a reply is not
+over until the stream is quiet, so the reader checks that nothing is pending
+before it accepts a blob. Delivering such an object needs access to the object
+store -- `upload-pack` will not pack one -- so this is not a remote attack; it is
+the reason the reader does not trust a size it was told.
 
 A missing `version` file exits 2 rather than 3-and-up: PEP-19 requires the file,
 so its absence is a finding, but the tree still folds, under the OLDEST rules this

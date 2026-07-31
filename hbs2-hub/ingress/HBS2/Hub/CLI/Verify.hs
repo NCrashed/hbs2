@@ -197,17 +197,20 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                           <> " large (PEP-19), not a bigger reader."
       CanonListingTooBig _ -> line <> "  Compaction is the answer to a canon this"
                                 <> " large (PEP-19), not a bigger reader."
-      -- Not "too big" and not local: the tree is small and expensive, which is a
-      -- shape a bound on size cannot see.
-      CanonTooSlow _ -> line <> "  The tree is not large; walking it is. A tree"
-                          <> " whose entries share subtrees" <> line
-                          <> "  costs a git per PATH, not per object. Compaction"
-                          <> " (PEP-19) is the answer;" <> line
-                          <> "  so is not running this in a pre-receive hook on"
-                          <> " somebody else's tree."
+      -- Not local, and not a bound on size: what ran out is the walk's time or
+      -- what it handed back. Says neither "the tree is large" nor "the tree is
+      -- small", because the two halves of this budget fire on opposite trees --
+      -- the byte half on a large one, the time half on a small one whose entries
+      -- share subtrees. The message that arrives with it says which.
+      CanonTooSlow _ -> line <> "  Reading this tree cost more than this reader"
+                          <> " will spend on one; the line" <> line
+                          <> "  above says what ran out. Compaction (PEP-19) is"
+                          <> " the answer; so is not" <> line
+                          <> "  running this in a pre-receive hook on somebody"
+                          <> " else's tree."
       -- The one refusal that is not about canon. Said so, because the others all
-      -- are, and a reader who has seen the other nine will read this as the tenth
-      -- thing wrong with somebody else's tree.
+      -- are, and a reader who has seen the other ten will read this as the
+      -- eleventh thing wrong with somebody else's tree.
       ReaderFailed _ -> line <> "  This is local: no process slots, no file"
                           <> " descriptors, or git gone from" <> line
                           <> "  PATH mid-audit. Nothing was learned about canon,"
@@ -295,7 +298,8 @@ reportDoc st =
   -- -z precisely because a path may contain anything but NUL, and a file named
   -- with a newline and a plausible summary line forged the last line of this
   -- report. Every other stranger's text in this project already goes through it.
-  <> [ "unreadable" <+> pathDoc p <> ":" <+> pretty e | (p, e) <- stBad st ]
+  <> capped "unreadable"
+       [ "unreadable" <+> pathDoc p <> ":" <+> pretty e | (p, e) <- stBad st ]
 
   -- Files whose own version clause did not read. Reported and never obeyed
   -- (PEP-19), and reported at all because a writer that appends to this tree is
@@ -307,10 +311,11 @@ reportDoc st =
   -- Nothing, and the line used to name only the first of the three. A maintainer
   -- who opened the file, saw a perfectly good clause and stopped believing the
   -- audit was reading a file with two of them.
-  <> [ "no single readable file version" <+> pathDoc p | p <- noFileVersion st ]
+  <> capped "unversioned"
+       [ "no single readable file version" <+> pathDoc p | p <- noFileVersion st ]
 
-  <> fmap pretty dropped
-  <> fmap pretty anomalies
+  <> capped "dropped" (fmap pretty dropped)
+  <> capped "anomaly" (fmap pretty anomalies)
 
   -- Counts, not a partition, and said so: an event with two anomalies adds one
   -- to admitted and two to anomalies.
@@ -336,6 +341,33 @@ reportDoc st =
     fr = stFold st
     dropped = frDropped fr
     anomalies = frAnomalies fr
+
+    -- A BOUND ON THE REPORT, which had none of any kind.
+    --
+    -- Every list above is one line per path, and every bound this reader has is
+    -- on what it READS. A path that is not where canon puts things never reaches
+    -- a blob, so the read budget never sees it, and it is printed all the same:
+    -- measured, 4555 bytes of git objects produced 369 600 298 bytes of stdout
+    -- and 661 MB resident, exiting 2. Eighty thousand times the input, out of a
+    -- repository that fits in an email, into the terminal of whoever ran the
+    -- hook.
+    --
+    -- The COUNTS are not capped, because they are one line each and they are what
+    -- the exit code is computed from. Cutting the lines and keeping the totals is
+    -- what makes the cut safe to make: nothing a script reads changes.
+    --
+    -- What is left is 1000 lines a section, and 'pathDoc' spends up to 1800
+    -- characters on one path, so the worst case is still a few megabytes rather
+    -- than a few hundred bytes. That is a terminal being filled, not a machine
+    -- being taken down, and shrinking pathDoc's own budget is the fix for it.
+    capped what xs
+      | n <= maxReportLines = xs
+      | otherwise = List.take maxReportLines xs
+          <> [ "and" <+> pretty (n - maxReportLines) <+> "more" <+> what
+                 <+> "lines, not printed; the counts below are of all of them" ]
+      where n = length xs
+
+    maxReportLines = 1000
 
 -- | What a completed audit exits with: 2 if it found anything, 0 otherwise.
 --

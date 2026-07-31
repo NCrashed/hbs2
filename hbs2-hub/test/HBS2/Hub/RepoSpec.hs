@@ -205,6 +205,35 @@ spec = do
       st <- readOk listed repo
       stBad st `shouldBe` [(p, FileUnreadable "no such object")]
 
+    it "calls a source it can no longer follow a tree it cannot read, not a local failure" $ do
+      owner <- kp
+      -- BlobProtocol is git having answered something this reader will not
+      -- follow: a reply about an object it did not ask for, a type it did not ask
+      -- for, a size that would overflow the number it is read into. It is not a
+      -- fact about a file, so it ends the walk; and it is not local, which is
+      -- what it used to be reported as -- "no process slots, no file
+      -- descriptors", printed about a git that had answered promptly. Code 9 with
+      -- the reader's own words is the one whose advice fits: report the git
+      -- version, because the format has moved.
+      let p = B8.pack "threads/t/00000000000000000001-x"
+          confused = inMem (pure (Right "deadbeef"))
+                       (const (pure (Right [TreeEntry p (Blob "oid" 10)])))
+                       (const (pure (BlobProtocol "answered about another object")))
+      readCanon confused (fst owner) >>= \r ->
+        fmap (const ()) r
+          `shouldBe` Left (TreeUnreadable (ReaderSays "answered about another object"))
+
+    it "says the same about the version file, which is read on its own path" $ do
+      owner <- kp
+      -- The version file is read before the walk and by different code, and every
+      -- fix to one of these two has had to be made twice. This is the half that
+      -- gets forgotten.
+      let confused = inMem (pure (Right "deadbeef"))
+                       (const (pure (Right [TreeEntry (B8.pack "version") (Blob "v" 10)])))
+                       (const (pure (BlobProtocol "said something else")))
+      readCanon confused (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (TreeUnreadable (ReaderSays "said something else"))
+
     it "refuses a tree it cannot list, rather than reporting empty canon" $ do
       owner <- kp
       -- A commit that is here and a tree that is not: a partial clone, a pruned

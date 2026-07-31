@@ -14,22 +14,24 @@ module HBS2.Hub.GitRepoSpec (spec) where
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 
+import Codec.Compression.Zlib qualified as Zlib
 import Control.Exception (bracket,bracket_)
 import Control.Monad (void,forM)
+import Crypto.Hash.SHA1 qualified as SHA1
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Base16 qualified as B16
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import System.Posix.Signals (signalProcess,nullSignal)
 import Data.Foldable (for_)
 import Data.List (sort)
 import Data.Maybe (fromMaybe,isJust)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
-import Control.Monad (unless)
 import System.Directory ( createDirectoryIfMissing,findExecutable,getPermissions
                         , setPermissions,setOwnerExecutable,doesFileExist )
 import System.Environment qualified as Env
-import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory,getCanonicalTemporaryDirectory)
 import Control.Concurrent (forkIO)
@@ -104,18 +106,8 @@ trim = takeWhile (`notElem` "\n\r") . LBS8.unpack
 -- blob with LBS8.pack and asserted against the six characters it had truncated
 -- to six bytes, and the reader read exactly what the fixture had written.
 withCanon :: [(ByteString, ByteString)] -> (FilePath -> IO a) -> IO a
-withCanon files act = withSystemTempDirectory "hub-git" $ \dir -> do
-  void $ git dir ["init", "-q", "."]
-  void $ git dir ["read-tree", "--empty"]
-  recs <- forM files $ \(p, content) -> do
-            h <- hashObject dir content
-            pure (B8.pack ("100644 " <> h) <> "\t" <> p <> "\0")
-  void $ gitStdin dir (LBS8.fromStrict (mconcat recs))
-           ["update-index", "-z", "--index-info"]
-  tree <- git dir ["write-tree"]
-  commit <- git dir ["commit-tree", tree, "-m", "canon"]
-  void $ git dir ["update-ref", "refs/hbs2/meta", commit]
-  act dir
+withCanon files =
+  withCanonOf (\dir -> forM files (\(p, c) -> (,) p <$> hashObject dir c))
 
 hashObject :: FilePath -> ByteString -> IO String
 hashObject dir content =
@@ -235,6 +227,159 @@ partial act = withSystemTempDirectory "hub-partial" $ \root -> do
   act clone (length . filter (== "blob")
                <$> gitAll clone [ "cat-file", "--batch-all-objects"
                                 , "--batch-check=%(objecttype)" ])
+
+-- A loose object whose header ANNOUNCES ONE SIZE AND WHOSE BODY IS ANOTHER, and
+-- the id it is stored under.
+--
+-- Planted by hand because git will not write one: hash-object computes the header
+-- from the body it is handed. It is not malformed, though, which is the whole
+-- difficulty -- the name is the sha1 of header and body together, so the object
+-- is self-consistent, @cat-file -s@ answers with the announced size, and
+-- @ls-tree -l@ prints it in the size column.
+--
+-- Measured on git 2.55: for a header of @blob 10@ over two megabytes of body,
+-- @cat-file --batch@ writes "<oid> blob 10" and then all two megabytes. That is
+-- the reply this reader has to survive, and the framing it cannot get from the
+-- announced size.
+lyingObject :: FilePath -> Int -> ByteString -> IO String
+lyingObject dir announced body = do
+  let raw = B8.pack ("blob " <> show announced) <> "\0" <> body
+      oid = B8.unpack (B16.encode (SHA1.hash raw))
+      d   = dir </> ".git" </> "objects" </> take 2 oid
+  createDirectoryIfMissing True d
+  LBS8.writeFile (d </> drop 2 oid) (Zlib.compress (LBS8.fromStrict raw))
+  pure oid
+
+-- A canon tree naming objects BY ID, so a fixture can plant one git would not
+-- write. 'withCanon' is this with the objects hashed the ordinary way.
+withCanonOf :: (FilePath -> IO [(ByteString, String)]) -> (FilePath -> IO a) -> IO a
+withCanonOf make act = withSystemTempDirectory "hub-git" $ \dir -> do
+  void $ git dir ["init", "-q", "."]
+  void $ git dir ["read-tree", "--empty"]
+  entries <- make dir
+  void $ gitStdin dir
+           (LBS8.fromStrict (mconcat [ B8.pack ("100644 " <> h) <> "\t" <> p <> "\0"
+                                     | (p, h) <- entries ]))
+           ["update-index", "-z", "--index-info"]
+  tree <- git dir ["write-tree"]
+  commit <- git dir ["commit-tree", tree, "-m", "canon"]
+  void $ git dir ["update-ref", "refs/hbs2/meta", commit]
+  act dir
+
+-- Every blob the tree lists, read through one source, in listing order.
+--
+-- One source and not one per blob, because reading them together is the thing
+-- under test: they share a @cat-file --batch@, and what one path's reply does to
+-- the next is invisible to a test that reads one.
+blobsOf :: GitBounds -> FilePath -> IO [(ByteString, BlobResult)]
+blobsOf bounds dir =
+  withGitCanonWith bounds (Just dir) $ \cs ->
+    csCommit cs >>= \case
+      Left e -> fail ("no commit: " <> show e)
+      Right commit -> csEntries cs commit >>= \case
+        Left e -> fail ("no listing: " <> show e)
+        Right es -> forM [ (teePath e, oid) | e <- es, Blob oid _ <- [teeKind e] ]
+                      (\(p, oid) -> (,) p <$> csBlob cs oid)
+
+-- A fake git whose @cat-file --batch@ is the shell given, and one read of the
+-- one blob its listing names.
+--
+-- A shim, because the batch protocol is where this reader and git agree on
+-- framing and these tests are about the agreement being broken. The two ways real
+-- git breaks it have their own tests above and use real git; the rest -- a reply
+-- about another object, a type nobody asked for, a size that overflows an Int --
+-- are not reachable through any git, and are exactly what the reader has to
+-- refuse rather than follow.
+--
+-- @pause@ is seconds slept before the listing, for the one test that is about
+-- which clock the walk's budget runs on.
+batching :: GitBounds -> [String] -> (IO BlobResult -> FilePath -> IO a) -> IO a
+batching bounds = batchingWith bounds 0
+
+batchingWith :: GitBounds -> Int -> [String]
+             -> (IO BlobResult -> FilePath -> IO a) -> IO a
+batchingWith bounds pause catFile act = withSystemTempDirectory "hub-batch" $ \dir -> do
+  let bin = dir </> "bin"
+  createDirectoryIfMissing True bin
+  sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
+  writeFile (bin </> "git") (unlines $
+    [ "#!/bin/sh"
+    , "case \"$*\" in"
+    , "  *cat-file*--batch*)"
+    ] <> fmap ("    " <>) catFile <>
+    [ "    ;;"
+    , "  *ls-tree*)"
+    , "    " <> (if pause > 0 then sleep <> " " <> show pause else "true")
+    , "    printf '100644 blob " <> shimOid <> "      5\\tthreads/t/0001-x\\000' ;;"
+    , "  *rev-parse*git-dir*) echo .git ;;"
+    , "  *show-ref*) exit 0 ;;"
+    , "  *rev-parse*) echo " <> shimOid <> " ;;"
+    , "  *) exit 1 ;;"
+    , "esac"
+    ])
+  perm <- getPermissions (bin </> "git")
+  setPermissions (bin </> "git") (setOwnerExecutable True perm)
+  old <- Env.lookupEnv "PATH"
+  bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
+           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (act (readOneBlob bounds dir) bin)
+
+-- A git that writes a listing, CLOSES STDOUT, and then does not exit.
+--
+-- What a killed or crashed writer looks like from the reading end, and the one
+-- shape that tells "the pipe ended" apart from "the tree ended". It ignores
+-- SIGTERM as well, so the reader has to reach its own answer rather than be
+-- rescued by the child dying.
+halfWritten :: GitBounds -> FilePath
+            -> (IO (Either CanonUnreadable [TreeEntry]) -> IO a) -> IO a
+halfWritten bounds sleep act = withSystemTempDirectory "hub-half" $ \dir -> do
+  let bin = dir </> "bin"
+  createDirectoryIfMissing True bin
+  writeFile (bin </> "git") (unlines
+    [ "#!/bin/sh"
+    , "trap '' TERM"
+    , "case \"$*\" in"
+    , "  *ls-tree*)"
+    , "    printf '100644 blob " <> shimOid <> "      5\\tthreads/t/0001-x\\000'"
+    , "    exec 1>&-"
+    , "    " <> sleep <> " 30 ;;"
+    , "  *rev-parse*git-dir*) echo .git ;;"
+    , "  *show-ref*) exit 0 ;;"
+    , "  *rev-parse*) echo " <> shimOid <> " ;;"
+    , "  *) exit 1 ;;"
+    , "esac"
+    ])
+  perm <- getPermissions (bin </> "git")
+  setPermissions (bin </> "git") (setOwnerExecutable True perm)
+  old <- Env.lookupEnv "PATH"
+  bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
+           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (act (readTreeWith bounds dir))
+
+-- The object id every shim above answers about.
+shimOid :: String
+shimOid = replicate 40 'a'
+
+readOneBlob :: GitBounds -> FilePath -> IO BlobResult
+readOneBlob bounds dir =
+  withGitCanonWith bounds (Just dir) $ \cs ->
+    csCommit cs >>= \case
+      Left e -> fail ("no commit: " <> show e)
+      Right commit -> csEntries cs commit >>= \case
+        Left e -> fail ("no listing: " <> show e)
+        Right es -> case [ oid | e <- es, Blob oid _ <- [teeKind e] ] of
+          [oid] -> csBlob cs oid
+          other -> fail ("expected one blob, got " <> show other)
+
+-- Is there still a process with this id?
+--
+-- Signal 0 is the POSIX way to ask, and the answer is only meaningful because the
+-- reader is the child's parent: it reaps what it kills, so a process it has
+-- finished with is gone rather than a zombie.
+alive :: Int -> IO Bool
+alive pid = either (const False) (const True)
+              <$> (try (signalProcess nullSignal (fromIntegral pid))
+                     :: IO (Either SomeException ()))
 
 -- A kind, without the object id, which varies from run to run.
 data Kind = Sized Int | Missing | NotBlob | Bad
@@ -414,9 +559,9 @@ readIn dir = do
 
 -- One test, with the environment it needs, put back afterwards.
 --
--- The reads below go through the production 'gitCanonIn', so what it inherits
+-- The reads below go through the production 'withGitCanonIn', so what it inherits
 -- from this process it inherits for real, and this is the only way to arrange
--- what it inherits. The GIT_DIR family is deliberately NOT here: 'gitCanonIn'
+-- what it inherits. The GIT_DIR family is deliberately NOT here: it
 -- strips those itself when a directory is named, which is a property of the
 -- production code and is asserted below rather than arranged away.
 --
@@ -887,6 +1032,198 @@ spec = do
           Left (NoCanonRef w) -> B8.unpack w `shouldContain` dir
           other -> expectationFailure
                      ("expected NoCanonRef, got " <> show (fmap (const ()) other))
+
+    it "does not give one path the bytes of another when an object lies about its size" $ do
+      -- THE ONE THAT MATTERS. A loose object may announce a size its body does
+      -- not have, and git serves the announcement and then the whole body, so
+      -- reading the announced number leaves the rest in the pipe as the answer to
+      -- the NEXT object. Everything about that is quiet: exit 2 or 0, one path's
+      -- content and verdict reported under another's name.
+      --
+      -- The body here is built to defeat the two obvious checks, because it did:
+      -- ten bytes, the newline a reader consumes after them, and then a COMPLETE
+      -- forged reply naming the next object correctly. The echoed id matches and
+      -- the byte after the body is a newline. Measured against the reader that
+      -- had only those two checks: 479 bytes of git objects, and this test's
+      -- "good" file audited as the contents of the liar.
+      withCanonOf (\dir -> do
+        good <- hashObject dir "an honest file\n"
+        let forged = B8.pack (good <> " blob 20\nbytes from elsewhere\n")
+        liar <- lyingObject dir 10 ("AAAAAAAAAA\n" <> forged)
+        v <- hashObject dir "(hub-meta 1)\n"
+        pure [ ("threads/t/0001-liar", liar)
+             , ("threads/t/0002-good", good)
+             , ("version", v) ]) $ \dir -> do
+        got <- blobsOf gitBounds dir
+        -- The good file reads as itself, which is the property. Named first
+        -- because it is the one an attacker changes and the one a reader trusts.
+        lookup "threads/t/0002-good" got `shouldBe` Just (BlobText "an honest file\n")
+        case lookup "threads/t/0001-liar" got of
+          Just (BlobRefused m) -> Text.unpack m `shouldContain` "delivered more"
+          other -> expectationFailure ("expected BlobRefused, got " <> show other)
+
+    it "refuses an object whose body is shorter than its header says, promptly" $ do
+      -- The other direction, and it was two minutes of a blocked pre-receive hook
+      -- reported as "this is local: no process slots". Two, because the read of
+      -- the trailing newline ran unconditionally after the body read had already
+      -- timed out.
+      --
+      -- The bound is the BODY bound and not the call bound: past the header git
+      -- has said what it is about to send, so silence in the middle of it is not
+      -- a git thinking. One second here, ten in production, sixty before.
+      let bounds = gitBounds { gbBodySeconds = 1 }
+      withCanonOf (\dir -> do
+        liar <- lyingObject dir 20000 "ten bytes!"
+        v <- hashObject dir "(hub-meta 1)\n"
+        pure [("threads/t/0001-short", liar), ("version", v)]) $ \dir ->
+        within 20 "the short-body read" $ do
+          got <- blobsOf bounds dir
+          case lookup "threads/t/0001-short" got of
+            Just (BlobRefused m) -> Text.unpack m `shouldContain` "did not deliver"
+            other -> expectationFailure ("expected BlobRefused, got " <> show other)
+
+    it "reads a blob whose batch process floods stderr past a pipe buffer" $ do
+      -- The listing has read both its pipes at once since the day it deadlocked;
+      -- the batch process was given a third pipe and none of that reasoning. A
+      -- pipe holds 64 KiB and git blocks on write when it is full: measured on
+      -- git 2.55, one request against a repository whose objects/info/alternates
+      -- names 2000 missing directories writes 206 893 bytes of stderr BEFORE
+      -- answering. Nobody was reading it, so git stopped in write() and the read
+      -- waited out its bound and called it local.
+      within 60 "the batch read with a flooded stderr" $
+        batching gitBounds
+          [ "i=0; while [ $i -lt 3000 ]; do"
+          , "  echo \"error: unable to normalize alternate object path: /no/such/dir/$i\" >&2"
+          , "  i=$((i+1)); done"
+          , "while read oid; do printf '%s blob 5\\nabcde\\n' \"$oid\"; done"
+          ] (\readIt _ -> readIt `shouldReturn` BlobText "abcde")
+
+    it "gives git's own words for an object it will not open" $ do
+      -- Batch mode collapses "not here" and "here and unreadable" into the one
+      -- word "missing" and puts the reason on stderr, so the answer for an object
+      -- with its permissions removed was a story this reader had chosen. The
+      -- lines are matched by object id rather than by when they arrived: two
+      -- pipes read by two threads have no order between them, and a window would
+      -- have put one path's reason under the next path's name.
+      batching gitBounds
+        [ "while read oid; do"
+        , "  echo \"error: unable to open loose object $oid: Permission denied\" >&2"
+        , "  echo \"error: unable to open loose object 0000000000000000000000000000000000000000: not this one\" >&2"
+        , "  printf '%s missing\\n' \"$oid\"; done"
+        ] $ \readIt _ -> readIt >>= \case
+          BlobRefused m -> do
+            Text.unpack m `shouldContain` "Permission denied"
+            Text.unpack m `shouldNotContain` "not this one"
+          other -> expectationFailure ("expected BlobRefused, got " <> show other)
+
+    it "says the plain thing when there are no words, and does not wait long for them" $ do
+      -- The other side of the wait above, and the one a unit slip turns into a
+      -- hang: a genuinely absent object has no stderr line, so the wait runs to
+      -- its end every time. It ran to five hundred SECONDS once, from a
+      -- milliseconds budget multiplied into microseconds and then halved.
+      within 30 "the wordless missing object" $
+        batching gitBounds
+          [ "while read oid; do printf '%s missing\\n' \"$oid\"; done" ]
+          (\readIt _ -> readIt `shouldReturn` BlobRefused "missing from this clone")
+
+    it "refuses a batch reply about an object it did not ask for" $ do
+      -- Not reachable through git, and that is the point: if the reply this
+      -- reader gets stops being the reply to the request it wrote, every answer
+      -- after it lands on the wrong path. Refused as a PROTOCOL failure, whose
+      -- advice is to report the git version, and not as "this is local".
+      batching gitBounds
+        [ "while read oid; do printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 5\\nabcde\\n'; done" ]
+        $ \readIt _ -> readIt >>= \case
+            BlobProtocol m -> Text.unpack m `shouldContain` "another object"
+            other -> expectationFailure ("expected BlobProtocol, got " <> show other)
+
+    it "refuses a batch size that would overflow the number it is read into" $ do
+      -- read for an Int goes through Integer and fromInteger WRAPS, so
+      -- 18446744073709551626 arrives as 10 and two megabytes of body would be
+      -- admitted under a ten-byte ceiling. The listing parser has had this guard
+      -- for a while and the batch reader was written without it.
+      batching gitBounds
+        [ "while read oid; do printf '%s blob 18446744073709551626\\nabcde\\n' \"$oid\"; done" ]
+        $ \readIt _ -> readIt >>= \case
+            BlobProtocol _ -> pure ()
+            other -> expectationFailure ("expected BlobProtocol, got " <> show other)
+
+    it "refuses a blob larger than the ceiling without reading it" $ do
+      -- The ceiling is this reader's own and is not the size column's: that
+      -- column is the audited tree's word for it. A parameter, because at the
+      -- real number no test could afford to reach the branch.
+      batching (gitBounds { gbBlobBytes = 4 })
+        [ "while read oid; do printf '%s blob 5\\nabcde\\n' \"$oid\"; done" ]
+        $ \readIt _ -> readIt `shouldReturn` BlobOversize 5
+
+    it "stops the walk when it has spent its seconds, and starts the clock at the walk" $ do
+      -- Two properties in one fixture, because they are one number seen from two
+      -- sides. The budget is on the WALK: an ls-tree that takes two seconds must
+      -- not spend it, or gbListingSeconds (600) is unreachable behind
+      -- gbReadSeconds (180) and a listing refused at 180 draws the advice for a
+      -- walk that never began. And once the walk starts, the budget holds.
+      let bounds = gitBounds { gbReadSeconds = 1, gbCallSeconds = 30 }
+      within 60 "the walk budget" $
+        batchingWith bounds 2
+          [ "while read oid; do printf '%s blob 5\\nabcde\\n' \"$oid\"; done" ]
+          $ \readIt _ -> do
+              -- The listing took twice the walk's budget and the first blob is
+              -- still read: the clock had not started.
+              readIt `shouldReturn` BlobText "abcde"
+
+    it "stops the walk when it has handed back its bytes" $ do
+      -- The other half of the budget, and it was counting CHARACTERS against a
+      -- byte bound, so canon in a non-Latin script was let past it by however
+      -- much of it was not ASCII. Nothing exercised either half.
+      let bounds = gitBounds { gbReadBytes = 3 }
+      withCanonOf (\dir -> do
+        a <- hashObject dir "aaaaaaaaaa"
+        b <- hashObject dir "bbbbbbbbbb"
+        v <- hashObject dir "(hub-meta 1)\n"
+        pure [ ("threads/t/0001-a", a), ("threads/t/0002-b", b), ("version", v) ]) $ \dir -> do
+        got <- blobsOf bounds dir
+        -- The first is under the bound when it is asked for, because the bound is
+        -- on what has been spent. The second is not.
+        lookup "threads/t/0001-a" got `shouldBe` Just (BlobText "aaaaaaaaaa")
+        case lookup "threads/t/0002-b" got of
+          Just (BlobBudget m) -> Text.unpack m `shouldContain` "bytes"
+          other -> expectationFailure ("expected BlobBudget, got " <> show other)
+
+    it "leaves no batch process behind" $ do
+      -- The source holds a git, three pipes and a thread. csClose is what returns
+      -- them and withGitCanon is what calls it; before this the suite's only
+      -- mention of csClose was a `pure ()` stub, so deleting the call left it
+      -- green.
+      --
+      -- The shim survives its stdin closing and ignores SIGTERM, so passing this
+      -- takes the whole escalation and not just the polite half.
+      sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
+      within 60 "the batch teardown" $
+        batching gitBounds
+          [ "trap '' TERM"
+          , "echo $$ > \"$(dirname \"$0\")/batchpid\""
+          , "while read oid; do printf '%s blob 5\\nabcde\\n' \"$oid\"; done"
+          , sleep <> " 30"
+          ] $ \readIt bin -> do
+            readIt `shouldReturn` BlobText "abcde"
+            pid <- read <$> readFile (bin </> "batchpid")
+            alive pid `shouldReturn` False
+
+    it "does not call a listing complete because its writer closed the pipe" $ do
+      -- EOF on stdout means the write end was closed. A writer that has finished
+      -- does that, and so does one that was killed, that crashed, or that closed
+      -- the descriptor with the tree half written -- only the exit code tells
+      -- them apart. Treating the wait's timeout as success was a fix for the
+      -- opposite complaint and traded a loud hypothetical false negative for a
+      -- quiet demonstrable false positive: a truncated listing audited clean.
+      let bounds = gitBounds { gbCallSeconds = 1 }
+      sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
+      within 60 "the unfinished listing" $
+        halfWritten bounds sleep $ \readIt -> readIt >>= \case
+          Left (TreeUnreadable (ReaderSays m)) ->
+            Text.unpack m `shouldContain` "closed its output"
+          other -> expectationFailure
+                     ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
 
     it "refuses a tree whose objects are gone, rather than calling it empty" $ do
       -- A partial clone, a pruned object, a killed ls-tree. Empty canon is the

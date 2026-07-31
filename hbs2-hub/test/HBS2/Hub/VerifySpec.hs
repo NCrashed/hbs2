@@ -350,6 +350,48 @@ spec = do
         \((ca, a), (cb, b)) ->
           (ca, cb, a) `shouldSatisfy` \_ -> a /= b
 
+    it "tells a tree git could not read from one this reader could not parse" $ do
+      -- The pair above compares refusals with DIFFERENT codes, so it cannot see
+      -- this one: both of these are code 9. The distinction is the whole of what
+      -- 'Told' was added for, and nothing in the suite could tell whether it had
+      -- been used -- deleting the split left every example green.
+      --
+      -- What the split buys: git's complaints have several causes and some are
+      -- fixed by fetching, while this reader's own refusals (a bound reached, a
+      -- format it cannot parse, a batch reply it will not follow) are not fixed
+      -- by fetching at all and were being told to fetch.
+      let advice u = Text.unlines (drop 1 (Text.lines (render (refusalDoc u))))
+          tool = advice (TreeUnreadable (ToolSaid "missing blob"))
+          ours = advice (TreeUnreadable (ReaderSays "gave up"))
+      tool `shouldNotBe` ours
+      Text.unpack tool `shouldContain` "fetching"
+      Text.unpack ours `shouldContain` "Fetching will not help"
+
+    it "bounds the report's lines without changing what it counts" $ do
+      -- The report had no bound of any kind, and no read bound reaches it: a path
+      -- that is not where canon puts things never becomes a blob, so the walk's
+      -- budget never sees it, and it is printed all the same. Measured on the
+      -- unbounded version: 4555 bytes of git objects, 369 600 298 bytes of
+      -- stdout, 661 MB resident, exit 2. Eighty thousand times the input.
+      owner <- kp
+      let repo = fst owner
+          n = 1200
+          files = ("version", renderMeta)
+                    : [ ( B8.pack ("threads/t/" <> show i <> "-x"), "not an event" )
+                      | i <- [1 .. n :: Int] ]
+      st <- readCanon (byPath files) repo >>= either (fail . show) pure
+
+      let ls = fmap render (reportDoc st)
+          unreadable = [ l | l <- ls, "unreadable " `Text.isPrefixOf` l ]
+      -- Cut, and SAID to be cut: a report that silently stops listing reads as a
+      -- report that found nothing more.
+      length unreadable `shouldBe` 1000
+      any (Text.isPrefixOf "and 200 more unreadable lines") ls `shouldBe` True
+      -- And the counts are of all of them, because that is what a hook reads and
+      -- what the exit code is computed from.
+      any (Text.isInfixOf ("unreadable " <> Text.pack (show n))) ls `shouldBe` True
+      reportCode st `shouldBe` 2
+
     it "exits 2 for a fold that dropped something, and prints the drop" $ do
       owner <- kp
       mallory <- kp

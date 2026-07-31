@@ -100,10 +100,11 @@ data CanonSource m = CanonSource
   , csBlob    :: Text -> m BlobResult
     -- | Release whatever the source is holding.
     --
-    -- The git source keeps ONE -file --batch@ for the whole walk, because a
+    -- The git source keeps ONE @cat-file --batch@ for the whole walk, because a
     -- process per blob is what made a 172 KB tree cost 82 seconds, so there is
-    -- something to close and a caller that forgets leaks it. 'withGitCanon' is
-    -- the shape that does not forget; this field is what it calls.
+    -- something to close (a git, its three pipes and the thread reading its
+    -- stderr) and a caller that forgets leaks all of it. 'withGitCanon' is the
+    -- shape that does not forget; this field is what it calls.
   , csClose   :: m ()
   }
 
@@ -127,12 +128,30 @@ data BlobResult =
     -- story. Reported as 'FileUnreadable', which is the honest shape: what is
     -- broken is the read.
   | BlobRefused Text
-    -- | The source could not run. Says nothing about canon.
+    -- | The source could not run, or ran and stopped running. Says nothing about
+    -- canon.
   | BlobUnavailable Text
-    -- | The blob is larger than the reader will read, with what it read before it
-    -- stopped. NOT the same as 'FileTooLarge', which is the listing's number: a
-    -- tree can say ten and hand over two megabytes, and the size column is the
-    -- audited tree's word for it.
+    -- | The source ran, answered, and the answer is not one this reader can
+    -- follow: a reply about an object it did not ask for, a type it did not ask
+    -- for, a shape it cannot parse. Not a fact about any file, and not a local
+    -- failure either -- it is this reader and the tool having stopped agreeing on
+    -- the protocol, which is what 'TreeUnreadable' with 'ReaderSays' is for, and
+    -- whose advice ("report the git version if the format has moved") is the one
+    -- that fits.
+    --
+    -- Its own constructor because the alternative was 'BlobUnavailable', whose
+    -- advice is "this is local: no process slots, no file descriptors", printed
+    -- about a git that had answered perfectly promptly.
+  | BlobProtocol Text
+    -- | The blob's announced size is larger than this reader will hold, carrying
+    -- THE ANNOUNCED SIZE: nothing was read, which is the point of refusing on the
+    -- announcement.
+    --
+    -- Reported as 'FileTooLarge', the same as the listing's own size column,
+    -- because to whoever reads the report they are one fact: this file is too
+    -- big. They are two different numbers, though, and that is why the read has
+    -- a ceiling at all -- the column is the AUDITED TREE's word for it and a
+    -- loose object can be self-consistent and lie, saying ten over two megabytes.
   | BlobOversize Int
     -- | The reader has spent as much as it will on this tree, and stopped. Says
     -- nothing about any one file.
@@ -195,13 +214,21 @@ data CanonUnreadable =
     -- wrapped as a tree that will not list it also drew the advice for a pruned
     -- object, printed directly under a message about compaction.
   | CanonListingTooBig Int
-    -- | Reading this tree cost more than the reader will spend. A budget on the
-    -- WALK, which the listing bounds cannot give: 45000 paths pointing at one
-    -- shared subtree is five objects and 164 KB on disk, and the listing is 3.6 MB
-    -- against a 102 MB bound, 45000 records against 200000 -- every bound passed,
-    -- and then one git per path. Measured at 82 seconds; at maxCanonFiles it is
-    -- about six minutes. In a pre-receive hook that is a push blocked for six
-    -- minutes by a repository that fits in an email.
+    -- | Reading this tree cost more than the reader will spend: time on the walk,
+    -- or bytes handed back by it.
+    --
+    -- A budget on the WALK, which no listing bound can give, because the listing
+    -- of an expensive tree is small. The tree that made this necessary was 45000
+    -- paths pointing at one shared subtree: five objects, 164 KB on disk, a 3.6 MB
+    -- listing against a 102 MB bound and 45000 records against 200000. Every bound
+    -- passed, and then the walk read it a path at a time.
+    --
+    -- That particular cost is gone -- blobs go through one batch process now, and
+    -- the same tree reads in seconds -- and this is not a leftover. A bound and a
+    -- fast path answer different questions: the fast path decides what a walk
+    -- usually costs, and this decides what it may cost at worst, on a tree chosen
+    -- by whoever is being audited, in a verb meant to run inside a pre-receive
+    -- hook.
   | CanonTooSlow Text
     -- | The reader could not run the tool at all: no process slots, no file
     -- descriptors, the tool gone from PATH mid-audit. Nothing is known about
@@ -307,8 +334,9 @@ data FileProblem =
     -- | The listing record itself could not be read. See 'Unparsed'.
   | FileListingUnparsed
     -- | The path is a DIRECTORY in the tree. Its own problem, because ls-tree -r
-    -- recurses: a tree at @ produces /x@ entries and no @
-    -- entry at all, so the reader saw "no version file" and printed it, and when
+    -- recurses: a tree at @version@ produces @version\/x@ entries and no
+    -- @version@ entry at all, so the reader saw "no version file" and printed it,
+    -- and when
     -- that was fixed the nearest constructor to hand said "not a blob: a
     -- submodule", sending somebody to look for a gitlink that is not there.
   | FileIsADirectory
@@ -570,6 +598,7 @@ readCanon cs owner = csCommit cs >>= \case
                    | n > maxEventBytes -> pure (Left (Right (FileTooLarge n)))
                    | otherwise -> csBlob cs oid >>= \case
                        BlobUnavailable e -> pure (Left (Left (ReaderFailed e)))
+                       BlobProtocol e -> pure (Left (Left (TreeUnreadable (ReaderSays e))))
                        BlobBudget e -> pure (Left (Left (CanonTooSlow e)))
                        BlobOversize n -> pure (Left (Right (FileTooLarge n)))
                        BlobRefused e -> pure (Left (Right (FileUnreadable e)))
@@ -627,8 +656,12 @@ readCanon cs owner = csCommit cs >>= \case
     readOne acc@(Left _) _ = pure acc
     readOne (Right (evs, vers, bad)) (p, oid, _) = csBlob cs oid >>= \case
       BlobUnavailable e -> pure (Left (ReaderFailed e))
-      -- Both about the WHOLE read, so both end it: a budget spent is spent, and a
-      -- tree that lied about one size will lie about the next.
+      -- The two that are NOT about this file end the walk: a budget spent is
+      -- spent, and a source this reader can no longer follow will not be followed
+      -- any better by the next object. The two that are about it do not: an
+      -- oversized file and an unreadable one are findings, and a report that stops
+      -- at the first of them is a report about one file.
+      BlobProtocol e -> pure (Left (TreeUnreadable (ReaderSays e)))
       BlobBudget e -> pure (Left (CanonTooSlow e))
       BlobOversize n -> pure (Right (evs, vers, (p, FileTooLarge n) : bad))
       BlobRefused e -> pure (Right (evs, vers, (p, FileUnreadable e) : bad))
