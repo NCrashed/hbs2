@@ -16,7 +16,8 @@ import HBS2.Hub.Repo.Git
 
 import Codec.Compression.Zlib qualified as Zlib
 import Control.Exception (bracket,bracket_)
-import Control.Monad (void,forM)
+import Control.Monad (void,forM,when)
+import Data.List (isPrefixOf)
 import Crypto.Hash.SHA1 qualified as SHA1
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -169,7 +170,7 @@ stalling what bounds act = withSystemTempDirectory "hub-stall" $ \dir -> do
   setPermissions (bin </> "git") (setOwnerExecutable True perm)
   old <- Env.lookupEnv "PATH"
   bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
-           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (unshim bin old)
            (act (readTreeWith bounds dir))
 
 -- A git that never stops talking and never finishes: one byte every tenth of a
@@ -194,7 +195,7 @@ dribbling bounds act = withSystemTempDirectory "hub-drip" $ \dir -> do
   setPermissions (bin </> "git") (setOwnerExecutable True perm)
   old <- Env.lookupEnv "PATH"
   bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
-           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (unshim bin old)
            (act (readTreeWith bounds dir))
 
 -- A blobless clone of a canon-carrying repository, and a count of the blobs it
@@ -321,7 +322,7 @@ batchingWith bounds pause catFile act = withSystemTempDirectory "hub-batch" $ \d
   setPermissions (bin </> "git") (setOwnerExecutable True perm)
   old <- Env.lookupEnv "PATH"
   bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
-           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (unshim bin old)
            (act (readOneBlob bounds dir) bin)
 
 -- A git that writes a listing, CLOSES STDOUT, and then does not exit.
@@ -353,8 +354,25 @@ halfWritten bounds sleep act = withSystemTempDirectory "hub-half" $ \dir -> do
   setPermissions (bin </> "git") (setOwnerExecutable True perm)
   old <- Env.lookupEnv "PATH"
   bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
-           (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+           (unshim bin old)
            (act (readTreeWith bounds dir))
+
+-- Put PATH back, UNLESS somebody has already put it back.
+--
+-- Every shim here sets a global and restores it in a bracket, and 'within' runs
+-- the body on a thread it may abandon: the bracket then releases whenever that
+-- thread happens to reach it, which is after the example has failed, after
+-- 'within' has restored PATH itself, and quite possibly in the middle of a later
+-- example. Restoring a value that is no longer the one in force is how one red
+-- example takes its neighbours with it.
+--
+-- The guard is the shim directory: a restore only fires while PATH still names
+-- it, so the late one is a no-op.
+unshim :: FilePath -> Maybe String -> IO ()
+unshim bin old = do
+  now <- Env.lookupEnv "PATH"
+  when (maybe False (bin `isPrefixOf`) now) $
+    maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old
 
 -- The object id every shim above answers about.
 shimOid :: String
@@ -474,7 +492,7 @@ vanishing act =
     -- is no git anywhere: with the real one still on PATH the second call found
     -- it, and it answered about a directory that is not a repository.
     bracket_ (Env.setEnv "PATH" bin)
-             (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+             (unshim bin old)
              (act (readTreeWith gitBounds dir))
 
 -- The reader, and how many pieces of the listing the shim got to write.
@@ -532,7 +550,7 @@ shimmedWith bounds noise showRefCode out act =
     setPermissions (bin </> "git") (setOwnerExecutable True perm)
     old <- Env.lookupEnv "PATH"
     bracket_ (Env.setEnv "PATH" (bin <> ":" <> fromMaybe "" old))
-             (maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") old)
+             (unshim bin old)
              (act (readTreeWith bounds dir) (written progress (length pieces)))
 
 -- How many pieces the shim finished, and how many there were.
@@ -594,9 +612,9 @@ isolated act = do
                , ("LC_ALL", "C")
                , ("GIT_CEILING_DIRECTORIES", tmp)
                ]
-  before <- mapM (\(k,_) -> (,) k <$> Env.lookupEnv k) wanted
+  was <- mapM (\(k,_) -> (,) k <$> Env.lookupEnv k) wanted
   bracket_ (mapM_ (uncurry Env.setEnv) wanted)
-           (mapM_ (\(k,v) -> maybe (Env.unsetEnv k) (Env.setEnv k) v) before)
+           (mapM_ (\(k,v) -> maybe (Env.unsetEnv k) (Env.setEnv k) v) was)
            act
 
 spec :: Spec
@@ -1027,7 +1045,7 @@ spec = do
 
       withSystemTempDirectory "hub-nogit" $ \dir ->
         readIn dir >>= \case
-          Left (NoRepository (ToolSaid msg)) ->
+          Left (NoRepository msg) ->
             Text.unpack msg `shouldContain` "not a git repository"
           other -> expectationFailure
                      ("expected NoRepository, got " <> show (fmap (const ()) other))
@@ -1157,6 +1175,41 @@ spec = do
           [ "while read oid; do printf '%s missing\\n' \"$oid\"; done" ]
           (\readIt _ -> readIt `shouldReturn` BlobRefused "missing from this clone")
 
+    it "spends the per-file message budget in bytes, not in characters" $ do
+      -- gbBlobMessage is a byte budget: its own haddock reaches twelve gigabytes
+      -- by multiplying it by maxCanonFiles. Spent with Text.take it buys
+      -- characters, which are up to four bytes each, so the budget was up to four
+      -- times what it says. An ASCII fixture cannot see that; these are Cyrillic,
+      -- two bytes apiece.
+      batching (gitBounds { gbBlobMessage = 10 })
+        [ "while read oid; do"
+        , "  printf 'error %s: \\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202\\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202\\n' \"$oid\" >&2"
+        , "  printf '%s missing\\n' \"$oid\"; done"
+        ] $ \readIt _ -> readIt >>= \case
+            BlobRefused m -> BS.length (Text.encodeUtf8 m) `shouldSatisfy` (<= 10)
+            other -> expectationFailure ("expected BlobRefused, got " <> show other)
+
+    it "calls a git that was never there local, not a fact about the repository" $ do
+      -- The first call, which is the one a new user meets: git not installed, or
+      -- not on the PATH a hook runs with. It exited 4 with advice to check
+      -- safe.directory in a repository nothing had opened, and the docs had
+      -- already been changed to say 4 means "not a git repository".
+      --
+      -- `vanishing` cannot reach this: it breaks the SECOND call. Here there is
+      -- no git at any point.
+      withSystemTempDirectory "hub-nogit" $ \dir -> do
+        let bin = dir </> "empty"
+        createDirectoryIfMissing True bin
+        old <- Env.lookupEnv "PATH"
+        bracket_ (Env.setEnv "PATH" bin)
+                 (unshim bin old)
+                 (readTreeWith gitBounds dir >>= \case
+                    Left (ReaderFailed m) ->
+                      Text.unpack m `shouldContain` "does not exist"
+                    other -> expectationFailure
+                               ("expected ReaderFailed, got "
+                                  <> show (fmap (const ()) other)))
+
     it "refuses a batch reply about an object it did not ask for" $ do
       -- Not reachable through git, and that is the point: if the reply this
       -- reader gets stops being the reply to the request it wrote, every answer
@@ -1202,6 +1255,24 @@ spec = do
               -- still read: the clock had not started.
               readIt `shouldReturn` BlobText "abcde"
 
+    it "stops the walk when it has spent its seconds" $ do
+      -- The other half, and the test named for this had only the half above: with
+      -- one blob in the fixture, `budgeted` sets the clock ON that blob, so the
+      -- comparison is structurally false and the BlobBudget branch was dead in
+      -- the whole suite. It takes two.
+      let bounds = gitBounds { gbReadSeconds = 0 }
+      withCanonOf (\dir -> do
+        a <- hashObject dir "aaaaaaaaaa"
+        b <- hashObject dir "bbbbbbbbbb"
+        v <- hashObject dir "(hub-meta 1)\n"
+        pure [ ("threads/t/0001-a", a), ("threads/t/0002-b", b), ("version", v) ]) $ \dir -> do
+        got <- blobsOf bounds dir
+        -- The first starts the clock and is under it.
+        lookup "threads/t/0001-a" got `shouldBe` Just (BlobText "aaaaaaaaaa")
+        case lookup "threads/t/0002-b" got of
+          Just (BlobBudget m) -> Text.unpack m `shouldContain` "0s"
+          other -> expectationFailure ("expected BlobBudget, got " <> show other)
+
     it "stops the walk when it has handed back its bytes" $ do
       -- The other half of the budget, and it was counting CHARACTERS against a
       -- byte bound, so canon in a non-Latin script was let past it by however
@@ -1244,9 +1315,13 @@ spec = do
           , "  printf '%s blob 100000\\n' \"$oid\""
           , "  while true; do printf xxxxxxxxxx; sleep 0.1; done"
           , "done"
+          -- A BUDGET and not a stall, which is what the first version of this
+          -- routed it to. Its own message says the source "was still sending",
+          -- and under "git ran and did not answer" that printed a refusal
+          -- contradicting itself, with advice to go and look for a dead mount.
           ] $ \readIt _ -> readIt >>= \case
-              BlobStalled m -> Text.unpack m `shouldContain` "on one object"
-              other -> expectationFailure ("expected BlobStalled, got " <> show other)
+              BlobBudget m -> Text.unpack m `shouldContain` "on one object"
+              other -> expectationFailure ("expected BlobBudget, got " <> show other)
 
     it "refuses an object id that is not one git would have written" $ do
       -- The batch reader compares the echoed id to the one it wrote byte for

@@ -136,14 +136,13 @@ data BlobResult =
     -- | The source ran, answered, and the answer is not one this reader can
     -- follow: a reply about an object it did not ask for, a type it did not ask
     -- for, a shape it cannot parse. Not a fact about any file, and not a local
-    -- failure either -- it is this reader and the tool having stopped agreeing on
-    -- the protocol, which is what 'TreeUnreadable' with 'ReaderSays' is for, and
-    -- whose advice ("report the git version if the format has moved") is the one
-    -- that fits.
+    -- failure either. Reported as 'BlobsOutOfStep', whose advice is to report
+    -- the git version.
     --
-    -- Its own constructor because the alternative was 'BlobUnavailable', whose
-    -- advice is "this is local: no process slots, no file descriptors", printed
-    -- about a git that had answered perfectly promptly.
+    -- Its own constructor because the two it borrowed both lied:
+    -- 'BlobUnavailable' says the tool could not be run, about a git that had
+    -- answered promptly, and 'TreeUnreadable' says the tree will not list, about
+    -- a listing already read whole and parsed.
   | BlobProtocol Text
     -- | The source ran and stopped saying anything. Distinct from 'BlobProtocol'
     -- (it said something wrong) and from 'BlobUnavailable' (it could not be run),
@@ -184,8 +183,14 @@ data CanonUnreadable =
     NoCanonRef ByteString
     -- | Not a git repository. Distinct from the above because the advice differs:
     -- fetching canon into a directory that is not a repository will not help.
-    -- Carries what was said and WHO SAID IT, whole.
-  | NoRepository Told
+    --
+    -- Always GIT'S WORDS, whole, and so a plain 'Text' rather than a 'Told': git
+    -- ran and exited non-zero to produce this. A git that could not be run is
+    -- 'ReaderFailed', on the first call as much as on any later one -- it was
+    -- this constructor on the first call, which is how "git is not installed"
+    -- came out as a fact about somebody's repository, with advice about
+    -- safe.directory.
+  | NoRepository Text
     -- | The ref is here and does not resolve to a commit: a pruned object, a
     -- partial clone, or a ref pointing at something else. Distinct from a missing
     -- ref for the same reason, and it used to share its answer.
@@ -241,11 +246,14 @@ data CanonUnreadable =
     -- descriptors, the tool gone from PATH mid-audit. Nothing is known about
     -- canon, which is why this is not a finding about it.
     --
-    -- MID-AUDIT is the distinction from 'NoRepository'. A tool that will not run
-    -- on the very first call cannot be told from a directory that is not a
-    -- repository, and 'NoRepository' says both and advises both. This one is for
-    -- a tool that ran, answered, and then stopped running, which is what a fork
-    -- limit reached two hundred thousand blobs into a tree looks like.
+    -- EXEC HAVING FAILED is the distinction from 'NoRepository', and it is not
+    -- about when: git not on PATH at the first call is this, and so is a fork
+    -- refused on EAGAIN two hundred thousand blobs into a tree. 'NoRepository' is
+    -- git having RUN and exited non-zero.
+    --
+    -- The earlier rule was "first call means it could be either", which was true
+    -- while the caller could not tell a process that never started from one that
+    -- started and failed. It can now, so the first call answers this too.
   | ReaderFailed Text
     -- | git RAN and did not answer. Not the same thing as 'ReaderFailed', which
     -- was the answer to both, and the difference is the whole of the advice: that
@@ -310,7 +318,7 @@ instance Pretty CanonUnreadable where
     -- not paste back into a shell, and that is the whole reason pathText is not
     -- decodeUtf8Lenient.
     NoCanonRef w      -> "no" <+> pretty metaRef <+> "in" <+> pretty (pathText w)
-    NoRepository t    -> "cannot read this git repository:" <> told t
+    NoRepository e    -> "cannot read this git repository:" <> toolSaid e
     RefUnresolved t   -> pretty metaRef <+> "does not resolve to a commit:" <> told t
     TreeUnreadable t  -> "cannot list the canon tree:" <> told t
     ToolStalled e     -> "git ran and did not answer:" <+> pretty (safeText e)
@@ -318,6 +326,11 @@ instance Pretty CanonUnreadable where
                            <+> pretty (safeText e)
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
+    -- FileBadVersion says what is wrong with the file itself, and "does not
+    -- read" is the one thing that is not: the file parses perfectly and the
+    -- number in it is not a version. Under the shared prefix the first thing a
+    -- reader saw sent them looking for a syntax error.
+    VersionUnreadable p@FileBadVersion{} -> "the version file" <+> pretty p
     VersionUnreadable p -> "the version file is listed and does not read:"
                              <+> pretty p
     CanonTooBig n     -> "the event files total" <+> pretty n
@@ -579,11 +592,11 @@ sortCanon entries = (evs, dups <> bad)
       | teePath e `HS.member` seen        = dedup seen rest
       | otherwise = e : dedup (HS.insert (teePath e) seen) rest
 
-    go evs bad [] = (reverse evs, reverse bad)
-    go evs bad (e:rest) = case teeKind e of
+    go es bs [] = (reverse es, reverse bs)
+    go es bs (e:rest) = case teeKind e of
       -- Before the layout question, because a record nobody could read has no
       -- reliable path to ask it about.
-      Unparsed -> go evs ((teePath e, FileListingUnparsed) : bad) rest
+      Unparsed -> go es ((teePath e, FileListingUnparsed) : bs) rest
       kind
         | not (isEvent (teePath e)) ->
             -- The version file and the index have their own readers; anything
@@ -596,14 +609,14 @@ sortCanon entries = (evs, dups <> bad)
             -- submodule could sit unnamed.
             if teePath e `elem` [versionPath, B8.pack numberIndexPath]
               then case kind of
-                     Blob{} -> go evs bad rest
-                     _      -> go evs ((teePath e, problemOf kind) : bad) rest
-              else go evs ((teePath e, FileUnexpected) : bad) rest
+                     Blob{} -> go es bs rest
+                     _      -> go es ((teePath e, problemOf kind) : bs) rest
+              else go es ((teePath e, FileUnexpected) : bs) rest
         | otherwise -> case kind of
             Blob oid n
-              | n > maxEventBytes -> go evs ((teePath e, FileTooLarge n) : bad) rest
-              | otherwise -> go ((teePath e, oid, n) : evs) bad rest
-            _ -> go evs ((teePath e, problemOf kind) : bad) rest
+              | n > maxEventBytes -> go es ((teePath e, FileTooLarge n) : bs) rest
+              | otherwise -> go ((teePath e, oid, n) : es) bs rest
+            _ -> go es ((teePath e, problemOf kind) : bs) rest
 
     -- What a non-blob entry is a problem of. Total, and Blob is in it so that a
     -- constructor added to EntryKind is a build failure here rather than a
@@ -694,7 +707,7 @@ readCanon cs owner = csCommit cs >>= \case
                        BlobStalled e -> pure (Left (Left (ToolStalled e)))
                        BlobProtocol e -> pure (Left (Left (BlobsOutOfStep e)))
                        BlobBudget e -> pure (Left (Left (CanonTooSlow e)))
-                       BlobOversize n -> pure (Left (Right (FileTooLarge n)))
+                       BlobOversize big -> pure (Left (Right (FileTooLarge big)))
                        BlobRefused e -> pure (Left (Right (FileUnreadable e)))
                        BlobText t -> pure (either (Left . Right . FileMalformed)
                                                   (Right . Just)
@@ -791,6 +804,16 @@ readCanon cs owner = csCommit cs >>= \case
         -- signed content and never looks at a path, so dropping the event here
         -- would make this reader show less than canon holds and disagree with
         -- every other clone over a byte no signature covers.
+        -- The name check is FORCED here, not left as a thunk in the accumulator.
+        -- It hashes the author box, which is a full serialisation of somebody's
+        -- event, and three of the four accumulators are already strict in their
+        -- spine; leaving this one lazy piles two hundred thousand of those up to
+        -- be paid at once when the report is printed, which is after every budget
+        -- has stopped applying.
+        --
+        -- It is still one hash per admitted event, and the fold computes the same
+        -- one for its sort key, so the walk hashes canon twice. Bounded by the
+        -- same maxCanonBytes the read is, and worth saying rather than hiding.
         Right (v, ev) ->
-          Right ( ev : evs, (p, v) : vers, bad
-                , maybe mis (\np -> (p, np) : mis) (nameProblem p ev) )
+          let !mis' = maybe mis (\np -> (p, np) : mis) (nameProblem p ev)
+          in Right (ev : evs, (p, v) : vers, bad, mis')

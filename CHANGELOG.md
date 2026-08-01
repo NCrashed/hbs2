@@ -52,9 +52,10 @@ tree:
         `refs/hbs2/meta`, re-runs the fold over it, and reports every
         event the rules did not admit, every anomaly in the ones they
         did, every file it could not read, every file with no readable
-        version clause, and a missing `version` file, which PEP-19
-        requires. Exit 2 when it found any of those, so it works in a
-        hook; 3 to 14 when the audit could not run, one code per reason
+        version clause, every file whose name is not the one PEP-19
+        gives it, and a missing `version` file, which PEP-19 requires.
+        Exit 2 when it found any of those, so it works in a
+        hook; 3 to 16 when the audit could not run, one code per reason
         and each with advice on stderr; 141 for a closed pipe. The codes
         are a table in PEP-22 and are a contract: they may be added to,
         not reassigned.
@@ -101,6 +102,21 @@ tree:
         It also refuses a size larger than it will hold, or one too
         wide for the number it is read into.
 
+        Every refusal says WHO SAID IT. A tool's complaint is an
+        indented block with each line marked `|`; this program's own
+        sentences are not, because the advice under a refusal is printed
+        at the same indent and an unmarked block put a stranger's text
+        exactly where a line telling the reader what to run goes. The
+        first refusal a new user meets is `git` not being on PATH, and
+        it used to print the runtime's exec error inside that block, as
+        though git had said it.
+
+        A hash-shaped field that is not the length of a hash is printed
+        by its size rather than by its base58. A `HashRef` takes any
+        length on the wire and only the author box's are checked, so a
+        canon box can carry tens of kilobytes in `origin`; base58 is
+        quadratic, and the report can print a thousand such lines.
+
         Everything a stranger chose that reaches a terminal is escaped
         injectively: `\u{...}` for a character, `\x{...}` for a raw
         byte, so two paths differing in one invalid byte print as two
@@ -127,9 +143,10 @@ tree:
         An event file whose name is not the one PEP-19 gives it is
         named, and folded anyway: no signature covers a path, so
         dropping it would show less than canon holds and disagree with
-        every other clone. Two halves of the name are checked, the shape
-        and the event-id; `seq` and the scope live in the canon box,
-        which only the fold opens, and the fold is never shown a path.
+        every other clone. Two things are checked, the shape and the
+        event-id. Three are not -- `seq`, the scope, and the thread
+        directory -- because checking them means opening the canon box,
+        which verifies a signature the fold is about to verify again.
 
         The repository key is an argument: the owner key is the root of
         the trust chain, so canon that named its own owner would be
@@ -519,7 +536,7 @@ included here for historical continuity.
   - `hbs2-cli` (new in this release line) becomes the primary
     command-line surface. Replaces most subcommands of the legacy
     monolithic `hbs2` binary. See `docs/CLI_MIGRATION.md` for the
-    full rename table (e.g., `hbs2 keyring-new` → `hbs2-cli
+    full rename table (e.g., `hbs2 keyring-new` becomes `hbs2-cli
     hbs2:keyring:new`). The legacy `hbs2` package is not shipped in
     this release; the old binary is available upstream as
     `hbs2-obsolete` in the dev-0.25.3 source but excluded from the

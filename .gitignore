@@ -18,6 +18,7 @@ docs/drafts/*
 !docs/drafts/pep-04.txt
 !docs/drafts/pep-04-01.txt
 !docs/drafts/pep-05-tor-transport.md
+!docs/drafts/hbs2-peer.rb
 !docs/drafts/pep-16-barter-storage.md
 !docs/drafts/pep-13-pq-encryption.md
 !docs/drafts/pep-14-encrypted-keystore.md

@@ -87,8 +87,7 @@ byPath files = CanonSource
 everyRefusal :: [(CanonUnreadable, Int)]
 everyRefusal =
   [ (NoCanonRef "/somewhere/.git",        3)
-  , (NoRepository (ToolSaid "not a git repository"), 4)
-  , (NoRepository (ReaderSays "git: exec: does not exist"), 4)
+  , (NoRepository "not a git repository", 4)
   , (RefUnresolved (ToolSaid "bad object"),          5)
   , (RefUnresolved (ReaderSays "not an object id: zz"), 5)
   , (CanonTooNewHere 99,                  6)
@@ -98,6 +97,9 @@ everyRefusal =
   , (VersionUnreadable FileObjectMissing, 13)
   , (VersionUnreadable FileListingUnparsed, 13)
   , (VersionUnreadable (FileUnreadable "cannot read"), 13)
+  -- The file reads and the number in it is not a version, which is the
+  -- publisher's problem and not this clone's: 7, not 13.
+  , (VersionUnreadable (FileBadVersion 0), 7)
   , (CanonTooBig (maxCanonBytes + 1),     8)
   , (TreeUnreadable (ToolSaid "missing blob"),   9)
   , (TreeUnreadable (ReaderSays "gave up"),      9)
@@ -165,10 +167,11 @@ spec = do
               `shouldSatisfy` \_ -> phrase `Text.isInfixOf`
                                       Text.unlines (drop 1 (Text.lines (render (refusalDoc u))))
       says (NoCanonRef "/x/.git") "git fetch"
-      says (NoRepository (ToolSaid "x")) "safe.directory"
+      says (NoRepository "x") "safe.directory"
       says (RefUnresolved (ToolSaid "x")) "unshallow"
       says (CanonTooNewHere 99) "Upgrade"
       says (VersionUnreadable (FileMalformed (BadClause "hub-meta"))) "rewrite that file"
+      says (VersionUnreadable (FileBadVersion 0)) "rewrite that file"
       says (VersionUnreadable FileObjectMissing) "shallow clone"
       says (VersionUnreadable FileListingUnparsed) "report the git version"
       says (CanonTooBig 1) "PEP-19"
@@ -176,7 +179,7 @@ spec = do
       says (TreeUnreadable (ReaderSays "x")) "Fetching will not help"
       says (CanonTooMany 1) "PEP-19"
       says (CanonListingTooBig 1) "PEP-19"
-      says (ReaderFailed "x") "no process slots"
+      says (ReaderFailed "x") "not on PATH"
       says (CanonTooSlow "x") "pre-receive hook"
       -- The two that used to borrow somebody else's advice: a git that is present
       -- and silent got "this is local, retry", and a batch reply out of step got
@@ -196,6 +199,19 @@ spec = do
                  >>= either (fail . show) pure
       reportCode clean `shouldBe` 0
       reportCode found `shouldBe` 2
+
+      -- A misnamed file is PRINTED AND COUNTED. "Printed and not counted" is the
+      -- defect this one function has had twice already -- the missing tree
+      -- version, then the files with no version clause of their own -- and both
+      -- times stdout listed findings while the summary said zero and the exit
+      -- code said clean. Deleting the misnamed clause from `clean` left the suite
+      -- green until this line.
+      let misnamed = clean { stMisnamed = [("threads/t/hello", NameNotEventShaped)] }
+      reportCode misnamed `shouldBe` 2
+      any ("misnamed" `Text.isPrefixOf`) (fmap render (reportDoc misnamed))
+        `shouldBe` True
+      -- And on the summary line, which is what a hook parses.
+      last (fmap render (reportDoc misnamed)) `shouldSatisfy` Text.isInfixOf "misnamed 1"
 
       -- Quietly, because the point is the exit code and not the text: stdout goes
       -- to /dev/null for the two that print.
@@ -320,7 +336,7 @@ spec = do
       -- escape in the middle of a sentence. The escaping is right; a report line
       -- must stay one line. What was wrong is putting a paragraph in a field.
       let said = "fatal: detected dubious ownership\nrun: git config --global ..."
-          ls = Text.lines (render (refusalDoc (NoRepository (ToolSaid said))))
+          ls = Text.lines (render (refusalDoc (NoRepository said)))
       any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` False
       -- Both lines of it, each on its own line and each MARKED as quoted. The
       -- marker is what tells a stranger's text from this program's advice, which
@@ -451,6 +467,25 @@ spec = do
                     , not (fst x `elem` bounds' && fst y `elem` bounds') ] $
         \((ca, a), (cb, b)) ->
           (ca, cb, a) `shouldSatisfy` \_ -> a /= b
+
+    it "quotes git and does not quote itself" $ do
+      -- THE HEAD OF THE MATTER, and nothing tested it. `told` is what puts git's
+      -- words in a | block and this program's in a sentence, and every existing
+      -- check of that block used ToolSaid: replacing told with one that sends
+      -- both through toolSaid left the suite green, which means the marker could
+      -- go back to sitting exactly where this program's advice sits.
+      let markers u = [ l | l <- Text.lines (render (refusalDoc u))
+                          , "  | " `Text.isPrefixOf` l ]
+      -- git said it: quoted, and the words are inside the block.
+      markers (RefUnresolved (ToolSaid "fatal: bad object"))
+        `shouldBe` ["  | fatal: bad object"]
+      -- This reader said it: no marker anywhere, and the words are still printed.
+      markers (RefUnresolved (ReaderSays "not an object id: zz")) `shouldBe` []
+      Text.unpack (render (refusalDoc (RefUnresolved (ReaderSays "not an object id: zz"))))
+        `shouldContain` "not an object id: zz"
+      -- And the same for the one a new user meets first, which is a message from
+      -- the runtime about git and not from git.
+      markers (ReaderFailed "git: startProcess: does not exist") `shouldBe` []
 
     it "tells a tree git could not read from one this reader could not parse" $ do
       -- The pair above compares refusals with DIFFERENT codes, so it cannot see

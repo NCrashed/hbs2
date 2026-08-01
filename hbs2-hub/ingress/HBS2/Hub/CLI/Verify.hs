@@ -220,10 +220,13 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
       -- The one refusal that is not about canon. Said so, because the others all
       -- are, and a reader who has seen the other ten will read this as the
       -- eleventh thing wrong with somebody else's tree.
-      ReaderFailed _ -> line <> "  This is local: no process slots, no file"
-                          <> " descriptors, or git gone from" <> line
-                          <> "  PATH mid-audit. Nothing was learned about canon,"
-                          <> " one way or the other."
+      -- No longer "mid-audit": git not on PATH at all lands here now, and it is
+      -- the first thing a new user hits. It used to exit 4 and advise checking
+      -- safe.directory in a repository nothing had looked at.
+      ReaderFailed _ -> line <> "  This is local: git is not on PATH, or there"
+                          <> " are no process slots or" <> line
+                          <> "  file descriptors left. Nothing was learned about"
+                          <> " canon, one way or the other."
       -- Deliberately NOT the advice above, which this used to get. That one says
       -- a retry is worth trying; here git is sitting there, and a retry buys
       -- another minute and another stuck child. Reached by a FIFO at

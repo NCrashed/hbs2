@@ -289,14 +289,43 @@ spec = do
       -- for whoever is reading and is true whatever the size. Measured the other
       -- way round: code 8 and advice to compact, on a tree that would still be
       -- unreadable here after compaction.
-      let huge = [ TreeEntry versionPath (Blob "v" 13) ]
-                   <> [ TreeEntry (B8.pack ("threads/t/" <> show i <> "-x"))
-                          (Blob "e" (maxCanonBytes `div` 2))
-                      | i <- [1 .. 3 :: Int] ]
-          src = inMem (pure (Right "deadbeef")) (const (pure (Right huge)))
-                  (const (pure (BlobText "(hub-meta 99)\n")))
-      readCanon src (fst owner) >>= \r ->
+      -- The fixture has to be able to REACH the byte bound, and the first version
+      -- of it could not: three entries of maxCanonBytes/2 are each three orders
+      -- over maxEventBytes, so sortCanon files all three as FileTooLarge and
+      -- leaves the sum at zero. CanonTooBig was then unreachable whatever the
+      -- order of the gates, and the test passed on both.
+      --
+      -- So: entries no larger than one file may be, and enough of them to pass
+      -- the total. And the same tree is read TWICE, once under a version this
+      -- build folds, which is what proves the bound is reachable at all.
+      let each = maxEventBytes
+          n = maxCanonBytes `div` each + 1
+          huge = TreeEntry versionPath (Blob "v" 13)
+                   : [ TreeEntry (B8.pack ("threads/t/" <> show i <> "-x"))
+                         (Blob "e" each)
+                     | i <- [1 .. n] ]
+          src v = inMem (pure (Right "deadbeef")) (const (pure (Right huge)))
+                    (const (pure (BlobText v)))
+      -- Under a version this build knows, the tree is refused for its size.
+      readCanon (src renderMeta) (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooBig (n * each))
+      -- Under one it does not, the version wins.
+      readCanon (src "(hub-meta 99)\n") (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooNewHere 99)
+
+    it "calls a source that stopped answering stalled, not local and not confused" $ do
+      owner <- kp
+      -- The third of the three states of one tool, and the route from the blob
+      -- walk to it had no test: BlobStalled is git present and silent, which used
+      -- to arrive as ReaderFailed ("this is local, and worth retrying").
+      let src = inMem (pure (Right "deadbeef"))
+                  (const (pure (Right [ TreeEntry versionPath (Blob "v" 13)
+                                      , TreeEntry (B8.pack "threads/t/0001-x")
+                                          (Blob "e" 5) ])))
+                  (\oid -> pure (if oid == "v" then BlobText renderMeta
+                                               else BlobStalled "said nothing for 60s"))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (ToolStalled "said nothing for 60s")
 
     it "stops the walk when the source says its budget is spent" $ do
       owner <- kp
@@ -634,8 +663,12 @@ spec = do
       -- survives multibyte bytes. It splits on '/' to decide what is an event
       -- file (a thread directory and a file in it), and a continuation byte is
       -- not a slash but is above 127.
+      -- These two are about the FIXTURE and not about the reader: they say the
+      -- path really is multibyte, so that the assertions after them are being
+      -- made against the case they name. Said plainly, because the line they
+      -- replaced looked like a test and was an identity.
       let seen = head (fmap fst (stFileVersions st))
-      BS.length seen `shouldSatisfy` (> length p)     -- really multibyte
+      BS.length seen `shouldSatisfy` (> length p)
       BS.any (> 127) seen `shouldBe` True
       -- Recognised as an event under a Cyrillic thread directory, folded, and
       -- not reported as a path the layout does not have.

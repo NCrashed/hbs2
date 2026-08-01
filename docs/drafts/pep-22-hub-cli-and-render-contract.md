@@ -144,13 +144,22 @@ as an unreadable file, which exits 2, telling a hook that a local resource limit
 was a finding about somebody's repository.
 
 12, 15 and 16 are three states of one tool and are worth keeping apart, because
-only one of them is worth retrying. 12 is git not running. 15 is git running and
-saying nothing, which a retry buys another wait of: reachable with a FIFO at
-`.git/refs/hbs2/meta`, where `rev-parse` answers and `show-ref` blocks on open,
-and which used to exit 12 with an invitation to try again. 16 is git running and
-saying something this build cannot follow, which is a version disagreement to
-report rather than anything about the repository; it used to exit 9, "the tree
-will not list", printed about a listing that had been read whole and parsed.
+only one of them is worth retrying. 12 is git not running: not on PATH, no
+process slots, no file descriptors. 15 is git running and saying nothing, which a
+retry buys another wait of: reachable with a FIFO at `.git/refs/hbs2/meta`, where
+`rev-parse` answers and `show-ref` blocks on open, and which used to exit 12 with
+an invitation to try again. 16 is git running and saying something this build
+cannot follow, which is a version disagreement to report rather than anything
+about the repository; it used to exit 9, "the tree will not list", printed about
+a listing that had been read whole and parsed.
+
+A LISTING that stalls stays at 9 and does not become 15, and the line is drawn
+there on purpose. 15 says a retry is pointless and the thing to look for is a
+FIFO or a dead mount, which is true of a ref lookup that cannot finish and false
+of `ls-tree`: `ls-tree -r` walks the tree AS A TREE, so a commit whose subtrees
+all point at one subtree costs 64^12 traversals of 116 KB of objects, and there
+the answer really is compaction, which is what 9's advice says. A stalled ref
+lookup can only be the machine; a stalled listing can be the tree.
 
 14 is a bound on the WALK, which the three listing bounds cannot give: a tree of
 45000 paths whose entries share one subtree is five objects and 172 KB on disk,
@@ -202,9 +211,10 @@ silently dropped:
   - A file under `threads/` or `repo/` that is not an event file is reported by
     path, not skipped. Something somebody put in canon is a finding.
   - A path the layout does not have at all is reported the same way. The two
-    exceptions are `version` and `index/number.sexp`, which have their own
-    readers; the number index is not otherwise read, since the fold assigns
-    numbers itself and a file cannot be allowed to change what the fold decided.
+    exceptions are `version`, which has a reader of its own, and
+    `index/number.sexp`, which has none: it is excluded from the report by path
+    and nothing opens it. The fold assigns numbers itself, and a file cannot be
+    allowed to change what the fold decided, so there is nothing to read it for.
   - A blob whose object this clone does not have is reported as that, and not as
     a submodule. It is the one of these that fetching fixes.
   - A path the tree lists TWICE is named. git fsck calls it duplicateEntries; on
@@ -214,14 +224,24 @@ silently dropped:
     one file listed twice, the tree is still reported as malformed, and refusing
     would be refusing over a question that has one answer.
   - An event file whose name is not the one PEP-19 gives it is named, and the
-    event in it is still folded. Two halves of the name are checked here: that it
-    is twenty digits, a hyphen and an event-id, and that the event-id is the one
-    the file holds. The other two are NOT checked and this build does not pretend
-    otherwise: `seq` and the scope (a `delegate` sitting under `threads/` rather
-    than `repo/`) live in the canon box, which only the fold opens, and the fold
-    is never shown a path. Closing that needs the fold to take the tree layout as
-    an input, which is an admission-rule question under PEP-19 rather than a
-    reporting one.
+    event in it is still folded. Two things are checked here: that the name is
+    twenty digits, a hyphen and an event-id, and that the event-id is the one the
+    file holds.
+
+    THREE are not, and the reason is cost rather than capability. `seq` and the
+    scope (a `delegate` under `threads/` rather than `repo/`) are ordinary fields
+    of the canon box, and the thread directory a file sits in is an ordinary
+    prefix of its path; `unboxChecked` is exported and is already called outside
+    the fold. What stops the reader doing it is that opening a canon box verifies
+    a signature, and the fold opens every one of them a moment later: doing it
+    here means verifying canon twice, in a verb whose whole point is running
+    inside a pre-receive hook. The place that has already paid for it is the
+    fold, and the fold is not shown a path. Giving it one is the change, and it
+    is not made here.
+
+    An earlier version of this paragraph said the canon box is one "only the fold
+    opens", which is not true of this tree and was the wrong reason for the right
+    decision.
 
     Reported and not dropped, deliberately: no signature covers a path, so a
     reader that refused a misnamed file would show less than canon holds and

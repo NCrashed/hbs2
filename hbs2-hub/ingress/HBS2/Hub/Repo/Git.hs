@@ -57,7 +57,7 @@ data GitBounds = GitBounds
     -- orders, because it is kept until the report is printed and there can be
     -- 'maxCanonFiles' of them: 64 KiB apiece would be twelve gigabytes.
   , gbBlobMessage  :: Int
-    -- | How long a git call may take. For the four small ones it is the whole
+    -- | How long a git call may take. For the three small ones it is the whole
     -- call; for the listing, which may legitimately run as long as an enormous
     -- tree takes, it is how long the stream may be SILENT. Two meanings, and one
     -- earlier haddock claimed the listing had no bound at all.
@@ -233,11 +233,6 @@ gitCanonWith bounds cwd = do
       -- exposes it only as prose, which is not something to branch on. So this
       -- answers NoCanonRef for both, and the advice for it names both causes.
       --
-      -- A Left is git NOT HAVING RUN, which on the first call cannot be told from
-      -- a directory that is not a repository, and after it can: git ran a moment
-      -- ago. Every later Left is therefore a local failure and says so. It read as
-      -- NoRepository, which under a process limit advised somebody to fix
-      -- safe.directory in a repository git had successfully read one call earlier.
       -- --absolute-git-dir, because the answer is put in front of the operator
       -- when the ref is missing, and a relative ".git" printed by a hook whose
       -- GIT_DIR points elsewhere is the sentence that sent them in circles.
@@ -249,16 +244,20 @@ gitCanonWith bounds cwd = do
       -- advice is that it is local and the one refusal worth retrying. The retry
       -- blocks for another minute. The listing has told these apart since it grew
       -- bounds of its own; these three had not.
+      -- ON THE FIRST CALL TOO, and this is the half the last commit got wrong. It
+      -- said in the documentation that 4 is "not a git repository" and 12 is "git
+      -- not running", and left the first call answering 4 for a git that could
+      -- not be started: measured, `git` off PATH exited 4 with advice about
+      -- safe.directory. The old reasoning was that the first call cannot tell the
+      -- two apart, and it could not while both were one Left. SmallUnstartable is
+      -- exec having failed, which is never a fact about the repository.
       raw ["rev-parse", "--absolute-git-dir"] >>= \case
-        SmallUnstartable e -> pure (Left (NoRepository (ReaderSays e)))
+        SmallUnstartable e -> pure (Left (ReaderFailed e))
         SmallStalled e -> pure (Left (ToolStalled e))
-        SmallFailed _ e -> pure (Left (NoRepository (ToolSaid (msg (decodeS e)))))
+        SmallFailed _ e -> pure (Left (NoRepository (msg (decodeS e))))
         SmallOk gitDirRaw -> do
           here <- raw ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
           case here of
-            -- git ran a moment ago, so a failure to run it NOW is local: this is
-            -- the distinction NoRepository cannot make on the first call and can
-            -- make on every later one.
             SmallUnstartable e -> pure (Left (ReaderFailed e))
             SmallStalled e -> pure (Left (ToolStalled e))
             -- The BYTES, and only the trailing newline taken off: Text.strip would
@@ -379,9 +378,17 @@ gitCanonWith bounds cwd = do
       -- asked (an id beginning with a dash is an option, and a non-ASCII one
       -- throws at exec under the C locale) and the answer says what is true.
       then pure (BlobUnavailable "not an object id")
-      else tryAny (askBatch oid) <&> \case
-             Right r -> r
-             Left e -> BlobUnavailable (msg (Text.pack (show e)))
+      -- THE ONE EXIT PAST `give`, so it stops the process itself. Every refusal
+      -- inside askBatch tears the batch down before answering, because the stream
+      -- is out of step by then; an exception thrown anywhere in there left a live
+      -- git with an unread tail, and the next blob would have read that tail as
+      -- its own reply. No trigger was built for it, which is the reason to close
+      -- it rather than to argue about reachability.
+      else tryAny (askBatch oid) >>= \case
+             Right r -> pure r
+             Left e -> do
+               readIORef batch >>= maybe (pure ()) stop
+               pure (BlobUnavailable (msg (Text.pack (show e))))
   }
 
    where
@@ -440,10 +447,15 @@ gitCanonWith bounds cwd = do
           -- is local: no process slots". End of file is git gone; silence is git
           -- sitting there; a reply line with no newline in four kilobytes is a
           -- format this reader does not know.
-          ReadEof -> give (BlobUnavailable "cat-file --batch closed its output")
+          ReadEof -> give (gone "before answering")
           ReadIdle -> give (BlobStalled ( "cat-file --batch did not answer in "
                               <> Text.pack (show (gbCallSeconds bounds)) <> "s" ))
-          ReadOverdue e -> give (BlobStalled e)
+          -- THE DEADLINE IS A BUDGET, not a silence: its own message says the
+          -- source "was still sending", and routing it to "git ran and did not
+          -- answer" printed a refusal that contradicted itself and advised
+          -- looking for a dead mount. CanonTooSlow is the one whose advice is
+          -- already about a read costing more than this reader will spend.
+          ReadOverdue e -> give (BlobBudget e)
           ReadTooLong -> give (BlobProtocol "cat-file --batch sent no reply line")
           ReadGot header -> case B8.words header of
             -- The ECHOED ID. git answers in the order it is asked, so a reply
@@ -458,7 +470,13 @@ gitCanonWith bounds cwd = do
               -- asked for what the listing named. Anything else is the two of
               -- them disagreeing about what the tree holds.
               | ty /= "blob" ->
-                  give (BlobProtocol ("cat-file --batch answered type " <> decodeS ty))
+                  -- The type NAMED, not echoed. It is a token from a fixed
+                  -- vocabulary when git wrote it, and a stranger's bytes when
+                  -- anything else did; PEP-22 puts a tool's words in a quoted
+                  -- block and nowhere else, and this is a field in a line of
+                  -- advice. So the known ones are spelled out and everything
+                  -- else is described.
+                  give (BlobProtocol ("cat-file --batch answered " <> named ty))
               | Just n <- sizeOf szB ->
                   if n > gbBlobBytes bounds
                     -- The stream is now out of step by n+1 bytes, and skipping
@@ -474,12 +492,19 @@ gitCanonWith bounds cwd = do
                       -- pre-receive hook, and then "this is local".
                       --
                       -- A body that stops short has git ALIVE and waiting for the
-                      -- next request, so it arrives as silence rather than as end
-                      -- of file: that is why the idle case here is the object's
-                      -- and not the tool's. The one exception is the deadline,
-                      -- which fires on a source that is still sending.
-                      BodyShort _ (ReadOverdue e) -> give (BlobStalled e)
-                      BodyShort got _ -> give (short n got)
+                      -- next request, so it arrives as SILENCE: that is the one
+                      -- case here that is a fact about the object.
+                      --
+                      -- End of file is not. It is git gone -- killed by an OOM
+                      -- killer inside a hook's cgroup, say -- and reporting it as
+                      -- a short object gave one false finding per remaining file
+                      -- and exit 2, where the truth is that nothing was learned
+                      -- about canon. The split was made on the newline read below
+                      -- and not on this one.
+                      BodyShort _ ReadEof -> give (gone "mid-body")
+                      BodyShort got ReadIdle -> give (short n got)
+                      BodyShort _ (ReadOverdue e) -> give (BlobBudget e)
+                      BodyShort _ _ -> give (BlobProtocol "cat-file --batch reply is unreadable")
                       BodyGot bs -> exactly dl (getStdout p) 1 >>= \case
                         BodyGot "\n" -> ended give p n bs
                         -- ONLY a byte that is not the newline says the body ran
@@ -488,14 +513,25 @@ gitCanonWith bounds cwd = do
                         -- so "git delivered more" was the one thing that had not
                         -- happened.
                         BodyGot _ -> give (over n)
-                        BodyShort _ ReadEof -> give (BlobUnavailable
-                                    "cat-file --batch closed its output mid-reply")
-                        BodyShort _ (ReadOverdue e) -> give (BlobStalled e)
+                        BodyShort _ ReadEof -> give (gone "mid-reply")
+                        BodyShort _ (ReadOverdue e) -> give (BlobBudget e)
                         BodyShort _ _ -> give (BlobStalled
                                     ( "cat-file --batch sent a body of "
                                         <> Text.pack (show n)
                                         <> " bytes and not the newline after it" ))
             _ -> give (BlobProtocol "cat-file --batch said something else")
+
+    -- The batch process ended. NOT a finding about the file it was in the middle
+    -- of: a git the kernel killed says nothing about somebody's tree, and one
+    -- false finding per remaining file, with exit 2, is a report about canon that
+    -- is not about canon.
+    gone where_ = BlobUnavailable ("cat-file --batch closed its output " <> where_)
+
+    -- An object type as a word this program chose. git's four are named; anything
+    -- else is described rather than repeated, since a field in a line of advice
+    -- is not where a stranger's bytes go.
+    named ty | ty `elem` ["blob","tree","commit","tag"] = "a " <> decodeS ty
+             | otherwise = "a type this reader does not know"
 
     over n = BlobRefused ( "the object's header announces "
                <> Text.pack (show n)
@@ -685,9 +721,12 @@ gitCanonWith bounds cwd = do
         go = do
           c <- liftIO (BS.hGetSome h 65536)
           unless (BS.null c) do
-            -- atomicModifyIORef', because the reader of this buffer is another
-            -- thread: modifyIORef' is a read and a write with a gap in it, and a
-            -- clear landing in that gap is undone by the write that follows.
+            -- atomicModifyIORef', because this runs on its own thread and the
+            -- buffer is read from another. The clear that used to race it is
+            -- ordered after the cancel now, so the specific race is gone; a
+            -- read-modify-write on a shared IORef from a thread of its own is
+            -- still not something to leave non-atomic for the next reader of
+            -- this code to rediscover.
             atomicModifyIORef' ref \acc ->
               let a = acc <> c
               in (if BS.length a > n then BS.drop (BS.length a - n) a else a, ())
@@ -1114,20 +1153,13 @@ gitCanonWith bounds cwd = do
         Right (Just (ExitSuccess, o)) -> SmallOk o
         Right (Just (code, e)) -> SmallFailed code e
 
--- | How one of the three small calls ended.
---
--- Four outcomes and they used to be two: an @Either Text (ExitCode, ByteString)@
--- whose Left meant BOTH "git could not be started" and "git started and never
--- said anything". Those two get opposite advice -- one is local and the single
--- refusal documented as worth retrying, the other is a git sitting there that a
--- retry buys another minute of -- and the caller had no way to tell them apart.
 -- | How one read from the batch process ended.
 --
--- Four outcomes, and they were @Maybe ByteString@: end of file, silence, and a
--- reply line with no newline in four kilobytes all came back as Nothing and were
--- reported as "this reader could not run git: no process slots, no file
--- descriptors". git had run, was running, and in two of the three cases was
--- still there.
+-- Five outcomes, and they were @Maybe ByteString@: end of file, silence, a
+-- deadline reached, and a reply line with no newline in four kilobytes all came
+-- back as Nothing and were reported as "this reader could not run git: no
+-- process slots, no file descriptors". git had run, was running, and in three of
+-- the four cases was still there.
 data Read1 =
     ReadGot ByteString
     -- | The source closed its output.
@@ -1151,7 +1183,13 @@ data Read1 =
 -- is an accusation against the tree that only one of those two deserves.
 data Body = BodyGot ByteString | BodyShort Int Read1
 
--- ONCE
+-- | How one of the three small calls ended.
+--
+-- Four outcomes and they used to be two: an @Either Text (ExitCode, ByteString)@
+-- whose Left meant BOTH "git could not be started" and "git started and never
+-- said anything". Those two get opposite advice -- one is local, the other is a
+-- git sitting there that a retry buys another minute of -- and the caller had no
+-- way to tell them apart.
 data Small =
     -- | Exited 0, with stdout.
     SmallOk ByteString
