@@ -1,0 +1,143 @@
+{-# Language PatternSynonyms #-}
+-- | Whether an entry somebody else's tree carries may be merged into ours.
+--
+-- Split out of @mailboxMergeQ@ because the decision was buried inside a
+-- 'runMaybeT' inside an @S.toList_@ inside a @polling@, and while it was there
+-- it looked for years like a check it was not: it established that a @Deleted@
+-- entry's proof is /a/ delete box signed by the mailbox key, and every reader
+-- downstream took that to mean the proof authorised deleting the message the
+-- entry names. It did not, and one public delete box worked as a proof for
+-- anything else in the same mailbox. See issue #15.
+--
+-- Nothing here touches storage, the network or a clock, so every answer is a
+-- one-line test. What is deliberately NOT here is fetching: "this node does not
+-- have the proof block yet" is a download, not a judgement, and the worker keeps
+-- it so that a proof still in flight is retried rather than refused.
+module HBS2.Peer.Proto.Mailbox.Merge
+  ( MergeVerdict(..)
+  , admitDeleted
+  , enqueueMerge
+  , pattern PlainMessageDelete
+  ) where
+
+import HBS2.Prelude
+
+import HBS2.Peer.Proto.Mailbox.Types
+import HBS2.Peer.Proto.Mailbox.Ref
+
+import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Data.Types.SignedBox
+
+import Codec.Serialise (deserialiseOrFail)
+import Data.ByteString.Lazy qualified as LBS
+import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HM
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HS
+import Data.Hashable (Hashable)
+
+-- | Add one entry to a mailbox's pending merge set.
+--
+-- A named function for one call to 'HM.insertWith', because the two call sites
+-- that need it were spelled with 'HM.insert' and one of them is INSIDE the loop
+-- over a downloaded tree's entries: it replaced the whole set on every
+-- iteration, so a tree carrying N @Deleted@ entries contributed at most one of
+-- them. The loss was permanent rather than merely racy, because the surrounding
+-- code counts fetch failures only, and a clobbered entry is not a fetch failure,
+-- so the download was dropped from the queue as complete.
+--
+-- Accumulating is the whole content of it, and that is what the test asserts:
+-- the interesting property is not what 'HM.insertWith' does, it is that this is
+-- what the callers do.
+enqueueMerge
+  :: (Eq k, Hashable k)
+  => k
+  -> HashRef
+  -> HashMap k (HashSet HashRef)
+  -> HashMap k (HashSet HashRef)
+enqueueMerge k h = HM.insertWith (<>) k (HS.singleton h)
+
+-- | A delete payload that names exactly one message.
+--
+-- The only predicate this build honours, on either path: 'mailboxAcceptDelete'
+-- refuses anything else outright, so no entry a peer wrote itself can carry one.
+-- Here rather than in the worker, which is where it used to be, so that the
+-- decision below and the code that builds an entry can be read together.
+pattern PlainMessageDelete :: forall {s :: CryptoScheme} . HashRef -> DeleteMessagesPayload s
+pattern PlainMessageDelete x <- DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq x)))
+
+-- | Why a @Deleted@ entry was or was not merged.
+--
+-- Six answers and not a Bool, because a refusal goes in the log and the reasons
+-- call for different things: three of them are somebody's bug, one is a build
+-- that is too old, and one is an attack.
+data MergeVerdict =
+    -- | The proof is signed by this mailbox's key and names this entry's target.
+    MergeAccept
+    -- | The block the proof points at is not a signed delete payload at all.
+    --
+    -- Permanent: the block is content-addressed, so those bytes will not become
+    -- something else. Refused rather than retried.
+  | MergeBadProofBlock
+    -- | It is one, and the signature does not verify.
+  | MergeUnsigned
+    -- | It verifies, for a different mailbox. Somebody's proof, not ours.
+  | MergeWrongMailbox
+    -- | It verifies, for THIS mailbox, and authorises deleting a different
+    -- message than the entry it is attached to.
+    --
+    -- THE ONE THIS MODULE EXISTS FOR. Every delete box the owner has ever issued
+    -- is public: it is gossiped by the @DeleteMessages@ branch and stored as a
+    -- block. Without this case, any peer that has finished a handshake can take
+    -- one of them, staple it to an entry naming somebody else's message, serve a
+    -- tree holding that entry, and have the message disappear from the mailbox
+    -- with no missing block, no unsettled state and no diagnostic anywhere.
+  | MergeWrongTarget
+    -- | A predicate this build does not implement.
+    --
+    -- Compound And/Or predicates are defined in the wire format and honoured
+    -- nowhere, so this is a refusal and not a failure: an older reader must not
+    -- guess what a newer one meant by a delete.
+  | MergeUnsupportedPred
+  deriving stock (Eq,Show,Generic)
+
+instance Pretty MergeVerdict where
+  pretty = \case
+    MergeAccept          -> "accepted"
+    MergeBadProofBlock   -> "the block its proof names is not a signed delete payload"
+    MergeUnsigned        -> "the delete payload's signature does not verify"
+    MergeWrongMailbox    -> "the delete payload is signed for another mailbox"
+    MergeWrongTarget     -> "the delete payload is for this mailbox and authorises another message"
+    MergeUnsupportedPred -> "the delete payload carries a predicate this build does not implement"
+
+-- | May this @Deleted@ entry be merged into this mailbox?
+--
+-- Takes the bytes of the block the entry's proof points at, rather than the
+-- block's hash, because everything from there on is a judgement: deserialising
+-- them, verifying the signature, and -- the part that was missing -- checking
+-- that what the signature authorises is what the entry does.
+--
+-- The two hashes that must agree are the entry's target and the predicate's
+-- argument. Both used to be discarded at the match site: the entry's in a @_@
+-- pattern, the payload's by never reading @dmpPredicate@ on this path at all.
+admitDeleted
+  :: forall s . ForMailbox s
+  => MailboxRefKey s      -- ^ the mailbox being merged into
+  -> HashRef              -- ^ the entry's target: the message it removes
+  -> LBS.ByteString       -- ^ the bytes of the block the entry's proof names
+  -> MergeVerdict
+
+admitDeleted (MailboxRefKey want) what bs =
+  case deserialiseOrFail @(SignedBox (DeleteMessagesPayload s) s) bs of
+    Left{}    -> MergeBadProofBlock
+    Right box -> case unboxSignedBox0 box of
+      Nothing -> MergeUnsigned
+      Just (pk, payload)
+        | pk /= want -> MergeWrongMailbox
+        -- An `if` and not a guard, because a guard that fails here falls through
+        -- to the wildcard below and would report a target mismatch as an
+        -- unsupported predicate: the same answer for an attack and for an old
+        -- build.
+        | otherwise -> case payload of
+            PlainMessageDelete x -> if x == what then MergeAccept else MergeWrongTarget
+            _                    -> MergeUnsupportedPred

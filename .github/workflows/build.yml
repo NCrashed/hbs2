@@ -84,5 +84,8 @@ jobs:
       # off because the legacy suites have not been audited for the
       # current API and runtime environment; add a package here once its
       # suite is reviewed.
+      #
+      # hbs2-peer joined for issue #15: the mailbox merge decision now has
+      # a regression test, and a regression test nobody runs is not one.
       - name: Test (reviewed suites)
-        run: cabal test hbs2-hub
+        run: cabal test hbs2-hub hbs2-peer

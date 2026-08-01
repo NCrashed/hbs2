@@ -263,10 +263,19 @@ Retention and garbage collection
 ==============================
 
 Retention today is reactive and reclaims nothing: `DeleteMessages` writes a
-`Deleted` tombstone (verified against the mailbox key) but only the
-single-hash `MessageHashEq` predicate is honored, message and attachment
-blocks are never purged (explicit TODOs), and the per-message TTL field is
-never enforced. This PEP defines the retention model to fill those gaps.
+`Deleted` tombstone (verified against the mailbox key, and against the message
+the tombstone names) but only the single-hash `MessageHashEq` predicate is
+honored, message and attachment blocks are never purged (explicit TODOs), and
+the per-message TTL field is never enforced. This PEP defines the retention
+model to fill those gaps.
+
+The second half of that verification is what makes fold-then-delete safe to run
+at all. It makes every delete box the owner issues public, and until issue #15 a
+merge checked only who had signed one, never what it authorised, so one of them
+could be reused as a proof against any other message in the same mailbox. A
+retention policy that mints proofs routinely needs proofs that are bound to
+their target; otherwise the busier the hub, the more keys to its own front door
+it hands out.
 
   - Fold-then-delete, and it must be canon-aware. Once a letter is folded, the
     mailbox copy of the message envelope is redundant (canon holds the durable

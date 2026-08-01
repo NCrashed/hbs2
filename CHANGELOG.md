@@ -1,5 +1,52 @@
 # Unreleased
 
+## Security
+
+  - **`hbs2-peer`: a mailbox delete proof was not bound to the message it
+    deleted (#15).** When merging a mailbox tree served by another peer,
+    the worker checked that the entry's proof was a delete box signed by
+    the mailbox key, and never checked that the box authorised deleting
+    the message the entry named. The two hashes that have to agree were
+    both discarded at the match site: the entry's target in a `_`
+    pattern, the payload's predicate by never being read on that path.
+
+    Every delete box an owner issues is public, gossiped and stored as a
+    block, and PEP-21 fold-then-delete makes issuing them routine. So one
+    of them worked as a proof for anything else in the same mailbox: any
+    peer that had finished a handshake could staple it to an entry naming
+    somebody else's message, serve a tree holding that entry, and have
+    the message leave the mailbox with no missing block, no unsettled
+    state and no diagnostic. For `hbs2-hub` that is a contributor's issue
+    silently never reaching the maintainer.
+
+    The decision is now a pure function, `admitDeleted` in
+    `HBS2.Peer.Proto.Mailbox.Merge`, with a verdict per reason and a
+    refusal in the log; it was buried inside a `runMaybeT` inside a
+    stream inside a poll, which is much of why it went so long looking
+    like a check it was not. Peers are now stricter, so the divergence
+    from an unpatched peer is in the safe direction.
+
+    **This does not clean up.** The merge carries entries already in a
+    tree forward without re-checking them, so a peer that accepted a
+    forgery keeps and re-serves it. The fix stops the forgery spreading
+    and stops it being accepted again; a mailbox suspected of having been
+    poisoned has to be recreated.
+
+  - **`hbs2-peer`: the mailbox download path clobbered its own merge
+    queue.** `HM.insert` inside the loop over a downloaded tree's entries
+    replaced the whole pending set on every iteration, so a tree carrying
+    several `Deleted` entries contributed at most one of them. The loss
+    was permanent rather than racy: the surrounding code counts fetch
+    failures only, a clobbered entry is not one, so the download was
+    dropped from the queue as complete and never retried. In practice a
+    synced mailbox kept messages its owner had deleted, which for a
+    reader that folds and then deletes means already-processed letters
+    reappearing in the queue. Both call sites go through `enqueueMerge`
+    now.
+
+  - `cabal test` in CI covers `hbs2-peer` as well as `hbs2-hub`, since
+    the above is only a regression test if something runs it.
+
 ## Fixed in the release artifacts
 
 Three things that are user-visible on an install rather than in a source

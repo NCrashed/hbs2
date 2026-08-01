@@ -541,6 +541,16 @@ predicates are defined but rejected as unsupported. The merge worker verifies
 the delete proof (the signed box must be for this mailbox) before writing a
 `Deleted` tombstone.
 
+It also verifies that the proof authorises deleting the message the tombstone
+names, and that second half is not decorative. A delete box is public: it is
+gossiped and stored as a block, and fold-then-delete makes issuing them routine.
+Checking only the signature meant any peer that had finished a handshake could
+take one of the owner's boxes, staple it to a tombstone naming somebody else's
+message, and serve a tree holding it: the message left the mailbox with no
+missing block and no diagnostic. Checking the signature is what stops a stranger
+FORGING a delete; checking the target is what stops them REUSING one. Both are
+required, and the second was missing until issue #15.
+
 Limits to state honestly: deletion is tombstone-only. Message blocks and
 attachment trees are not garbage-collected (explicit TODOs), and the
 per-message TTL field exists in `MessageFlags` but is never enforced. So

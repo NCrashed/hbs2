@@ -9,6 +9,8 @@ import HBS2.Peer.Proto.RefLog
 import HBS2.Net.Auth.Schema
 import HBS2.Misc.PrettyStuff
 
+import MailboxMerge (mailboxMergeTests)
+
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -101,6 +103,7 @@ main =
     testGroup "root"
       [
         testCase "testVersionedKeys" testVersionedKeysHashes
+      , mailboxMergeTests
       ]
 
 

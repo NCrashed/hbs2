@@ -167,6 +167,7 @@ library
       HBS2.Peer.Proto.Mailbox.Types
       HBS2.Peer.Proto.Mailbox.Message
       HBS2.Peer.Proto.Mailbox.Entry
+      HBS2.Peer.Proto.Mailbox.Merge
       HBS2.Peer.Proto.Mailbox.Ref
       HBS2.Peer.Proto.Mailbox.Policy
       HBS2.Peer.Proto.Mailbox.Policy.Basic
@@ -200,6 +201,7 @@ test-suite test
     default-language: Haskell2010
 
     other-modules:
+        MailboxMerge
 
     -- other-extensions:
 
@@ -230,6 +232,7 @@ test-suite test
         , tasty-quickcheck
         , transformers
         , uniplate
+        , unordered-containers
         , vector
         , saltine
         , simple-logger

@@ -30,6 +30,7 @@ import HBS2.Net.Proto.Types
 import HBS2.Peer.Proto
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
+import HBS2.Peer.Proto.Mailbox.Merge
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Net.Messaging.Unix
@@ -142,8 +143,10 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
 okay :: Monad m => good -> m (Either bad good)
 okay good = pure (Right good)
 
-pattern PlainMessageDelete :: forall {s :: CryptoScheme} . HashRef -> DeleteMessagesPayload s
-pattern PlainMessageDelete x <- DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq x)))
+-- 'PlainMessageDelete' moved to HBS2.Peer.Proto.Mailbox.Merge, beside the
+-- decision that has to read the same predicate. It lived here, in an executable
+-- module, which is part of why the merge path never consulted it: nothing that
+-- could be tested could see it either.
 
 instance IsAcceptPolicy HBS2Basic () where
   policyAcceptPeer _ _ = pure True
@@ -199,7 +202,10 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
       deh <- ContT $ maybe1 deh' storageFail
 
-      atomically $ modifyTVar inMessageMergeQueue (HM.insert mbox (HS.singleton deh))
+      -- insertWith for the reason the download path needs it: two deletes issued
+      -- for one mailbox between two merge polls collided here and the first was
+      -- dropped.
+      atomically $ modifyTVar inMessageMergeQueue (enqueueMerge mbox deh)
 
     where
       storageFail = err $ red "mailbox (storage:critical)" <+> "block writing failure"
@@ -739,29 +745,48 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
               -- maybe to something more sophisticated
               Right (Exists{}) -> lift $ S.yield th
 
-              Right (Deleted (ProofOfDelete{..}) _) -> do
-                h   <- toMPlus deleteMessage
+              -- The entry's TARGET is bound now. It used to be matched as a `_`
+              -- here, and the payload's own predicate was never read on this
+              -- path at all, so the two hashes that have to agree were the two
+              -- values thrown away: the check established that the proof was a
+              -- delete box signed for this mailbox, and not that it authorised
+              -- deleting this message. Every delete box the owner ever issued is
+              -- public, so one of them worked as a proof for anything else in
+              -- the same mailbox. Issue #15.
+              Right (Deleted (ProofOfDelete{..}) what) -> case deleteMessage of
 
-                mbox <- getBlock sto (coerce h)
-                         -- >>= toMPlus
+                -- Names no proof at all. There is nothing to fetch and nothing
+                -- that will change, so this is a refusal rather than an entry
+                -- retried on every poll for as long as the tree holds it.
+                Nothing ->
+                  warn $ red "mailbox: refusing a delete entry" <+> pretty th
+                           <+> "for" <+> pretty r <> ":"
+                           <+> "it names no proof at all"
 
-                when (isNothing mbox) do
-                  startDownloadStuff me h
-                  warn $ red "<<~~~>>" <+> "Proof not found!" <+> pretty h
+                Just h -> do
+                  mbox <- getBlock sto (coerce h)
 
-                box <- toMPlus mbox
-                        <&> deserialiseOrFail @(SignedBox (DeleteMessagesPayload s) s)
-                        >>= toMPlus
+                  -- The one outcome here that is NOT a judgement: the proof may
+                  -- simply not have arrived yet. Left outside 'admitDeleted' on
+                  -- purpose, so that a proof still in flight is retried on a
+                  -- later poll instead of being refused as unsigned.
+                  when (isNothing mbox) do
+                    startDownloadStuff me h
+                    warn $ red "<<~~~>>" <+> "Proof not found!" <+> pretty h
 
-                debug $ red "<<***>> mailbox:" <+> "found proof of message deleting" <+> pretty h
+                  bs <- toMPlus mbox
 
-                (pk,_) <- unboxSignedBox0 box & toMPlus
+                  case admitDeleted r what bs of
+                    MergeAccept -> do
+                      debug $ red "<<***>> mailbox:" <+> "PROVEN message deleting" <+> pretty h
+                      lift $ S.yield th
 
-                guard (MailboxRefKey pk == r)
-
-                debug $ red "<<***>> mailbox:" <+> "PROVEN message deleting" <+> pretty h
-
-                lift $ S.yield th
+                    -- Said out loud. A failing guard inside runMaybeT dropped
+                    -- the entry in silence, so a poisoning attempt was not
+                    -- merely ineffective, it was invisible.
+                    bad ->
+                      warn $ red "mailbox: refusing a delete entry" <+> pretty th
+                               <+> "for" <+> pretty r <> ":" <+> pretty bad
 
         let newTxProven = HS.fromList newTxProvenL
 
@@ -870,7 +895,15 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
                 case entry of
                   Deleted{} -> do
-                    atomically $ modifyTVar inMessageMergeQueue (HM.insert mailboxRef (HS.singleton h))
+                    -- insertWith, not insert. This runs INSIDE the loop over the
+                    -- tree's entries, and a plain insert replaces the whole set
+                    -- on every iteration -- so a tree carrying N Deleted entries
+                    -- contributed at most one of them, and which one depended on
+                    -- how the two-second merge poll interleaved with this walk.
+                    -- The loss was then permanent: 'fails' counts fetch failures
+                    -- only, clobbered entries are not failures, so failNum == 0
+                    -- and the download was dropped from the queue below.
+                    atomically $ modifyTVar inMessageMergeQueue (enqueueMerge mailboxRef h)
                     -- write-already-merged
 
                   Exists _ w -> do

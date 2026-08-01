@@ -250,11 +250,23 @@ instance Exception MailboxUnknown
 -- (both proofs are a 'Maybe HashRef' and nothing else), so a difference is the
 -- only answer that is defined: there is no "latest" to prefer.
 --
--- Deletion winning is therefore not a policy choice here, and it is safe for a
--- reason worth writing down: a @Deleted@ entry only enters the tree if its
--- payload box is signed by the mailbox's own key (@guard (MailboxRefKey pk ==
--- r)@ in the peer's merge). A stranger cannot hide a letter from triage by
--- sending a deletion for it.
+-- Deletion winning is therefore not a policy choice here, and what makes it
+-- safe is a check in the peer that this comment used to describe wrongly. It
+-- said a @Deleted@ entry enters the tree only if its payload box is signed by
+-- the mailbox's own key, and concluded that a stranger cannot hide a letter
+-- from triage. The first half was true and the conclusion did not follow: the
+-- merge never compared what the signed box AUTHORISED with what the entry
+-- deleted, so any one of the owner's delete boxes -- all of them public, all of
+-- them gossiped -- worked as a proof for anything else in the same mailbox
+-- (issue #15).
+--
+-- 'HBS2.Peer.Proto.Mailbox.Merge.admitDeleted' now compares the two, so the
+-- claim holds as written. It holds going FORWARD: the merge carries entries
+-- already in a tree across without re-checking them, so a peer that accepted a
+-- forgery before the fix still serves it. Reading a mailbox whose history
+-- predates the fix is reading a tree that could have been poisoned, and the
+-- remedy for that is to recreate the mailbox rather than anything this module
+-- can do.
 liveMessages :: [MailboxEntry] -> HashSet HashRef
 liveMessages es = HS.difference exists deleted
   where
