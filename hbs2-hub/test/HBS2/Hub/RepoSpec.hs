@@ -10,6 +10,10 @@ import HBS2.Net.Auth.Credentials
 import Data.HashMap.Strict qualified as HM
 import Data.Text (Text)
 import Data.IORef
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
+import Control.Exception (evaluate)
+import System.Timeout (timeout)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Text qualified as Text
@@ -135,6 +139,28 @@ spec = do
       -- their own readers, and a report naming them would name two files in every
       -- healthy tree.
       bad `shouldBe` []
+
+    it "deduplicates a full tree in seconds, not in minutes" $ do
+      -- A PERFORMANCE TEST, and it is here because the fix it guards had none.
+      -- Dedup was `elem` per entry, which is quadratic: measured at about 20
+      -- seconds for 40000 entries, where the bound this reader accepts is
+      -- 200000. The HashMap pass is 0.056 s for 40000 and 0.409 s for 200000, so
+      -- the two are three hundred times apart and a ten-second budget tells them
+      -- apart without being flaky.
+      --
+      -- Called DIRECTLY, which is what makes it affordable: through readCanon the
+      -- count bound refuses this many entries before sortCanon ever sees them, so
+      -- the quadratic pass was unreachable from any test that went in the front
+      -- door. That is also why it went unnoticed.
+      let entries = [ TreeEntry (B8.pack ("threads/t/" <> show i <> "-x")) (Blob "o" 1)
+                    | i <- [1 .. maxCanonFiles] ]
+      done <- newEmptyMVar
+      _ <- forkIO (evaluate (length (fst (sortCanon entries))) >>= putMVar done)
+      timeout 10000000 (takeMVar done) >>= \case
+        Just n -> n `shouldBe` maxCanonFiles
+        Nothing -> expectationFailure
+                     "sortCanon did not finish 200000 entries in 10s, which for\
+                     \ this test means the dedup is quadratic again"
 
     it "answers an absent ref as absent, not as empty canon" $ do
       owner <- kp
@@ -434,8 +460,8 @@ spec = do
 
     it "refuses a tree past either bound, counting only the files it reads" $ do
       owner <- kp
-      let ev n = TreeEntry (B8.pack ("threads/t/" <> show n))
-                   (Blob (Text.pack (show n)) maxEventBytes)
+      let ev i = TreeEntry (B8.pack ("threads/t/" <> show i))
+                   (Blob (Text.pack (show i)) maxEventBytes)
           src es = inMem (pure (Right "deadbeef"))
                      (const (pure (Right es))) (const (pure (BlobText "x")))
           n = maxCanonBytes `div` maxEventBytes + 1
@@ -457,7 +483,7 @@ spec = do
       -- a slice of one buffer, so holding one holds all: a tree of ten million
       -- paths outside the layout cost ten million lines and the whole buffer while
       -- a count over event files alone said it was empty.
-      let junk n = TreeEntry (B8.pack ("junk/" <> show n)) (Blob "x" 1)
+      let junk i = TreeEntry (B8.pack ("junk/" <> show i)) (Blob "x" 1)
           n = maxCanonFiles + 1
           src es = inMem (pure (Right "deadbeef"))
                      (const (pure (Right es))) (const (pure (BlobText "x")))

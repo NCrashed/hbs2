@@ -476,7 +476,7 @@ gitCanonWith bounds cwd = do
                   -- block and nowhere else, and this is a field in a line of
                   -- advice. So the known ones are spelled out and everything
                   -- else is described.
-                  give (BlobProtocol ("cat-file --batch answered " <> named ty))
+                  give (BlobProtocol ("cat-file --batch answered " <> typeWord ty))
               | Just n <- sizeOf szB ->
                   if n > gbBlobBytes bounds
                     -- The stream is now out of step by n+1 bytes, and skipping
@@ -530,8 +530,8 @@ gitCanonWith bounds cwd = do
     -- An object type as a word this program chose. git's four are named; anything
     -- else is described rather than repeated, since a field in a line of advice
     -- is not where a stranger's bytes go.
-    named ty | ty `elem` ["blob","tree","commit","tag"] = "a " <> decodeS ty
-             | otherwise = "a type this reader does not know"
+    typeWord ty | ty `elem` ["blob","tree","commit","tag"] = "a " <> decodeS ty
+                | otherwise = "a type this reader does not know"
 
     over n = BlobRefused ( "the object's header announces "
                <> Text.pack (show n)
@@ -680,7 +680,7 @@ gitCanonWith bounds cwd = do
     -- for a stream with no newline in it at all.
     lineFrom dl h = go mempty
       where
-        go acc = step dl (gbCallSeconds bounds) h 1 >>= \case
+        go acc = readStep dl (gbCallSeconds bounds) h 1 >>= \case
           Left r -> pure r
           Right c | c == "\n" -> pure (ReadGot acc)
                   | BS.length acc > 4096 -> pure ReadTooLong
@@ -691,7 +691,7 @@ gitCanonWith bounds cwd = do
     exactly dl h n = go n mempty
       where
         go 0 acc = pure (BodyGot acc)
-        go k acc = step dl (gbBodySeconds bounds) h k >>= \case
+        go k acc = readStep dl (gbBodySeconds bounds) h k >>= \case
           Left r -> pure (BodyShort (n - k) r)
           Right c -> go (k - BS.length c) (acc <> c)
 
@@ -701,7 +701,7 @@ gitCanonWith bounds cwd = do
     -- that has not stopped and will not finish, which no per-read bound can see.
     -- Checked before the read, so the worst case is the deadline plus one idle
     -- bound rather than the deadline exactly.
-    step dl idle h k = do
+    readStep dl idle h k = do
       now <- getMonotonicTime
       if now > dl
         then pure (Left (ReadOverdue ( "cat-file --batch was still sending after "

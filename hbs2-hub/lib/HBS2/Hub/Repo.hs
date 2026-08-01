@@ -159,8 +159,11 @@ data BlobResult =
     -- a ceiling at all -- the column is the AUDITED TREE's word for it and a
     -- loose object can be self-consistent and lie, saying ten over two megabytes.
   | BlobOversize Int
-    -- | The reader has spent as much as it will on this tree, and stopped. Says
-    -- nothing about any one file.
+    -- | The reader has spent as much as it will, and stopped. Usually about the
+    -- WALK -- its clock, or the bytes it has handed back -- and sometimes about
+    -- one object, when that object alone took longer than the reader will wait
+    -- while never going quiet enough to be called stalled. The message says
+    -- which; the answers differ, and the advice for the code names both.
   | BlobBudget Text
   deriving stock (Eq,Show)
 
@@ -227,7 +230,7 @@ data CanonUnreadable =
     -- object, printed directly under a message about compaction.
   | CanonListingTooBig Int
     -- | Reading this tree cost more than the reader will spend: time on the walk,
-    -- or bytes handed back by it.
+    -- bytes handed back by it, or one object that took too long on its own.
     --
     -- A budget on the WALK, which no listing bound can give, because the listing
     -- of an expensive tree is small. The tree that made this necessary was 45000
@@ -246,14 +249,18 @@ data CanonUnreadable =
     -- descriptors, the tool gone from PATH mid-audit. Nothing is known about
     -- canon, which is why this is not a finding about it.
     --
-    -- EXEC HAVING FAILED is the distinction from 'NoRepository', and it is not
-    -- about when: git not on PATH at the first call is this, and so is a fork
-    -- refused on EAGAIN two hundred thousand blobs into a tree. 'NoRepository' is
-    -- git having RUN and exited non-zero.
+    -- NO ANSWER OUT OF GIT is the distinction from 'NoRepository', which is git
+    -- having run and exited non-zero WITH SOMETHING TO SAY. Two shapes reach
+    -- here, and narrowing the words to one of them was a mistake made once
+    -- already: exec failing (git not on PATH, no process slots, no file
+    -- descriptors) and a git that ran and then vanished mid-answer, which is what
+    -- an OOM killer inside a hook's cgroup looks like from this end.
     --
-    -- The earlier rule was "first call means it could be either", which was true
-    -- while the caller could not tell a process that never started from one that
-    -- started and failed. It can now, so the first call answers this too.
+    -- Not about WHEN, either: git absent at the first call is this, and so is a
+    -- fork refused two hundred thousand blobs into a tree. The earlier rule was
+    -- "the first call means it could be either", which held while the caller
+    -- could not tell a process that never started from one that started and
+    -- failed; it can now.
   | ReaderFailed Text
     -- | git RAN and did not answer. Not the same thing as 'ReaderFailed', which
     -- was the answer to both, and the difference is the whole of the advice: that
@@ -326,12 +333,14 @@ instance Pretty CanonUnreadable where
                            <+> pretty (safeText e)
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
-    -- FileBadVersion says what is wrong with the file itself, and "does not
-    -- read" is the one thing that is not: the file parses perfectly and the
-    -- number in it is not a version. Under the shared prefix the first thing a
-    -- reader saw sent them looking for a syntax error.
-    VersionUnreadable p@FileBadVersion{} -> "the version file" <+> pretty p
-    VersionUnreadable p -> "the version file is listed and does not read:"
+    -- ONE PREFIX THAT IS TRUE OF EVERY PAYLOAD, rather than one that is true of
+    -- most and special cases for the rest. "Listed and does not read" was false
+    -- three ways: of a version that parses and holds a number that is not a
+    -- version, of a DIRECTORY where the file goes (nothing is listed at that
+    -- path, which is the whole distinction), and of a listing record this build
+    -- could not parse, which the advice underneath then corrected in the next
+    -- sentence. What is true in all of them is that no version came out of it.
+    VersionUnreadable p -> "the version file gave this reader no version:"
                              <+> pretty p
     CanonTooBig n     -> "the event files total" <+> pretty n
                            <+> "bytes, past what this reader will hold"
@@ -347,7 +356,7 @@ instance Pretty CanonUnreadable where
     -- through toolSaid, "git: startProcess: exec: does not exist" appeared under
     -- a | marker as though git had said it, which is the exact confusion the
     -- markers exist to prevent, on the first refusal a new user meets.
-    ReaderFailed e    -> "this reader could not run git:" <+> pretty (safeText e)
+    ReaderFailed e    -> "this reader got no answer out of git:" <+> pretty (safeText e)
 
 -- | Whose words a message is.
 --
@@ -456,9 +465,17 @@ instance Pretty FileProblem where
 -- this clone show less than canon holds over a byte no signature covers. What is
 -- wrong with the tree is said, and the tree is still folded.
 --
--- Two of the four halves of the name are checked here, and the other two cannot
--- be: @seq@ and the thread it sits under come from the CANON box, which only the
--- fold opens, and this runs before the fold. PEP-22 says which.
+-- Two things are checked here: the shape, and the event-id against the file's own
+-- content. THREE are not -- @seq@, the scope (a repo-scope event under
+-- @threads\/@), and the thread directory a file sits in -- and the reason is cost
+-- rather than reach. They are ordinary fields of the canon box, and opening one
+-- verifies a signature the fold verifies again a moment later, so checking them
+-- here means verifying canon twice in a verb built for a pre-receive hook. The
+-- place that has already paid is the fold, and the fold is not shown a path.
+--
+-- An earlier version of this note said the canon box is one "only the fold
+-- opens", which is not true of this tree: 'unboxChecked' is exported and is
+-- already called elsewhere. PEP-22 has the corrected version.
 data NameProblem =
     -- | Not @\<20 digits>-\<something>@ at all.
     NameNotEventShaped

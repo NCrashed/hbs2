@@ -102,14 +102,14 @@ and a tree full of forged events were the same event.
 | 4    | not a git repository                                   |
 | 5    | the ref is here and does not resolve to a commit       |
 | 6    | canon is stamped `(hub-meta N)` newer than this build  |
-| 7    | the `version` file is here and does not read           |
+| 7    | the `version` file is here and gave no usable version   |
 | 8    | canon is past the reader's byte bound                  |
 | 9    | the tree will not list, whether git said so or this reader did |
 | 10   | canon is past the reader's file-count bound            |
 | 11   | the tree listing is past the reader's byte bound       |
-| 12   | the reader could not run git at all: a local failure   |
+| 12   | no answer out of git: it would not start, or it is gone |
 | 13   | the `version` file is here and THIS CLONE cannot read it |
-| 14   | reading canon cost more than the reader will spend      |
+| 14   | reading canon, or one object in it, cost more than the reader will spend |
 | 15   | git ran and did not answer                              |
 | 16   | the tree listed and its files went out of step with git |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
@@ -138,14 +138,17 @@ Two of these are worth reading twice. 3 covers both an absent ref and a ref whos
 loose file is corrupt, because git offers no way to tell those apart: `show-ref
 --verify --quiet` exits 1 for both and both messages say "not a valid ref". A
 fetch is the remedy either way, which is why they can share a code and the advice
-names both. And 12 is the one refusal that is not about canon at all: no process
-slots, no file descriptors, git gone from `PATH` mid-audit. It used to be reported
-as an unreadable file, which exits 2, telling a hook that a local resource limit
-was a finding about somebody's repository.
+names both. And 12 is the one refusal that is not about canon at all: git not on
+PATH, no process slots, no file descriptors, or the git this reader did start
+gone before it answered. It used to be reported as an unreadable file, which
+exits 2, telling a hook that a local resource limit was a finding about
+somebody's repository.
 
 12, 15 and 16 are three states of one tool and are worth keeping apart, because
-only one of them is worth retrying. 12 is git not running: not on PATH, no
-process slots, no file descriptors. 15 is git running and saying nothing, which a
+only one of them is worth retrying. 12 is no answer out of git at all: it would not
+start (not on PATH, no process slots, no file descriptors), or the one this
+reader did start is gone before it answered, which is what an OOM killer inside a
+hook's cgroup looks like from this end. 15 is git running and saying nothing, which a
 retry buys another wait of: reachable with a FIFO at `.git/refs/hbs2/meta`, where
 `rev-parse` answers and `show-ref` blocks on open, and which used to exit 12 with
 an invitation to try again. 16 is git running and saying something this build
@@ -161,7 +164,8 @@ all point at one subtree costs 64^12 traversals of 116 KB of objects, and there
 the answer really is compaction, which is what 9's advice says. A stalled ref
 lookup can only be the machine; a stalled listing can be the tree.
 
-14 is a bound on the WALK, which the three listing bounds cannot give: a tree of
+14 is a bound on the WALK and on one object inside it, which the three listing
+bounds cannot give: a tree of
 45000 paths whose entries share one subtree is five objects and 172 KB on disk,
 and its listing is 3.6 MB against a 102 MB bound and 45001 records against
 200000. Every listing bound passes, and the walk that follows is bounded by none
@@ -202,8 +206,17 @@ The report is read by people and by scripts, so two things about its shape are
 fixed. A path is printed QUOTED, with a quote inside it escaped, because a path
 may contain ": " and the line is `unreadable <path>: <reason>`: unquoted, the
 author of a tree chose what the reason field said. And a tool's own words are
-printed as an indented block with each line marked `|`, never as a field value,
-because this program prints its own advice at the same indent underneath.
+printed as an indented block with each line marked `|`, because this program
+prints its own advice at the same indent underneath, and an unmarked block puts a
+stranger's text exactly where a line telling the reader what to run goes.
+
+That rule governs the REFUSALS, which are one message with advice under it. It
+cannot govern the per-file findings, and saying "never as a field value" claimed
+it did: a finding is one line of a list, the report promises one `Doc` per line,
+and a tree may have a thousand of them, so a block there puts a paragraph in the
+middle of a list a thousand times over. What git said about one unreadable file
+is therefore a field, escaped onto one line like every other stranger's text.
+Nothing follows it at that indent, which is what the marker exists to prevent.
 
 Five things the report says that are worth naming, because each was once
 silently dropped:
@@ -212,9 +225,11 @@ silently dropped:
     path, not skipped. Something somebody put in canon is a finding.
   - A path the layout does not have at all is reported the same way. The two
     exceptions are `version`, which has a reader of its own, and
-    `index/number.sexp`, which has none: it is excluded from the report by path
-    and nothing opens it. The fold assigns numbers itself, and a file cannot be
-    allowed to change what the fold decided, so there is nothing to read it for.
+    `index/number.sexp`, which has none: nothing opens it, because the fold
+    assigns numbers itself and a file cannot be allowed to change what the fold
+    decided. It is passed over ONLY WHEN IT IS A BLOB, though. A gitlink at that
+    path is reported like any other, since a skip by path alone made the one file
+    in the tree nothing reads into the one place a submodule could sit unnamed.
   - A blob whose object this clone does not have is reported as that, and not as
     a submodule. It is the one of these that fetching fixes.
   - A path the tree lists TWICE is named. git fsck calls it duplicateEntries; on

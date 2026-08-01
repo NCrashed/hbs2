@@ -1181,12 +1181,21 @@ spec = do
       -- characters, which are up to four bytes each, so the budget was up to four
       -- times what it says. An ASCII fixture cannot see that; these are Cyrillic,
       -- two bytes apiece.
+      -- THE MULTIBYTE TEXT COMES FIRST, and that is the whole of the fixture. The
+      -- first version put it after `error <oid>:`, where the first ten bytes and
+      -- the first ten characters are the same ten ASCII bytes, so both
+      -- implementations produced the identical string and the revert stayed
+      -- green. Leading Cyrillic is five characters in ten bytes: taking bytes
+      -- yields ten bytes, taking characters yields twenty.
       batching (gitBounds { gbBlobMessage = 10 })
         [ "while read oid; do"
-        , "  printf 'error %s: \\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202\\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202\\n' \"$oid\" >&2"
+        , "  printf '\\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202\\320\\277\\321\\200\\320\\270\\320\\262\\320\\265\\321\\202 %s\\n' \"$oid\" >&2"
         , "  printf '%s missing\\n' \"$oid\"; done"
         ] $ \readIt _ -> readIt >>= \case
-            BlobRefused m -> BS.length (Text.encodeUtf8 m) `shouldSatisfy` (<= 10)
+            BlobRefused m -> do
+              BS.length (Text.encodeUtf8 m) `shouldSatisfy` (<= 10)
+              -- And it really was the multibyte text, not an empty match.
+              Text.length m `shouldSatisfy` (> 0)
             other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
     it "calls a git that was never there local, not a fact about the repository" $ do

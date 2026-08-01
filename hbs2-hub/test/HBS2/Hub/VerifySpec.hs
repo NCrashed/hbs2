@@ -36,7 +36,7 @@ import Control.Exception (bracket,try)
 import GHC.IO.Handle (hDuplicate,hDuplicateTo)
 import HBS2.Data.Types.Refs (HashRef(..))
 import System.Exit (ExitCode(..))
-import System.IO (stdout,hClose,withFile,IOMode(WriteMode),hSetBuffering,BufferMode(..))
+import System.IO (stdout,stderr,hClose,withFile,IOMode(WriteMode),hSetBuffering,BufferMode(..))
 import System.Posix.IO qualified as Posix
 import Test.Hspec
 
@@ -173,7 +173,11 @@ spec = do
       says (VersionUnreadable (FileMalformed (BadClause "hub-meta"))) "rewrite that file"
       says (VersionUnreadable (FileBadVersion 0)) "rewrite that file"
       says (VersionUnreadable FileObjectMissing) "shallow clone"
-      says (VersionUnreadable FileListingUnparsed) "report the git version"
+      -- These two both say "report the git version", so the phrase alone lets
+      -- their bodies be swapped: each would still contain the phrase asserted of
+      -- it, and the pairwise check only requires that they differ. So each is
+      -- pinned by the words that are true of IT and of nothing else.
+      says (VersionUnreadable FileListingUnparsed) "not the file"
       says (CanonTooBig 1) "PEP-19"
       says (TreeUnreadable (ToolSaid "x")) "fetching"
       says (TreeUnreadable (ReaderSays "x")) "Fetching will not help"
@@ -185,7 +189,7 @@ spec = do
       -- and silent got "this is local, retry", and a batch reply out of step got
       -- "compaction". Both are named here so neither can drift back.
       says (ToolStalled "x") "retrying"
-      says (BlobsOutOfStep "x") "report the git version"
+      says (BlobsOutOfStep "x") "The tree listed and its files did not read"
 
     it "exits with what it computed, and 141 when the pipe is gone" $ do
       owner <- kp
@@ -244,6 +248,28 @@ spec = do
                           try (report found))
       hClose wh
       gone `shouldBe` (Left (ExitFailure 141) :: Either ExitCode ())
+
+      -- And the OTHER half of the verb's IO, which nothing joined up: every
+      -- check of a refusal's code so far has been of codeOf in isolation, and
+      -- nothing asserted that the process actually leaves with it. That is the
+      -- one thing the narrowing of the 141 handler was written for -- it is
+      -- scoped to the report so that a usage error whose stderr is closed keeps
+      -- its own code -- and it was unobserved.
+      let onStderr act = bracket (hDuplicate stderr)
+                           (\o -> hDuplicateTo o stderr >> hClose o)
+                           (\_ -> withFile "/dev/null" WriteMode $ \n ->
+                                    hDuplicateTo n stderr >> act)
+      onStderr (try (refused (NoRepository "not a git repository")))
+        `shouldReturn` (Left (ExitFailure 4) :: Either ExitCode ())
+      onStderr (try (refused (ToolStalled "did not finish")))
+        `shouldReturn` (Left (ExitFailure 15) :: Either ExitCode ())
+
+    it "says how to spell the verb when the arguments are wrong" $
+      -- `hub verify --help` landed on "hbs2-hub: BadFormException
+      -- (hub:verify --help)", which names an internal type and a spelling
+      -- nobody typed. The dispatcher that reaches this is not testable without
+      -- an hbs2-cli context; the text it dies with is.
+      Text.unpack (render usage) `shouldContain` "usage: hub verify <repo-key>"
 
     it "prints a hash-shaped field that is not a hash by its size" $ do
       -- A HashRef takes any length on the wire and validHashRef is applied to the
@@ -454,7 +480,7 @@ spec = do
       -- Pairwise distinct, because "more than one line" is satisfied by any two
       -- texts, including two identical ones: swapping the advice of any two
       -- constructors passed. What a reader gets told is the whole product of a
-      -- refusal, and there are twelve of them.
+      -- refusal, and there are nineteen entries below covering thirteen of them.
       -- The ADVICE, not the whole doc: the first line is `hub: <pretty u>`, which
       -- differs per constructor for free, so comparing whole docs passed while
       -- three refusals gave word-for-word identical advice.
@@ -467,6 +493,31 @@ spec = do
                     , not (fst x `elem` bounds' && fst y `elem` bounds') ] $
         \((ca, a), (cb, b)) ->
           (ca, cb, a) `shouldSatisfy` \_ -> a /= b
+
+      -- And the three that ARE allowed to share say the same thing word for word,
+      -- which is the claim the exemption above rests on. Asserted rather than
+      -- assumed: with only the exemption, changing one of the three and not the
+      -- others is invisible, and the phrase table cannot see it either, since
+      -- their one phrase is the one they share.
+      let three = [ advice u | (u, c) <- everyRefusal, c `elem` bounds' ]
+      length three `shouldBe` 3
+      nub three `shouldBe` take 1 three
+
+      -- The filter above compares refusals with DIFFERENT codes, so two sharing
+      -- one are never put side by side. Three do: the pairs that matter are named
+      -- here. (TreeUnreadable's two are their own example further down.)
+      advice (VersionUnreadable FileObjectMissing)
+        `shouldNotBe` advice (VersionUnreadable FileListingUnparsed)
+      -- These two SHARE, and that is right: a version file with a broken clause
+      -- and one whose number is not a version are both the publisher's to
+      -- rewrite, and only the line above the advice differs. Pinned so the
+      -- sharing is a decision rather than an accident.
+      advice (VersionUnreadable (FileMalformed (BadClause "hub-meta")))
+        `shouldBe` advice (VersionUnreadable (FileBadVersion 0))
+      -- RefUnresolved's two are not compared here: `advice` drops one line, and a
+      -- ToolSaid payload is a block of several, so the two differ by the quoted
+      -- text rather than by anything advisory. What tells them apart is the
+      -- marker, which "quotes git and does not quote itself" below asserts.
 
     it "quotes git and does not quote itself" $ do
       -- THE HEAD OF THE MATTER, and nothing tested it. `told` is what puts git's

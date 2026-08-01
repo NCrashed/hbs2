@@ -143,9 +143,14 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                       -- them, which is why it comes first.
                       <> "  Or the ref is here and broken, or nothing has"
                       <> " published canon for this repository yet."
-      NoRepository _ -> line <> "  Run this inside the repository, or check that"
-                          <> " git is installed and" <> line
-                          <> "  that this user may read it (safe.directory)."
+      -- NOT "check that git is installed", which this said until git-not-installed
+      -- stopped arriving here: git ran to produce this and exited non-zero, so
+      -- advertising a cause the constructor now rules out was the fixed bug left
+      -- standing in the other half of the split.
+      NoRepository _ -> line <> "  Run this inside a git repository. If you are in"
+                          <> " one, git refused it:" <> line
+                          <> "  read the message above -- an ownership complaint"
+                          <> " is fixed with safe.directory."
       -- No mention of tags: this reader asks for @^{commit}@, which PEELS an
       -- annotated tag, so a ref pointing at one is accepted and audited. The
       -- advice said otherwise and was checked: exit 0, canon read.
@@ -206,27 +211,31 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                           <> " large (PEP-19), not a bigger reader."
       CanonListingTooBig _ -> line <> "  Compaction is the answer to a canon this"
                                 <> " large (PEP-19), not a bigger reader."
-      -- Not local, and not a bound on size: what ran out is the walk's time or
-      -- what it handed back. Says neither "the tree is large" nor "the tree is
-      -- small", because the two halves of this budget fire on opposite trees --
-      -- the byte half on a large one, the time half on a small one whose entries
-      -- share subtrees. The message that arrives with it says which.
+      -- Three sources now, not two, and they do not share a remedy: the byte
+      -- budget fires on a large tree, the walk's clock on a small tree that is
+      -- expensive to walk, and the per-object deadline on ONE object arriving too
+      -- slowly, which compaction does not fix and a sick disk explains. The line
+      -- above says which, and this names the two answers rather than one.
       CanonTooSlow _ -> line <> "  Reading this tree cost more than this reader"
                           <> " will spend on one; the line" <> line
-                          <> "  above says what ran out. Compaction (PEP-19) is"
-                          <> " the answer; so is not" <> line
-                          <> "  running this in a pre-receive hook on somebody"
-                          <> " else's tree."
+                          <> "  above says what ran out. For a tree, compaction"
+                          <> " (PEP-19) is the answer," <> line
+                          <> "  and so is not running this in a pre-receive hook"
+                          <> " on somebody else's" <> line
+                          <> "  tree. For a single object, look at the storage it"
+                          <> " is coming off."
       -- The one refusal that is not about canon. Said so, because the others all
       -- are, and a reader who has seen the other ten will read this as the
       -- eleventh thing wrong with somebody else's tree.
-      -- No longer "mid-audit": git not on PATH at all lands here now, and it is
-      -- the first thing a new user hits. It used to exit 4 and advise checking
-      -- safe.directory in a repository nothing had looked at.
-      ReaderFailed _ -> line <> "  This is local: git is not on PATH, or there"
-                          <> " are no process slots or" <> line
-                          <> "  file descriptors left. Nothing was learned about"
-                          <> " canon, one way or the other."
+      -- BOTH SHAPES, and naming only one of them is a mistake this line has made
+      -- twice: first "git gone from PATH mid-audit", which missed git never
+      -- having been there, and then the exec-only list, which missed a git that
+      -- ran and was killed. The message above says which happened.
+      ReaderFailed _ -> line <> "  This is local: git is not on PATH, nothing is"
+                          <> " left to start it with," <> line
+                          <> "  or the git this reader did start is gone. Nothing"
+                          <> " was learned about" <> line
+                          <> "  canon, one way or the other."
       -- Deliberately NOT the advice above, which this used to get. That one says
       -- a retry is worth trying; here git is sitting there, and a retry buys
       -- another minute and another stuck child. Reached by a FIFO at
