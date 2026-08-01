@@ -37,7 +37,8 @@ import System.IO (hPrint)
 import Streaming.Prelude qualified as S
 
 data ImportException =
-  ImportInvalidSegment HashRef
+    ImportInvalidSegment HashRef
+  | ImportBlocksUnavailable Int String
   deriving stock (Show,Typeable)
 
 instance Exception ImportException
@@ -122,6 +123,18 @@ writeAsGitPack dir href = do
 -- completes, and finite, which is the point.
 maxStuckRounds :: Int
 maxStuckRounds = 40
+
+-- | How many times to come back for blocks that are not here yet.
+--
+-- Each round waits a little longer than the last, so this is roughly three
+-- minutes of asking before the import calls the blocks unavailable. It gives up
+-- for good at that point: the exception is an 'ImportException', so the retry
+-- wrapped around 'doImport' does not catch it and start over. Any bound would
+-- do; what matters is that there is one. Without it a block nobody can serve is
+-- indistinguishable from a block that is on its way, and the import waits for
+-- the difference forever, which is what a stuck push looked like from outside.
+maxMissedRounds :: Int
+maxMissedRounds = 16
 
 data ImportStage =
     ImportStart
@@ -248,26 +261,69 @@ importGitRefLog = do
 
             r <- try @_ @OperationError $ do
 
+              -- The checkpoint is a local marker saying "imported up to here",
+              -- and the tree it names lives in shared storage. Once the reflog
+              -- stops referencing that checkpoint nothing fetches it again, so
+              -- a node that dropped those blocks, or never had them, keeps a
+              -- marker pointing at a block it cannot read.
+              --
+              -- That walk used to throw, and the throw landed on the retry path
+              -- below, which waits for the peer's download queue to drain. The
+              -- queue was empty, because nobody had asked for the block, so the
+              -- wait ended at once and the same walk threw again, and again:
+              -- "download wip" and "wait-for-download (0)" in turn while no
+              -- fetch and no push against the repository could ever finish.
+              --
+              -- The set is only used to skip work already done, so an unreadable
+              -- marker costs a re-import and nothing more. Pay that instead.
+              -- 'txImported' reaches the same conclusion for the same reason.
               excl <- maybe1 prev (pure mempty) $ \p -> do
-                txListAll (Just p) <&> HS.fromList . fmap fst
+                try @_ @OperationError (txListAll (Just p)) >>= \case
+                  Right txs -> pure (HS.fromList (fmap fst txs))
+                  Left e    -> do
+                    notice $ "cannot read the imported checkpoint" <+> pretty p
+                               <+> parens (viaShow e) <> ", importing again"
+                    pure mempty
 
               rv <- refLogRef
 
               hxs <- txList ( pure . not . flip HS.member excl ) rv
 
-              cp' <- flip fix (fmap snd hxs, Nothing) $ \next -> \case
-                ([], r) -> pure r
-                (TxSegment{}:xs, l) -> next (xs, l)
-                (cp@(TxCheckpoint n tree) : xs, l) -> do
+              (cp', pending) <- flip fix (fmap snd hxs, Nothing, mempty) $ \next -> \case
+                ([], r, pend) -> pure (r, pend)
+                (TxSegment{}:xs, l, pend) -> next (xs, l, pend)
+                (cp@(TxCheckpoint n tree) : xs, l, pend) -> do
 
                   missed <- findMissedBlocks sto tree
 
                   let full = L.null missed
 
                   if full && Just n > (getGitTxRank <$> l) then do
-                    next (xs, Just cp)
+                    next (xs, Just cp, pend)
+                  else if full then do
+                    next (xs, l, pend)
                   else do
-                    next (xs, l)
+                    next (xs, l, (n, missed) : pend)
+
+              -- The blocks a checkpoint turned out to be missing were counted
+              -- and then dropped on the floor. The wait below watches the peer's
+              -- download queue, so counting without asking left it watching a
+              -- queue nobody had filled: it read zero, concluded there was
+              -- nothing to wait for, and came straight back to count the same
+              -- blocks again. Ask for them.
+              --
+              -- Only for the best checkpoint that could not be used, never for
+              -- every one that came up short. An old checkpoint can be missing
+              -- blocks that nobody on the network still has, and a request that
+              -- nobody can answer sits in the queue for good; there is no reason
+              -- to file one for a checkpoint already superseded.
+              let chosenRank = maybe 0 getGitTxRank cp'
+              for_ (lastMay (L.sortOn fst [ p | p@(n,_) <- pending, n > chosenRank ])) $
+                \(rank, missed) -> do
+                  notice $ "asking for" <+> pretty (length missed)
+                             <+> "missing block(s) of checkpoint rank" <+> pretty rank
+                  for_ missed $ \h ->
+                    void $ callRpcWaitMay @RpcFetch (TimeoutSec 1) peerAPI h
 
               case cp' of
                 Just TxCheckpoint{..} -> do
@@ -296,16 +352,30 @@ importGitRefLog = do
                   notice "no checkpoints found"
                   pure Nothing
 
+            -- Say which block. 'txList' goes out of its way to name the one it
+            -- could not read, and reporting "missed blocks" threw that away:
+            -- whoever hit this had a repository that would not sync and no way
+            -- to tell which block to go looking for.
+            --
+            -- Then stop. This retry used to be unbounded, on the reasoning that
+            -- a missing block is usually a block still on its way. Usually. When
+            -- it was not, the loop was the only thing the user ever saw, and a
+            -- push that fails with a hash to chase beats one that never returns.
+            let missedAgain what = do
+                  when (attempt >= maxMissedRounds) do
+                    err $ "giving up on missing block(s) after" <+> pretty attempt
+                            <+> "attempts:" <+> pretty what
+                    throwIO (ImportBlocksUnavailable attempt what)
+
+                  notice $ "missed blocks" <+> pretty what
+                  again (ImportWait w Nothing (ImportWIP (w*1.15) (succ attempt) prev))
+
             case r of
               Right cp -> again $ ImportDone cp
 
-              Left  (MissedBlockError2 _) -> do
-                notice "missed blocks"
-                again (ImportWait w Nothing (ImportWIP (w*1.15) (succ attempt) prev))
+              Left  (MissedBlockError2 s) -> missedAgain s
 
-              Left  MissedBlockError      -> do
-                notice "missed blocks"
-                again (ImportWait w Nothing (ImportWIP (w*1.15) (succ attempt) prev))
+              Left  MissedBlockError      -> missedAgain "(block not named)"
 
               Left  e                     -> err (viaShow e) >> throwIO e
 
