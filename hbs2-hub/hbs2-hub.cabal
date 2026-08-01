@@ -107,6 +107,7 @@ library hub-ingress
     exposed-modules:
       HBS2.Hub.Ingress
       HBS2.Hub.Repo.Git
+      HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Inbox
       HBS2.Hub.CLI.Verify
@@ -169,6 +170,10 @@ test-suite spec
                  , zlib
                  , cryptohash-sha1
   other-modules:
+      HBS2.Hub.ArgvSpec
+      HBS2.Hub.ComposeSpec
+      HBS2.Hub.InboxSpec
+      HBS2.Hub.TextSpec
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec
       HBS2.Hub.ManifestSpec

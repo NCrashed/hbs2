@@ -14,6 +14,8 @@ module HBS2.Hub.CLI.Compose
   ( composeEntries
   , Outbound(..)
   , sendLetter
+  , issueUsage
+  , issueArgs
   ) where
 
 import HBS2.Hub.Types
@@ -34,7 +36,9 @@ import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEntry)
 
+import Data.List qualified as List
 import Data.Text qualified as Text
+import System.Exit (die)
 
 -- | What sending a letter needs from the outside.
 data Outbound = Outbound
@@ -93,8 +97,18 @@ sendLetter ob sender rcpts box reply = do
   -- nothing at all. The read side spent a whole round being taught not to report
   -- silence as an answer; on the write side the same mistake is worse, because
   -- the caller believes a letter is in a mailbox.
+  --
+  -- What this establishes and NOTHING MORE: the RPC round-tripped. The reason is
+  -- in the peer's types rather than here -- @Output RpcMailboxSend@ is @()@, the
+  -- handler is @void $ mailboxSendMessage@, and @mailboxSendMessage@ fires the
+  -- protocol inside @deferred@ and returns @Right ()@ unconditionally. So a
+  -- policy refusal, a mailbox the peer has never heard of and a storage failure
+  -- are all indistinguishable from delivery, and no wording here can make them
+  -- otherwise. The message says what was checked; making it say more would need
+  -- a result type the RPC does not have. Named in the answer too: see the
+  -- @queued@ form the verb returns.
   callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) msg
-    >>= orThrowUser "the peer did not accept the message for delivery"
+    >>= orThrowUser "the peer did not take the message: it stopped answering"
 
   pure (HashRef h)
 
@@ -108,10 +122,17 @@ composeEntries :: forall c m . ( IsContext c
 composeEntries = do
 
   brief "open an issue: compose a Tier B letter and send it to a hub mailbox"
-    $ args [ arg "string" "repo-key"
-           , arg "string" "sender-sigil", arg "string" "recipient-sigil"
-           , arg "string" "author-key", arg "string" "title" ]
-    $ desc ( "Signs the author box with author-key and seals it to"
+    $ args [ arg "string" "--target repo-key"
+           , arg "string" "--sender sender-sigil"
+           , arg "string" "--recipient recipient-sigil"
+           , arg "string" "--author author-key", arg "string" "--title title" ]
+    $ desc ( "The flags may be given in any order, and the same five values"
+             <> line <> "are also accepted positionally in the order above. Prefer"
+             <> line <> "the flags: the two keys are interchangeable positionally,"
+             <> line <> "and so are the two sigils, so a swap sends a correctly"
+             <> line <> "signed letter claiming the wrong author."
+             <> line
+             <> line <> "Signs the author box with author-key and seals it to"
              <> line <> "recipient-sigil, which is also what says which mailbox"
              <> line <> "it lands in."
              <> line
@@ -124,9 +145,7 @@ composeEntries = do
              <> line <> "everywhere else (the inbox lists it, a folded event carries"
              <> line <> "it as its origin), and the event-id the thread will have." )
     $ entry $ bindMatch "hub:issue:new" \case
-        [ SignPubKeyLike repo
-          , HashLike senderSigil, HashLike rcptSigil
-          , SignPubKeyLike author, StringLike title ] -> lift do
+        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title)) -> lift do
 
           -- Only when there is something to read. On a terminal this used to
           -- block with no prompt, which reads as a hang rather than as a
@@ -169,11 +188,22 @@ composeEntries = do
           -- Strings, not symbols: a hash is data here, and the argv reader on the
           -- way back in lexes a bare base58 word as a symbol only by accident of
           -- it having no punctuation. One convention for hashes across the tool.
-          pure $ mkForm "sent" [ mkForm "message" [mkStr (show (pretty h))]
-                               , mkForm "thread"  [mkStr (show (pretty (authorBoxId box)))]
-                               ]
+          -- "queued", not "sent", and the word is the finding. The peer's send
+          -- RPC answers @()@ and its handler discards the protocol's own result,
+          -- so what a zero exit here establishes is that the peer took the
+          -- message off our hands -- not that any mailbox accepted it, and not
+          -- that it was delivered. `sent` was a claim about the network that
+          -- nothing in the round trip supports, printed to somebody who would
+          -- then stop watching for it.
+          pure $ mkForm "queued" [ mkForm "message" [mkStr (show (pretty h))]
+                                 , mkForm "thread"  [mkStr (show (pretty (authorBoxId box)))]
+                                 ]
 
-        _ -> throwIO (BadFormException @c nil)
+        -- Its own message, for the reason `hub verify` has one: BadFormException
+        -- names an internal Haskell type and a spelling the caller did not type,
+        -- and its 'show' renders the whole form -- so a wrong-arity call printed
+        -- the caller's argv raw, control characters included.
+        _ -> liftIO (die (show (issueUsage :: Doc ())))
 
   where
     -- A trailing newline from the shell is not part of the body, and an empty
@@ -182,3 +212,91 @@ composeEntries = do
     bodyOf s = case Text.strip (Text.pack s) of
       t | Text.null t -> Nothing
         | otherwise   -> Just t
+
+-- | The arguments to @hub issue new@, positionally or by name.
+--
+-- The named form exists because the positional one is four base58 blobs in a
+-- row and TWO PAIRS OF THEM ARE INTERCHANGEABLE AT THE PATTERN LEVEL: repo-key
+-- and author-key are both 'SignPubKeyLike', the two sigils are both 'HashLike'.
+-- Swapping the keys produced a valid, signed, delivered letter authored by the
+-- repository key and targeting the author key, with no error and a zero exit --
+-- and an authorship claim inside a signed box is permanent. A name cannot be
+-- swapped silently.
+--
+-- PEP-22 spells the verb with flags, and this is also the rule the sibling verb
+-- states for itself: "a form the spec names has to be accepted under that name
+-- or the divergence has merely moved". The positional form stays because it is
+-- what exists and what the tests drive; --title's argument is the only free text
+-- here, and it is the one the argv reader must hand over verbatim.
+--
+-- Total, and exported so that a test can ask what a command line means without
+-- a peer, a keyman or a dictionary.
+issueArgs :: [Syntax c] -> Maybe (RepoRef, HashRef, HashRef, HubKey, String)
+issueArgs = \case
+  [ SignPubKeyLike repo, HashLike sender, HashLike rcpt
+    , SignPubKeyLike author, (titleOf -> Just title) ] -> Just (repo, sender, rcpt, author, title)
+  ss -> named ss
+  where
+    -- A title is TEXT, and a person is allowed to call an issue "2026".
+    --
+    -- The argv reader keeps a word that spells a number as a number, on purpose,
+    -- because half the inherited dictionary matches on integers -- and every
+    -- title pattern here is 'StringLike', which matches a symbol or a string and
+    -- not a number. So `--title 2026` died with a usage message that said
+    -- nothing about why. Rendering the atom back is lossless by construction:
+    -- the reader kept it as a number only BECAUSE rendering it gives back the
+    -- characters that were typed.
+    titleOf = \case
+      StringLike t           -> Just t
+      x@(LitIntVal _)        -> Just (show (pretty x))
+      x@(LitScientificVal _) -> Just (show (pretty x))
+      x@(LitBoolVal _)       -> Just (show (pretty x))
+      _                      -> Nothing
+    named ss = do
+      kvs <- pairs ss
+      -- Every flag known, so a typo is a refusal rather than a default. Without
+      -- this, `--titel X` would be dropped on the floor and the letter would go
+      -- out under whatever the other flags said.
+      guard (all ((`elem` knownFlags) . fst) kvs)
+      repo   <- one kvs "--target"    >>= signKey
+      sender <- one kvs "--sender"    >>= hashOf
+      rcpt   <- one kvs "--recipient" >>= hashOf
+      author <- one kvs "--author"    >>= signKey
+      title  <- one kvs "--title"     >>= titleOf
+      pure (repo, sender, rcpt, author, title)
+
+    knownFlags = ["--target","--sender","--recipient","--author","--title"]
+
+    -- Exactly one, so that `--title a --title b` is a refusal rather than a
+    -- silent choice between them.
+    one kvs k = case [ v | (k',v) <- kvs, k' == k ] of
+      [v] -> Just v
+      _   -> Nothing
+
+    pairs = \case
+      [] -> Just []
+      (StringLike k : v : rest) | "--" `List.isPrefixOf` k -> ((k,v) :) <$> pairs rest
+      _ -> Nothing
+
+    signKey = \case
+      SignPubKeyLike x -> Just x
+      _                -> Nothing
+
+    hashOf = \case
+      HashLike x -> Just x
+      _          -> Nothing
+
+-- | What this verb takes, in the words somebody typing it would use.
+issueUsage :: Doc ann
+issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
+          <> line <> "                     --recipient <recipient-sigil>"
+          <> line <> "                     --author <author-key> --title <title>"
+          <> line <> "   or: hub issue new <repo-key> <sender-sigil> <recipient-sigil>"
+          <> line <> "                     <author-key> <title>"
+          <> line
+          <> line <> "  The body is read from stdin when stdin is not a terminal."
+          <> line <> "  Prefer the named form: the two keys and the two sigils are"
+          <> line <> "  interchangeable positionally, and a swap sends a correctly"
+          <> line <> "  signed letter claiming the wrong author, which cannot be"
+          <> line <> "  taken back."
+          <> line <> "  `hub help issue new` says more."

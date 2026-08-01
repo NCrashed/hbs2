@@ -677,9 +677,25 @@ sexpStr = mkStr @C . Text.unpack . Text.concatMap esc
       '\n' -> "\\n"
       '\r' -> "\\r"
       '\t' -> "\\t"
-      c | Char.isControl c -> hex c
-        | otherwise        -> Text.singleton c
+      -- 'invisible', not 'Char.isControl'. isControl is category Cc and nothing
+      -- else, which is the fact "HBS2.Hub.Types" writes down about itself two
+      -- hundred lines from here and which this function did not act on: a RIGHT-
+      -- TO-LEFT OVERRIDE (Cf), a LINE SEPARATOR (Zl), a ZERO WIDTH SPACE (Cf) and
+      -- a NO-BREAK SPACE (Zs) all went into the file raw. That is worse here than
+      -- in a report, because this is what 'renderEvent' writes into canon and
+      -- canon is what a maintainer reads with `git show` before deciding whether
+      -- to sign -- the exact reading the paragraph above says a raw escape can
+      -- rewrite. The two escapers now ask one question and differ only in how
+      -- they spell the answer.
+      --
+      -- It costs nothing to widen: @\\xNNNN\\&@ reads back for any code point,
+      -- so the round trip this function exists for is unaffected.
+      c | invisible c -> hex c
+        | otherwise   -> Text.singleton c
 
+    -- justifyRight PADS and does not truncate, so a code point above U+00FF
+    -- keeps all of its digits; the two is a minimum for the C0 controls that
+    -- were the only thing this used to see.
     hex c = "\\x" <> Text.justifyRight 2 '0' (Text.pack (showHex (Char.ord c) "")) <> "\\&"
 
 -- Shared by both projections below.

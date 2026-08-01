@@ -208,6 +208,13 @@ data InboxRead = InboxRead
     -- it was read. 'False' means the letters below are a snapshot of something
     -- still arriving: not an error, and not something to keep quiet about
     -- either, which is what happened while this was computed and discarded.
+    --
+    -- 'False' with an EMPTY 'irLetters' is the case worth naming, because it is
+    -- the one that used to lie: it means the peer never produced a root for this
+    -- mailbox in the time allowed, and a mailbox with nothing in it and a
+    -- mailbox still downloading look exactly alike from here (see
+    -- 'awaitMailbox'). An empty inbox is therefore only believable when this is
+    -- 'True'.
   , irSettled :: Bool
   }
   deriving stock (Eq,Show)
@@ -307,11 +314,29 @@ awaitMailbox ig mbox = do
     go 0 seen = pure (seen, False)
     go n seen = do
       root <- igRoot ig mbox
-      if root == seen && n < maxFetchRounds
-        -- Unchanged across a round, and not the first look: as settled as a
-        -- local reader can establish.
-        then pure (root, True)
-        else igPause ig fetchRound >> go (n - 1) root
+      case root of
+        -- NO ROOT IS NOT A SETTLED STATE, and this is the whole of the
+        -- correction. The peer writes the mailbox ref only when a merge lands,
+        -- so "this peer has no ref for the mailbox" and "this peer has not
+        -- finished downloading it" are the same observation from here; there is
+        -- nothing local that tells them apart. The loop used to compare the
+        -- absence against the absence it started with and call the second look
+        -- settled -- 2.5 s into a download whose own path pauses for ten
+        -- (@mailboxInQ@), which made "settled" very nearly a constant True and
+        -- made an empty answer on a first run indistinguishable from a complete
+        -- one. Waiting the rounds out and then saying so is the honest answer,
+        -- and it costs a wait only on the mailbox that had nothing to show.
+        -- The pause is BEFORE the next look and not after the last one: waiting
+        -- on the final round buys an observation nobody makes, and it is 2.5 s
+        -- of a wait a person is watching.
+        Nothing | n <= 1    -> pure (Nothing, False)
+                | otherwise -> igPause ig fetchRound >> go (n - 1) Nothing
+        -- Unchanged across a round, and not the first look, since @seen@ starts
+        -- as Nothing and this branch has a root: as settled as a local reader
+        -- can establish.
+        Just _ | root == seen -> pure (root, True)
+               | n <= 1       -> pure (root, False)
+               | otherwise    -> igPause ig fetchRound >> go (n - 1) root
 
 -- | Fetch, walk and read a mailbox: every live message, opened as far as it
 -- will open.

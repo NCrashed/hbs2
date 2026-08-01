@@ -1105,6 +1105,47 @@ spec = do
           Just (BlobRefused m) -> Text.unpack m `shouldContain` "delivered more"
           other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
+    it "catches the same lie when the excess does not decode as text" $ do
+      -- The test above is built entirely out of printable ASCII, which is the one
+      -- shape where the check worked. hReady is hWaitForInput, which runs the
+      -- HANDLE'S TEXT DECODER to find out whether a character is available, and a
+      -- pipe carries the locale encoding unless told otherwise. Measured on this
+      -- build, with the reader's own read pattern:
+      --
+      --   excess in the pipe   text mode    binary mode
+      --   none                 False        False
+      --   ASCII                True         True
+      --   0xff then ASCII      throws       True
+      --   lone 0xe2            False        True
+      --
+      -- and 'ended' read every exception as "the reply was consumed whole". So
+      -- one byte in front of the forged reply turned the check off: the truncated
+      -- prefix came back as this path's content, and the batch was left
+      -- desynchronised for the next one. A git object body is bytes, and asking a
+      -- decoder about it was the whole mistake.
+      withCanonOf (\dir -> do
+        good <- hashObject dir "an honest file\n"
+        let forged = B8.pack (good <> " blob 20\nbytes from elsewhere\n")
+        -- 0xff is not valid UTF-8 in any position; 0xe2 is a leading byte whose
+        -- continuation never comes. The first used to throw, the second used to
+        -- answer False, and both took the same branch.
+        liar <- lyingObject dir 10 ("AAAAAAAAAA\n\255" <> forged)
+        lone <- lyingObject dir 10 ("BBBBBBBBBB\n\226" <> forged)
+        v <- hashObject dir "(hub-meta 1)\n"
+        pure [ ("threads/t/0001-liar", liar)
+             , ("threads/t/0002-lone", lone)
+             , ("threads/t/0003-good", good)
+             , ("version", v) ]) $ \dir -> do
+        got <- blobsOf gitBounds dir
+        -- The property: the honest file is still itself, after two liars.
+        lookup "threads/t/0003-good" got `shouldBe` Just (BlobText "an honest file\n")
+        case lookup "threads/t/0001-liar" got of
+          Just (BlobRefused m) -> Text.unpack m `shouldContain` "delivered more"
+          other -> expectationFailure ("expected BlobRefused, got " <> show other)
+        case lookup "threads/t/0002-lone" got of
+          Just (BlobRefused m) -> Text.unpack m `shouldContain` "delivered more"
+          other -> expectationFailure ("expected BlobRefused, got " <> show other)
+
     it "refuses an object whose body is shorter than its header says, promptly" $ do
       -- The other direction, and it was two minutes of a blocked pre-receive hook
       -- reported as "this is local: no process slots". Two, because the read of

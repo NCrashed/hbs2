@@ -115,6 +115,39 @@ spec = do
       -- ...and a mailbox it does hold with nothing in it is not an error
       r <- readInbox stub k
       irLetters r `shouldBe` []
+      -- ...but it is not a SETTLED answer either, and that distinction is the
+      -- whole of what a caller can act on here. See the test below.
+      irSettled r `shouldBe` False
+
+    it "does not call a mailbox it never saw a root for settled" $ do
+      k <- aKey
+      -- THE ONE THAT MATTERS. The peer writes the mailbox ref only when a merge
+      -- lands, so "this peer has no ref" and "this peer has not finished
+      -- downloading" are the same observation from here. The loop compared the
+      -- absence against the absence it started with and called the SECOND look
+      -- settled -- 2.5 s into a download whose own path pauses for ten -- so
+      -- "settled" was very nearly a constant True, and an empty answer on a first
+      -- run against a live mailbox was indistinguishable from a complete one.
+      calls <- newIORef (0 :: Int)
+      let ig = stub { igRoot = const (liftIO (modifyIORef' calls succ >> pure Nothing)) }
+      (root, settled) <- awaitMailbox ig k
+      root `shouldBe` Nothing
+      settled `shouldBe` False
+      -- and it waited the full bound before saying so, rather than one round
+      readIORef calls `shouldReturn` maxFetchRounds
+
+    it "settles on a root that stops changing, on the second look" $ do
+      k <- aKey
+      -- The other half: a mailbox that IS here must not pay the full wait. A
+      -- root that is present and unchanged across one round is as settled as a
+      -- local reader can establish, and it costs one pause.
+      calls <- newIORef (0 :: Int)
+      let ig = stub { igRoot = const (liftIO (modifyIORef' calls succ
+                                                >> pure (Just (mh "r")))) }
+      (root, settled) <- awaitMailbox ig k
+      root `shouldBe` Just (mh "r")
+      settled `shouldBe` True
+      readIORef calls `shouldReturn` 2
 
     it "does not fetch a mailbox before asking whether the peer has it" $ do
       k <- aKey

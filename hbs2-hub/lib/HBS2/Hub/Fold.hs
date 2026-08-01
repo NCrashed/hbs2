@@ -454,22 +454,11 @@ instance Pretty DropReason where
         TrailingData -> "with bytes left over"
         WrongDomain  -> "signed as another kind of record"
 
--- | A hash-shaped field on a report line, WITHOUT trusting that it is a hash.
---
--- A HashRef takes any length on the wire, and 'validHashRef' is applied to the
--- fields of the AUTHOR box only: the canon box's @origin@ goes through no such
--- gate, so a maintainer can stamp one carrying tens of kilobytes. Printing that
--- is not merely a long line: base58 is quadratic in its input, and this project
--- has already measured 2.5 s for 64 KiB of it, on a line the report can print a
--- thousand of.
---
--- Not clipped after rendering, which would pay the cost and then throw it away.
--- A field that is not the length of a hash is not printed as one at all: what is
--- shown is what is true about it, which is its size.
-hashDoc :: HashRef -> Doc ann
-hashDoc h
-  | validHashRef h = pretty h
-  | otherwise = "(not a hash:" <+> pretty (hashRefWeight h) <+> "bytes)"
+-- 'hashDoc' used to live here, next to its first caller, and stayed private to
+-- this module. That is why the triage renderer next door printed a stranger's
+-- thread-id with a bare 'pretty': the guard existed, was documented, was tested,
+-- and was not reachable from the second place that needed it. It is in
+-- "HBS2.Hub.Types" now, beside 'validHashRef', with 'keyDoc' for the same reason.
 
 instance Pretty Anomaly where
   pretty = \case

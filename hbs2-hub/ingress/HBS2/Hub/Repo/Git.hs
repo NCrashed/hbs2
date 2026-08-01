@@ -39,6 +39,8 @@ import Data.Text.Encoding qualified as Text
 import Data.Maybe (isJust)
 import Control.Concurrent qualified as Conc
 import System.Environment (getEnvironment)
+import System.IO qualified as IO
+import System.IO.Error (isEOFError)
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Process qualified as P
 import System.Process (terminateProcess)
@@ -566,11 +568,34 @@ gitCanonWith bounds cwd = do
     -- At EOF hReady throws rather than answering, and an EOF is git gone, not git
     -- verbose: it is not this object's fault, and the next request says so on its
     -- own.
+    --
+    -- EOF AND NOTHING ELSE, though, which is the second half of the fix whose
+    -- first half is the hSetBinaryMode in 'batchProc'. This used to catch every
+    -- exception and read all of them as "consumed whole" -- the benign answer,
+    -- chosen for the benign cause -- so the decoder error that a non-UTF-8 byte
+    -- raised took the same path as an EOF and waved the lying object through.
+    -- Binary mode means no decoder error is raised any more; treating an
+    -- unexpected one as unknown means that if some other cause is found later,
+    -- the reader gives up on the batch rather than believing a prefix.
+    --
+    -- And it gives up with 'gone' rather than with 'over', which is a difference
+    -- about who is at fault. 'over' says "the object's header announces N bytes
+    -- and git delivered more" -- an accusation against somebody's tree, made
+    -- here on the evidence of a handle this reader could not question. What is
+    -- actually known is that the answer cannot be framed any more, which is what
+    -- 'gone' says, and which the two mid-reply cases above already say for the
+    -- same condition.
     ended give p n bs = tryAny (liftIO (hReady (getStdout p))) >>= \case
-      Right True -> give (over n)
-      _ -> do
-        modifyIORef' spent (+ BS.length bs)
-        pure (BlobText (decodeS bs))
+      Right True  -> give (over n)
+      Right False -> consumed
+      Left e | isEof e   -> consumed
+             | otherwise -> give (gone "while checking whether its reply was over")
+      where
+        consumed = do
+          modifyIORef' spent (+ BS.length bs)
+          pure (BlobText (decodeS bs))
+
+        isEof e = maybe False isEOFError (fromException e)
 
     -- "missing", WITH GIT'S OWN WORDS FOR IT when there are any.
     --
@@ -643,6 +668,28 @@ gitCanonWith bounds cwd = do
         p <- startProcess (setStdin createPipe
                             (setStdout createPipe
                               (setStderr createPipe cfg)))
+        -- BINARY, and this is load-bearing rather than tidiness. Every read of
+        -- this handle is 'BS.hGetSome', which does not decode -- but 'hReady' in
+        -- 'ended' DOES: it is hWaitForInput, which runs the handle's text decoder
+        -- to find out whether a character is available. A pipe handle carries the
+        -- locale encoding unless told otherwise, so under any byte-rejecting
+        -- encoding (which is UTF-8 and also LC_ALL=C) hReady on an undecodable
+        -- byte throws instead of answering, and on the lone first byte of a
+        -- multi-byte sequence answers False. 'ended' treated both as "the reply
+        -- was consumed whole". Measured on this build:
+        --
+        --   excess in the pipe   text mode    binary mode
+        --   none                 False        False
+        --   ASCII                True         True
+        --   0xff then ASCII      throws       True
+        --   lone 0xe2            False        True
+        --
+        -- So a loose object whose header announces fewer bytes than its body
+        -- carries defeated the one check that catches it by starting the excess
+        -- with a byte that is not UTF-8: the truncated prefix was returned as
+        -- that path's content and the batch was left desynchronised. A git object
+        -- body is bytes, and asking a decoder about it was the whole mistake.
+        liftIO (IO.hSetBinaryMode (getStdout p) True)
         a <- async (tailInto (gbToolMessage bounds) said (getStderr p))
         writeIORef batch (Just (p, a))
         pure (p, a)

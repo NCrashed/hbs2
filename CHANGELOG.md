@@ -44,10 +44,52 @@ tree:
         deleted. A mailbox the peer does not hold locally is reported
         as such rather than as an empty inbox, because a peer never
         asks the network about one it does not have.
+
+        An empty answer is not reported as an empty mailbox either.
+        The peer writes a mailbox ref only when a merge lands, so "no
+        ref" and "not downloaded yet" are one observation from here;
+        the reader waits the rounds out and then says which of the two
+        it cannot rule out. Exit 2 when part of the mailbox tree could
+        not be read, since a hole makes the list wrong in both
+        directions; 17 when the peer does not hold the mailbox, with
+        the `hbs2-peer mailbox create` line to fix it; 18 when the peer
+        is running and stopped answering. All three used to be 1, which
+        PEP-22 gives to usage errors.
       - **`hbs2-hub issue new`.** Composes a Tier B letter, signs the
         author box, seals it to the recipient sigils and hands it to
         the peer. Prints the message hash and the event-id, which the
         sender can compute before any maintainer has looked.
+
+        Takes `--target`, `--sender`, `--recipient`, `--author` and
+        `--title` in any order, which is the spelling PEP-22 specifies;
+        the five positional arguments still work. The named form is
+        worth preferring because the positional one is four base58
+        blobs in a row and two pairs of them are interchangeable: the
+        repo key and the author key are both sign keys, the two sigils
+        are both hashes, and swapping either pair produced a correctly
+        signed, delivered letter claiming the wrong author. An unknown
+        or repeated flag is refused rather than ignored.
+
+        The answer is `(queued ...)` and not `(sent ...)`. The peer's
+        send RPC answers `()` and its handler discards the protocol's
+        own result, so what a zero exit establishes is that the peer
+        took the message -- not that a mailbox accepted it and not that
+        it was delivered.
+      - **Arguments are text, not script tokens.** Every word of `argv`
+        used to be handed to the suckless script lexer and whatever came
+        back was kept. That is right for a script and wrong for an
+        argument the shell has already tokenised: `;` is the comment
+        character, so `--title 'fix; see later'` bound the title `fix`
+        and signed it, and a title with a space in it -- which is to say
+        a title -- lexed as a function call and could not be passed at
+        all. A word is now taken verbatim unless it starts with `(` or
+        `[` (the script escape hatch) or spells a number or boolean that
+        renders back to exactly the characters typed, which is what
+        keeps an integer argument an integer while leaving `007` alone.
+        A quoted word is no longer unquoted either: the lexer ran
+        `readLitChar` over the inside, so `'"C:\temp"'` arrived as
+        `C:<TAB>emp`. The quoting workaround existed only because a
+        multi-word title had no other spelling, and it has one now.
       - **`hbs2-hub verify <repo-key>`.** Reads canon out of
         `refs/hbs2/meta`, re-runs the fold over it, and reports every
         event the rules did not admit, every anomaly in the ones they

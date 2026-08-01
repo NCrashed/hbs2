@@ -1,0 +1,185 @@
+module HBS2.Hub.ArgvSpec (spec) where
+
+import HBS2.Hub.CLI.Argv
+
+import Data.Config.Suckless
+
+import Prettyprinter (pretty)
+
+import Data.Maybe (isJust)
+import Data.Text qualified as Text
+import Test.Hspec
+import Test.QuickCheck
+
+-- What a word came back as, in the only terms the verbs care about: every
+-- argument pattern in this package -- StringLike, and SignPubKeyLike and
+-- HashLike through it -- ends at 'stringLike'.
+said :: Syntax C -> Maybe String
+said = \case
+  LitStrVal t      -> Just (Text.unpack t)
+  SymbolVal (Id t) -> Just (Text.unpack t)
+  _                -> Nothing
+
+isSymbol :: Syntax C -> Bool
+isSymbol = \case
+  SymbolVal _ -> True
+  _           -> False
+
+isList :: Syntax C -> Bool
+isList = \case
+  ListVal _ -> True
+  _         -> False
+
+asInt :: Syntax C -> Maybe Integer
+asInt = \case
+  LitIntVal n -> Just n
+  _           -> Nothing
+
+-- Nothing was lost: the word came back as itself, whether it came back as text
+-- or as the number it spells.
+kept :: String -> Property
+kept s = case argvAtom s of
+  x | Just t <- said x -> t === s
+    | otherwise        -> show (pretty x) === s
+
+-- Words a person would plausibly type as a title or a key, avoiding the two
+-- characters that mean "lex me": a quote (which is a request to be read as a
+-- string literal) and a leading paren (which is a request to be read as a form).
+-- Everything else is fair game, and the point of the property is that all of it
+-- comes back whole.
+titleish :: Gen String
+titleish = do
+  n <- choose (1, 40 :: Int)
+  s <- vectorOf n (elements alphabet)
+  -- A leading digit could lex as a number, and a number that round-trips is
+  -- deliberately kept as a number; that case has its own examples below.
+  pure (if all (`elem` ("0123456789.-" :: String)) s then 'x' : s else s)
+  where
+    alphabet = ['a'..'z'] <> ['A'..'Z'] <> ['0'..'9']
+                 <> " ;#&*+-.:/!@^_=<>?,|~$%"
+
+spec :: Spec
+spec = do
+
+  describe "PEP-22 argv: a shell word is not a script token" $ do
+
+    it "keeps a title whole when it contains the comment character" $ do
+      -- THE ONE THAT MATTERS. `;` starts a comment in the script lexer, a bare
+      -- word lexes as a symbol, and StringLike matches a symbol -- so the whole
+      -- of `hub issue new ... 'fix; see later'` bound the title `fix`, put it in
+      -- the author box, signed it and sent it. The title is inside the signature
+      -- and inside the event-id, and canon is append-only.
+      said (argvAtom "fix; see later") `shouldBe` Just "fix; see later"
+      said (argvAtom "a;b") `shouldBe` Just "a;b"
+      said (argvAtom "trailing;") `shouldBe` Just "trailing;"
+
+    it "keeps a title whole when it contains spaces" $ do
+      -- Which is to say: when it is a title. This lexed as three symbols and the
+      -- evaluator called the first of them, so `hub issue new ... 'Crash on
+      -- startup'` answered NameNotBound (Id "Crash") and no issue could be filed
+      -- with an ordinary title at all.
+      said (argvAtom "Crash on startup") `shouldBe` Just "Crash on startup"
+      isList (argvAtom "Crash on startup") `shouldBe` False
+
+    it "never hands back a symbol, whatever the word is" $ do
+      -- A symbol is a NAME, and the evaluator resolves names: a word that happens
+      -- to be one of the interpreter's 215 bindings evaluated to the lambda it
+      -- names, so `head` arrived at a verb as (builtin:lambda head) and matched no
+      -- string pattern at all. An argument is data.
+      let words' = ["head", "list", "now", "quot", "display", "true", "nil"]
+      map (isSymbol . argvAtom) words' `shouldBe` map (const False) words'
+      map (said . argvAtom) words' `shouldBe` map Just words'
+
+    it "keeps a number a number, so an arity that wants one still binds" $ do
+      -- The reason the lexer is consulted at all: `hub pr merge 12` and half the
+      -- inherited dictionary match on an integer. Quoting everything to avoid the
+      -- bugs above lost these, which is the mistake this replaced.
+      asInt (argvAtom "42") `shouldBe` Just 42
+      asInt (argvAtom "0")  `shouldBe` Just 0
+
+    it "does not renumber a word that only looks like a number" $ do
+      -- 007 and 7 are different words. The lexer's opinion that they are the same
+      -- number is about a number, and this is about what somebody typed -- an
+      -- argument that silently changes value is the same class of defect as the
+      -- title above, just quieter.
+      said (argvAtom "007") `shouldBe` Just "007"
+      said (argvAtom "+5")  `shouldBe` Just "+5"
+
+    it "does not unquote, because unquoting was lossy" $ do
+      -- This USED to hand a quoted word to the lexer, on the argument that the
+      -- quotes were the request. The lexer runs readLitChar over the inside, so
+      -- '"C:\temp"' arrived as C:<TAB>emp and would have been signed that way --
+      -- the semicolon bug one branch over. The workaround existed only because a
+      -- multi-word title could not be passed at all, and it can now.
+      said (argvAtom "\"quoted text\"") `shouldBe` Just "\"quoted text\""
+      said (argvAtom "\"C:\\temp\"") `shouldBe` Just "\"C:\\temp\""
+
+    it "still reads an explicit form, which is the script escape hatch" $ do
+      -- The one place a user IS asking to be lexed. Unwrapping this the way a
+      -- bare word is unwrapped turned `(list)` into the symbol `list`, which
+      -- evaluates to a lambda instead of calling it.
+      isList (argvAtom "(list 1 2)") `shouldBe` True
+      isList (argvAtom "[1 2]") `shouldBe` True
+
+    it "loses nothing from any word it is given" $
+      -- The property the examples above are cases of, and the one a future
+      -- convenience has to keep: an argument is bytes a person typed, and this
+      -- function's whole job is to hand them over unchanged.
+      --
+      -- Stated as "renders back to itself" rather than "is a string", because
+      -- keeping a number a number is deliberate and a generated word can be one:
+      -- `1.5e3` and `#t` lex as a scientific and a boolean, round-trip exactly,
+      -- and are correctly kept as such. Asserting the STRING case would have made
+      -- this test fail on a correct implementation, roughly one run in a
+      -- thousand, which is how a flaky test teaches people to re-run the suite.
+      --
+      -- The cover monitors are here for the reason PropertySpec's are: a property
+      -- over a generator that never produces the interesting character is a
+      -- property that passes by not looking. `;` and a space are the two that
+      -- caused the bug, and each is one character in an alphabet of 85.
+      property $ forAll titleish $ \s ->
+        checkCoverage $
+        cover 5 (';' `elem` s) "holds the comment character" $
+        cover 5 (' ' `elem` s) "holds a space" $
+        kept s
+
+  describe "PEP-22 argv: which words are the verb" $ do
+
+    -- "hub:issue" is in the list on purpose, and it is the only reason the test
+    -- below tests what its name says: with only "hub:issue:new" present, a
+    -- shortest-first search and a longest-first search agree on every input, so
+    -- the claim was unfalsifiable. A dictionary really can hold both -- PEP-22
+    -- specifies `hub issue list` beside `hub issue new` -- and then the order
+    -- decides whether `new` is a verb or an argument.
+    let bound = (`elem` ["hub:inbox", "hub:issue", "hub:issue:new", "hub:verify", "display"])
+
+    it "takes the longest noun-verb match the dictionary holds" $ do
+      -- `hub issue new X` is one entry with one help text and one arity, and the
+      -- match is decided by asking the dictionary rather than by a rule about
+      -- what an argument looks like: the rule was "join the first two plain
+      -- words", which turned `hub inbox <key>` into `inbox:<key>` because a
+      -- base58 key is a plain word too.
+      case verbOf bound ["issue","new","K","S","R","A","a title"] of
+        Just (ListVal (SymbolVal k : as)) -> do
+          k `shouldBe` Id "hub:issue:new"
+          -- and the arguments arrive as the words that were typed
+          map said as `shouldBe` map Just ["K","S","R","A","a title"]
+        other -> expectationFailure ("expected hub:issue:new, got " <> show (fmap (const ()) other))
+
+    it "does not swallow an argument into the verb name" $ do
+      case verbOf bound ["inbox","SomeBase58Key"] of
+        Just (ListVal (SymbolVal k : as)) -> do
+          k `shouldBe` Id "hub:inbox"
+          map said as `shouldBe` [Just "SomeBase58Key"]
+        other -> expectationFailure ("expected hub:inbox, got " <> show (fmap (const ()) other))
+
+    it "says nothing when nothing is named" $ do
+      isJust (verbOf bound ["nosuchverb"]) `shouldBe` False
+      isJust (verbOf bound []) `shouldBe` False
+
+    it "still reaches a shared dictionary name spelled out" $ do
+      -- The entries hbs2-cli contributes are there either way, and a surface that
+      -- silently swallows a name it holds is worse than one that does not hold it.
+      case verbOf bound ["display","x"] of
+        Just (ListVal (SymbolVal k : _)) -> k `shouldBe` Id "display"
+        other -> expectationFailure ("expected display, got " <> show (fmap (const ()) other))

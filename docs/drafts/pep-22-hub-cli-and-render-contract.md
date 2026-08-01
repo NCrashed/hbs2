@@ -112,7 +112,19 @@ and a tree full of forged events were the same event.
 | 14   | reading canon, or one object in it, cost more than the reader will spend |
 | 15   | git ran and did not answer                              |
 | 16   | the tree listed and its files went out of step with git |
+| 17   | the peer does not hold this mailbox (`hub inbox`)       |
+| 18   | the peer is running and stopped answering (`hub inbox`)  |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
+
+3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
+above rather than folded into an existing number, because the numbers are a
+contract and reassigning one is worse than spending one. Both used to be 1,
+which this table gives to usage errors, so a hook could not tell "you mistyped
+the key" from "run `hbs2-peer mailbox create`" from "the peer is wedged" -- three
+situations with three different remedies and one exit code between them. `hub
+inbox` also exits 2, with the sense the row above gives it: the queue was read
+and part of the mailbox tree was not, so the list is incomplete in both
+directions.
 
 The last two lines of a clean run are normative, because a hook parses them:
 

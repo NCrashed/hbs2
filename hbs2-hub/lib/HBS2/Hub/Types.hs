@@ -54,9 +54,12 @@ module HBS2.Hub.Types
   , validHubKey
   , safeText
   , safeWith
+  , invisible
   , pathText
   , hashRefBytes
   , hashRefWeight
+  , hashDoc
+  , keyDoc
   , PartSecret
   , mkPartSecret
   , MessageSecret
@@ -74,6 +77,7 @@ module HBS2.Hub.Types
   ) where
 
 import HBS2.Prelude.Plated
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
@@ -431,42 +435,67 @@ safeText = safeWith (const False)
 safeWith :: (Char -> Bool) -> Text -> Text
 safeWith allow = Text.concatMap esc
   where
-    esc c | allow c   = Text.singleton c
-          | unsafe c  = escChar c
-          | otherwise = Text.singleton c
+    -- The backslash is this ESCAPE's own problem rather than a property of the
+    -- character, which is why it is here and not in 'invisible': a projection
+    -- that spells its escapes some other way has its own answer about it, and
+    -- did not want this one.
+    esc c | allow c              = Text.singleton c
+          | c == '\\' || invisible c = escChar c
+          | otherwise            = Text.singleton c
 
-    -- BY CATEGORY, not by a list of the ones somebody thought of, and it took two
-    -- goes to get the categories right. The list was twelve characters; Cf alone
-    -- holds over 160, so a ZERO WIDTH SPACE printed as nothing at all and two
-    -- different tree entries came out as one line, which is the exact failure
-    -- 'pathText' exists to prevent. Naming Cf then left Zs, where U+00A0 printed
-    -- as an ordinary space and did it again.
-    --
-    -- isControl is category Cc and nothing else, which is why it was never enough
-    -- on its own.
-    --
-    -- Zs MINUS the ASCII space, because a space is how words are separated and
-    -- escaping it would wreck every title to fix a collision nobody has: U+0020
-    -- is the one character in that class a reader can be expected to recognise.
-    -- Cs and Co because a surrogate or a private-use character renders as whatever
-    -- the font decides, which includes nothing. NotAssigned is deliberately NOT
-    -- here: GHC's tables lag Unicode, so a character assigned after this compiler
-    -- would be escaped for no reason and the output would change on an upgrade.
-    unsafe c = Char.isControl c || c == '\\' || ignorable c
-                 || cat `elem` [ Char.Format, Char.LineSeparator
-                               , Char.ParagraphSeparator, Char.Surrogate
-                               , Char.PrivateUse ]
-                 || (cat == Char.Space && c /= ' ')
-      where cat = Char.generalCategory c
+-- | Is this character one a terminal will not show, or will obey?
+--
+-- Top-level and exported, because there are two escapers in this package and
+-- only one of them had this. 'sexpStr' in "HBS2.Hub.Letter" spells its escapes
+-- as Haskell literals so that a canon file reads back byte for byte, and it
+-- tested @isControl@ -- category Cc and nothing else -- while its own haddock
+-- described a title repositioning the cursor. So the answer to "what is
+-- invisible" lived in two places, one of them four categories short, and the
+-- short one wrote the file a maintainer reads before signing.
+--
+-- BY CATEGORY, not by a list of the ones somebody thought of, and it took two
+-- goes to get the categories right. The list was twelve characters; Cf alone
+-- holds over 160, so a ZERO WIDTH SPACE printed as nothing at all and two
+-- different tree entries came out as one line, which is the exact failure
+-- 'pathText' exists to prevent. Naming Cf then left Zs, where U+00A0 printed
+-- as an ordinary space and did it again.
+--
+-- isControl is category Cc and nothing else, which is why it was never enough
+-- on its own.
+--
+-- Zs MINUS the ASCII space, because a space is how words are separated and
+-- escaping it would wreck every title to fix a collision nobody has: U+0020
+-- is the one character in that class a reader can be expected to recognise.
+-- Cs and Co because a surrogate or a private-use character renders as whatever
+-- the font decides, which includes nothing. NotAssigned is deliberately NOT
+-- here: GHC's tables lag Unicode, so a character assigned after this compiler
+-- would be escaped for no reason and the output would change on an upgrade.
+invisible :: Char -> Bool
+invisible c = Char.isControl c || ignorable c
+                || cat `elem` [ Char.Format, Char.LineSeparator
+                              , Char.ParagraphSeparator, Char.Surrogate
+                              , Char.PrivateUse ]
+                || (cat == Char.Space && c /= ' ')
+  where
+    cat = Char.generalCategory c
 
     -- Default-ignorable characters that are in NONE of those categories, because
     -- Unicode assigns them by property and not by category: the fillers are Lo,
     -- the variation selectors and the grapheme joiner are Mn. A HANGUL FILLER in a
     -- path is a character that takes up space and prints nothing.
-    ignorable c = c `elem` [ '\x034F', '\x115F', '\x1160', '\x17B4', '\x17B5'
+    --
+    -- The Mongolian block is a RANGE and not the three code points that were
+    -- missing from it, and the difference is the bug this list keeps having. The
+    -- comment above says "by category and not by a list"; U+180B..U+180D are Mn,
+    -- so no category names them, and U+180F was assigned to the same block in
+    -- Unicode 14 after the list was written. Escaping the whole 180B..180F run
+    -- covers the one Cf member too (U+180E, already caught above, and harmless to
+    -- name twice) and leaves nothing in the block for the next revision to add.
+    ignorable x = x `elem` [ '\x034F', '\x115F', '\x1160', '\x17B4', '\x17B5'
                            , '\x3164', '\xFFA0' ]
-                    || (c >= '\xFE00' && c <= '\xFE0F')
-                    || (c >= '\xE0100' && c <= '\xE01EF')
+                    || (x >= '\x180B' && x <= '\x180F')
+                    || (x >= '\xFE00' && x <= '\xFE0F')
+                    || (x >= '\xE0100' && x <= '\xE01EF')
 
 -- | A path out of a stranger's git tree, on its way to a terminal.
 --
@@ -556,6 +585,43 @@ hashRefWeight = LBS.length . serialise
 -- no second opinion about the encoding anywhere in this module.
 hashRefBytes :: Int64
 hashRefBytes = LBS.length (serialise (HashRef (hashObject ("" :: ByteString))))
+
+-- | A hash-shaped field on its way to a human, printed as a hash only if it is
+-- one.
+--
+-- Here rather than beside its first caller, and that is the whole point: base58
+-- is Integer base conversion, so it is QUADRATIC in its input, and a hash-shaped
+-- field is not bounded to a hash's width by anything in the type (see
+-- 'validHashRef'). Measured in this project: 2.5 s for 64 KiB, on a line a
+-- report can print a thousand of. Every renderer that prints one of these needs
+-- the same guard, and the second one to need it printed 'pretty' instead --
+-- which is what happens when the guard lives in whichever module thought of it
+-- first.
+--
+-- Not clipped after rendering, which would pay the cost and then throw it away.
+-- A field that is not the length of a hash is not printed as one at all: what is
+-- shown is what is true about it, which is its size.
+hashDoc :: HashRef -> Doc ann
+hashDoc h
+  | validHashRef h = pretty h
+  | otherwise = "(not a hash:" <+> pretty (hashRefWeight h) <+> "bytes)"
+
+-- | The same for a key, for the same reason.
+--
+-- A 'HubKey' is a newtype over a ByteString with a generic 'Serialise' instance
+-- too, so it also takes any length off the wire, and libsodium reads its 32
+-- bytes without asking how many there are. A key whose first 32 bytes are real
+-- and whose serialised form carries another fifty kilobytes therefore VERIFIES,
+-- and then prints as fifty kilobytes of base58 -- on a triage line, once per
+-- letter, from a mailbox anybody can write to.
+keyDoc :: HubKey -> Doc ann
+keyDoc k
+  | validHubKey k = pretty (AsBase58 k)
+  | otherwise = "(not a key:" <+> pretty (hubKeyWeight k) <+> "bytes)"
+
+-- | What this one weighs, for saying so.
+hubKeyWeight :: HubKey -> Int
+hubKeyWeight = BS.length . Saltine.encode
 
 -- | Is this a well-formed attribute name?
 --
