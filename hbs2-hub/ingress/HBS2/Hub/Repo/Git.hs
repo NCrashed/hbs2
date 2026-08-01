@@ -22,6 +22,7 @@ module HBS2.Hub.Repo.Git
   , GitBounds(..)
   , gitBounds
   , parseListing
+  , nowSeconds
   ) where
 
 import HBS2.Hub.Repo
@@ -38,6 +39,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Maybe (isJust)
 import Control.Concurrent qualified as Conc
+import GHC.Clock (getMonotonicTimeNSec)
 import System.Environment (getEnvironment)
 import System.IO qualified as IO
 import System.IO.Error (isEOFError)
@@ -438,7 +440,7 @@ gitCanonWith bounds cwd = do
       -- down, in the same words: "a variant that emits a record now and then
       -- resets the idle counter for ever". The blob reader was written without
       -- the deadline half.
-      now <- getMonotonicTime
+      now <- nowSeconds
       let dl = now + fromIntegral (gbBlobSeconds bounds)
           oidB = Text.encodeUtf8 oid
           give = restart (p, a)
@@ -754,7 +756,7 @@ gitCanonWith bounds cwd = do
     -- Checked before the read, so the worst case is the deadline plus one idle
     -- bound rather than the deadline exactly.
     readStep dl idle h k = do
-      now <- getMonotonicTime
+      now <- nowSeconds
       if now > dl
         then pure (Left (ReadOverdue ( "cat-file --batch was still sending after "
                                          <> Text.pack (show (gbBlobSeconds bounds))
@@ -800,7 +802,7 @@ gitCanonWith bounds cwd = do
     -- were Text.length -- characters -- against a byte bound, so a canon of
     -- multibyte text was allowed past it by however much of it was not ASCII.
     budgeted act = do
-      now <- getMonotonicTime
+      now <- nowSeconds
       begun <- readIORef clock >>= \case
                  Just t  -> pure t
                  Nothing -> writeIORef clock (Just now) >> pure now
@@ -1116,11 +1118,11 @@ gitCanonWith bounds cwd = do
     -- Checked BEFORE each read, so the worst case is gbListingSeconds plus one
     -- gbCallSeconds, not gbListingSeconds exactly.
     upTo n h = do
-      started <- getMonotonicTime
+      started <- nowSeconds
       go started 0 []
       where
         go started seen chunks = do
-          now <- getMonotonicTime
+          now <- nowSeconds
           if now - started > fromIntegral (gbListingSeconds bounds)
             -- The DEADLINE, which the idle bound cannot replace: a listing that
             -- keeps dribbling bytes is never idle and can still be a tree walk
@@ -1131,7 +1133,7 @@ gitCanonWith bounds cwd = do
              -- MEASURED after the read and not before it, so what is reported is
              -- how long the reader really spent rather than how long it was
              -- allowed to. The two are the same only when nothing is wrong.
-             stopped <- getMonotonicTime
+             stopped <- nowSeconds
              case c of
               Nothing -> pure (Left (StallIdle, seen, stopped - started))
               Just c'
@@ -1273,6 +1275,29 @@ data Small =
   | SmallStalled Text
     -- | Could not be run at all, with the reason the runtime gave.
   | SmallUnstartable Text
+
+-- | Now, in seconds, from a counter whose UNIT IS IN ITS NAME.
+--
+-- Every bound in this module is a duration in seconds and every one of them was
+-- computed from 'UnliftIO.IO.getMonotonicTime', which is documented to return
+-- seconds and does on linux. On aarch64-osx it returns NANOSECONDS, and the
+-- whole @gitCanon against real git@ group went red there and stayed green
+-- everywhere else: every listing was refused for running past a 600s deadline it
+-- had been in for a few milliseconds. The measurement that caught it is the one
+-- the report started carrying, and the number that named it is a test which
+-- deliberately waits two seconds and reported @2.008234875e9@ -- two seconds, to
+-- three decimal places, in nanoseconds.
+--
+-- So the scaling is done here rather than trusted from there.
+-- 'getMonotonicTimeNSec' returns a @Word64@ of nanoseconds by its type, which is
+-- a contract a platform cannot quietly reinterpret, and dividing is one line.
+-- Verified equal to the old call on linux to four decimal places over a 250ms
+-- delay; see 'HBS2.Hub.GitRepoSpec' for the test that fails on a platform where
+-- it would not be.
+nowSeconds :: MonadIO m => m Double
+nowSeconds = liftIO do
+  ns <- getMonotonicTimeNSec
+  pure (fromIntegral ns / 1e9)
 
 -- | Which of the listing reader's two time bounds ran out.
 --

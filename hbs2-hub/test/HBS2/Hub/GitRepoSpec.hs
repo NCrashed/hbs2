@@ -35,7 +35,7 @@ import System.Directory ( createDirectoryIfMissing,findExecutable,getPermissions
 import System.Environment qualified as Env
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory,getCanonicalTemporaryDirectory)
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO,threadDelay)
 import Control.Concurrent.MVar (MVar,newEmptyMVar,putMVar,takeMVar)
 import Control.Exception (try,throwIO,SomeException)
 import System.Timeout (timeout)
@@ -944,6 +944,29 @@ spec = do
               m `shouldSatisfy` (not . Text.isInfixOf "deadline")
             other -> expectationFailure
                        ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
+
+    it "measures a second as a second" $ do
+      -- THE ONE THAT MATTERS FOR THIS FILE'S BOUNDS. Every one of them is a
+      -- duration in seconds, and all of them came from
+      -- 'UnliftIO.IO.getMonotonicTime', which is documented to return seconds and
+      -- does on linux. On aarch64-osx it returns NANOSECONDS.
+      --
+      -- Nothing here noticed for eight commits. The whole "gitCanon against real
+      -- git" group was red on that platform and green on every other, with every
+      -- listing refused for running past a 600s deadline it had been inside for a
+      -- few milliseconds, and the report said only "ran past 600s" so the logs
+      -- narrowed nothing down. What named it was this: a test that deliberately
+      -- waits two seconds reported 2.008234875e9 -- two seconds, to three decimal
+      -- places, in nanoseconds.
+      --
+      -- Generous on both sides, because this is not a benchmark: it is asking
+      -- whether the unit is the one the whole module assumes, and the failure it
+      -- exists to catch is off by a factor of a billion.
+      a <- nowSeconds
+      threadDelay 200000
+      b <- nowSeconds
+      (b - a) `shouldSatisfy` (> 0.1)
+      (b - a) `shouldSatisfy` (< 5.0)
 
     it "says which bound it gave up on, and how long it really took" $ do
       -- The listing reader has two time bounds and used to report BOTH of them
