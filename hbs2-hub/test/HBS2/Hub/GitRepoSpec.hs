@@ -938,6 +938,40 @@ spec = do
               -- The count is in it, because the bound is per chunk and the stream
               -- may have delivered plenty before it stopped.
               Text.unpack m `shouldContain` "77 bytes"
+              -- WHICH bound, in words, and not both of them side by side. See the
+              -- deadline test below for why this half matters.
+              Text.unpack m `shouldContain` "then nothing for 1s"
+              m `shouldSatisfy` (not . Text.isInfixOf "deadline")
+            other -> expectationFailure
+                       ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
+
+    it "says which bound it gave up on, and how long it really took" $ do
+      -- The listing reader has two time bounds and used to report BOTH of them
+      -- whichever had fired -- "nothing for 60s or ran past 600s in total" -- and
+      -- no measurement at all. So the line read the same for a reader that waited
+      -- out a whole minute and for one that gave up instantly, and the same for
+      -- the idle bound as for the deadline.
+      --
+      -- That is not a cosmetic complaint. Thirty-two of these arrived from a CI
+      -- runner nobody can log into, on a platform where the suite is green
+      -- everywhere else, and they did not narrow anything down: the message
+      -- described the settings the reader had been given rather than anything it
+      -- had observed.
+      --
+      -- A zero-second deadline against a shim that dribbles is the cheap way to
+      -- reach the branch: the idle bound is a whole second and cannot fire first.
+      within 10 "the deadline branch" $
+        stalling "ls-tree" (gitBounds { gbListingSeconds = 0
+                                      , gbCallSeconds = 1
+                                      , gbTeardownSeconds = 1 }) $ \readIt ->
+          readIt >>= \case
+            Left (TreeUnreadable (ReaderSays m)) -> do
+              Text.unpack m `shouldContain` "deadline"
+              -- and NOT the other bound's words, which is the confusion itself
+              m `shouldSatisfy` (not . Text.isInfixOf "then nothing for")
+              -- the measurement, which is what tells a bound that elapsed from
+              -- one that fired at once
+              Text.unpack m `shouldContain` "into the listing"
             other -> expectationFailure
                        ("expected TreeUnreadable, got " <> show (fmap (const ()) other))
 

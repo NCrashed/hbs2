@@ -330,14 +330,19 @@ gitCanonWith bounds cwd = do
           -- however busy it was. The message does not say which, because from
           -- here they are one thing: git was asked for a listing and did not
           -- produce one in the time this reader will wait.
-          Right (ListedStalled seen) ->
+          -- WHICH bound, and how long it really took. This used to name both
+          -- configured numbers and neither measurement, so the line said the same
+          -- thing whichever bound had fired and however fast it had fired: an
+          -- audit describing its own settings instead of what it saw. Thirty-two
+          -- of these in a CI log on a machine nobody can log into say nothing at
+          -- all, which is how they were read for a while.
+          Right (ListedStalled why seen took) ->
             Left (TreeUnreadable (ReaderSays ( "git ls-tree did not finish: it sent "
                                      <> Text.pack (show seen)
-                                     <> " bytes, then nothing for "
-                                     <> Text.pack (show (gbCallSeconds bounds))
-                                     <> "s or ran past "
-                                     <> Text.pack (show (gbListingSeconds bounds))
-                                     <> "s in total, and was given up on" )))
+                                     <> " bytes and "
+                                     <> stallWord why
+                                     <> ", " <> tookText took
+                                     <> " into the listing" )))
           -- EOF on stdout and no exit code. NOT a complete listing: end of file
           -- means the write end of the pipe was closed, which a writer that has
           -- finished does and a writer that has been killed, has crashed, or has
@@ -800,10 +805,14 @@ gitCanonWith bounds cwd = do
                  Just t  -> pure t
                  Nothing -> writeIORef clock (Just now) >> pure now
       used <- readIORef spent
+      -- With the measurement, for the reason the listing reader now carries one:
+      -- a budget that reports only the number it was given cannot be told from a
+      -- clock that is lying about how much of it was spent, and both look like
+      -- "passed 180s" in a log.
       if now - begun > fromIntegral (gbReadSeconds bounds)
         then pure (BlobBudget ( "reading canon passed "
                                   <> Text.pack (show (gbReadSeconds bounds))
-                                  <> "s" ))
+                                  <> "s, after " <> tookText (now - begun) ))
         else if used > gbReadBytes bounds
           then pure (BlobBudget ( "reading canon passed "
                                     <> Text.pack (show (gbReadBytes bounds))
@@ -1035,7 +1044,7 @@ gitCanonWith bounds cwd = do
             withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA -> do
               out <- upTo (gbListingBytes bounds) (getStdout p)
               a <- case out of
-                     Left seen -> pure (ListedStalled seen)
+                     Left (why, seen, took) -> pure (ListedStalled why seen took)
                      Right Nothing -> pure ListedTooBig
                      Right (Just bs) -> do
                        -- Bounded, like every other wait in this module. A child
@@ -1072,6 +1081,20 @@ gitCanonWith bounds cwd = do
         Right a -> pure (Right a)
         Left e  -> readIORef answer <&> maybe (Left (Text.pack (show e))) Right
 
+    -- Which bound ran out, in the words that say what to do about it. The idle
+    -- one is a git that is there and has stopped; the deadline is a git that has
+    -- not stopped and is not going to finish.
+    stallWord = \case
+      StallIdle     -> "then nothing for " <> Text.pack (show (gbCallSeconds bounds)) <> "s"
+      StallDeadline -> "ran past its " <> Text.pack (show (gbListingSeconds bounds))
+                         <> "s deadline for the whole listing"
+
+    -- One decimal place, which is the resolution a person acts on and enough to
+    -- tell "it waited the whole minute" from "it gave up at once". The second of
+    -- those is what a clock or a timer misbehaving looks like, and the report had
+    -- no way to say it.
+    tookText t = Text.pack (show (fromIntegral (round (t * 10) :: Int) / 10 :: Double)) <> "s"
+
     -- Read a handle to a bound. Stops at the first chunk that crosses it and does
     -- not read the rest, which is the whole point.
     --
@@ -1102,11 +1125,15 @@ gitCanonWith bounds cwd = do
             -- The DEADLINE, which the idle bound cannot replace: a listing that
             -- keeps dribbling bytes is never idle and can still be a tree walk
             -- that will not finish this century.
-            then pure (Left seen)
+            then pure (Left (StallDeadline, seen, now - started))
             else do
              c <- timeout (gbCallSeconds bounds * 1000000) (liftIO (BS.hGetSome h 65536))
+             -- MEASURED after the read and not before it, so what is reported is
+             -- how long the reader really spent rather than how long it was
+             -- allowed to. The two are the same only when nothing is wrong.
+             stopped <- getMonotonicTime
              case c of
-              Nothing -> pure (Left seen)
+              Nothing -> pure (Left (StallIdle, seen, stopped - started))
               Just c'
                 | BS.null c' -> pure (Right (Just (BS.concat (List.reverse chunks))))
                 | otherwise -> do
@@ -1247,6 +1274,17 @@ data Small =
     -- | Could not be run at all, with the reason the runtime gave.
   | SmallUnstartable Text
 
+-- | Which of the listing reader's two time bounds ran out.
+--
+-- They mean different things and call for different things, and the report could
+-- not tell them apart: it printed both configured numbers side by side and left
+-- the reader to guess. 'StallIdle' is a writer that STOPPED -- git is there and
+-- has sent nothing for a whole 'gbCallSeconds'. 'StallDeadline' is a writer that
+-- has not stopped and will not finish, which the idle bound can never catch,
+-- because a listing that dribbles one record now and then is never idle.
+data StallWhy = StallIdle | StallDeadline
+  deriving stock (Eq,Show)
+
 -- | How a run of @ls-tree@ ended. One constructor per outcome, because the
 -- caller's answer differs for every one of them and three of them used to share
 -- a shape.
@@ -1257,9 +1295,17 @@ data Listed =
   | ListedFailed ByteString
     -- | Past 'gbListingBytes' while it was still arriving.
   | ListedTooBig
-    -- | Silent for 'gbCallSeconds', or running past 'gbListingSeconds', with the
-    -- bytes seen by then.
-  | ListedStalled Int
+    -- | The reader gave up: WHICH bound, the bytes seen by then, and how long it
+    -- actually took.
+    --
+    -- All three, because the report used to carry only the bytes and then print
+    -- both configured bounds beside them -- "nothing for 60s or ran past 600s in
+    -- total" -- which describes the configuration and not the observation. A CI
+    -- log full of that cannot say which of the two fired, or after how long, so a
+    -- failure on a machine nobody can log into is uninterpretable. That is the
+    -- state this reader was in when its whole listing group went red on
+    -- aarch64-osx and green on linux.
+  | ListedStalled StallWhy Int Double
     -- | stdout reached EOF and git had not exited by 'gbCallSeconds' after it,
     -- with the bytes read. NOT a complete listing: EOF is the write end being
     -- closed, and a writer that was killed or crashed closes it too.
