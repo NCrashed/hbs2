@@ -19,7 +19,7 @@ import HBS2.Hub.CLI.Verify
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Prelude.Plated (pretty)
+import HBS2.Prelude.Plated (pretty,fromString)
 
 import Data.ByteString (ByteString)
 import Data.List (nub,sort)
@@ -31,6 +31,13 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Prettyprinter
 import Prettyprinter.Render.Text (renderStrict)
+import Data.Char qualified as Char
+import Control.Exception (bracket,try)
+import GHC.IO.Handle (hDuplicate,hDuplicateTo)
+import HBS2.Data.Types.Refs (HashRef(..))
+import System.Exit (ExitCode(..))
+import System.IO (stdout,hClose,withFile,IOMode(WriteMode),hSetBuffering,BufferMode(..))
+import System.Posix.IO qualified as Posix
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
@@ -80,8 +87,10 @@ byPath files = CanonSource
 everyRefusal :: [(CanonUnreadable, Int)]
 everyRefusal =
   [ (NoCanonRef "/somewhere/.git",        3)
-  , (NoRepository "not a git repository", 4)
-  , (RefUnresolved "bad object",          5)
+  , (NoRepository (ToolSaid "not a git repository"), 4)
+  , (NoRepository (ReaderSays "git: exec: does not exist"), 4)
+  , (RefUnresolved (ToolSaid "bad object"),          5)
+  , (RefUnresolved (ReaderSays "not an object id: zz"), 5)
   , (CanonTooNewHere 99,                  6)
   , (VersionUnreadable (FileMalformed (BadClause "hub-meta")), 7)
   -- Not the file being wrong but this clone not having it: the ordinary state
@@ -96,6 +105,8 @@ everyRefusal =
   , (CanonListingTooBig maxListingBytes, 11)
   , (ReaderFailed "fork: Resource exhausted", 12)
   , (CanonTooSlow "passed 180s", 14)
+  , (ToolStalled "git show-ref did not finish in 60s", 15)
+  , (BlobsOutOfStep "cat-file --batch answered about another object", 16)
   ]
 
 spec :: Spec
@@ -138,6 +149,97 @@ spec = do
       -- read. They are the two a reader is least likely to work out unaided.
       for_ everyRefusal $ \(u, _) ->
         length (Text.lines (render (refusalDoc u))) `shouldSatisfy` (> 1)
+
+    it "tells each refusal the thing that is true of IT" $ do
+      -- "More than one line" and "no two are word for word the same" are both
+      -- satisfied by advice attached to the wrong constructor. Three branches
+      -- could be deleted outright and the suite stayed green: the refusals whose
+      -- payload goes through toolSaid are multi-line for free, and the pairwise
+      -- check tells them apart by that payload rather than by the advice.
+      --
+      -- So this pins a phrase per constructor. It is deliberately the phrase a
+      -- reader ACTS on, not a decoration: what to run, or what not to bother
+      -- running.
+      let says u phrase =
+            (show (pretty u), phrase)
+              `shouldSatisfy` \_ -> phrase `Text.isInfixOf`
+                                      Text.unlines (drop 1 (Text.lines (render (refusalDoc u))))
+      says (NoCanonRef "/x/.git") "git fetch"
+      says (NoRepository (ToolSaid "x")) "safe.directory"
+      says (RefUnresolved (ToolSaid "x")) "unshallow"
+      says (CanonTooNewHere 99) "Upgrade"
+      says (VersionUnreadable (FileMalformed (BadClause "hub-meta"))) "rewrite that file"
+      says (VersionUnreadable FileObjectMissing) "shallow clone"
+      says (VersionUnreadable FileListingUnparsed) "report the git version"
+      says (CanonTooBig 1) "PEP-19"
+      says (TreeUnreadable (ToolSaid "x")) "fetching"
+      says (TreeUnreadable (ReaderSays "x")) "Fetching will not help"
+      says (CanonTooMany 1) "PEP-19"
+      says (CanonListingTooBig 1) "PEP-19"
+      says (ReaderFailed "x") "no process slots"
+      says (CanonTooSlow "x") "pre-receive hook"
+      -- The two that used to borrow somebody else's advice: a git that is present
+      -- and silent got "this is local, retry", and a batch reply out of step got
+      -- "compaction". Both are named here so neither can drift back.
+      says (ToolStalled "x") "retrying"
+      says (BlobsOutOfStep "x") "report the git version"
+
+    it "exits with what it computed, and 141 when the pipe is gone" $ do
+      owner <- kp
+      -- THE VERB'S OWN IO, which nothing reached: reportDoc and reportCode are
+      -- pure and tested, and the function that prints one and exits with the
+      -- other was not. Its whole content is the two things below.
+      let repo = fst owner
+      clean <- readCanon (byPath [("version", renderMeta)]) repo
+                 >>= either (fail . show) pure
+      found <- readCanon (byPath [("version", renderMeta), ("threads/t/x", "junk")]) repo
+                 >>= either (fail . show) pure
+      reportCode clean `shouldBe` 0
+      reportCode found `shouldBe` 2
+
+      -- Quietly, because the point is the exit code and not the text: stdout goes
+      -- to /dev/null for the two that print.
+      let quietly act = bracket (hDuplicate stdout) (\o -> hDuplicateTo o stdout >> hClose o)
+                          (\_ -> withFile "/dev/null" WriteMode $ \n ->
+                                   hDuplicateTo n stdout >> act)
+      -- A clean audit RETURNS, and does not exit 0 through exitWith: `hub verify`
+      -- is one verb in a dispatcher, so exiting on success would stop whatever
+      -- else the caller asked for.
+      quietly (try (report clean)) `shouldReturn` (Right () :: Either ExitCode ())
+      quietly (try (report found)) `shouldReturn` Left (ExitFailure 2)
+
+      -- 141 IS 128 PLUS SIGPIPE, and it used to be 1, which PEP-22 gives to a bad
+      -- argument: `hub verify | head -1` on a long report told a hook it had been
+      -- called wrongly. Reproduced by writing into a pipe whose read end is shut,
+      -- which is what head leaves behind.
+      (r, w) <- Posix.createPipe
+      Posix.closeFd r
+      wh <- Posix.fdToHandle w
+      -- UNBUFFERED, so the write reaches the pipe inside the handler's scope. A
+      -- buffered handle swallows a short report whole and raises nothing until
+      -- the flush at exit, by which time the code is already chosen -- which is
+      -- also why a short report piped into `head` legitimately exits 2: nothing
+      -- ever failed to write.
+      gone <- bracket (hDuplicate stdout)
+                (\o -> hDuplicateTo o stdout >> hClose o
+                         >> hSetBuffering stdout LineBuffering)
+                (\_ -> do hDuplicateTo wh stdout
+                          hSetBuffering stdout NoBuffering
+                          try (report found))
+      hClose wh
+      gone `shouldBe` (Left (ExitFailure 141) :: Either ExitCode ())
+
+    it "prints a hash-shaped field that is not a hash by its size" $ do
+      -- A HashRef takes any length on the wire and validHashRef is applied to the
+      -- AUTHOR box only, so a maintainer can stamp a canon box whose origin is
+      -- tens of kilobytes. base58 is quadratic (2.5 s per 64 KiB, measured in this
+      -- project), and the report can print a thousand of these lines.
+      let h = HashRef (fromString (replicate 40000 (Char.chr 122)))
+      validHashRef h `shouldBe` False
+      let out = render (pretty (DupOrigin h))
+      -- Says what is true of it -- its size -- and does not spend the base58.
+      Text.unpack out `shouldContain` "not a hash"
+      Text.length out `shouldSatisfy` (< 200)
 
     it "escapes so that nothing can spell an escape" $ do
       -- The escaping is only worth having if it is injective, and it took three
@@ -218,7 +320,7 @@ spec = do
       -- escape in the middle of a sentence. The escaping is right; a report line
       -- must stay one line. What was wrong is putting a paragraph in a field.
       let said = "fatal: detected dubious ownership\nrun: git config --global ..."
-          ls = Text.lines (render (refusalDoc (NoRepository said)))
+          ls = Text.lines (render (refusalDoc (NoRepository (ToolSaid said))))
       any ("\\u{0a}" `Text.isInfixOf`) ls `shouldBe` False
       -- Both lines of it, each on its own line and each MARKED as quoted. The
       -- marker is what tells a stranger's text from this program's advice, which

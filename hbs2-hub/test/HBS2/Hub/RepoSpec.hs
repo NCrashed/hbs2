@@ -221,7 +221,7 @@ spec = do
                        (const (pure (BlobProtocol "answered about another object")))
       readCanon confused (fst owner) >>= \r ->
         fmap (const ()) r
-          `shouldBe` Left (TreeUnreadable (ReaderSays "answered about another object"))
+          `shouldBe` Left (BlobsOutOfStep "answered about another object")
 
     it "says the same about the version file, which is read on its own path" $ do
       owner <- kp
@@ -232,7 +232,85 @@ spec = do
                        (const (pure (Right [TreeEntry (B8.pack "version") (Blob "v" 10)])))
                        (const (pure (BlobProtocol "said something else")))
       readCanon confused (fst owner) >>= \r ->
-        fmap (const ()) r `shouldBe` Left (TreeUnreadable (ReaderSays "said something else"))
+        fmap (const ()) r `shouldBe` Left (BlobsOutOfStep "said something else")
+
+    it "names a file whose name is not the one PEP-19 gives it, and folds it anyway" $ do
+      owner <- kp
+      alice <- kp
+      -- PEP-19 makes the file name normative (20 digits of seq, a hyphen, the
+      -- event-id) and nothing checked it, so a file could be named for one event
+      -- and hold another. A tool that trusts names -- a hook grepping the tree, a
+      -- human reading ls -- would then be looking at a different event from the
+      -- one the fold admits.
+      let repo = fst owner
+          e = mkEvent alice owner
+                (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                (canon repo 1 (Just 1))
+          thr = eventId e
+          right = threadDir thr <> "/" <> eventFileName 1 thr
+      -- Named for another event, and otherwise perfectly good.
+      st <- readOk (inMemory [ ("version", renderMeta)
+                             , (threadDir thr <> "/" <> eventFileName 1 (canonBoxId (evCanonBox e))
+                               , renderEvent e) ]) repo
+      fmap snd (stMisnamed st) `shouldBe` [NameWrongEvent thr]
+      -- REPORTED AND STILL FOLDED. The fold works off signed content and never
+      -- reads a path, so dropping it would make this clone show less than canon
+      -- holds over a byte no signature covers.
+      HM.size (frThreads (stFold st)) `shouldBe` 1
+      stBad st `shouldBe` []
+
+      -- Not shaped like an event file name at all.
+      st2 <- readOk (inMemory [ ("version", renderMeta)
+                              , (threadDir thr <> "/hello", renderEvent e) ]) repo
+      fmap snd (stMisnamed st2) `shouldBe` [NameNotEventShaped]
+      HM.size (frThreads (stFold st2)) `shouldBe` 1
+
+      -- And the name the writer produces passes.
+      st3 <- readOk (inMemory [("version", renderMeta), (right, renderEvent e)]) repo
+      stMisnamed st3 `shouldBe` []
+
+    it "says which nothing a directory where the version file goes is" $ do
+      owner <- kp
+      -- ls-tree -r recurses, so a TREE at version/ yields version/x and no
+      -- version entry at all: "no version file" and "a directory there" wore each
+      -- other's face, and the second was folded under the oldest rules with a
+      -- clean exit.
+      let src = inMem (pure (Right "deadbeef"))
+                  (const (pure (Right [TreeEntry (B8.pack "version/x") (Blob "v" 3)])))
+                  (const (pure (BlobText "x")))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (VersionUnreadable FileIsADirectory)
+
+    it "says upgrade before it says compact" $ do
+      owner <- kp
+      -- Order of the gates. A bound says "this canon is bigger than this reader
+      -- will take, compact it", which is work for the tree's owner; the version
+      -- says "this build cannot fold this tree at all, upgrade", which is work
+      -- for whoever is reading and is true whatever the size. Measured the other
+      -- way round: code 8 and advice to compact, on a tree that would still be
+      -- unreadable here after compaction.
+      let huge = [ TreeEntry versionPath (Blob "v" 13) ]
+                   <> [ TreeEntry (B8.pack ("threads/t/" <> show i <> "-x"))
+                          (Blob "e" (maxCanonBytes `div` 2))
+                      | i <- [1 .. 3 :: Int] ]
+          src = inMem (pure (Right "deadbeef")) (const (pure (Right huge)))
+                  (const (pure (BlobText "(hub-meta 99)\n")))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooNewHere 99)
+
+    it "stops the walk when the source says its budget is spent" $ do
+      owner <- kp
+      -- CanonTooSlow appeared in the suite only as a literal in a table of exit
+      -- codes: nothing ever made readCanon produce one, so the whole mapping from
+      -- a spent budget to a refusal was unexercised.
+      let src = inMem (pure (Right "deadbeef"))
+                  (const (pure (Right [ TreeEntry versionPath (Blob "v" 13)
+                                      , TreeEntry (B8.pack "threads/t/0001-x")
+                                          (Blob "e" 5) ])))
+                  (\oid -> pure (if oid == "v" then BlobText renderMeta
+                                               else BlobBudget "passed 180s"))
+      readCanon src (fst owner) >>= \r ->
+        fmap (const ()) r `shouldBe` Left (CanonTooSlow "passed 180s")
 
     it "refuses a tree it cannot list, rather than reporting empty canon" $ do
       owner <- kp
@@ -413,9 +491,11 @@ spec = do
       let src = inMem (pure (Right "deadbeef"))
                   (const (pure (Right [TreeEntry versionPath (Blob "v" 13)])))
                   (const (pure (BlobText "(hub-meta 0)\n")))
+      -- FileBadVersion, not FileMalformed: the file is a perfectly good clause and
+      -- the only thing wrong with it is the number, so "malformed clause hub-meta"
+      -- sent whoever read it looking for a syntax error that is not there.
       readCanon src (fst owner) >>= \r ->
-        fmap (const ()) r `shouldBe`
-          Left (VersionUnreadable (FileMalformed (BadClause "hub-meta")))
+        fmap (const ()) r `shouldBe` Left (VersionUnreadable (FileBadVersion 0))
 
     it "reads neither copy of a path listed twice with different objects" $ do
       owner <- kp
@@ -545,6 +625,20 @@ spec = do
           thr = eventId e
           p = "threads/\1090\1077\1084\1072/" <> eventFileName 1 thr
       st <- readOk (inMemory [("version", renderMeta), (p, renderEvent e)]) repo
-      -- read as an event, and its path came back as the bytes it is
-      fmap fst (stFileVersions st) `shouldBe` [Text.encodeUtf8 (Text.pack p)]
+      -- NOT `path == encode path`, which is what this asserted: the fixture puts
+      -- those exact bytes in and this module hands them back untouched, so it
+      -- was an identity on ByteString and would have passed with every line of
+      -- the reader deleted.
+      --
+      -- What is actually worth asserting is that the reader's own path work
+      -- survives multibyte bytes. It splits on '/' to decide what is an event
+      -- file (a thread directory and a file in it), and a continuation byte is
+      -- not a slash but is above 127.
+      let seen = head (fmap fst (stFileVersions st))
+      BS.length seen `shouldSatisfy` (> length p)     -- really multibyte
+      BS.any (> 127) seen `shouldBe` True
+      -- Recognised as an event under a Cyrillic thread directory, folded, and
+      -- not reported as a path the layout does not have.
+      HM.size (frThreads (stFold st)) `shouldBe` 1
       stBad st `shouldBe` []
+      stMisnamed st `shouldBe` []

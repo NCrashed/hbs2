@@ -97,26 +97,28 @@ and a tree full of forged events were the same event.
 |------|------------------------------------------------------|
 | 0    | the audit ran and found nothing                       |
 | 1    | usage: a bad argument, an unknown verb                 |
-| 2    | the audit ran and found drops, anomalies, unreadable files, no `version`, or a file with no version clause |
+| 2    | the audit ran and found drops, anomalies, unreadable files, misnamed files, no `version`, or a file with no version clause |
 | 3    | `refs/hbs2/meta` is not here, or is here and broken    |
-| 4    | not a git repository, or git could not be run          |
+| 4    | not a git repository                                   |
 | 5    | the ref is here and does not resolve to a commit       |
 | 6    | canon is stamped `(hub-meta N)` newer than this build  |
 | 7    | the `version` file is here and does not read           |
 | 8    | canon is past the reader's byte bound                  |
-| 9    | the tree will not list (a pruned object, a permission) |
+| 9    | the tree will not list, whether git said so or this reader did |
 | 10   | canon is past the reader's file-count bound            |
 | 11   | the tree listing is past the reader's byte bound       |
 | 12   | the reader could not run git at all: a local failure   |
 | 13   | the `version` file is here and THIS CLONE cannot read it |
 | 14   | reading canon cost more than the reader will spend      |
+| 15   | git ran and did not answer                              |
+| 16   | the tree listed and its files went out of step with git |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 The last two lines of a clean run are normative, because a hook parses them:
 
 ```
 maintainers <n> redacted <n>
-admitted <n> dropped <n> anomalies <n> unreadable <n> unversioned <n> tree-version ok|missing
+admitted <n> dropped <n> anomalies <n> unreadable <n> unversioned <n> misnamed <n> tree-version ok|missing
 ```
 
 Every number the exit code counts is on those lines. Two of them are about what
@@ -124,7 +126,7 @@ the fold DECIDED rather than what it refused: a tree holding one valid version
 file and nothing else otherwise prints all zeroes and exits 0, which reads
 exactly like a healthy tracker.
 
-3 to 14 is "could not run", so a hook that only cares about the distinction tests
+3 to 16 is "could not run", so a hook that only cares about the distinction tests
 for that range. 141 is neither: it is what a shell reports for a program a pipe
 killed, and it used to be 1, which this table gives to usage errors. It is also
 the one code that prints nothing: by the time it happens there is nowhere left to
@@ -140,6 +142,15 @@ names both. And 12 is the one refusal that is not about canon at all: no process
 slots, no file descriptors, git gone from `PATH` mid-audit. It used to be reported
 as an unreadable file, which exits 2, telling a hook that a local resource limit
 was a finding about somebody's repository.
+
+12, 15 and 16 are three states of one tool and are worth keeping apart, because
+only one of them is worth retrying. 12 is git not running. 15 is git running and
+saying nothing, which a retry buys another wait of: reachable with a FIFO at
+`.git/refs/hbs2/meta`, where `rev-parse` answers and `show-ref` blocks on open,
+and which used to exit 12 with an invitation to try again. 16 is git running and
+saying something this build cannot follow, which is a version disagreement to
+report rather than anything about the repository; it used to exit 9, "the tree
+will not list", printed about a listing that had been read whole and parsed.
 
 14 is a bound on the WALK, which the three listing bounds cannot give: a tree of
 45000 paths whose entries share one subtree is five objects and 172 KB on disk,
@@ -185,7 +196,7 @@ author of a tree chose what the reason field said. And a tool's own words are
 printed as an indented block with each line marked `|`, never as a field value,
 because this program prints its own advice at the same indent underneath.
 
-Three things the report says that are worth naming, because each was once
+Five things the report says that are worth naming, because each was once
 silently dropped:
 
   - A file under `threads/` or `repo/` that is not an event file is reported by
@@ -197,8 +208,24 @@ silently dropped:
   - A blob whose object this clone does not have is reported as that, and not as
     a submodule. It is the one of these that fetching fixes.
   - A path the tree lists TWICE is named. git fsck calls it duplicateEntries; on
-    `version` it is a refusal, because taking the first would let the order of
-    entries in somebody else's tree pick the rules canon is folded under.
+    `version` two entries that DIFFER are a refusal, because taking the first
+    would let the order of entries in somebody else's tree pick the rules canon
+    is folded under. Two identical entries collapse and the file is read: it is
+    one file listed twice, the tree is still reported as malformed, and refusing
+    would be refusing over a question that has one answer.
+  - An event file whose name is not the one PEP-19 gives it is named, and the
+    event in it is still folded. Two halves of the name are checked here: that it
+    is twenty digits, a hyphen and an event-id, and that the event-id is the one
+    the file holds. The other two are NOT checked and this build does not pretend
+    otherwise: `seq` and the scope (a `delegate` sitting under `threads/` rather
+    than `repo/`) live in the canon box, which only the fold opens, and the fold
+    is never shown a path. Closing that needs the fold to take the tree layout as
+    an input, which is an admission-rule question under PEP-19 rather than a
+    reporting one.
+
+    Reported and not dropped, deliberately: no signature covers a path, so a
+    reader that refused a misnamed file would show less than canon holds and
+    disagree with every other clone over a byte nobody signed.
 
 Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 
@@ -383,9 +410,8 @@ A renderer must tolerate a `reply-to` that names no event it can see, or one
 that belongs to another thread. Nothing validates it, deliberately: the
 reference may point at a letter the owner chose not to fold, and rejecting
 such a comment at the bridge would strand a legitimate submission for good.
-Render it flat rather than failing or inventing a parent, and leave the
-reporting to `hub verify`, which lists dangling and cross-thread references
-along with the dropped events.
+Render it flat rather than failing or inventing a parent. Reporting it belongs
+with the dropped events in `hub verify`, and does not happen yet:
 
 That last part is not implemented and needs a fold change, not a CLI one: the
 fold has no anomaly for a `reply-to` that dangles or crosses a thread, so `hub

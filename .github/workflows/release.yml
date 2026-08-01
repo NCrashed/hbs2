@@ -227,9 +227,13 @@ jobs:
           "${BUNDLE}/bin/hbs2-peer" version
           "${BUNDLE}/bin/hbs2-cli" --help >/dev/null
           "${BUNDLE}/bin/hbs2-sync" --help >/dev/null
-          # Every binary the archive ships, not three of them. The two symlinks
-          # are the point: an ln that failed, or a shebang script naming a nix
-          # store path, is invisible to a smoke test that only runs the daemon.
+          # More than the daemon, which is all this used to run. Not every binary:
+          # hbs2-git3 and git-remote-hbs23 are git plumbing that git invokes, and
+          # ncq3 is a storage tool, so none of the three answers --help usefully;
+          # git-hbs2 below is checked for 127 alone for exactly that reason. The
+          # two symlinks are the point of the rest: an ln that failed, or a
+          # shebang script naming a nix store path, is invisible to a smoke test
+          # that only runs the daemon.
           "${BUNDLE}/bin/hbs2-hub" --help >/dev/null
           "${BUNDLE}/bin/hub" --help >/dev/null
           "${BUNDLE}/bin/hbs2-keyman" --help >/dev/null

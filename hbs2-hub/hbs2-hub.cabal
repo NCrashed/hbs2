@@ -125,6 +125,7 @@ executable hbs2-hub
         -rtsopts
         "-with-rtsopts=-N4 -A64m"
     build-depends:    base
+                    , hbs2-hub
                     , hbs2-hub:hub-ingress
                     , hbs2-cli
                     , suckless-conf

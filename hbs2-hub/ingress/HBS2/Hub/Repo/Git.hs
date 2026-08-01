@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- | A 'CanonSource' backed by a git repository.
 --
 -- The whole of what talks to git, and all of it is five commands. The reading of
@@ -109,6 +110,14 @@ data GitBounds = GitBounds
     -- repository stalled a pre-receive hook for a minute, and for two before the
     -- newline read stopped running after a body read that had already failed.
   , gbBodySeconds  :: Int
+    -- | How long ONE blob may take, start to finish, however busy the stream is.
+    --
+    -- The idle bounds above cannot give this, for the reason the listing needed
+    -- both an idle bound and a deadline: a source that says something before each
+    -- of them is never idle. 8 KiB every nine seconds passes 'gbBodySeconds' for
+    -- ever and passes the walk's budget too, because that one is checked between
+    -- blobs and never inside one.
+  , gbBlobSeconds  :: Int
     -- | How long, in MILLISECONDS, to wait for git's own words about an object it
     -- answered "missing" for, before saying the plain thing instead.
     --
@@ -135,6 +144,7 @@ gitBounds = GitBounds
   , gbReadBytes    = maxCanonBytes
   , gbBlobBytes    = maxEventBytes
   , gbBodySeconds  = 10
+  , gbBlobSeconds  = 60
   , gbBlobWords    = 500
   , gbTeardownSeconds = 2
   }
@@ -231,26 +241,39 @@ gitCanonWith bounds cwd = do
       -- --absolute-git-dir, because the answer is put in front of the operator
       -- when the ref is missing, and a relative ".git" printed by a hook whose
       -- GIT_DIR points elsewhere is the sentence that sent them in circles.
-      isRepo <- raw ["rev-parse", "--absolute-git-dir"]
-      case isRepo of
-        Left e -> pure (Left (NoRepository (msg e)))
-        Right (ExitFailure _, e) -> pure (Left (NoRepository (msg (decodeS e))))
-        Right (ExitSuccess, gitDirRaw) -> do
-          here <- git ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
+      -- Each of the three answers below tells the FOUR outcomes apart, which is
+      -- what 'Small' is for. They used to be an Either, in which "git could not
+      -- be started" and "git started and never answered" were the same Left: a
+      -- FIFO at .git/refs/hbs2/meta leaves rev-parse answering and show-ref
+      -- blocked on open, and that came out as code 12 after a minute, whose
+      -- advice is that it is local and the one refusal worth retrying. The retry
+      -- blocks for another minute. The listing has told these apart since it grew
+      -- bounds of its own; these three had not.
+      raw ["rev-parse", "--absolute-git-dir"] >>= \case
+        SmallUnstartable e -> pure (Left (NoRepository (ReaderSays e)))
+        SmallStalled e -> pure (Left (ToolStalled e))
+        SmallFailed _ e -> pure (Left (NoRepository (ToolSaid (msg (decodeS e)))))
+        SmallOk gitDirRaw -> do
+          here <- raw ["show-ref", "--verify", "--quiet", Text.unpack metaRef]
           case here of
-            Left e -> pure (Left (ReaderFailed (msg e)))
+            -- git ran a moment ago, so a failure to run it NOW is local: this is
+            -- the distinction NoRepository cannot make on the first call and can
+            -- make on every later one.
+            SmallUnstartable e -> pure (Left (ReaderFailed e))
+            SmallStalled e -> pure (Left (ToolStalled e))
             -- The BYTES, and only the trailing newline taken off: Text.strip would
             -- eat a real trailing space in a directory name, and decoding to Text
             -- loses a byte that is not UTF-8 before pathText can escape it.
-            Right (ExitFailure 1, _) ->
+            SmallFailed (ExitFailure 1) _ ->
               pure (Left (NoCanonRef (B8.dropWhileEnd (`elem` ("\r\n" :: String))
                                         gitDirRaw)))
-            Right (ExitFailure _, e) -> pure (Left (RefUnresolved (msg e)))
-            Right (ExitSuccess, _) ->
-              git ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] <&> \case
-                Left e -> Left (ReaderFailed (msg e))
-                Right (ExitSuccess, out) -> Right (Text.strip out)
-                Right (_, e) -> Left (RefUnresolved (msg e))
+            SmallFailed _ e -> pure (Left (RefUnresolved (ToolSaid (msg (decodeS e)))))
+            SmallOk _ ->
+              raw ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] <&> \case
+                SmallUnstartable e -> Left (ReaderFailed e)
+                SmallStalled e -> Left (ToolStalled e)
+                SmallOk out -> Right (Text.strip (decodeS out))
+                SmallFailed _ e -> Left (RefUnresolved (ToolSaid (msg (decodeS e))))
 
   , csEntries = \commit ->
       -- --full-tree, and this is not a nicety: ls-tree resolves paths relative to
@@ -284,9 +307,9 @@ gitCanonWith bounds cwd = do
       -- never typed. The honest answer is the ref does not resolve, which is
       -- code 5.
       if not (isObjectId commit)
-        then pure (Left (RefUnresolved
+        then pure (Left (RefUnresolved (ReaderSays
                           ( "not an object id: "
-                              <> Text.take 100 commit )))
+                              <> Text.take 100 commit ))))
         else
       listing (["ls-tree", "-r", "-z", "-l", "--full-tree"
                       , Text.unpack commit, "--" ])
@@ -388,7 +411,22 @@ gitCanonWith bounds cwd = do
     -- having on the one path where every answer is about somebody's file.
     askBatch oid = do
       (p, a) <- batchProc
-      let oidB = Text.encodeUtf8 oid
+      -- ONE DEADLINE FOR THE WHOLE REPLY, and not only a bound per read.
+      --
+      -- Every read below has its own idle bound, and a source that says something
+      -- before each of them is never idle: 8 KiB every nine seconds is a blob
+      -- that takes as long as it likes, inside a walk whose budget is checked
+      -- only BETWEEN blobs. Measured shape, on a slow store reached through
+      -- objects/info/alternates: 216 s inside one blob against a 180 s budget for
+      -- the whole walk, in a verb meant for a pre-receive hook.
+      --
+      -- This is the same defect the listing reader found and fixed two functions
+      -- down, in the same words: "a variant that emits a record now and then
+      -- resets the idle counter for ever". The blob reader was written without
+      -- the deadline half.
+      now <- getMonotonicTime
+      let dl = now + fromIntegral (gbBlobSeconds bounds)
+          oidB = Text.encodeUtf8 oid
           give = restart (p, a)
       wrote <- tryAny do
                  liftIO (B8.hPutStrLn (getStdin p) oidB)
@@ -397,48 +435,78 @@ gitCanonWith bounds cwd = do
         -- A batch process that has died since the last blob. The tool ran and
         -- stopped running, which is what ReaderFailed is for.
         Left e -> give (BlobUnavailable (msg (Text.pack (show e))))
-        Right () -> lineFrom (getStdout p) <&> fmap B8.words >>= \case
-          Nothing -> give (BlobUnavailable "cat-file --batch stopped answering")
-          -- The ECHOED ID. git answers in the order it is asked, so a reply about
-          -- another object means this reader and git have stopped counting the
-          -- same replies, and every answer after it would land on the wrong path.
-          Just (echo : _) | echo /= oidB ->
-            give (BlobProtocol "cat-file --batch answered about another object")
-          Just [_, "missing"] -> missing oid
-          Just [_, ty, szB]
-            -- The TYPE, because the listing already said blob and this reader
-            -- asked for what the listing named. Anything else is the two of them
-            -- disagreeing about what the tree holds.
-            | ty /= "blob" ->
-                give (BlobProtocol ("cat-file --batch answered type " <> decodeS ty))
-            | Just n <- sizeOf szB ->
-                if n > gbBlobBytes bounds
-                  -- The stream is now out of step by n+1 bytes, and skipping them
-                  -- is the work this reader has just refused to do. Cheaper and
-                  -- safer to start a new process for whatever comes next.
-                  then give (BlobOversize n)
-                  else exactly (getStdout p) n >>= \case
-                    -- NOT followed by a read of the newline, which is what the
-                    -- first version did unconditionally. The reverse lie -- a
-                    -- header announcing more than git then writes -- made that
-                    -- read wait out its own bound after this one had waited out
-                    -- its: 269 bytes of repository, two minutes of a pre-receive
-                    -- hook, and then "this is local: no process slots".
-                    Nothing -> give (BlobRefused ( "the object's header announces "
-                                       <> Text.pack (show n)
-                                       <> " bytes and git did not deliver them" ))
-                    Just bs -> exactly (getStdout p) 1 >>= \case
-                      Just "\n" -> ended give p n bs
-                      -- The newline is what says the body ended where the header
-                      -- said it would. Anything else in that byte is the lying
-                      -- object above, caught at the object that lied rather than
-                      -- at the next one to be read.
-                      _ -> give (over n)
-          Just _ -> give (BlobProtocol "cat-file --batch said something else")
+        Right () -> lineFrom dl (getStdout p) >>= \case
+          -- THREE DIFFERENT THINGS, and they were one Nothing that became "this
+          -- is local: no process slots". End of file is git gone; silence is git
+          -- sitting there; a reply line with no newline in four kilobytes is a
+          -- format this reader does not know.
+          ReadEof -> give (BlobUnavailable "cat-file --batch closed its output")
+          ReadIdle -> give (BlobStalled ( "cat-file --batch did not answer in "
+                              <> Text.pack (show (gbCallSeconds bounds)) <> "s" ))
+          ReadOverdue e -> give (BlobStalled e)
+          ReadTooLong -> give (BlobProtocol "cat-file --batch sent no reply line")
+          ReadGot header -> case B8.words header of
+            -- The ECHOED ID. git answers in the order it is asked, so a reply
+            -- about another object means this reader and git have stopped
+            -- counting the same replies, and every answer after it would land on
+            -- the wrong path.
+            (echo : _) | echo /= oidB ->
+              give (BlobProtocol "cat-file --batch answered about another object")
+            [_, "missing"] -> missing oid
+            [_, ty, szB]
+              -- The TYPE, because the listing already said blob and this reader
+              -- asked for what the listing named. Anything else is the two of
+              -- them disagreeing about what the tree holds.
+              | ty /= "blob" ->
+                  give (BlobProtocol ("cat-file --batch answered type " <> decodeS ty))
+              | Just n <- sizeOf szB ->
+                  if n > gbBlobBytes bounds
+                    -- The stream is now out of step by n+1 bytes, and skipping
+                    -- them is the work this reader has just refused to do.
+                    -- Cheaper and safer to start a new process for what follows.
+                    then give (BlobOversize n)
+                    else exactly dl (getStdout p) n >>= \case
+                      -- NOT followed by a read of the newline, which is what the
+                      -- first version did unconditionally. The reverse lie -- a
+                      -- header announcing more than git then writes -- made that
+                      -- read wait out its own bound after this one had waited out
+                      -- its: 269 bytes of repository, two minutes of a
+                      -- pre-receive hook, and then "this is local".
+                      --
+                      -- A body that stops short has git ALIVE and waiting for the
+                      -- next request, so it arrives as silence rather than as end
+                      -- of file: that is why the idle case here is the object's
+                      -- and not the tool's. The one exception is the deadline,
+                      -- which fires on a source that is still sending.
+                      BodyShort _ (ReadOverdue e) -> give (BlobStalled e)
+                      BodyShort got _ -> give (short n got)
+                      BodyGot bs -> exactly dl (getStdout p) 1 >>= \case
+                        BodyGot "\n" -> ended give p n bs
+                        -- ONLY a byte that is not the newline says the body ran
+                        -- past its header. End of file here says the opposite:
+                        -- git delivered exactly what it announced and then ended,
+                        -- so "git delivered more" was the one thing that had not
+                        -- happened.
+                        BodyGot _ -> give (over n)
+                        BodyShort _ ReadEof -> give (BlobUnavailable
+                                    "cat-file --batch closed its output mid-reply")
+                        BodyShort _ (ReadOverdue e) -> give (BlobStalled e)
+                        BodyShort _ _ -> give (BlobStalled
+                                    ( "cat-file --batch sent a body of "
+                                        <> Text.pack (show n)
+                                        <> " bytes and not the newline after it" ))
+            _ -> give (BlobProtocol "cat-file --batch said something else")
 
     over n = BlobRefused ( "the object's header announces "
                <> Text.pack (show n)
                <> " bytes and git delivered more" )
+
+    -- What was announced and what arrived, and no verdict on which of them is at
+    -- fault: a short body is the object lying, and a body that stops for ten
+    -- seconds on a sick disk looks the same from here. Both are true of this line.
+    short n got = BlobRefused ( "the object's header announces "
+                    <> Text.pack (show n) <> " bytes and git delivered "
+                    <> Text.pack (show got) <> " and stopped" )
 
     -- The end of a reply, and the only check here that actually holds.
     --
@@ -498,8 +566,14 @@ gitCanonWith bounds cwd = do
     -- already collected is still used.
     missing oid = do
       let mine errs = [ l | l <- B8.lines errs, Text.encodeUtf8 oid `BS.isInfixOf` l ]
-          say ls = BlobRefused (Text.take (gbBlobMessage bounds)
-                                  (msg (decodeS (B8.unlines ls))))
+          -- Cut in BYTES, before decoding. gbBlobMessage is a byte budget (its
+          -- own haddock reaches twelve gigabytes by multiplying it by
+          -- maxCanonFiles), and spending it with Text.take spends characters,
+          -- which are up to four bytes apiece: the budget was up to four times
+          -- what it says. The same confusion was fixed for the walk's byte budget
+          -- one commit ago and left standing here.
+          say ls = BlobRefused (msg (decodeS (BS.take (gbBlobMessage bounds)
+                                                (B8.unlines ls))))
           waitFor 0 = writeIORef patient False >> pure (BlobRefused "missing from this clone")
           waitFor k = readIORef said <&> mine >>= \case
             [] -> liftIO (Conc.threadDelay 2000) >> waitFor (k - 1 :: Int)
@@ -549,10 +623,15 @@ gitCanonWith bounds cwd = do
     -- Then stdin: cat-file --batch ends on EOF, which is the graceful way out and
     -- the common one, so the signals in the teardown are for a git that does not
     -- take it.
+    -- The buffer is cleared AFTER the reader that fills it is gone. Cleared
+    -- first, a line still in flight from the dying process landed in the pool the
+    -- next one starts with, where 'missing' matches by object id and would have
+    -- attributed it to whatever object shares that id -- the same misattribution
+    -- the id matching exists to prevent, arriving through the other end.
     stop (p, a) = do
       writeIORef batch Nothing
-      writeIORef said mempty
       tryAny (cancel a)
+      writeIORef said mempty
       tryAny (liftIO (hClose (getStdin p)))
       teardown p
 
@@ -563,26 +642,39 @@ gitCanonWith bounds cwd = do
     -- A byte at a time, and it has to be: the reply line is followed by the body,
     -- and a buffered read would take part of it. The bound on the accumulator is
     -- for a stream with no newline in it at all.
-    lineFrom h = go mempty
+    lineFrom dl h = go mempty
       where
-        go acc = timeout (gbCallSeconds bounds * 1000000)
-                         (liftIO (BS.hGetSome h 1)) >>= \case
-          Nothing -> pure Nothing
-          Just c | BS.null c -> pure Nothing
-                 | c == "\n" -> pure (Just acc)
-                 | BS.length acc > 4096 -> pure Nothing
-                 | otherwise -> go (acc <> c)
+        go acc = step dl (gbCallSeconds bounds) h 1 >>= \case
+          Left r -> pure r
+          Right c | c == "\n" -> pure (ReadGot acc)
+                  | BS.length acc > 4096 -> pure ReadTooLong
+                  | otherwise -> go (acc <> c)
 
     -- Exactly n bytes, on the BODY bound: past the header git has said what it is
     -- about to send, so silence in the middle of it is not a git thinking.
-    exactly h n = go n mempty
+    exactly dl h n = go n mempty
       where
-        go 0 acc = pure (Just acc)
-        go k acc = timeout (gbBodySeconds bounds * 1000000)
-                           (liftIO (BS.hGetSome h k)) >>= \case
-          Nothing -> pure Nothing
-          Just c | BS.null c -> pure Nothing
-                 | otherwise -> go (k - BS.length c) (acc <> c)
+        go 0 acc = pure (BodyGot acc)
+        go k acc = step dl (gbBodySeconds bounds) h k >>= \case
+          Left r -> pure (BodyShort (n - k) r)
+          Right c -> go (k - BS.length c) (acc <> c)
+
+    -- One read, against BOTH an idle bound and the reply's deadline.
+    --
+    -- The idle bound catches a source that has stopped; the deadline catches one
+    -- that has not stopped and will not finish, which no per-read bound can see.
+    -- Checked before the read, so the worst case is the deadline plus one idle
+    -- bound rather than the deadline exactly.
+    step dl idle h k = do
+      now <- getMonotonicTime
+      if now > dl
+        then pure (Left (ReadOverdue ( "cat-file --batch was still sending after "
+                                         <> Text.pack (show (gbBlobSeconds bounds))
+                                         <> "s on one object" )))
+        else timeout (idle * 1000000) (liftIO (BS.hGetSome h k)) >>= \case
+          Nothing -> pure (Left ReadIdle)
+          Just c | BS.null c -> pure (Left ReadEof)
+                 | otherwise -> pure (Right c)
 
     -- Read a handle to EOF, keeping the LAST n bytes where another thread can see
     -- them as it goes. For the batch process's stderr: it has to be read
@@ -593,9 +685,12 @@ gitCanonWith bounds cwd = do
         go = do
           c <- liftIO (BS.hGetSome h 65536)
           unless (BS.null c) do
-            modifyIORef' ref \acc ->
+            -- atomicModifyIORef', because the reader of this buffer is another
+            -- thread: modifyIORef' is a read and a write with a gap in it, and a
+            -- clear landing in that gap is undone by the write that follows.
+            atomicModifyIORef' ref \acc ->
               let a = acc <> c
-              in if BS.length a > n then BS.drop (BS.length a - n) a else a
+              in (if BS.length a > n then BS.drop (BS.length a - n) a else a, ())
             go
 
     -- The budget on the WHOLE read, checked before each blob: a wall-clock
@@ -747,9 +842,6 @@ gitCanonWith bounds cwd = do
     -- newlines are kept, because the LAST line of a dubious-ownership complaint is
     -- the command that fixes it, three lines below the complaint itself.
     msg = Text.stripEnd
-
-    -- Decoded output, for the calls whose result is text.
-    git args = raw args <&> fmap (fmap decodeS)
 
     -- Records in a raw listing: one NUL each.
     recs = BS.count 0
@@ -1013,13 +1105,62 @@ gitCanonWith bounds cwd = do
                    e <- wait errA
                    pure (code, if code == ExitSuccess then o else e)
       pure case r of
-        Left e -> Left (Text.pack (show e))
+        Left e -> SmallUnstartable (Text.pack (show e))
         Right Nothing ->
-          Left ( "git " <> Text.pack (unwords (take 2 args))
-                   <> " did not finish in "
-                   <> Text.pack (show (gbCallSeconds bounds))
-                   <> "s and was given up on" )
-        Right (Just x) -> Right x
+          SmallStalled ( "git " <> Text.pack (unwords (take 2 args))
+                           <> " did not finish in "
+                           <> Text.pack (show (gbCallSeconds bounds))
+                           <> "s and was given up on" )
+        Right (Just (ExitSuccess, o)) -> SmallOk o
+        Right (Just (code, e)) -> SmallFailed code e
+
+-- | How one of the three small calls ended.
+--
+-- Four outcomes and they used to be two: an @Either Text (ExitCode, ByteString)@
+-- whose Left meant BOTH "git could not be started" and "git started and never
+-- said anything". Those two get opposite advice -- one is local and the single
+-- refusal documented as worth retrying, the other is a git sitting there that a
+-- retry buys another minute of -- and the caller had no way to tell them apart.
+-- | How one read from the batch process ended.
+--
+-- Four outcomes, and they were @Maybe ByteString@: end of file, silence, and a
+-- reply line with no newline in four kilobytes all came back as Nothing and were
+-- reported as "this reader could not run git: no process slots, no file
+-- descriptors". git had run, was running, and in two of the three cases was
+-- still there.
+data Read1 =
+    ReadGot ByteString
+    -- | The source closed its output.
+  | ReadEof
+    -- | The source is there and has said nothing for the idle bound. Told apart
+    -- from 'ReadOverdue' because in the middle of a body they mean opposite
+    -- things: git has already committed to a length, so silence is the object
+    -- having less in it than its header says, while a source still sending is a
+    -- source this reader is giving up on.
+  | ReadIdle
+    -- | Past the deadline for the whole reply, however busy it has been.
+  | ReadOverdue Text
+    -- | A reply line longer than this reader will read one.
+  | ReadTooLong
+
+-- | Reading a body of an announced length.
+--
+-- Carries HOW MUCH ARRIVED when it did not all arrive, because the honest
+-- message names it: "announced 20000, delivered 10, then stopped" is true whether
+-- the object is short or the disk is sick, and "the object did not deliver them"
+-- is an accusation against the tree that only one of those two deserves.
+data Body = BodyGot ByteString | BodyShort Int Read1
+
+-- ONCE
+data Small =
+    -- | Exited 0, with stdout.
+    SmallOk ByteString
+    -- | Exited non-zero, with the code and what it said on stderr.
+  | SmallFailed ExitCode ByteString
+    -- | Ran and did not finish within 'gbCallSeconds'.
+  | SmallStalled Text
+    -- | Could not be run at all, with the reason the runtime gave.
+  | SmallUnstartable Text
 
 -- | How a run of @ls-tree@ ended. One constructor per outcome, because the
 -- caller's answer differs for every one of them and three of them used to share
@@ -1054,13 +1195,23 @@ sizeOf b
   | B8.length b > 18 = Nothing
   | otherwise = readMay (B8.unpack b)
 
--- | Is this hex of a plausible object-id length? sha1 is 40, sha256 is 64, and
--- git accepts an unambiguous prefix, so the low end is where ambiguity starts
--- rather than a spec.
+-- | Is this a FULL object id as git writes one: 40 lowercase hex for sha1, 64
+-- for sha256?
+--
+-- It accepted 4 to 64 characters in either case, which is what git accepts when
+-- a HUMAN types one. Nothing here is typed by a human: every id this reader uses
+-- comes out of @rev-parse@ or the size column of @ls-tree@, both of which write
+-- the full canonical lowercase form. Measured on git 2.55: the batch reply echoes
+-- the canonical form too, whatever was written to it.
+--
+-- That matters because the batch reader compares the echoed id to the one it
+-- wrote BYTE FOR BYTE, and treats a mismatch as the two of them having lost
+-- count of each other. A guard that admits @DEADBEEF@ and @dead@ is weaker than
+-- the invariant the protocol rests on, so an id that could never round-trip
+-- would have been read as a desync rather than as the bad id it is.
 isObjectId :: Text -> Bool
-isObjectId t = Text.length t >= 4 && Text.length t <= 64 && Text.all hex t
+isObjectId t = (Text.length t == 40 || Text.length t == 64) && Text.all hex t
   where hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-                  || (c >= 'A' && c <= 'F')
 
 -- | Parse the output of @ls-tree -r -z -l@.
 --

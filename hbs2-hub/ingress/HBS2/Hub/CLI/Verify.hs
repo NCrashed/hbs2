@@ -24,6 +24,12 @@ module HBS2.Hub.CLI.Verify
   , reportCode
   , refusalDoc
   , codeOf
+    -- | The IO half: prints the report and exits. Exported for the one thing the
+    -- pure halves cannot show, which is that a closed pipe exits 141 rather than
+    -- 1 and that the exit code matches what reportCode computed.
+  , report
+  , refused
+  , usage
   ) where
 
 import HBS2.Hub.Types (pathText)
@@ -115,6 +121,9 @@ notHere = \case
   FileIsADirectory    -> False
   FileUnexpected      -> False
   FileDuplicated      -> False
+  -- The file read here perfectly well; the number in it is not a version. That
+  -- is the publisher's, not the clone's.
+  FileBadVersion _    -> False
 
 -- | What a refusal says: the reason, and what to do about it.
 refusalDoc :: CanonUnreadable -> Doc ann
@@ -215,6 +224,23 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
                           <> " descriptors, or git gone from" <> line
                           <> "  PATH mid-audit. Nothing was learned about canon,"
                           <> " one way or the other."
+      -- Deliberately NOT the advice above, which this used to get. That one says
+      -- a retry is worth trying; here git is sitting there, and a retry buys
+      -- another minute and another stuck child. Reached by a FIFO at
+      -- .git/refs/hbs2/meta, where rev-parse answers and show-ref blocks on open.
+      ToolStalled _ -> line <> "  git is running and not answering, so retrying"
+                          <> " buys another wait." <> line
+                          <> "  Look for a FIFO or a dead mount in the object"
+                          <> " store, or a filesystem" <> line
+                          <> "  that is not responding."
+      -- The listing arrived and parsed; the walk over its files did not. So no
+      -- fetching, and no compaction either, which is what this got when it was
+      -- reported as a tree that will not list.
+      BlobsOutOfStep _ -> line <> "  The tree listed and its files did not read."
+                            <> " This is this build and git" <> line
+                            <> "  disagreeing about the cat-file protocol:"
+                            <> " report the git version." <> line
+                            <> "  Neither fetching nor compaction is the answer."
 
 -- | What a refusal exits with.
 --
@@ -242,6 +268,12 @@ codeOf = \case
   CanonTooMany{}       -> 10
   CanonListingTooBig{} -> 11
   CanonTooSlow{}       -> 14
+  -- Appended, not slotted in: the numbers are a contract. 15 is git present and
+  -- silent, which used to be 12 ("local, and worth retrying") or 4 ("not a git
+  -- repository"); 16 is git present and talking nonsense, which used to be 9
+  -- ("the tree will not list") about a listing that had already been read whole.
+  ToolStalled{}        -> 15
+  BlobsOutOfStep{}     -> 16
   -- Not a number about canon at all: a script that retries on it is retrying
   -- something local, which is the only one of these worth retrying. (It is no
   -- longer the highest, 13 having been added after it; the numbers are a
@@ -314,6 +346,13 @@ reportDoc st =
   <> capped "unversioned"
        [ "no single readable file version" <+> pathDoc p | p <- noFileVersion st ]
 
+  -- Reported and still folded, for the reason 'NameProblem' gives: the name is
+  -- normative (PEP-19) and no signature covers it, so a reader that dropped a
+  -- misnamed file would show less than canon holds and disagree with every other
+  -- clone over a byte nobody signed.
+  <> capped "misnamed"
+       [ "misnamed" <+> pathDoc p <> ":" <+> pretty np | (p, np) <- stMisnamed st ]
+
   <> capped "dropped" (fmap pretty dropped)
   <> capped "anomaly" (fmap pretty anomalies)
 
@@ -336,6 +375,7 @@ reportDoc st =
          <+> "anomalies" <+> pretty (length anomalies)
          <+> "unreadable" <+> pretty (length (stBad st))
          <+> "unversioned" <+> pretty (length (noFileVersion st))
+         <+> "misnamed" <+> pretty (length (stMisnamed st))
          <+> "tree-version" <+> maybe "missing" (const "ok") (stVersion st) ]
   where
     fr = stFold st
@@ -392,6 +432,7 @@ reportCode st
     clean = List.null (frDropped fr) && List.null (frAnomalies fr)
               && List.null (stBad st)
               && List.null (noFileVersion st)
+              && List.null (stMisnamed st)
               && stVersion st /= Nothing
 
 -- Files whose own version clause did not read.

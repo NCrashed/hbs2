@@ -1385,33 +1385,32 @@ what they expose. The contract:
     not implement is refused rather than folded under the rules it does
   - `FoldResult` holds `frThreads` (the map below), `frRedacted` (events a
     renderer must withhold), `frDropped` and `frAnomalies` (what the audit
-    prints), `frLog` and `frOwner`
+    prints), `frMaintainers` (the keys the fold ended up trusting, which
+    `hub verify` prints and PEP-22 makes normative), `frLog` and `frOwner`
   - `ThreadState` fields: number, kind, title, status, labels, assignees,
     author, created_at, updated_at, comments[], and for PRs the source/onto
     coordinates and merge result.
 
-The CLI maintains a local materialized cache in SQLite, ported from
-fixme-new (`/home/user/dev/hbs2-legacy/fixme-new/lib/Fixme/State.hs`): its
-single `object(o, w, k, v)` table with last-write-wins by weight, plus a
-`comments` table. The port is nearly verbatim; the monofold and the
-LWW-by-weight upsert carry over. The cache is node-local and never canonical:
-it is always reproducible from the event log, so it is gitignored and
-rebuildable.
+This paragraph used to plan a local materialized cache in SQLite, ported from
+fixme-new's `object(o, w, k, v)` table. It is superseded: PEP-22 "Reuse of
+fixme-new" decides against the port and says why, and hbs2-hub has no SQLite
+dependency. What survives from it is the constraint, which holds for any cache
+anyone does build.
 
-What does NOT carry over is the `scanned`-style table recording the last applied
-`seq` as a resume point. That works for a log that only ever grows at the end,
-and canon does not: files arrive in whatever order a fetch produces them, and an
-`open` with a lower `seq` can turn up after the reply that names it has already
-been refused as dangling. Resuming from "the highest seq applied" would leave
-that reply refused forever, in a cache nobody would think to distrust.
+A cache may key on the OUTPUT of a fold and never on a position inside one. The
+`scanned`-style table recording the last applied `seq` as a resume point works
+for a log that only ever grows at the end, and canon does not: files arrive in
+whatever order a fetch produces them, and an `open` with a lower `seq` can turn
+up after the reply that names it has already been refused as dangling. Resuming
+from "the highest seq applied" would leave that reply refused forever, in one
+clone and not in another, in a cache nobody would think to distrust.
 
-The rule an incremental cache has to follow is therefore: a batch of new files
-may be applied on top of the cache only if every one of them has a `seq` above
-every `seq` already applied. Otherwise the cache is dropped and rebuilt from the
-whole log, which is cheap because the fold is cheap and the tree is local. Any
-cleverer scheme has to answer what a late arrival does to admission, and
-admission is not a function of one event. A renderer reads either the
-library `materialize` directly or the SQLite cache; it never writes canon.
+So a batch of new files may be applied on top of a cache only if every one of
+them has a `seq` above every `seq` already applied; otherwise the cache is
+dropped and rebuilt from the whole log, which is cheap because the fold is cheap
+and the tree is local. Any cleverer scheme has to answer what a late arrival does
+to admission, and admission is not a function of one event. A renderer reads the
+library's `materialize` directly; it never writes canon.
 
 
 Redaction, retention, compaction

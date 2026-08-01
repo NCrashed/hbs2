@@ -56,6 +56,7 @@ module HBS2.Hub.Types
   , safeWith
   , pathText
   , hashRefBytes
+  , hashRefWeight
   , PartSecret
   , mkPartSecret
   , MessageSecret
@@ -538,7 +539,15 @@ pad w n = replicate (max 0 (w - length s)) '0' <> s
 -- (see @maxBoxBytes@): four kilobytes of slack covers a handful of hashes only
 -- while a hash is a hash.
 validHashRef :: HashRef -> Bool
-validHashRef h = LBS.length (serialise h) == hashRefBytes
+validHashRef h = hashRefWeight h == hashRefBytes
+
+-- | What this one weighs on the wire.
+--
+-- For saying so in a report. A hash-shaped field that is not a hash is printed
+-- by its size rather than by its base58, which is quadratic and which a canon box
+-- can make tens of kilobytes wide.
+hashRefWeight :: HashRef -> Int64
+hashRefWeight = LBS.length . serialise
 
 -- | What a well-formed one weighs on the wire.
 --

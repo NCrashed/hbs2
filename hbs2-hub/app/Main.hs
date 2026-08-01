@@ -5,6 +5,7 @@
 -- and the help, so that adding a verb is adding a module and one line.
 module Main where
 
+import HBS2.Hub.Types (safeText)
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Verify
@@ -173,7 +174,12 @@ main = do
     -- used to share: falling into the stdin branch made a typo exit zero after
     -- printing the help, and on a terminal or in a pipeline it waited for input
     -- nobody was going to send.
-    (w:_, Nothing) -> die ("unknown verb: " <> w <> "\ntry: hbs2-hub --help")
+    -- THROUGH safeText, like every other stranger's bytes this program prints.
+    -- argv is a stranger's bytes on the one path where nothing has looked at it
+    -- yet: a verb with an ESC in it went straight to the terminal, and a verb
+    -- with a newline and a plausible second line forged the advice under it.
+    (w:_, Nothing) -> die ( "unknown verb: " <> Text.unpack (safeText (Text.pack w))
+                              <> "\ntry: hbs2-hub --help" )
 
     -- recover is what probes for the peer socket and builds the RPC clients;
     -- without it every verb that talks to hbs2-peer fails as "not connected".

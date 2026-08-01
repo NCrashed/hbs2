@@ -410,14 +410,25 @@ within secs what act = do
   -- takeMVar here is not inside anybody's mask, so it interrupts, and the example
   -- goes red on time. The forked thread is left running: it is stuck by
   -- definition, and there is nothing to be done about that from here.
+  -- PATH IS PUT BACK HERE TOO, and not only by the shim helper's bracket.
+  --
+  -- The helper runs inside the abandoned thread, so on a timeout its bracket
+  -- never releases and the global PATH keeps pointing at a shim directory that
+  -- withSystemTempDirectory is about to delete. Every example after it in the
+  -- file then runs against a git that is not there, so one red example became a
+  -- cascade and the first failure was buried in the middle of it.
+  path <- Env.lookupEnv "PATH"
+  let restore = maybe (Env.unsetEnv "PATH") (Env.setEnv "PATH") path
   done <- newEmptyMVar :: IO (MVar (Either SomeException ()))
   _ <- forkIO (try act >>= putMVar done)
   timeout (secs * 1000000) (takeMVar done) >>= \case
     Just (Right ()) -> pure ()
-    Just (Left e)   -> throwIO e
-    Nothing -> expectationFailure
-                 (what <> ": did not finish in " <> show secs <> "s, which for this"
-                       <> " test means the reader stopped stopping")
+    Just (Left e)   -> restore >> throwIO e
+    Nothing -> do
+      restore
+      expectationFailure
+        (what <> ": did not finish in " <> show secs <> "s, which for this"
+              <> " test means the reader stopped stopping")
 
 -- A fake git on PATH, printing a fixed listing on stdout and n lines of noise on
 -- stderr, and a read of "canon" through it.
@@ -857,7 +868,9 @@ spec = do
       -- is where the renderer lives.
       shimmedWith gitBounds 0 128 "" $ \readIt _ ->
         readIt >>= \case
-          Left (RefUnresolved m) -> do
+          -- ToolSaid, not just any Told: these are git's words, and printing them
+          -- as this program's sentence is the confusion the type exists to stop.
+          Left (RefUnresolved (ToolSaid m)) -> do
             Text.unpack m `shouldContain` "bad ref refs/hbs2/meta"
             -- The last line, which is where git puts what to run.
             Text.unpack m `shouldContain` "git fsck"
@@ -892,7 +905,11 @@ spec = do
       -- The shim ignores SIGTERM, so this also covers the teardown: withProcessTerm
       -- would have waited for it for ever, which is the bound not being a bound.
       -- One second here; sixty in production.
-      within 30 "the idle bound and the teardown" $
+      -- TEN, not thirty, against a shim that sleeps thirty: at thirty the shim
+      -- dies at the same moment this gives up, so a reader that only stops
+      -- because its child did would finish inside the deadline by a few tens of
+      -- milliseconds and pass. The correct reader stops in about a second.
+      within 10 "the idle bound and the teardown" $
         stalling "ls-tree" (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 }) $ \readIt ->
           readIt >>= \case
             Left (TreeUnreadable (ReaderSays m)) -> do
@@ -918,13 +935,18 @@ spec = do
       --
       -- rev-parse is the first call this reader makes, so this covers the path all
       -- four take, cat-file included, which an audit runs once per event file.
-      within 30 "a small call that hangs" $
+      within 10 "a small call that hangs" $
         stalling "rev-parse" (gitBounds { gbCallSeconds = 1, gbTeardownSeconds = 1 })
           $ \readIt -> readIt >>= \case
-              -- git ran and said nothing, four calls' worth of nothing: what
-              -- matters here is that an answer arrives at all.
-              Left _  -> pure ()
-              Right _ -> expectationFailure "expected a refusal from a hung call"
+              -- ToolStalled, and the constructor is the point. "Some Left"
+              -- passed while this was ReaderFailed, whose advice is that the
+              -- failure is local and is the ONE refusal worth retrying: git is
+              -- sitting right there, and the retry waits out the same minute
+              -- again. Reachable without a shim, by a FIFO at
+              -- .git/refs/hbs2/meta, where rev-parse answers and show-ref blocks.
+              Left (ToolStalled m) -> Text.unpack m `shouldContain` "did not finish"
+              other -> expectationFailure
+                         ("expected ToolStalled, got " <> show (fmap (const ()) other))
 
     it "gives up on a listing that dribbles for ever" $ do
       -- The idle bound cannot see this one: the writer is never silent for a whole
@@ -932,7 +954,7 @@ spec = do
       -- looks like from here -- 64 entries at 12 levels all pointing at one
       -- subtree is 64^12 traversals of 116 KB of objects -- and a variant that
       -- emits a record between them resets the idle counter for ever.
-      within 30 "the total deadline" $
+      within 10 "the total deadline" $
         dribbling (gitBounds { gbCallSeconds = 5, gbListingSeconds = 1
                              , gbTeardownSeconds = 1 })
           $ \readIt -> readIt >>= \case
@@ -954,7 +976,10 @@ spec = do
       -- caller never typed.
       withCanon [("version", "(hub-meta 1)\n")] $ \dir -> do
         withGitCanonIn (Just dir) (\cs -> csEntries cs "--upload-pack=evil") >>= \case
-          Left (RefUnresolved m) -> Text.unpack m `shouldContain` "not an object id"
+          -- ReaderSays: this reader refused the revision itself, without running
+          -- git, so the message is its own and must not print as a quoted block.
+          Left (RefUnresolved (ReaderSays m)) ->
+            Text.unpack m `shouldContain` "not an object id"
           other -> expectationFailure
                      ("expected RefUnresolved, got " <> show (fmap (const ()) other))
 
@@ -1002,7 +1027,7 @@ spec = do
 
       withSystemTempDirectory "hub-nogit" $ \dir ->
         readIn dir >>= \case
-          Left (NoRepository msg) ->
+          Left (NoRepository (ToolSaid msg)) ->
             Text.unpack msg `shouldContain` "not a git repository"
           other -> expectationFailure
                      ("expected NoRepository, got " <> show (fmap (const ()) other))
@@ -1017,7 +1042,7 @@ spec = do
         -- naming a tag or a tree gets here the same way in the wild.
         writeFile (dir </> ".git" </> "refs" </> "hbs2" </> "meta") (blob <> "\n")
         readIn dir >>= \case
-          Left (RefUnresolved msg) -> Text.unpack msg `shouldNotBe` ""
+          Left (RefUnresolved (ToolSaid msg)) -> Text.unpack msg `shouldNotBe` ""
           other -> expectationFailure
                      ("expected RefUnresolved, got " <> show (fmap (const ()) other))
 
@@ -1079,7 +1104,13 @@ spec = do
         within 20 "the short-body read" $ do
           got <- blobsOf bounds dir
           case lookup "threads/t/0001-short" got of
-            Just (BlobRefused m) -> Text.unpack m `shouldContain` "did not deliver"
+            -- BOTH NUMBERS, and no verdict on which side is at fault. A short
+            -- body and a disk that stopped for ten seconds look identical from
+            -- here, so "the object did not deliver them" accuses the tree of one
+            -- of two things it might not have done. What arrived is a fact.
+            Just (BlobRefused m) -> do
+              Text.unpack m `shouldContain` "announces 20000 bytes"
+              Text.unpack m `shouldContain` "delivered 11 and stopped"
             other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
     it "reads a blob whose batch process floods stderr past a pipe buffer" $ do
@@ -1175,19 +1206,65 @@ spec = do
       -- The other half of the budget, and it was counting CHARACTERS against a
       -- byte bound, so canon in a non-Latin script was let past it by however
       -- much of it was not ASCII. Nothing exercised either half.
-      let bounds = gitBounds { gbReadBytes = 3 }
+      -- NON-LATIN, and that is the whole test. The fixture was ten ASCII a's
+      -- against a bound of 3, where a byte and a character are the same thing and
+      -- both metrics pass: the comment promised what the fixture could not see.
+      -- Six Cyrillic characters are twelve bytes, so a bound of 8 is passed by the
+      -- byte count and not by the character count, and the two answers differ.
+      let bounds = gitBounds { gbReadBytes = 8 }
+          first = utf8 "\1087\1088\1080\1074\1077\1090"   -- 6 chars, 12 bytes
       withCanonOf (\dir -> do
-        a <- hashObject dir "aaaaaaaaaa"
+        a <- hashObject dir first
         b <- hashObject dir "bbbbbbbbbb"
         v <- hashObject dir "(hub-meta 1)\n"
         pure [ ("threads/t/0001-a", a), ("threads/t/0002-b", b), ("version", v) ]) $ \dir -> do
         got <- blobsOf bounds dir
-        -- The first is under the bound when it is asked for, because the bound is
-        -- on what has been spent. The second is not.
-        lookup "threads/t/0001-a" got `shouldBe` Just (BlobText "aaaaaaaaaa")
+        -- The first is under the bound when it is ASKED for, because the bound is
+        -- on what has been spent so far.
+        lookup "threads/t/0001-a" got
+          `shouldBe` Just (BlobText "\1087\1088\1080\1074\1077\1090")
+        -- And the second is refused, which it is not if the twelve bytes just
+        -- spent were counted as six characters against a bound of eight.
         case lookup "threads/t/0002-b" got of
-          Just (BlobBudget m) -> Text.unpack m `shouldContain` "bytes"
+          Just (BlobBudget m) -> Text.unpack m `shouldContain` "8 bytes"
           other -> expectationFailure ("expected BlobBudget, got " <> show other)
+
+    it "gives up on one blob that never stops arriving" $ do
+      -- The deadline the blob reader did not have. Every read here has an idle
+      -- bound, and a source that says something before each of them is never
+      -- idle: the walk's own budget is checked BETWEEN blobs, so one blob could
+      -- run past it and never be looked at. This is the same defect the listing
+      -- reader had, in the same words, one function away.
+      let bounds = gitBounds { gbBlobSeconds = 1, gbBodySeconds = 5 }
+      within 30 "the per-blob deadline" $
+        batching bounds
+          -- A trickle that never finishes the body it announced and is never
+          -- silent for as long as the idle bound. Only a deadline sees this.
+          [ "while read oid; do"
+          , "  printf '%s blob 100000\\n' \"$oid\""
+          , "  while true; do printf xxxxxxxxxx; sleep 0.1; done"
+          , "done"
+          ] $ \readIt _ -> readIt >>= \case
+              BlobStalled m -> Text.unpack m `shouldContain` "on one object"
+              other -> expectationFailure ("expected BlobStalled, got " <> show other)
+
+    it "refuses an object id that is not one git would have written" $ do
+      -- The batch reader compares the echoed id to the one it wrote byte for
+      -- byte, and treats a mismatch as the two of them having lost count of each
+      -- other. So the guard in front of it has to be at least as strict: it took
+      -- 4 to 64 characters in either case, which is what git accepts from a
+      -- HUMAN, and an abbreviated or uppercase id can never round-trip. A bad id
+      -- would have been reported as a protocol desync rather than as a bad id.
+      withCanon [("version", "(hub-meta 1)\n")] $ \dir ->
+        withGitCanonIn (Just dir) $ \cs -> do
+          csBlob cs "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+            `shouldReturn` BlobUnavailable "not an object id"
+          csBlob cs "deadbeef" `shouldReturn` BlobUnavailable "not an object id"
+          -- And the full lowercase form is still asked for, so the guard has not
+          -- simply become "refuse everything".
+          csBlob cs (Text.pack (replicate 40 'a')) >>= \case
+            BlobRefused _ -> pure ()
+            other -> expectationFailure ("expected BlobRefused, got " <> show other)
 
     it "leaves no batch process behind" $ do
       -- The source holds a git, three pipes and a thread. csClose is what returns
@@ -1198,7 +1275,12 @@ spec = do
       -- The shim survives its stdin closing and ignores SIGTERM, so passing this
       -- takes the whole escalation and not just the polite half.
       sleep <- fromMaybe "/bin/sleep" <$> findExecutable "sleep"
-      within 60 "the batch teardown" $
+      -- FIFTEEN. The mechanism this pins is the ORDER of cancel and hClose, and
+      -- the wrong order is not a hang: hClose on a handle whose reader is inside
+      -- hGetSome returns when that read times out, measured at 30.0009s. At a
+      -- sixty-second budget both orders are green, which is the whole of what
+      -- this example is supposed to tell apart. Right order: about four seconds.
+      within 15 "the batch teardown" $
         batching gitBounds
           [ "trap '' TERM"
           , "echo $$ > \"$(dirname \"$0\")/batchpid\""

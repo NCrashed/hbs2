@@ -2,20 +2,22 @@
 
 ## Fixed in the release artifacts
 
-Three things that were wrong in every artifact up to and including
-0.25.5.0, and are user-visible on an install rather than in a source
+Three things that are user-visible on an install rather than in a source
 tree:
 
   - The linux musl tarball shipped `bin/git-hbs2` as a one-line shebang
     script naming a `/nix/store` path that does not exist on the machine
     unpacking it, so `git hbs2 ...` and `git-hbs2 --help` (which
     INSTALL.md offers as an install check) failed with "no such file or
-    directory". It is a symlink to `hbs2-git3` now, as it already was in
-    the docker image and the macOS bundle.
+    directory". Wrong in every artifact up to and including 0.25.5.0. It
+    is a symlink to `hbs2-git3` now, as it already was in the docker
+    image and the macOS bundle.
   - The docker image carried `/bin/hub` and `/bin/git-hbs2` as symlinks
     into a store path that is not in the image, so both were dangling:
-    `docker exec ... hub` could never have worked. Nothing ran the image
-    before pushing it; the release job does now.
+    `docker exec ... hub` could never have worked. `git-hbs2` was wrong
+    in every artifact; `/bin/hub` only from the commit that added the
+    alias, since `hbs2-hub` did not exist in 0.25.5.0. Nothing ran the
+    image before pushing it; the release job does now.
   - The docker image grew by about 123 MB, because it now carries
     `gitMinimal`: `hbs2-hub` reads a repository's issue tracker by
     running `git`, and a forge CLI in an image with no git can announce
@@ -116,7 +118,18 @@ tree:
         A path listed twice is named; if the two entries differ, neither
         is read, because choosing between them would let the order of
         entries in somebody else's tree decide which signed event the
-        fold sees. On `version` it is a refusal.
+        fold sees. Identical entries collapse and the file is read: it
+        is one file listed twice, and refusing would be refusing over a
+        question that has one answer. On `version` the same rule holds,
+        and there a difference is a refusal of the whole audit rather
+        than of one file.
+
+        An event file whose name is not the one PEP-19 gives it is
+        named, and folded anyway: no signature covers a path, so
+        dropping it would show less than canon holds and disagree with
+        every other clone. Two halves of the name are checked, the shape
+        and the event-id; `seq` and the scope live in the canon box,
+        which only the fold opens, and the fold is never shown a path.
 
         The repository key is an argument: the owner key is the root of
         the trust chain, so canon that named its own owner would be

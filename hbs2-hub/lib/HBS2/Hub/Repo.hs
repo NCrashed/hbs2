@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- | Canon as a tree of files (PEP-19 "Tree layout").
 --
 -- Canon is an orphan git commit chain under @refs\/hbs2\/meta@ whose trees hold
@@ -37,6 +38,7 @@ module HBS2.Hub.Repo
   , EntryKind(..)
   , BlobResult(..)
   , Told(..)
+  , NameProblem(..)
   ) where
 
 import HBS2.Hub.Types
@@ -143,6 +145,11 @@ data BlobResult =
     -- advice is "this is local: no process slots, no file descriptors", printed
     -- about a git that had answered perfectly promptly.
   | BlobProtocol Text
+    -- | The source ran and stopped saying anything. Distinct from 'BlobProtocol'
+    -- (it said something wrong) and from 'BlobUnavailable' (it could not be run),
+    -- because those are the two answers a silent git used to get, and neither is
+    -- true of it.
+  | BlobStalled Text
     -- | The blob's announced size is larger than this reader will hold, carrying
     -- THE ANNOUNCED SIZE: nothing was read, which is the point of refusing on the
     -- announcement.
@@ -175,14 +182,14 @@ data CanonUnreadable =
     -- they fetch canon into the tree they can see, run it again, and get the same
     -- sentence for ever.
     NoCanonRef ByteString
-    -- | Not a git repository, or git could not be run. Distinct from the above
-    -- because the advice differs: fetching canon into a directory that is not a
-    -- repository will not help. Carries what the tool said, whole.
-  | NoRepository Text
+    -- | Not a git repository. Distinct from the above because the advice differs:
+    -- fetching canon into a directory that is not a repository will not help.
+    -- Carries what was said and WHO SAID IT, whole.
+  | NoRepository Told
     -- | The ref is here and does not resolve to a commit: a pruned object, a
     -- partial clone, or a ref pointing at something else. Distinct from a missing
     -- ref for the same reason, and it used to share its answer.
-  | RefUnresolved Text
+  | RefUnresolved Told
     -- | The commit is here and its tree cannot be listed, and WHO SAID SO.
     --
     -- The distinction is not decoration: the report prints a tool's words as an
@@ -240,6 +247,29 @@ data CanonUnreadable =
     -- a tool that ran, answered, and then stopped running, which is what a fork
     -- limit reached two hundred thousand blobs into a tree looks like.
   | ReaderFailed Text
+    -- | git RAN and did not answer. Not the same thing as 'ReaderFailed', which
+    -- was the answer to both, and the difference is the whole of the advice: that
+    -- one is documented as the single refusal worth retrying, and a retry against
+    -- a git that is sitting there buys another minute and another stuck child.
+    --
+    -- Reachable without any exotica: a FIFO at @.git\/refs\/hbs2\/meta@ leaves
+    -- @rev-parse@ answering and @show-ref@ blocked on open, which exited 12 after
+    -- a minute with "no process slots, no file descriptors" and an invitation to
+    -- try again.
+    --
+    -- The listing has had this distinction since it grew bounds of its own; these
+    -- are the three small calls, which did not.
+  | ToolStalled Text
+    -- | The listing parsed and the walk over its files did not: git answered a
+    -- request about an object nobody asked for, with a type nobody asked for, or
+    -- with a size this reader will not read into an Int.
+    --
+    -- Its own constructor because the two it borrowed both lied. 'ReaderFailed'
+    -- says the tool could not be run, about a git that answered promptly.
+    -- 'TreeUnreadable' says the tree will not list, printed about a listing that
+    -- had already been read whole and parsed, under advice recommending
+    -- compaction, which has nothing to do with a batch reply going out of step.
+  | BlobsOutOfStep Text
   deriving stock (Eq,Show)
 
 -- | The tool's own words, as their own indented block rather than a value in a
@@ -280,11 +310,12 @@ instance Pretty CanonUnreadable where
     -- not paste back into a shell, and that is the whole reason pathText is not
     -- decodeUtf8Lenient.
     NoCanonRef w      -> "no" <+> pretty metaRef <+> "in" <+> pretty (pathText w)
-    NoRepository e    -> "cannot read this git repository:" <> toolSaid e
-    RefUnresolved e   -> pretty metaRef <+> "does not resolve to a commit:"
-                           <> toolSaid e
-    TreeUnreadable (ToolSaid e)   -> "cannot list the canon tree:" <> toolSaid e
-    TreeUnreadable (ReaderSays e) -> "cannot list the canon tree:" <+> pretty (safeText e)
+    NoRepository t    -> "cannot read this git repository:" <> told t
+    RefUnresolved t   -> pretty metaRef <+> "does not resolve to a commit:" <> told t
+    TreeUnreadable t  -> "cannot list the canon tree:" <> told t
+    ToolStalled e     -> "git ran and did not answer:" <+> pretty (safeText e)
+    BlobsOutOfStep e  -> "reading the canon files went out of step with git:"
+                           <+> pretty (safeText e)
     CanonTooNewHere n -> "canon was folded under rules newer than this build:"
                            <+> "hub-meta" <+> pretty n
     VersionUnreadable p -> "the version file is listed and does not read:"
@@ -297,13 +328,30 @@ instance Pretty CanonUnreadable where
     CanonListingTooBig n -> "the canon tree listing is over" <+> pretty n
                               <+> "bytes, past what this reader will read"
     CanonTooSlow e    -> "this reader gave up on canon:" <+> pretty (safeText e)
-    ReaderFailed e    -> "this reader could not run git:" <> toolSaid e
+    -- A SENTENCE, not a quoted block. Nothing here is ever git's: this
+    -- constructor is for git not having run, so what it carries is a message
+    -- written here, or an IOException's own words about a failed exec. Printed
+    -- through toolSaid, "git: startProcess: exec: does not exist" appeared under
+    -- a | marker as though git had said it, which is the exact confusion the
+    -- markers exist to prevent, on the first refusal a new user meets.
+    ReaderFailed e    -> "this reader could not run git:" <+> pretty (safeText e)
 
 -- | Whose words a message is.
+--
+-- On every constructor that can carry either, which is every one whose payload
+-- sometimes comes from git's stderr and sometimes from this reader. Three of them
+-- were left as bare 'Text' when this type was added and went on printing this
+-- reader's own sentences inside the block that means "a stranger said this".
 data Told =
     ToolSaid Text     -- ^ git's, printed as a quoted block
   | ReaderSays Text   -- ^ this program's, printed as its own sentence
   deriving stock (Eq,Show)
+
+-- | A 'Told' as the report prints it: a block for the tool, a sentence for us.
+told :: Told -> Doc ann
+told = \case
+  ToolSaid e   -> toolSaid e
+  ReaderSays e -> " " <> pretty (safeText e)
 
 -- | Why one file in the tree did not become an event.
 data FileProblem =
@@ -352,6 +400,14 @@ data FileProblem =
     -- else's tree, silently, with the audit exiting zero. Everywhere else in this
     -- package an ambiguity is refused rather than resolved, and this is that.
   | FileDuplicated
+    -- | The file reads, parses, and declares a version that is not one: today
+    -- only zero, since anything above this build's is 'CanonTooNewHere'.
+    --
+    -- Not 'FileMalformed': the clause is spelled correctly and the file is a
+    -- perfectly good s-expression, so "malformed clause hub-meta" sent whoever
+    -- read it looking for a syntax error that is not there. What is wrong is the
+    -- number, and only the number.
+  | FileBadVersion Word32
   deriving stock (Eq,Ord,Show)
 
 instance Pretty FileProblem where
@@ -371,6 +427,37 @@ instance Pretty FileProblem where
     FileIsADirectory    -> "a directory in the tree, where a file belongs"
     FileUnexpected      -> "not a path the canon tree layout has"
     FileDuplicated      -> "listed more than once in the tree"
+    FileBadVersion n    -> "declares hub-meta" <+> pretty n <> ", and there is no"
+                             <+> "version" <+> pretty n
+
+-- | How an event file's name disagrees with the event in it.
+--
+-- PEP-19 "Tree layout" makes the name normative: twenty digits of @seq@, a
+-- hyphen, then the event-id. Nothing checked it, so a file could be named for one
+-- event and hold another, and a tool that trusts names (a hook grepping the tree,
+-- a human reading @ls@) would be looking at a different event from the one the
+-- fold admits.
+--
+-- REPORTED, NEVER OBEYED, like the per-file version clause: the fold works off
+-- signed content and never reads a path, so dropping a misnamed file would make
+-- this clone show less than canon holds over a byte no signature covers. What is
+-- wrong with the tree is said, and the tree is still folded.
+--
+-- Two of the four halves of the name are checked here, and the other two cannot
+-- be: @seq@ and the thread it sits under come from the CANON box, which only the
+-- fold opens, and this runs before the fold. PEP-22 says which.
+data NameProblem =
+    -- | Not @\<20 digits>-\<something>@ at all.
+    NameNotEventShaped
+    -- | Shaped right and naming another event, with the id the file holds.
+  | NameWrongEvent EventId
+  deriving stock (Eq,Show)
+
+instance Pretty NameProblem where
+  pretty = \case
+    NameNotEventShaped -> "not named as PEP-19 names an event file:"
+                            <+> "20 digits of seq, a hyphen, the event-id"
+    NameWrongEvent e   -> "named for another event; this file holds" <+> pretty e
 
 -- | What reading canon produced.
 data CanonState = CanonState
@@ -378,6 +465,8 @@ data CanonState = CanonState
   , stVersion :: Maybe Word32
     -- ^ the tree's own rules version, absent when the tree has no @version@ file
   , stBad     :: [(ByteString, FileProblem)]
+  , stMisnamed :: [(ByteString, NameProblem)]
+    -- ^ files whose name is not the one PEP-19 gives them, reported and folded
   , stFileVersions :: [(ByteString, Maybe Word32)]
     -- ^ what each file declared, reported and never obeyed (PEP-19)
   , stFold    :: FoldResult
@@ -549,23 +638,27 @@ readCanon cs owner = csCommit cs >>= \case
   Left e -> pure (Left e)
   Right commit -> csEntries cs commit >>= \case
     Left e -> pure (Left e)
-    Right entries
-      -- The COUNT is over the whole listing, and the bytes over the event files.
-      -- Two different costs: every entry becomes a TreeEntry, is sorted and is
-      -- printed, so ten million paths outside the layout cost ten million lines
-      -- whether or not this reader would fetch any of them, and the paths are
-      -- slices of one listing buffer, so holding any of them holds all of it. The
-      -- bytes are what the reader will HOLD, which only the event files are.
-      | length entries > maxCanonFiles ->
-          pure (Left (CanonTooMany (length entries)))
+    -- The COUNT below is over the whole listing, and the bytes over the event
+    -- files. Two different costs: every entry becomes a TreeEntry, is sorted and
+    -- is printed, so ten million paths outside the layout cost ten million lines
+    -- whether or not this reader would fetch any of them, and the paths are
+    -- slices of one listing buffer, so holding any of them holds all of it. The
+    -- bytes are what the reader will HOLD, which only the event files are.
     Right entries -> do
-      let (evEntries, refused) = sortCanon entries
-          bytes = sum [ n | (_,_,n) <- evEntries ]
-
-      -- Before any blob is fetched.
-      case (if bytes > maxCanonBytes then Just (CanonTooBig bytes) else Nothing) of
-       Just refusal -> pure (Left refusal)
-       Nothing -> do
+        -- THE VERSION FIRST, ahead of both bounds on size, because the two
+        -- answers are not equal in rank. A bound says "this canon is bigger than
+        -- this reader will take, go and compact it", which is work for whoever
+        -- owns the tree; the version says "this build cannot fold this tree at
+        -- all, upgrade", which is work for whoever is reading it and is true
+        -- whatever the size. Measured the other way round: a 300 MB tree stamped
+        -- (hub-meta 99) was answered with code 8 and advice to compact, and
+        -- compacting it would have produced a small tree this build still cannot
+        -- read.
+        --
+        -- It costs one linear scan of a listing already in memory, plus one blob
+        -- bounded by maxEventBytes. The COUNT bound still runs before 'sortCanon'
+        -- below, which is the expensive pass and the one it exists to protect.
+        --
         -- The version decides whether the rest may be folded at all, so its
         -- absence and its unreadability are different answers. The listing is
         -- what tells them apart: a file the tree does not list is absent, and one
@@ -598,7 +691,8 @@ readCanon cs owner = csCommit cs >>= \case
                    | n > maxEventBytes -> pure (Left (Right (FileTooLarge n)))
                    | otherwise -> csBlob cs oid >>= \case
                        BlobUnavailable e -> pure (Left (Left (ReaderFailed e)))
-                       BlobProtocol e -> pure (Left (Left (TreeUnreadable (ReaderSays e))))
+                       BlobStalled e -> pure (Left (Left (ToolStalled e)))
+                       BlobProtocol e -> pure (Left (Left (BlobsOutOfStep e)))
                        BlobBudget e -> pure (Left (Left (CanonTooSlow e)))
                        BlobOversize n -> pure (Left (Right (FileTooLarge n)))
                        BlobRefused e -> pure (Left (Right (FileUnreadable e)))
@@ -613,8 +707,7 @@ readCanon cs owner = csCommit cs >>= \case
           -- Zero is not a version this or any build implements, and it read as
           -- one: the gate only ever looked for NEWER, so (hub-meta 0) folded
           -- silently under today's rules with a clean report.
-          Right (Just 0) -> pure (Left (VersionUnreadable (FileMalformed
-                              (BadClause "hub-meta"))))
+          Right (Just 0) -> pure (Left (VersionUnreadable (FileBadVersion 0)))
           -- BEFORE the blobs, not after them. The gate lives inside foldCanon,
           -- which runs last, so a tree stamped newer than this build was read in
           -- full first: measured at one cat-file per event, all of it thrown away.
@@ -622,7 +715,13 @@ readCanon cs owner = csCommit cs >>= \case
           -- ReaderFailed and "nothing was learned about canon", when the version
           -- file had been read and the answer was already known.
           Right (Just n) | n > hubMetaVersion -> pure (Left (CanonTooNewHere n))
+          -- Now the counting, and only now: see the note over the version read.
+          _ | length entries > maxCanonFiles ->
+                pure (Left (CanonTooMany (length entries)))
           Right declared -> do
+           let (evEntries, refused) = sortCanon entries
+               bytes = sum [ n | (_,_,n) <- evEntries ]
+           if bytes > maxCanonBytes then pure (Left (CanonTooBig bytes)) else do
 
             -- Parsed inside the loop, so a file's TEXT dies as soon as it has
             -- become an event or a problem. Binding the texts first and using
@@ -633,11 +732,11 @@ readCanon cs owner = csCommit cs >>= \case
             -- problem per remaining file: 200000 failed forks are one local
             -- failure, and a report listing them all as unreadable files is a
             -- report about canon that is not about canon.
-            readAll <- foldM readOne (Right ([],[],[])) evEntries
+            readAll <- foldM readOne (Right ([],[],[],[])) evEntries
 
             case readAll of
              Left u -> pure (Left u)
-             Right (evs, vers, bad2) -> do
+             Right (evs, vers, bad2, mis) -> do
               let bad = sortOn fst (refused <> bad2)
 
               -- foldCanon and not foldEvents: the tree's version governs the
@@ -649,22 +748,49 @@ readCanon cs owner = csCommit cs >>= \case
                   , stVersion = declared
                   , stBad     = bad
                   , stFileVersions = sortOn fst vers
+                  , stMisnamed = sortOn fst mis
                   , stFold    = fr
                   }
 
   where
+    -- The leaf of a path against the name PEP-19 gives this event. See
+    -- 'NameProblem' for what is checked and what cannot be.
+    nameProblem p ev
+      | not shaped = Just NameNotEventShaped
+      | named /= mine = Just (NameWrongEvent (eventId ev))
+      | otherwise = Nothing
+      where
+        -- The last component. Safe on any path this reaches: isEvent has already
+        -- said it has two components under threads/ or one under repo/.
+        base = B8.takeWhileEnd (/= '/') p
+        (digits, rest) = B8.splitAt 20 base
+        shaped = B8.length digits == 20
+                   && B8.all (\c -> c >= '0' && c <= '9') digits
+                   && not (B8.null rest) && B8.head rest == '-'
+        named = B8.drop 1 rest
+        mine = B8.pack (show (pretty (eventId ev)))
+
     readOne acc@(Left _) _ = pure acc
-    readOne (Right (evs, vers, bad)) (p, oid, _) = csBlob cs oid >>= \case
+    readOne (Right (evs, vers, bad, mis)) (p, oid, _) = csBlob cs oid >>= \case
       BlobUnavailable e -> pure (Left (ReaderFailed e))
-      -- The two that are NOT about this file end the walk: a budget spent is
-      -- spent, and a source this reader can no longer follow will not be followed
-      -- any better by the next object. The two that are about it do not: an
-      -- oversized file and an unreadable one are findings, and a report that stops
-      -- at the first of them is a report about one file.
-      BlobProtocol e -> pure (Left (TreeUnreadable (ReaderSays e)))
+      -- The ones that are NOT about this file end the walk: a budget spent is
+      -- spent, and a source that has stopped answering or stopped making sense
+      -- will not do better on the next object. The two that are about it do not:
+      -- an oversized file and an unreadable one are findings, and a report that
+      -- stops at the first of them is a report about one file.
+      BlobStalled e -> pure (Left (ToolStalled e))
+      BlobProtocol e -> pure (Left (BlobsOutOfStep e))
       BlobBudget e -> pure (Left (CanonTooSlow e))
-      BlobOversize n -> pure (Right (evs, vers, (p, FileTooLarge n) : bad))
-      BlobRefused e -> pure (Right (evs, vers, (p, FileUnreadable e) : bad))
+      BlobOversize n -> pure (Right (evs, vers, (p, FileTooLarge n) : bad, mis))
+      BlobRefused e -> pure (Right (evs, vers, (p, FileUnreadable e) : bad, mis))
       BlobText t -> pure $ case parseEvent t of
-        Left e        -> Right (evs, vers, (p, FileMalformed e) : bad)
-        Right (v, ev) -> Right (ev : evs, (p, v) : vers, bad)
+        Left e        -> Right (evs, vers, (p, FileMalformed e) : bad, mis)
+        -- REPORTED AND STILL FOLDED, like the per-file version clause above it.
+        -- The name is normative (PEP-19 "Tree layout") and nothing checked it, so
+        -- a file could name one event and hold another; but the fold works off
+        -- signed content and never looks at a path, so dropping the event here
+        -- would make this reader show less than canon holds and disagree with
+        -- every other clone over a byte no signature covers.
+        Right (v, ev) ->
+          Right ( ev : evs, (p, v) : vers, bad
+                , maybe mis (\np -> (p, np) : mis) (nameProblem p ev) )
