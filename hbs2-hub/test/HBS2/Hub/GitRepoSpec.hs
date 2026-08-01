@@ -1311,8 +1311,18 @@ spec = do
         bracket_ (Env.setEnv "PATH" bin)
                  (unshim bin old)
                  (readTreeWith gitBounds dir >>= \case
-                    Left (ReaderFailed m) ->
-                      Text.unpack m `shouldContain` "does not exist"
+                    Left (ReaderFailed m) -> do
+                      -- THIS READER'S words, not the runtime's. Asserting the
+                      -- runtime's was a test of the C library's errno strings:
+                      -- linux says "does not exist (No such file or directory)"
+                      -- and aarch64-osx says "failed (Unknown error: -2)", so
+                      -- this was the one example in the group that was red there
+                      -- for a reason that had nothing to do with this code.
+                      Text.unpack m `shouldContain` "git could not be started"
+                      -- and the runtime's words are still carried, because they
+                      -- are what tells a missing git from a fork that failed for
+                      -- want of process slots. Checked by shape, not by spelling.
+                      Text.unpack m `shouldContain` "startProcess"
                     other -> expectationFailure
                                ("expected ReaderFailed, got "
                                   <> show (fmap (const ()) other)))

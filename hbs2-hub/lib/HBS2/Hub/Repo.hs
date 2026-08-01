@@ -352,10 +352,16 @@ instance Pretty CanonUnreadable where
     CanonTooSlow e    -> "this reader gave up on canon:" <+> pretty (safeText e)
     -- A SENTENCE, not a quoted block. Nothing here is ever git's: this
     -- constructor is for git not having run, so what it carries is a message
-    -- written here, or an IOException's own words about a failed exec. Printed
-    -- through toolSaid, "git: startProcess: exec: does not exist" appeared under
-    -- a | marker as though git had said it, which is the exact confusion the
-    -- markers exist to prevent, on the first refusal a new user meets.
+    -- written here, which names this reader before quoting whatever the runtime
+    -- said about the failed exec. Printed through toolSaid, "git: startProcess:
+    -- exec: does not exist" appeared under a | marker as though git had said it,
+    -- which is the exact confusion the markers exist to prevent, on the first
+    -- refusal a new user meets.
+    --
+    -- The quoted half is the runtime's and differs between platforms -- that
+    -- same text is "startProcess: find_executable: failed (Unknown error: -2)"
+    -- on aarch64-osx -- so it is evidence for a human and never something to
+    -- assert on.
     ReaderFailed e    -> "this reader got no answer out of git:" <+> pretty (safeText e)
 
 -- | Whose words a message is.

@@ -1220,7 +1220,19 @@ gitCanonWith bounds cwd = do
                    e <- wait errA
                    pure (code, if code == ExitSuccess then o else e)
       pure case r of
-        Left e -> SmallUnstartable (Text.pack (show e))
+        -- THIS READER'S OWN WORDS FIRST, then the runtime's as evidence. It used
+        -- to be the runtime's alone, and those are not the same sentence on two
+        -- platforms: linux says "startProcess: exec: does not exist (No such file
+        -- or directory)" and aarch64-osx says "startProcess: find_executable:
+        -- failed (Unknown error: -2)". A report made of somebody else's words
+        -- says whatever they happen to say, which is the rule 'typeWord' states
+        -- twenty lines up and this line did not follow.
+        --
+        -- The runtime's text is KEPT rather than replaced: it is the only thing
+        -- that distinguishes a git that is not installed from a fork that failed
+        -- for want of process slots, and both reach here.
+        Left e -> SmallUnstartable ( "git could not be started: "
+                                       <> Text.pack (show e) )
         Right Nothing ->
           SmallStalled ( "git " <> Text.pack (unwords (take 2 args))
                            <> " did not finish in "
