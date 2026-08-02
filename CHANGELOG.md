@@ -2,6 +2,48 @@
 
 ## Security
 
+  - **`hbs2-core`: any peer could take over the encrypted flow to any
+    other peer, by naming its nonce first.** `ByPass` names a flow by a
+    32-bit key built from two 16-bit nonces, one per end. Half of that
+    value is the remote side's free choice and rides in the clear, in the
+    `HEY` constructor OUTSIDE the signed box. The shared key was installed
+    under that flow key on a first-writer-wins rule, so a flow key was
+    being used as a name for a peer when it is only a name for a flow.
+
+    Whoever announced a nonce colliding with an honest peer's got their
+    own key installed where that peer's belonged. The honest peer's `HEY`
+    then found the slot taken and installed nothing, while its nonce WAS
+    recorded, so the victim went on encrypting to it, under the stranger's
+    key. Traffic meant for the honest peer became readable by the stranger
+    and unreadable by its recipient. `hbs2-peer` builds the layer with
+    `byPassDef`, whose `byPassKeyAllowed` accepts every key, so a valid
+    `HEY` for this cost an attacker one signature and a nonce it read off
+    the wire. `cleanupByPassMessaging` kept the shadowed entry rather than
+    repairing it. Sixteen bits is also small enough that two HONEST peers
+    collide by birthday at a few hundred, breaking the flow between them
+    with nobody attacking anything.
+
+    Two things are separated now. What we encrypt to a peer is keyed by
+    the peer, in `peerFlow`, and comes only from the `HEY` that peer
+    signed: a stranger's announcement can no longer speak for somebody
+    else's address. What may decrypt a given flow key is a bounded set of
+    candidates rather than one key, and the Poly1305 tag picks among them,
+    so peers sharing a flow key stay readable instead of taking turns.
+    `cleanupByPassMessaging` rebuilds that set from the peers still known,
+    which repairs a squatted flow key instead of carrying it forward.
+
+    The WIRE FORMAT IS UNCHANGED. Both the `HEY` handshake and the packet
+    header are byte for byte what they were, and no protocol version moves,
+    so a fixed peer and an unfixed one still talk. What changed is only
+    which key each side reaches for.
+
+    Not fixed here, and worth knowing: a `HEY` is still trusted about the
+    address it arrives from, so an attacker who spoofs a peer's source
+    address still redirects our traffic for it. That was true before this
+    change and remains true after. Closing it needs pinning an address to
+    a signing key, which is a policy decision about how peers rotate
+    credentials, not a repair to this layer.
+
   - **`hbs2-core`: a public key was whatever length its sender said it
     was.** The five saltine types this project puts on the wire are
     newtypes over a `ByteString` and had DERIVED `Serialise` instances.

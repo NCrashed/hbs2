@@ -49,7 +49,7 @@ byPassWorker bp@ByPass{..} = do
       p <- readTVarIO probe
       acceptReport p =<< do
         h <- readTVarIO heySent <&> ("heysSent",) . fromIntegral . HM.size
-        n <- readTVarIO noncesByPeer <&> ("noncesByPeer",) .  fromIntegral . HM.size
+        n <- readTVarIO peerFlow <&> ("peerFlow",) .  fromIntegral . HM.size
         f <- readTVarIO flowKeys <&> ("flowKeys",) . fromIntegral . HM.size
         pure [h,n,f]
 

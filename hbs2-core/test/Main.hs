@@ -7,6 +7,7 @@ import TestScheduled
 import TestDerivedKey
 import TestMerkleWalk
 import TestKeyEncoding
+import TestByPassFlow
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -32,6 +33,12 @@ main =
               testKeyEncodingUnchanged
           , testCase "is refused when it is not the length its scheme wants"
               testKeyEncodingRefusesBadLength
+          ]
+      , testGroup "an encrypted flow belongs to the peer, not to the flow key"
+          [ testCase "is not taken over by a stranger who names the nonce first"
+              testByPassFlowNotStolen
+          , testCase "stays readable when two peers share a flow key"
+              testByPassFlowSharedIsReadable
           ]
       ]
 

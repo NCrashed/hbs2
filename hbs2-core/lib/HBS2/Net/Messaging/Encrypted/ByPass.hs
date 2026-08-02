@@ -10,6 +10,19 @@ module HBS2.Net.Messaging.Encrypted.ByPass
   , byPassMessagingSetProbe
   , cleanupByPassMessaging
   , getStat
+  -- * Handshake internals
+  --
+  -- Exported so a test can play the part of a peer that picks its own nonce,
+  -- which is the whole shape of the flow-key attack and cannot be staged with
+  -- 'newByPassMessaging' alone: it derives the nonce and will not be told one.
+  -- Nothing here is a capability; these are the bytes anyone on the wire writes.
+  , NonceA(..)
+  , FlowKey
+  , PeerFlow(..)
+  , HEYBox(..)
+  , EncryptHandshake(..)
+  , heySeed
+  , makeKey
   ) where
 
 import HBS2.Prelude
@@ -39,6 +52,7 @@ import Data.ByteString qualified as BS
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HashSet
+import Data.List (sortOn)
 import Data.Maybe
 import Data.Word
 import System.Random
@@ -102,6 +116,37 @@ data ByPassStat =
 
 instance Serialise ByPassStat
 
+-- | Everything one peer told us about its own flow, in the HEY it signed:
+-- the nonce it announced, the key that signed the announcement, the encryption
+-- public key carried inside the signed box, and the shared key derived from it.
+--
+-- NOTE: flow-key-is-not-an-identity
+--   A 'FlowKey' is 32 bits and half of it is the remote side's free choice, so
+--   it names a flow and never a peer. What we encrypt to a peer is therefore
+--   decided here, keyed by the peer, and not by whoever reached the flow key
+--   first: otherwise anyone may announce a nonce that collides with an honest
+--   peer's and have our traffic for that peer encrypted to them instead.
+data PeerFlow s =
+  PeerFlow
+  { pfNonce  :: NonceA
+  , pfSigner :: PubKey 'Sign s
+  , pfPubKey :: PubKey 'Encrypt s
+  , pfKey    :: CombinedKey
+  }
+
+-- | Shared keys that may decrypt a packet bearing a given flow key, one per
+-- announcing identity. More than one peer can land on the same flow key, by
+-- accident at a few hundred peers and on purpose at any time, so this is a set
+-- of candidates to try rather than a single answer.
+type FlowCandidates s = HashMap FlowKey (HashMap (PubKey 'Sign s) (TimeSpec, CombinedKey))
+
+-- | How many candidates are kept per flow key. The bound is what stops a peer
+-- that manufactures collisions from turning every decryption into a long scan.
+-- Eviction is by age; an honest peer evicted this way reinstalls itself on its
+-- next HEY, which a failed decryption already asks for.
+maxFlowCandidates :: Int
+maxFlowCandidates = 8
+
 data ByPass e them =
   ByPass
   { opts         :: ByPassOpts (Encryption e)
@@ -114,9 +159,9 @@ data ByPass e them =
   , nonceA       :: NonceA
   , heySent      :: TVar (HashMap (Peer e) TimeSpec)
   , heySentNum   :: TVar (HashMap (Peer e) Int)
-  , noncesByPeer :: TVar (HashMap (Peer e) NonceA)
+  , peerFlow     :: TVar (HashMap (Peer e) (PeerFlow (Encryption e)))
   , banned       :: TVar (HashMap (Peer e) TimeSpec)
-  , flowKeys     :: TVar (HashMap FlowKey CombinedKey)
+  , flowKeys     :: TVar (FlowCandidates (Encryption e))
   , bypassed     :: TVar Int
   , encrypted    :: TVar Int
   , decrypted    :: TVar Int
@@ -170,8 +215,8 @@ getStat ByPass{..} = liftIO do
                <*> readTVar recvNum
                <*> readTVar sentBytes
                <*> readTVar recvBytes
-               <*> (readTVar flowKeys <&> HM.size)
-               <*> (readTVar noncesByPeer <&> HM.size)
+               <*> (readTVar flowKeys <&> sum . fmap HM.size . HM.elems)
+               <*> (readTVar peerFlow <&> HM.size)
                <*> readTVar authFail
                <*> readTVar maxPkt
 
@@ -190,26 +235,29 @@ cleanupByPassMessaging  bus pips = do
   let alive = HashSet.fromList pips
 
   atomically do
-    sent   <- readTVar (heySent bus)
-    nonces <- readTVar (noncesByPeer bus)
-    flows  <- readTVar (flowKeys bus)
+    sent  <- readTVar (heySent bus)
+    flows <- readTVar (peerFlow bus)
 
     let livePeers = [ (k,v)
-                    | (k,v) <- HM.toList nonces
+                    | (k,v) <- HM.toList flows
                     , k `HashSet.member` alive
                     ] & HM.fromList
 
     let liveSent = HM.filterWithKey (\k _ -> k `HM.member` livePeers) sent
 
-    let liveFk = [ makeKey (nonceA bus) nonce
-                 | nonce <- HM.elems livePeers
-                 ] & HashSet.fromList
-
-    let liveFlows =  HM.filterWithKey (\k _ -> k `HashSet.member` liveFk) flows
+    -- The candidate index is rebuilt from the peers we still know rather than
+    -- filtered: a candidate nobody live stands behind has no way back in, so a
+    -- squatted flow key is repaired here instead of being carried forward.
+    let liveFlows = HM.map capCandidates $ HM.fromListWith (<>)
+                      [ ( makeKey (nonceA bus) (pfNonce pf)
+                        , HM.singleton (pfSigner pf) (now, pfKey pf)
+                        )
+                      | pf <- HM.elems livePeers
+                      ]
 
     writeTVar (heySent bus) liveSent
     writeTVar (heySentNum bus) mempty
-    writeTVar (noncesByPeer bus) livePeers
+    writeTVar (peerFlow bus) livePeers
     writeTVar (flowKeys bus) liveFlows
     modifyTVar (banned bus) (HM.filter (>now))
 
@@ -378,13 +426,11 @@ instance (ForByPass e, Messaging w e ByteString)
             when (isNothing mbx) do
               debug $ "HEY: failed to unbox" <+> pretty heyNonceA <+> pretty orig
 
-            _n <- toMPlus mbx
-
-            (pks, HEYBox t puk) <- toMPlus mbx
+            (theirSignPk, HEYBox t puk) <- toMPlus mbx
 
             let dt = byPassTimeRange o
 
-            allowed <- liftIO $ byPassKeyAllowed o pks
+            allowed <- liftIO $ byPassKeyAllowed o theirSignPk
             now <- liftIO getPOSIXTime <&> round
             let actual = maybe1 dt True (\(ta, tb) -> t >= now - ta &&  t <= now + tb)
 
@@ -399,23 +445,14 @@ instance (ForByPass e, Messaging w e ByteString)
 
             guard authorized
 
-            let fk = makeKey nonceA  heyNonceA
+            -- A peer speaks for its own flow and for nothing else, so this
+            -- always supersedes what we held for THIS peer, and never touches
+            -- what we hold for another. Answer only when something moved: an
+            -- unconditional reply here is a HEY ping-pong between two peers
+            -- that both keep having nothing new to say.
+            moved <- installPeerFlow bus orig theirSignPk puk heyNonceA
 
-            here <- readTVarIO flowKeys <&> HM.member fk
-
-            updatePeerNonce bus orig heyNonceA
-
-            unless here do
-
-              let ck = PKE.beforeNM ske puk
-
-              debug $ "HEY: CK" <+> pretty nonceA
-                                <+> pretty fk
-                                <+> pretty (hashObject @HbSync (SA.encode ck))
-
-              atomically $ do
-                modifyTVar flowKeys (HM.insert fk ck)
-
+            when moved do
               withHeySent bus 30 orig do
                 sendHey bus orig
 
@@ -480,23 +517,63 @@ withHeySent w ts pip m = do
     m
 
 
-updatePeerNonce :: forall e w m . ( ForByPass e
+-- | Keep at most 'maxFlowCandidates' entries, dropping the oldest.
+capCandidates :: (Eq k, Hashable k)
+              => HashMap k (TimeSpec, CombinedKey)
+              -> HashMap k (TimeSpec, CombinedKey)
+capCandidates b
+  | HM.size b <= maxFlowCandidates = b
+  | otherwise = HM.fromList
+              $ drop (HM.size b - maxFlowCandidates)
+              $ sortOn (fst . snd)
+              $ HM.toList b
+
+-- | Record what a peer announced about its flow, replacing whatever we held
+-- for that peer, and add the shared key to the candidates for its flow key.
+-- Answers whether anything actually changed.
+installPeerFlow :: forall e w m . ( ForByPass e
                                   , MonadIO m
                                   )
                 => ByPass e w
                 -> Peer e
+                -> PubKey 'Sign (Encryption e)
+                -> PubKey 'Encrypt (Encryption e)
                 -> NonceA
-                -> m ()
+                -> m Bool
 
-updatePeerNonce bus pip nonce = do
-  atomically $ modifyTVar (noncesByPeer bus) (HM.insert pip nonce)
+installPeerFlow bus pip signer puk nonce = do
+  now <- getTimeCoarse
+  old <- readTVarIO (peerFlow bus) <&> HM.lookup pip
+
+  let same pf = pfSigner pf == signer && pfNonce pf == nonce && pfPubKey pf == puk
+
+  let fk = makeKey (nonceA bus) nonce
+
+  -- Deriving the shared key is a scalar multiplication, and a peer repeats its
+  -- HEY on a timer, so do not pay for it to arrive at what we already hold.
+  flow <- case old of
+            Just pf | same pf -> pure pf
+            _ -> do
+              let ck = PKE.beforeNM (ske bus) puk
+
+              debug $ "HEY: CK" <+> pretty (nonceA bus)
+                                <+> pretty fk
+                                <+> pretty (hashObject @HbSync (SA.encode ck))
+
+              pure $ PeerFlow nonce signer puk ck
+
+  atomically do
+    modifyTVar' (peerFlow bus) (HM.insert pip flow)
+    modifyTVar' (flowKeys bus) $ \fks ->
+      let bucket = HM.insert signer (now, pfKey flow) (HM.lookupDefault mempty fk fks)
+      in HM.insert fk (capCandidates bucket) fks
+
+  pure (not (any same old))
 
 lookupEncKey :: (ForByPass e, MonadIO m) => ByPass e w -> Peer e -> m (Maybe (FlowKey, CombinedKey))
 lookupEncKey bus whom = runMaybeT do
-  nonce <- MaybeT $ readTVarIO (noncesByPeer bus) <&> HM.lookup whom
-  let fk = makeKey nonce (nonceA bus)
-  ck <- MaybeT $ readTVarIO (flowKeys bus) <&> HM.lookup fk
-  pure (fk, ck)
+  pf <- MaybeT $ readTVarIO (peerFlow bus) <&> HM.lookup whom
+  pure (makeKey (nonceA bus) (pfNonce pf), pfKey pf)
 
 
 typicalNonceLength :: Integral a => a
@@ -529,9 +606,14 @@ tryDecryptMessage bus bs = runMaybeT do
 
   let bnonce = nonceFrom @ByPassNonce wnonce
 
-  ck <- MaybeT $ readTVarIO (flowKeys bus) <&> HM.lookup fk
+  cks <- MaybeT $ readTVarIO (flowKeys bus) <&> HM.lookup fk
 
-  let dmess = PKE.boxOpenAfterNM ck (unByPassNonce bnonce) (LBS.toStrict body) <&> LBS.fromStrict
+  -- Several peers may hold this flow key, so try each of their shared keys:
+  -- the Poly1305 tag is what says which one the sender actually used.
+  let dmess = listToMaybe [ m
+                          | (_, ck) <- HM.elems cks
+                          , Just m  <- [PKE.boxOpenAfterNM ck (unByPassNonce bnonce) (LBS.toStrict body)]
+                          ] <&> LBS.fromStrict
 
   atomically do
     maybe1 dmess
