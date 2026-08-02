@@ -16,6 +16,9 @@ import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
+import Data.ByteString.Lazy.Char8 qualified as LBS
+import HBS2.Hash (hashObject)
+import HBS2.Data.Types.Refs (HashRef(..))
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
@@ -701,3 +704,110 @@ spec = do
       HM.size (frThreads (stFold st)) `shouldBe` 1
       stBad st `shouldBe` []
       stMisnamed st `shouldBe` []
+
+  describe "PEP-19 canon writer" $ do
+
+    -- The one that matters: the reader and the writer are two halves of one
+    -- format, and the only assertion that covers both is that a tree the writer
+    -- produced folds back into the canon it was given. Everything else here is
+    -- about a way that can fail.
+    it "writes a tree the reader folds back into what was written" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          eOpen = mkEvent alice owner
+                    (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
+                    (canon repo 1 (Just 1))
+          thr = eventId eOpen
+          eCom = mkEvent alice owner (AComment thr Nothing (Just "a reply") Nothing 2000)
+                   (canon repo 2 Nothing)
+          evs = [ (threadDir thr <> "/" <> eventFileName 1 thr, eOpen)
+                , (threadDir thr <> "/" <> eventFileName 2 (eventId eCom), eCom) ]
+
+      cw <- either (fail . show) pure (planCanon evs [(1, thr)])
+      cwIndexOmitted cw `shouldBe` 0
+
+      st <- readOk (inMemory (asFiles cw)) repo
+      stVersion st `shouldBe` Just hubMetaVersion
+      stBad st `shouldBe` []
+      stMisnamed st `shouldBe` []
+      frDropped (stFold st) `shouldBe` []
+      fmap (length . tsComments) (HM.lookup thr (frThreads (stFold st)))
+        `shouldBe` Just 1
+      -- and the number survived the round trip through the index
+      numberIndexOf (stFold st) `shouldBe` [(1, thr)]
+
+    -- The index is the one file in the tree no signature covers, so PEP-19 has
+    -- it regenerated from the events rather than carried forward. This is that
+    -- rule as a test: the numbers the writer emits come out of the fold.
+    it "regenerates the number index out of the fold" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          mk n ts = mkEvent alice owner
+                      (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing ts)
+                      (canon repo n (Just n))
+          e1 = mk 1 1000
+          e2 = mk 2 2000
+          evs = [ (threadDir (eventId e) <> "/" <> eventFileName n (eventId e), e)
+                | (n,e) <- [(1,e1),(2,e2)] ]
+
+      st0 <- readOk (inMemory (evFiles evs)) repo
+      cw <- either (fail . show) pure (planCanon evs (numberIndexOf (stFold st0)))
+
+      let idx = lookup (B8.pack numberIndexPath) (cwFiles cw)
+      parseNumberIndex (Text.decodeUtf8 (maybe "" id idx))
+        `shouldBe` Right [(1, eventId e1), (2, eventId e2)]
+
+    it "refuses two events that claim one path" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                 (canon repo 1 (Just 1))
+          p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+      planCanon [(p, ev), (p, ev)] [] `shouldBe` Left (PathCollision p)
+
+    -- The reader refuses a file over its bounds, and a writer that produced one
+    -- anyway would put an event in every clone that this build folds without.
+    -- Reachable through an inline body, which is the one field a sender sizes.
+    it "refuses a file it could not read back" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          -- Well past maxEventBytes, which is derived from the bridge's own
+          -- minting bounds; nothing the bridge mints reaches here, which is why
+          -- the fixture builds the event directly.
+          huge = Text.replicate (400 * 1024) "x"
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "an issue" [] (Just huge) Nothing Nothing 1000)
+                 (canon repo 1 (Just 1))
+          p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+      case planCanon [(p, ev)] [] of
+        Left (EventUnwritable p' _) -> p' `shouldBe` p
+        other -> expectationFailure ("expected a refusal, got " <> show (fmap cwFiles other))
+
+    -- A cap nobody is told about reads as "everything fit". The index truncates
+    -- by design (PEP-19: a prefix is still correct for every number in it), so
+    -- the only thing that can be wrong is silence.
+    it "says how many numbers the index could not hold" $ do
+      let ids = [ HashRef (hashObject (LBS.pack (show i))) | i <- [1 :: Int .. 60000] ]
+          numbers = zip [1 ..] ids
+      cw <- either (fail . show) pure (planCanon [] numbers)
+      cwIndexOmitted cw `shouldSatisfy` (> 0)
+      -- and what it DID hold is readable, which is the half that makes
+      -- truncating better than refusing
+      let idx = lookup (B8.pack numberIndexPath) (cwFiles cw)
+      case parseNumberIndex (Text.decodeUtf8 (maybe "" id idx)) of
+        Left e -> expectationFailure ("a truncated index must still read: " <> show e)
+        Right held -> length held `shouldBe` length numbers - cwIndexOmitted cw
+
+-- The files a planned commit puts in the tree, in the shape the in-memory
+-- source serves. Decoding is safe here and only here: the writer encoded them.
+asFiles :: CanonCommit -> [(FilePath, Text)]
+asFiles cw = [ (Text.unpack (Text.decodeUtf8 p), Text.decodeUtf8 b) | (p,b) <- cwFiles cw ]
+
+-- A tree of just the events, for reading a fold back before planning from it.
+evFiles :: [(FilePath, Event)] -> [(FilePath, Text)]
+evFiles evs = ("version", renderMeta) : [ (p, renderEvent e) | (p,e) <- evs ]

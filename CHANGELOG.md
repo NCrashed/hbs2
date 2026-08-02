@@ -480,6 +480,52 @@
     port a neighbour cannot open is nothing but an invitation to probe
     it.
 
+## Features
+
+  - **`hbs2-hub`: canon can be written, and one letter can be accepted
+    into it.** Everything around this existed already and had nowhere to
+    put its result: the fold decided what canon means, the bridge minted
+    an event from a stranger's letter, the file format rendered one, and
+    the reader folded a tree back. Nothing committed a tree. The vertical
+    slice PEP-17 is for, a stranger files an issue and a maintainer takes
+    it, was open at exactly that step.
+
+    `planCanon` turns accepted events into the files PEP-19's layout puts
+    them in: the `version` file, one immutable file per event under
+    `threads/<id>/` or `repo/`, and a regenerated `index/number.sexp`.
+    Every file is READ BACK with this build's own reader before it is
+    accepted, because being able to write what cannot be read is the
+    failure that costs most here, and the reader has three bounds a size
+    check would not cover. A number the index cannot hold is reported
+    rather than dropped in silence.
+
+    `CanonSink` is the mirror of `CanonSource`, and `withGitSink` is its
+    git half: `hash-object`, `read-tree`, `update-index --index-info`,
+    `write-tree`, `commit-tree`, `update-ref`. Paths only ever travel on
+    stdin, never argv, for the reason the reader already documents at
+    length. The index it builds is its own, named by `GIT_INDEX_FILE`, so
+    accepting an issue does not stage the operator's working tree. The
+    ref move is a compare-and-swap against the canon that was folded, so
+    two accepts racing leave one refusal instead of one silent loss, and
+    the commit's dates come from the caller's stamp, which makes the
+    commit id a function of canon rather than of when the writer ran.
+
+    `hub inbox accept --mailbox K --repo R --message H` is the verb. It
+    re-reads canon from git, requires the letter to actually be in that
+    mailbox rather than merely present in local storage, asks the bridge,
+    and commits. Every value is behind a flag, including the message,
+    because a sign key and a hash are both thirty-two bytes of base58: a
+    positional message parsed `--repo <hash> <key>` happily with the two
+    swapped, and the first thing to notice was the bridge.
+
+    Two things PEP-22 puts in this verb are deliberately absent, and the
+    verb says so on success rather than leaving them to be discovered:
+    the letter is not deleted (fold-then-delete is PEP-21 retention) and
+    no acknowledgement is sent (the record type exists, the sending does
+    not). Neither loses anything, since re-accepting the same letter is
+    refused as `AlreadyInCanon`. No deny-list is applied either: PEP-21
+    policy lives in the repo manifest and there is no manifest reader.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

@@ -35,6 +35,7 @@ module HBS2.Hub.CLI.Inbox
   , codeMailboxUnknown
   , codePeerSilent
   , maxMissingLines
+  , overRpc
   ) where
 
 import HBS2.Hub.Types
@@ -149,50 +150,6 @@ inboxEntries = do
       liftIO $ case inboxCode r of
         0 -> pure ()
         n -> exitWith (ExitFailure n)
-
-    -- The one place the ingress is wired to a peer. Everything above it is a
-    -- function of these six, which is what lets the wait loop and every
-    -- OpenError be tested without one.
-    overRpc sto api = Ingress
-      { -- BOUNDED, and it is the only one of these that was not. The other three
-        -- go through 'callRpcWaitMay', which is 'race' against a pause; this one
-        -- is the storage client's 'getBlock', which calls 'callService' raw, and
-        -- that blocks on a TQueue with no timeout at all. Every merkle node and
-        -- every message body comes through here, so the bulk of what `hub inbox`
-        -- asks the peer for was the part with no bound: a peer that answered the
-        -- mailbox service and then stalled on storage hung the verb forever,
-        -- after all three timed calls had succeeded. Per block, not per walk --
-        -- see 'bounded'.
-        igBlock  = \h -> bounded rpcTimeout "a block of the mailbox"
-                           (liftIO (getBlock sto (coerce h)))
-      , igStatus = \k ->
-          callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
-            >>= silent "the mailbox service"
-            >>= either badService (pure . void)
-        -- Checked, not voided. 'void' threw away the Maybe, and the Maybe IS the
-        -- timeout signal: a fetch that never reached the peer left the wait loop
-        -- to conclude, correctly and uselessly, that a mailbox it had never
-        -- asked for had not arrived.
-      , igFetch  = \k ->
-          void (callRpcWaitMay @RpcMailboxFetch rpcTimeout api k
-                  >>= silent "the mailbox service")
-      , igRoot   = \k ->
-          callRpcWaitMay @RpcMailboxGet rpcTimeout api k
-            >>= silent "the mailbox service"
-      , igPause  = pause
-        -- No deny-list: PEP-21 policy lives in the repo manifest and this verb
-        -- takes a mailbox key rather than a repo. Allowing everything is honest
-        -- here, since listing is not accepting; the accept path must not
-        -- inherit this default, and 'inboxNotes' says so on stderr whenever the
-        -- queue actually contains something a reader might take for permission.
-      , igAllowed = const True
-      , igSecret = ReadMessageServices
-          (liftIO . runKeymanClientRO . extractGroupKeySecret)
-      }
-
-    -- A call that answered nothing in the time allowed is not an answer.
-    silent :: MonadUnliftIO m' => String -> Maybe a -> m' a
-    silent what = maybe (throwIO (PeerSilent what)) pure
 
 -- | Bound one call to the peer, and say which call it was if it does not answer.
 --
@@ -454,3 +411,54 @@ utcOf ms
   | ms > maxFoldedTs = "after " <> utcOf maxFoldedTs
   | otherwise = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
                   (posixSecondsToUTCTime (fromIntegral ms / 1000))
+
+-- | The one place the ingress is wired to a peer.
+--
+-- Top level and exported, because there are two callers now: listing a queue
+-- and accepting one letter out of it. Two copies of this would be two answers
+-- to what a hub asks a peer for, drifting apart at whichever of the six a
+-- later fix touches.
+--
+-- Everything above it is a function of these six, which is what lets the wait
+-- loop and every OpenError be tested without a peer.
+overRpc :: (MonadUnliftIO m) => AnyStorage -> ServiceCaller MailboxAPI UNIX -> Ingress m
+overRpc sto api = Ingress
+  { -- BOUNDED, and it is the only one of these that was not. The other three
+    -- go through 'callRpcWaitMay', which is 'race' against a pause; this one
+    -- is the storage client's 'getBlock', which calls 'callService' raw, and
+    -- that blocks on a TQueue with no timeout at all. Every merkle node and
+    -- every message body comes through here, so the bulk of what `hub inbox`
+    -- asks the peer for was the part with no bound: a peer that answered the
+    -- mailbox service and then stalled on storage hung the verb forever,
+    -- after all three timed calls had succeeded. Per block, not per walk --
+    -- see 'bounded'.
+    igBlock  = \h -> bounded rpcTimeout "a block of the mailbox"
+                       (liftIO (getBlock sto (coerce h)))
+  , igStatus = \k ->
+      callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
+        >>= silent "the mailbox service"
+        >>= either badService (pure . void)
+    -- Checked, not voided. 'void' threw away the Maybe, and the Maybe IS the
+    -- timeout signal: a fetch that never reached the peer left the wait loop
+    -- to conclude, correctly and uselessly, that a mailbox it had never
+    -- asked for had not arrived.
+  , igFetch  = \k ->
+      void (callRpcWaitMay @RpcMailboxFetch rpcTimeout api k
+              >>= silent "the mailbox service")
+  , igRoot   = \k ->
+      callRpcWaitMay @RpcMailboxGet rpcTimeout api k
+        >>= silent "the mailbox service"
+  , igPause  = pause
+    -- No deny-list: PEP-21 policy lives in the repo manifest and this verb
+    -- takes a mailbox key rather than a repo. Allowing everything is honest
+    -- here, since listing is not accepting; the accept path must not
+    -- inherit this default, and 'inboxNotes' says so on stderr whenever the
+    -- queue actually contains something a reader might take for permission.
+  , igAllowed = const True
+  , igSecret = ReadMessageServices
+      (liftIO . runKeymanClientRO . extractGroupKeySecret)
+  }
+
+-- A call that answered nothing in the time allowed is not an answer.
+silent :: MonadUnliftIO m' => String -> Maybe a -> m' a
+silent what = maybe (throwIO (PeerSilent what)) pure

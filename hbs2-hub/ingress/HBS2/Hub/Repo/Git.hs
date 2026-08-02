@@ -23,6 +23,7 @@ module HBS2.Hub.Repo.Git
   , gitBounds
   , parseListing
   , nowSeconds
+  , gitIn
   ) where
 
 import HBS2.Hub.Repo
@@ -855,73 +856,7 @@ gitCanonWith bounds cwd = do
     -- hook's GIT_DIR is then the right one to obey. Everything else here applies
     -- to both, because the command line is what names a repository and none of
     -- the rest is about which one.
-    inDir p = do
-      env0 <- liftIO getEnvironment
-      let kept = List.filter ((`notElem` (fmap fst forced <> named)) . fst) env0
-          named = case cwd of Nothing -> [] ; Just _ -> whichRepository
-          here = maybe id setWorkingDir cwd
-      pure (setEnv (kept <> forced) (here p))
-
-    -- REMOVED FROM THE INHERITED SET and then added, which is the whole of the
-    -- difference between this working and not. Appending alone does nothing: with
-    -- two bindings of one name in envp, getenv returns the FIRST, so a caller
-    -- with GIT_NO_LAZY_FETCH=0 in their environment got a reader that fetched the
-    -- tree it was auditing, with the bounds firing after the bytes had landed.
-    -- Measured on the same clone and the same binary, changing only the parent's
-    -- environment: 0 blobs against 2, and one file refused as 270177 bytes after
-    -- it had been downloaded.
-    forced =
-      [ -- The audit is read-only and offline; see the note above.
-        ("GIT_NO_LAZY_FETCH", "1")
-        -- refs/replace rewrites what a commit's tree IS, so canon could be read
-        -- from a substituted tree while the report printed the honest commit id.
-        -- Verified: a planted replacement added an event to a clean audit and the
-        -- header line named the real commit throughout. Not reachable through the
-        -- documented fetch refspec, but a mirror clone carries refs/replace.
-      , ("GIT_NO_REPLACE_OBJECTS", "1")
-        -- No prompting, in three places, because git tries them in order and only
-        -- the last is a terminal: GIT_ASKPASS, then core.askPass, then
-        -- SSH_ASKPASS, then /dev/tty, which `setStdin closed` does not cover. A
-        -- hook that stops for a password nobody is there to type is a hung hook.
-        --
-        -- EMPTY, not a path to a program that fails. git's check is `askpass &&
-        -- *askpass`, so an empty value means "no askpass" and skips the rest of
-        -- the chain, while a path means "run this": /bin/false was the first
-        -- attempt and does not exist on NixOS, so git would have complained about
-        -- a missing helper and that complaint would have been printed to the user
-        -- as what git said about their repository.
-      , ("GIT_ASKPASS", "")
-      , ("SSH_ASKPASS", "")
-      , ("GIT_TERMINAL_PROMPT", "0")
-      ]
-
-    -- Variables that answer "which repository" from outside it. Obeyed when the
-    -- caller named no directory, dropped when they did: naming one and being
-    -- given another is the failure, and a hook has GIT_DIR set for every command
-    -- it runs.
-    whichRepository = [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
-                      , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
-                      , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-                      ]
-
-    -- GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM are LEFT ALONE,
-    -- in both cases, and two earlier versions of this got it wrong in opposite
-    -- directions.
-    --
-    -- Dropping them was wrong: the ceiling is how a caller says "do not walk up
-    -- past here", which is a thing this reader should obey and not override, and
-    -- the discovery flag was described as stopping git from looking when it does
-    -- the reverse (it lets git cross a filesystem boundary), so removing it is
-    -- how a bind mount inside a working tree becomes "not a git repository".
-    --
-    -- Setting a ceiling at the named directory's parent was also wrong: discovery
-    -- walking up is not a bug, it is how every git command behaves in a
-    -- subdirectory, and `hub verify` run three directories deep in a working tree
-    -- has to find the repository the way `git status` does. A caller who does not
-    -- want the walk sets a ceiling, and it is obeyed.
-
-    -- GIT_CONFIG_* are in NO list: a config that turns off gpg signing or sets
-    -- safe.directory is the caller's business, and this only reads.
+    inDir p = gitIn cwd [] p
 
     -- Lenient, so a blob that is not UTF-8 becomes replacement characters rather
     -- than an exception.
@@ -932,6 +867,7 @@ gitCanonWith bounds cwd = do
     -- memory. The comment here used to claim the tree-wide bound covered it,
     -- which it cannot, being made of the same numbers as the per-file one.
     decodeS = Text.decodeUtf8Lenient
+
 
     -- A tool's complaint as a message. Its trailing newline is not part of what
     -- it said, and it survived into a report where every newline is escaped, so
@@ -1425,3 +1361,87 @@ parseListing = fmap entry . filter (not . B8.null) . B8.split '\0'
       -- A record with the right shape but the wrong number of words is a format
       -- shift, and is reported as one rather than as a tree full of submodules.
       _ -> Unparsed
+
+-- | Where a git command runs, and what it is allowed to do while it runs.
+--
+-- One definition for the whole package. The reader and the writer disagree
+-- about almost everything else and must not disagree about this: which
+-- repository a command lands in is decided here, and two spellings of it are
+-- two answers to that question.
+--
+-- @extra@ is forced on top of the list below, with the same removal rule, for
+-- the variables only one caller needs (the writer names an index file and a
+-- committer; the reader has neither).
+gitIn :: MonadIO m
+  => Maybe FilePath -> [(String,String)] -> ProcessConfig a b c -> m (ProcessConfig a b c)
+gitIn cwd extra p = do
+  env0 <- liftIO getEnvironment
+  let forced = forcedEnv <> extra
+      kept = List.filter ((`notElem` (fmap fst forced <> named)) . fst) env0
+      named = case cwd of Nothing -> [] ; Just _ -> whichRepository
+      here = maybe id setWorkingDir cwd
+  pure (setEnv (kept <> forced) (here p))
+
+-- REMOVED FROM THE INHERITED SET and then added, which is the whole of the
+-- difference between this working and not. Appending alone does nothing: with
+-- two bindings of one name in envp, getenv returns the FIRST, so a caller
+-- with GIT_NO_LAZY_FETCH=0 in their environment got a reader that fetched the
+-- tree it was auditing, with the bounds firing after the bytes had landed.
+-- Measured on the same clone and the same binary, changing only the parent's
+-- environment: 0 blobs against 2, and one file refused as 270177 bytes after
+-- it had been downloaded.
+forcedEnv :: [(String,String)]
+forcedEnv =
+  [ -- The audit is read-only and offline; see the note above.
+    ("GIT_NO_LAZY_FETCH", "1")
+    -- refs/replace rewrites what a commit's tree IS, so canon could be read
+    -- from a substituted tree while the report printed the honest commit id.
+    -- Verified: a planted replacement added an event to a clean audit and the
+    -- header line named the real commit throughout. Not reachable through the
+    -- documented fetch refspec, but a mirror clone carries refs/replace.
+  , ("GIT_NO_REPLACE_OBJECTS", "1")
+    -- No prompting, in three places, because git tries them in order and only
+    -- the last is a terminal: GIT_ASKPASS, then core.askPass, then
+    -- SSH_ASKPASS, then /dev/tty, which `setStdin closed` does not cover. A
+    -- hook that stops for a password nobody is there to type is a hung hook.
+    --
+    -- EMPTY, not a path to a program that fails. git's check is `askpass &&
+    -- *askpass`, so an empty value means "no askpass" and skips the rest of
+    -- the chain, while a path means "run this": /bin/false was the first
+    -- attempt and does not exist on NixOS, so git would have complained about
+    -- a missing helper and that complaint would have been printed to the user
+    -- as what git said about their repository.
+  , ("GIT_ASKPASS", "")
+  , ("SSH_ASKPASS", "")
+  , ("GIT_TERMINAL_PROMPT", "0")
+  ]
+
+-- Variables that answer "which repository" from outside it. Obeyed when the
+-- caller named no directory, dropped when they did: naming one and being
+-- given another is the failure, and a hook has GIT_DIR set for every command
+-- it runs.
+whichRepository :: [String]
+whichRepository = [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
+                  , "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"
+                  , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                  ]
+
+-- GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM are LEFT ALONE,
+-- in both cases, and two earlier versions of this got it wrong in opposite
+-- directions.
+--
+-- Dropping them was wrong: the ceiling is how a caller says "do not walk up
+-- past here", which is a thing this reader should obey and not override, and
+-- the discovery flag was described as stopping git from looking when it does
+-- the reverse (it lets git cross a filesystem boundary), so removing it is
+-- how a bind mount inside a working tree becomes "not a git repository".
+--
+-- Setting a ceiling at the named directory's parent was also wrong: discovery
+-- walking up is not a bug, it is how every git command behaves in a
+-- subdirectory, and `hub verify` run three directories deep in a working tree
+-- has to find the repository the way `git status` does. A caller who does not
+-- want the walk sets a ceiling, and it is obeyed.
+
+-- GIT_CONFIG_* are in NO list: a config that turns off gpg signing or sets
+-- safe.directory is the caller's business, and this only reads.
+

@@ -35,6 +35,8 @@ module HBS2.Hub.Ingress
   , maxInboxLetters
   , fetchRound
   , rpcTimeout
+  , LetterRaw(..)
+  , rawMessage
   ) where
 
 import HBS2.Hub.Types
@@ -52,6 +54,7 @@ import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Storage.Operations.Class (OperationError)
 
 import Codec.Serialise (deserialiseOrFail)
+import Crypto.Saltine.Class qualified as Saltine
 import Data.Coerce (coerce)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
@@ -552,3 +555,55 @@ openMessage ig mh = do
         either (Left . BadLetterHere) Right
           (openLetterAs (igAllowed ig) (EnvelopeSigner who) md)
       pure (author, content, classify content)
+
+-- | One message, opened far enough for the bridge (PEP-18 "Folding").
+--
+-- 'openMessage' answers the QUEUE's question, which is what a letter asks for,
+-- and drops three things the accept path cannot do without: the letter as it
+-- was sent, the key that signed the envelope, and the secret the message body
+-- was encrypted with, which the bridge compares a published part secret
+-- against.
+--
+-- A second read rather than three more fields on 'LetterView'. A queue is a
+-- page of letters and an accept is one of them, so carrying a secret per line
+-- would hold key material for a thousand letters nobody is going to accept,
+-- and 'Show' on the view would have to start hiding fields.
+data LetterRaw = LetterRaw
+  { lrEnvelope :: HubKey
+  , lrData     :: MessageData
+  , lrSecret   :: MessageSecret
+  }
+
+-- | Read one message for the bridge, or say why it could not be read.
+--
+-- The same errors 'openMessage' reports, because it is the same reading; what
+-- differs is only what is kept. A letter the queue could show and this cannot
+-- is a bug, not a state.
+rawMessage :: MonadUnliftIO m => Ingress m -> HashRef -> m (Either OpenError LetterRaw)
+rawMessage ig mh = do
+  blk <- igBlock ig mh
+  case blk >>= either (const Nothing) Just . deserialiseOrFail @(Message HBS2Basic) of
+    Nothing -> pure (Left (maybe NotFetched (const NotAMessage) blk))
+    Just msg ->
+      (do
+        (who, co, payload) <- readMessage (igSecret ig) msg
+        -- The secret again, and from the same place readMessage took it. It is
+        -- not in what readMessage returns, and asking for the group key twice
+        -- is cheaper than widening that signature for one caller.
+        gk  <- messageGK0 co & orThrow ReadNoGroupKey
+        gks <- rmsFindGKS (igSecret ig) gk >>= orThrow ReadNoGroupKeyAccess
+        -- A key that is not the length a key is cannot be a message secret.
+        -- Unreachable through libsodium, and the constructor refuses rather
+        -- than truncating for the reason every other length check here does.
+        sec <- mkMessageSecret (Saltine.encode gks) & orThrow ReadNoGroupKeyAccess
+        unless (validHubKey who) (throwIO ReadSignCheckFailed)
+        case parsePayload payload of
+          Left e   -> pure (Left (BadLetterHere e))
+          Right md -> pure (Right (LetterRaw who md sec)))
+      `catch` (pure . Left . readErr')
+      `catch` (\(_ :: OperationError) -> pure (Left Undecipherable))
+  where
+    readErr' = \case
+      ReadSignCheckFailed  -> BadEnvelopeSig
+      ReadNoGroupKey       -> GroupKeyByRef
+      ReadNoGroupKeyAccess -> NotForUs

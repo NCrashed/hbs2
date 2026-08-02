@@ -39,6 +39,13 @@ module HBS2.Hub.Repo
   , BlobResult(..)
   , Told(..)
   , NameProblem(..)
+  , planCanon
+  , numberIndexOf
+  , CanonCommit(..)
+  , WriteRefused(..)
+  , CanonSink(..)
+  , CanonWrite(..)
+  , CanonUnwritable(..)
   ) where
 
 import HBS2.Hub.Types
@@ -55,7 +62,8 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32)
+import Data.Text.Encoding qualified as TE
+import Data.Word (Word32,Word64)
 
 -- | One entry a tree listing reported.
 data TreeEntry = TreeEntry
@@ -840,3 +848,203 @@ readCanon cs owner = csCommit cs >>= \case
         Right (v, ev) ->
           let !mis' = maybe mis (\np -> (p, np) : mis) (nameProblem p ev)
           in Right (ev : evs, (p, v) : vers, bad, mis')
+
+-- | What a commit to canon must put in the tree.
+--
+-- Files only. A commit message, a parent and a ref are git's business and are
+-- the sink's; what canon IS stops here, which is the same line 'readCanon'
+-- draws from the other side.
+data CanonCommit = CanonCommit
+  { cwFiles :: [(ByteString, ByteString)]
+    -- ^ path to contents, in path order, no duplicates
+  , cwIndexOmitted :: Int
+    -- | How many numbers @index\/number.sexp@ could not hold.
+    --
+    -- Not an error and not silent. The index is a convenience map that PEP-19
+    -- says is regenerable from the @open@ events and never trusted over them,
+    -- so a writer that reaches its bound truncates rather than refusing the
+    -- commit: a prefix is still correct for every number in it, and refusing
+    -- an index would be refusing the repository. But a cap nobody is told
+    -- about reads as "everything fit", so the count comes out and the caller
+    -- says it.
+  }
+  deriving stock (Eq,Show)
+
+-- | Why a set of events could not be turned into a commit.
+data WriteRefused =
+    -- | The file rendered, and this build could not read it back.
+    --
+    -- Refused rather than written. The reader's bounds are derived from the
+    -- ones the bridge mints under ('maxEventBytes' explains the derivation),
+    -- so this should be unreachable, and that is exactly why it is checked:
+    -- an unreachable case that becomes reachable writes canon this build folds
+    -- with one event missing, in every clone, permanently. A refused commit
+    -- costs an operator a message.
+    EventUnwritable FilePath CanonError
+    -- | The file read back as a different event than the one written.
+    --
+    -- Cannot happen through 'renderEvent', which puts both boxes in the file
+    -- verbatim; it is here because the alternative to checking is trusting,
+    -- and what is trusted is a projection layer that already truncates.
+  | EventNotItself FilePath EventId EventId
+    -- | Two events want one path, so writing both would keep one.
+    --
+    -- The path is @seq@ plus event-id, so a collision means the caller minted
+    -- one author box twice at one @seq@, which the bridge refuses as
+    -- @AlreadyInCanon@. A batch assembled by hand can still do it.
+  | PathCollision FilePath
+  deriving stock (Eq,Show)
+
+instance Pretty WriteRefused where
+  pretty = \case
+    EventUnwritable p e ->
+      nest 2 $ vsep [ "cannot write" <+> pretty (pathText (B8.pack p))
+                        <+> ": this build could not read back what it rendered"
+                    , pretty e ]
+    EventNotItself p want got ->
+      nest 2 $ vsep [ "cannot write" <+> pretty (pathText (B8.pack p))
+                        <+> ": the file reads back as another event"
+                    , "wanted" <+> pretty want
+                    , "got" <+> pretty got ]
+    PathCollision p ->
+      "two events claim" <+> pretty (pathText (B8.pack p))
+        <+> ": writing both would keep one"
+
+-- | The number map PEP-19 puts in @index\/number.sexp@, from a fold.
+--
+-- Derived from the fold and never from a previous index, because the index is
+-- the one file in the tree that no signature covers: regenerating it is what
+-- keeps it from drifting, and PEP-19 requires exactly that.
+numberIndexOf :: FoldResult -> [(Word64, ThreadId)]
+numberIndexOf fr =
+  sortOn fst [ (n, t) | (t, ts) <- HM.toList (frThreads fr), Just n <- [tsNumber ts] ]
+
+-- | The files that put these events in canon (PEP-19 "Tree layout").
+--
+-- The paths come from 'HBS2.Hub.Bridge.eventPath', which is where the layout
+-- is decided; this renders, checks and assembles. Taking a path rather than an
+-- 'HBS2.Hub.Bridge.Accepted' keeps the format's two halves free of the triage
+-- layer, which neither of them needs to know about.
+--
+-- Every commit rewrites @version@ and @index\/number.sexp@ whole and adds one
+-- file per event. The two rewritten files are content-stable, so git stores
+-- one object for them however many commits repeat them, and the event files
+-- are immutable by construction; this is the incremental update PEP-19
+-- describes, spelled as a whole-tree write because the caller then hands the
+-- sink a complete set and does not have to reason about what it is replacing.
+--
+-- Each file is READ BACK before it is accepted, with the reader this package
+-- ships. Being able to write what cannot be read is the failure that costs
+-- most here (canon is in every clone and cannot be un-published), the reader
+-- has three bounds of its own that a size check would not cover, and the cost
+-- is one parse per event written, which is one event per accept.
+planCanon :: [(FilePath, Event)]
+          -> [(Word64, ThreadId)]
+          -> Either WriteRefused CanonCommit
+planCanon evs numbers = do
+  files <- traverse one evs
+  case duplicates (fmap fst files) of
+    (p:_) -> Left (PathCollision p)
+    []    -> pure ()
+  let idx = renderNumberIndex numbers
+      -- What the index HELD, against what it was given. renderNumberIndex
+      -- truncates silently and returns text; counting its lines is the only
+      -- way back to the number, and it is cheaper than the render was.
+      held = length (filter (not . Text.null) (Text.lines idx))
+  pure CanonCommit
+    { cwFiles = sortOn fst
+        (  [ (versionPath, TE.encodeUtf8 renderMeta)
+           , (B8.pack numberIndexPath, TE.encodeUtf8 idx) ]
+        <> fmap (\(p,t) -> (B8.pack p, t)) files )
+    , cwIndexOmitted = max 0 (length numbers - held)
+    }
+  where
+    one (p, ev) =
+      let txt = renderEvent ev
+      in case parseEvent txt of
+           Left e -> Left (EventUnwritable p e)
+           Right (_, back)
+             | eventId back /= eventId ev ->
+                 Left (EventNotItself p (eventId ev) (eventId back))
+             | otherwise -> Right (p, TE.encodeUtf8 txt)
+
+    -- Over a sorted list of paths, so this is linear and does not need Ord on
+    -- anything the rest of the module lacks it for.
+    duplicates ps = [ a | (a,b) <- zip s (drop 1 s), a == b ]
+      where s = sortOn id ps
+
+-- | Where a canon commit goes.
+--
+-- The mirror of 'CanonSource', and a record of functions for the same reason:
+-- what a commit IS can then be exercised without git, and the git-facing half
+-- without the format.
+--
+-- Two operations and not three. Reading the ref and writing the commit are
+-- separate because the caller needs the parent long before it has anything to
+-- write (it folds canon first, and mints from that fold), but moving the ref
+-- is NOT separate from writing: the parent read at the start is the value the
+-- move must compare against, and a caller holding the two apart is a caller
+-- who can forget to.
+data CanonSink m = CanonSink
+  { skParent :: m (Either CanonUnwritable (Maybe Text))
+    -- ^ what @refs\/hbs2\/meta@ points at, 'Nothing' when canon does not exist yet
+  , skCommit :: CanonWrite -> m (Either CanonUnwritable Text)
+    -- ^ write the files, commit them, move the ref; the new commit
+  , skClose  :: m ()
+  }
+
+-- | One commit to canon.
+data CanonWrite = CanonWrite
+  { cnParent  :: Maybe Text
+    -- | The commit's parent AND the value the ref must still have.
+    --
+    -- One field for both because they are one fact: canon is a chain, so
+    -- committing onto a parent that is no longer the tip would fork it, and
+    -- the fork that loses is a triage decision the operator already made.
+  , cnFiles   :: [(ByteString, ByteString)]
+  , cnMessage :: Text
+  , cnWhen    :: Word64
+    -- | MILLISECONDS, the unit everything in this package stamps in.
+    --
+    -- Used for the commit's author and committer dates, so the commit id is a
+    -- function of what canon holds and not of when the writer ran: folding the
+    -- same event at the same stamp twice produces the same commit, which is
+    -- what makes a retry after a lost answer cheap instead of forking history.
+  }
+  deriving stock (Eq,Show)
+
+-- | Why canon could not be written.
+--
+-- The same four-way split 'BlobResult' draws, for the same reason: a git that
+-- could not start says nothing about the repository, a git that ran and
+-- refused says everything, and a ref that moved under us is neither.
+data CanonUnwritable =
+    WriterFailed Text
+    -- ^ git could not be started, or stopped being there. Worth retrying.
+  | WriterStalled Text
+    -- ^ git ran and did not finish. Not worth retrying at the same bound.
+  | WriterRefused Text Told
+    -- ^ git ran and said no, with which command and what it said
+  | RefMoved (Maybe Text) (Maybe Text)
+    -- | Canon moved between the fold and the commit, so the event was minted
+    -- against a canon that is no longer the tip.
+    --
+    -- The commit itself may well have been written; what did not happen is the
+    -- ref move, which is the only step that publishes anything. Nothing is
+    -- lost and nothing is half-done: the caller folds again and re-mints,
+    -- which is exactly what the bridge's @AlreadyInCanon@ is there to make
+    -- safe.
+  deriving stock (Eq,Show)
+
+instance Pretty CanonUnwritable where
+  pretty = \case
+    WriterFailed e  -> "could not run git:" <+> pretty e
+    WriterStalled e -> "git did not finish:" <+> pretty e
+    WriterRefused what t ->
+      nest 2 $ vsep [ "git" <+> pretty what <+> "refused", told t ]
+    RefMoved want got ->
+      nest 2 $ vsep
+        [ pretty metaRef <+> "moved while this was being prepared"
+        , "expected" <+> maybe "no ref" pretty want
+        , "found" <+> maybe "no ref" pretty got
+        , "nothing was published; fold again and retry" ]

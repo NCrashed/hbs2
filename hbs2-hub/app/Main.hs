@@ -7,6 +7,7 @@ module Main where
 
 import HBS2.Hub.Types (safeText)
 import HBS2.Hub.CLI.Argv (verbOf)
+import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Verify
@@ -101,6 +102,7 @@ main = do
   let dict = makeDict do
         internalEntries
         inboxEntries
+        acceptEntries
         composeEntries
         verifyEntries
 

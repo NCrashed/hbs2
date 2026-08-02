@@ -64,6 +64,7 @@ library
                     , text
                     , prettyprinter
                     , saltine
+                    , time
                     , base64-bytestring
     exposed-modules:
       HBS2.Hub.Types
@@ -104,11 +105,16 @@ library hub-ingress
                     , unix
                     , unordered-containers
                     , text
+                    , mtl
+                    , saltine
+                    , filepath
     exposed-modules:
       HBS2.Hub.Ingress
       HBS2.Hub.Repo.Git
+      HBS2.Hub.Repo.GitWrite
       HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Compose
+      HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
       HBS2.Hub.CLI.Verify
 
@@ -170,6 +176,7 @@ test-suite spec
                  , zlib
                  , cryptohash-sha1
   other-modules:
+      HBS2.Hub.AcceptSpec
       HBS2.Hub.ArgvSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
@@ -183,4 +190,5 @@ test-suite spec
       HBS2.Hub.IngressSpec
       HBS2.Hub.RepoSpec
       HBS2.Hub.GitRepoSpec
+      HBS2.Hub.GitWriteSpec
       HBS2.Hub.VerifySpec
