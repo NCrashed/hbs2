@@ -46,6 +46,24 @@ instance Serialise VersionedPubKey
 
 instance Serialise (RefLogRequestVersioned e)
 
+-- | What a public key on the wire is, and what it is not.
+--
+-- This test used to ESTABLISH THE OPPOSITE of what it establishes now, and the
+-- change is the point of it. It was an experiment in versioning a key by
+-- appending bytes to it: `RefLogRequestVersioned` carries a bare ByteString
+-- where `RefLogRequest` carries a `PubKey`, and the old assertion was that a
+-- request built with a key plus @"AAA"@ decoded back as an ordinary
+-- `RefLogRequest`. It did, and that was not a compatibility property worth
+-- having. It was the observation that a public key was whatever length somebody
+-- said it was.
+--
+-- Every `SignedBox` in this project recovers a key that way and then compares it
+-- against something: a mailbox key, a deny list, a maintainer list. libsodium's
+-- verify takes no length argument and reads its thirty-two bytes out of whatever
+-- buffer it is handed, so a key with a byte appended verifies its owner's
+-- signatures exactly as the real key does and is a different value, equal to
+-- nothing on any list. So the bytes below are now refused, and the test says so
+-- in the direction it is refused in.
 testVersionedKeysHashes :: IO ()
 testVersionedKeysHashes = do
 
@@ -58,43 +76,57 @@ testVersionedKeysHashes = do
 
   let pks = serialise pk
 
-  pks2 <- deserialiseOrFail @(PubKey 'Sign 'HBS2Basic) (pks <> "12345")
-           & orThrowUser "key decode error"
+  -- The ENCODING is unchanged and has to be: this key's bytes are inside every
+  -- ref key derived from it and inside every signature over it, so a different
+  -- spelling would invalidate everything already stored. Two elements, the
+  -- constructor tag, and the raw thirty-two bytes.
+  LBS.unpack (LBS.take 4 pks) @?= [0x82, 0x00, 0x58, 0x20]
+  LBS.length pks @?= 36
 
-  let rfk = serialise (RefLogKey @'HBS2Basic pk)
+  -- Trailing bytes AFTER a complete value are still ignored, which is a property
+  -- of deserialiseOrFail and not of keys, and is deliberately left alone here.
+  _ <- deserialiseOrFail @(PubKey 'Sign 'HBS2Basic) (pks <> "12345")
+         & orThrowUser "a complete key followed by junk should still decode"
+
+  let rfk  = serialise (RefLogKey @'HBS2Basic pk)
   let wrfk = serialise $ W (RefLogKey @'HBS2Basic pk)
   let xrfk = serialise $ X (RefLogKey @'HBS2Basic pk)
 
-  print $ pretty (AsHexSparse keypart)
-  print $ pretty (AsHexSparse pks)
-  print $ pretty (AsHexSparse rfk)
-  print $ pretty (AsHexSparse wrfk)
-  print $ pretty (AsHexSparse xrfk)
+  -- A key is the same bytes however deeply it is wrapped: the derivations below
+  -- are what ref keys and block hashes are taken over.
+  forM_ [rfk, wrfk, xrfk] $ \enc ->
+    assertBool "the key's own bytes end every wrapping of it"
+      (LBS.isSuffixOf keypart enc)
 
-  let req1 = RefLogRequest @L4Proto pk
-
-  let req2 = RefLogRequestVersioned @L4Proto ( VersionedPubKey (LBS.toStrict keypart <> "AAA") )
-
-  print $ yellow "okay"
-
+  let req1  = RefLogRequest @L4Proto pk
   let req1s = serialise req1
+
+  -- A real key still decodes as the loose versioned shape, because that shape
+  -- has no length rule of its own. Kept so that the test says which direction
+  -- closed and which did not.
+  _ <- deserialiseOrFail @(RefLogRequestVersioned L4Proto) req1s
+         & orThrowUser "failed simple -> versioned"
+
+  -- THE ONE THAT MATTERS. A "key" of thirty-five bytes is not a key, at the top
+  -- level and inside a request alike.
+  let req2  = RefLogRequestVersioned @L4Proto ( VersionedPubKey (LBS.toStrict keypart <> "AAA") )
   let req2s = serialise req2
 
-  print $ pretty "---"
+  case deserialiseOrFail @(RefLogRequest L4Proto) req2s of
+    Left _  -> pure ()
+    Right _ -> assertFailure "a 35-byte public key decoded as a RefLogRequest"
 
-  print $ pretty (AsHexSparse req1s)
-  print $ pretty (AsHexSparse req2s)
+  let fat = LBS.take 3 pks <> LBS.pack [0x23] <> LBS.drop 4 pks <> "AAA"
+  case deserialiseOrFail @(PubKey 'Sign 'HBS2Basic) fat of
+    Left _  -> pure ()
+    Right _ -> assertFailure "a 35-byte public key decoded on its own"
 
-  rq0 <- deserialiseOrFail @(RefLogRequestVersioned L4Proto) req1s
-           & orThrowUser "failed simple -> versioned"
-
-  rq1 <- deserialiseOrFail @(RefLogRequest L4Proto) req2s
-           & orThrowUser "failed versioned -> simple"
-
-  print $ viaShow rq0
-  print $ viaShow req1
-
-  print $ viaShow rq1
+  -- And the other side of the boundary, which is the quiet one: a key SHORTER
+  -- than the scheme used to reach libsodium and be read past the end of.
+  let thin = LBS.take 3 pks <> LBS.pack [0x41] <> LBS.take 1 (LBS.drop 4 pks)
+  case deserialiseOrFail @(PubKey 'Sign 'HBS2Basic) thin of
+    Left _  -> pure ()
+    Right _ -> assertFailure "a 1-byte public key decoded"
 
   pure ()
 

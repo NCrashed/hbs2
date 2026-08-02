@@ -17,8 +17,9 @@ import Codec.Serialise (serialise)
 import Codec.Serialise qualified as CBOR
 import Control.Exception (bracket,try)
 import Data.ByteString qualified as BS
+import Control.Monad (forM_)
+import Data.Either (isLeft)
 import Data.List (isInfixOf)
-import Data.Maybe (fromMaybe)
 import GHC.IO.Handle (hDuplicate,hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.IO
@@ -37,12 +38,11 @@ mh = HashRef . hashObject
 fatRef :: Int -> HashRef
 fatRef n = HashRef (fromString (replicate n 'z'))
 
--- The same for a key, built the way FoldSpec builds one: through the generic
--- encoding, because Saltine's own decode is what refuses these.
-fatKey :: Int -> HubKey
-fatKey n = fromMaybe (error "cannot build a stunted key")
-             (either (const Nothing) Just
-                (CBOR.deserialiseOrFail (serialise ((0 :: Word), BS.replicate n 0x41))))
+-- There is no fatKey beside it any more. A key used to be buildable the same
+-- way, through the generic encoding, and that is exactly what was fixed: the
+-- Serialise instances are hand-written now and run saltine's own decoder, and
+-- saltine does not export the constructor. A HashRef still has no length rule,
+-- which is why the one above is still needed.
 
 aKey :: IO HubKey
 aKey = _peerSignPk <$> newCredentials @'HBS2Basic
@@ -72,16 +72,22 @@ spec = do
       -- and the cost was not paid and then thrown away
       length line `shouldSatisfy` (< 400)
 
-    it "prints an envelope key that is not a key by its size" $ do
-      -- The envelope key is recovered by unboxSignedBox0, which does not run the
-      -- length check 'unboxChecked' adds for the inner box: libsodium reads its
-      -- 32 bytes without asking how many there are, so a key whose first 32 bytes
-      -- are real and whose serialised form carries another fifty kilobytes
-      -- VERIFIES -- and this line prints on every failure path, NotForUs
-      -- included, which is most of a public mailbox.
-      let line = shown (render (view (mh "m") (Just (fatKey 40000)) (Left NotForUs)))
-      line `shouldSatisfy` isInfixOf "not a key"
-      length line `shouldSatisfy` (< 400)
+    it "can no longer be given an envelope key that is not a key" $ do
+      -- This used to build a 40 KiB "key" and assert the line said "not a key"
+      -- rather than paying quadratic base58 for it. The envelope key is
+      -- recovered by unboxSignedBox0, which does not run the length check
+      -- 'unboxChecked' adds, and this line prints on every failure path,
+      -- NotForUs included, which is most of a public mailbox.
+      --
+      -- The fixture cannot be built now: a key was a newtype over bytes with a
+      -- DERIVED Serialise instance, so any length of bytes decoded into one, and
+      -- those instances are hand-written and run saltine's own decoder. saltine
+      -- does not export the constructor, so there is no other door. 'keyDoc's
+      -- guard stays as defence in depth and is no longer reachable from here, so
+      -- what is pinned is the thing that closed it.
+      forM_ [0, 31, 40000] $ \n ->
+        CBOR.deserialiseOrFail @HubKey (serialise ((0 :: Word), BS.replicate n 0x41))
+          `shouldSatisfy` isLeft
 
     it "prints a real hash and a real key as themselves" $ do
       -- The other half: the guard must not turn the ordinary case into a size.

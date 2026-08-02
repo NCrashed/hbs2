@@ -8,6 +8,8 @@ import HBS2.Data.Types.SignedBox
 
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
+import Control.Monad (forM_)
+import Data.Either (isLeft,isRight)
 import Data.List (isInfixOf,sortOn)
 import HBS2.Base58 (AsBase58(..))
 import Data.Maybe (fromMaybe)
@@ -631,37 +633,33 @@ spec = do
       reasons (foldEvents repo [eOpen, here]) `shouldBe` []
       HS.member tid (frRedacted (foldEvents repo [eOpen, here])) `shouldBe` True
 
-    it "refuses a box whose key or signature is the wrong length" $ do
+    it "can no longer be given a box whose key or signature is the wrong length" $ do
       owner <- kp
-      alice <- kp
-      -- The Serialise instances for a key and a signature are generic over a
-      -- newtype and take any length, walking past the length check the crypto
-      -- library does in its own decoder; the verifier then hands the pointers
-      -- to a C function that reads a fixed number of bytes regardless.
-      let repo = fst owner
-          ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
-                 (canon repo 1 (Just 1))
-          bend n = case evAuthorBox ev of
-            SignedBox _ bs sig -> Event (SignedBox (stunt n) bs sig) (evCanonBox ev)
-          -- A key is a newtype over bytes with a generic instance, so its
-          -- encoding is the constructor tag and the field: exactly what any
-          -- length of bytes decodes into, which is the hole.
-          stunt n = fromMaybe (error "cannot build a stunted key")
-                      (either (const Nothing) Just
-                        (CBOR.deserialiseOrFail
-                           (serialise ((0 :: Word), BS.replicate n 0x41))))
-      map drWhy (frDropped (foldEvents repo [bend 0]))  `shouldBe` [BadAuthorSig]
-      map drWhy (frDropped (foldEvents repo [bend 31])) `shouldBe` [BadAuthorSig]
-      map drWhy (frDropped (foldEvents repo [bend 5000])) `shouldBe` [BadAuthorSig]
-      -- What the guard changes is not observable from here, and saying so is
-      -- more useful than implying otherwise: the refusal is the same with or
-      -- without it, because the read out of bounds lands in heap slack and
-      -- comes back a mismatch. So this pins the predicate and the refusal, and
-      -- the reason for the guard is that a read out of bounds is undefined
-      -- behaviour whatever it happens to return today.
-      validHubKey (stunt 0) `shouldBe` False
-      validHubKey (stunt 31) `shouldBe` False
-      validHubKey (stunt 5000) `shouldBe` False
+      -- This used to BEND an event's author box to carry a key of 0, 31 and 5000
+      -- bytes and assert the fold dropped each as BadAuthorSig. The bending
+      -- worked because a key and a signature were newtypes over bytes with
+      -- DERIVED Serialise instances: the encoding is the constructor tag and the
+      -- field, so any length of bytes decoded into one, walking straight past the
+      -- length check the crypto library does in its own decoder. libsodium then
+      -- read its thirty-two and sixty-four bytes regardless, which is a read out
+      -- of bounds for a short key and, for a long one, a value that verifies its
+      -- owner's signatures and is equal to nothing on any list.
+      --
+      -- The fixture has no way to exist now. Those instances are hand-written and
+      -- run saltine's own decoder, and saltine does not export the constructor
+      -- either, so a key of the wrong length cannot be built at all. The
+      -- 'wellFormed' guard in 'unboxChecked' stays as defence in depth and is
+      -- simply unreachable from the wire; what is testable, and what actually
+      -- closed the hole, is that the bytes are refused before anything is made
+      -- out of them.
+      let bytes n = serialise ((0 :: Word), BS.replicate n 0x41)
+      forM_ [0, 31, 5000] $ \n -> do
+        CBOR.deserialiseOrFail @HubKey (bytes n) `shouldSatisfy` isLeft
+        CBOR.deserialiseOrFail @(Signature HubScheme) (bytes n) `shouldSatisfy` isLeft
+
+      -- And the encoding is otherwise untouched, which it has to be: these bytes
+      -- are inside every signature and every ref key derived from a key.
+      CBOR.deserialiseOrFail @HubKey (serialise (fst owner)) `shouldSatisfy` isRight
       validHubKey (fst owner) `shouldBe` True
 
     it "prints a refusal in words, with keys anyone can look up" $ do

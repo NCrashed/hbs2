@@ -813,14 +813,19 @@ unboxChecked
   -> Either BoxError (HubKey, p)
 unboxChecked (SignedBox pk bs sig)
   -- Before the verify, because the verify is where the bytes stop being ours.
-  -- The Serialise instances for a signing key and a signature are generic over
-  -- a newtype, so they take any length and walk straight past the length check
-  -- the crypto library does on its own decoder; the verifier then hands the
-  -- pointers to a C function that reads thirty-two and sixty-four bytes without
-  -- asking. On this heap that lands in slack and returns a mismatch rather than
-  -- a crash, which is luck rather than a defence: it is a read out of bounds
-  -- either way. This runs the check the instance skipped, using the crypto
-  -- library's own decoder so there is no second opinion about the sizes.
+  -- The verifier hands its pointers to a C function that reads thirty-two and
+  -- sixty-four bytes without asking, so a key of the wrong length is a read out
+  -- of bounds in one direction and a value equal to nothing on any list in the
+  -- other.
+  --
+  -- This used to be the ONLY thing standing between those bytes and libsodium:
+  -- the Serialise instances for a signing key and a signature were derived,
+  -- generic over a newtype, and took a payload of any length. They are
+  -- hand-written now and run the crypto library's own decoder, so a key that is
+  -- not one no longer decodes anywhere in the project. This stays because it
+  -- costs a round trip through that same decoder and because the rule belongs to
+  -- this function too: a box is opened here whether or not the instance that
+  -- produced its parts was the one this comment was written about.
   | not (wellFormed pk sig)               = Left BoxBadSig
   | not (verifySign @HubScheme pk sig bs) = Left BoxBadSig
   | otherwise = case decodeChecked bs of

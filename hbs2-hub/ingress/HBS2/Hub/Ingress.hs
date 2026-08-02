@@ -417,18 +417,22 @@ openMessage ig mh = do
       -- which is a queue with no key to block by.
       --
       -- CHECKED FOR BEING A KEY, which 'unboxSignedBox0' does not do and
-      -- 'unboxChecked' does. The Serialise instances for a signing key and a
-      -- signature are generic over a newtype, so they take any length and walk
-      -- past the length check the crypto library does on its own decoder;
-      -- libsodium then reads its thirty-two bytes and ignores the rest. So a
-      -- sender who appends one byte to their own public key produces an envelope
-      -- that verifies under a key equal to nothing anybody has on a list, and
-      -- 'openLetterAs' has exactly one envelope-level check -- @allowed
-      -- envelopeSigner@ -- which therefore never fired. Each padding also changes
-      -- the message hash, so one letter became N stored blocks and N queue lines,
-      -- each printing as @(not a key: N bytes)@: nothing to copy into a block
-      -- list either. The reasoning is 'unboxChecked's, written down there in
-      -- full; this is the path it was not applied to.
+      -- 'unboxChecked' does.
+      --
+      -- When this check was added it was load-bearing: the Serialise instances
+      -- for a signing key and a signature were derived, so they took a payload
+      -- of any length, and libsodium reads its thirty-two bytes and ignores the
+      -- rest. A sender who appended one byte to their own public key produced an
+      -- envelope that verified under a key equal to nothing anybody has on a
+      -- list, so 'openLetterAs's one envelope-level check -- @allowed
+      -- envelopeSigner@ -- never fired, and each padding changed the message
+      -- hash, so one letter became N stored blocks and N queue lines printing as
+      -- @(not a key: N bytes)@.
+      --
+      -- Those instances are hand-written now and refuse a wrong length, so this
+      -- is defence in depth rather than the only defence. It stays: it is one
+      -- round trip through the same decoder, and this reader should not have to
+      -- know which instance produced the bytes it was handed.
       let envelope = case unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg) of
             Just (k, _) | validHubKey k -> Just k
             _                           -> Nothing

@@ -2,6 +2,46 @@
 
 ## Security
 
+  - **`hbs2-core`: a public key was whatever length its sender said it
+    was.** The five saltine types this project puts on the wire are
+    newtypes over a `ByteString` and had DERIVED `Serialise` instances.
+    The generic encoding is that `ByteString` and the generic decoding
+    takes one of any length; saltine's own decoder is the length check for
+    the scheme, and it was being walked straight past. Measured before the
+    change: a 35-byte public key decoded, and `Crypto.decode` on the same
+    bytes answered `Nothing`.
+
+    libsodium's verify takes no length argument and reads its thirty-two
+    or sixty-four bytes out of whatever buffer it is handed. So appending
+    one byte to your own public key gives a key that verifies your
+    signatures exactly as the real one does and is a DIFFERENT VALUE,
+    equal to nothing on anybody's list, and every deny list, maintainer
+    list and mailbox-key comparison in this project is a lookup on that
+    value. That is the hub envelope hole from the previous commit, at its
+    root rather than at one call site. A key SHORTER than the scheme is
+    the quieter direction: the read runs off the end of the buffer.
+
+    The instances are hand-written now. The ENCODING IS UNCHANGED, byte
+    for byte, and had to be: these bytes are inside signatures, inside
+    block hashes and inside every ref key derived from a public key, so a
+    different spelling would invalidate the network and everything stored
+    in it. All five encode as a two-element array, the constructor tag and
+    the raw bytes, exactly as before. The decoder now asks saltine, which
+    is the only thing that knows the size each scheme wants.
+
+    Consequences worth knowing. A key of the wrong length can no longer be
+    constructed at all: saltine does not export the constructor either, so
+    the `wellFormed`/`validHubKey` guards in `hbs2-hub` and the
+    `(not a key: N bytes)` rendering are now unreachable. They stay as
+    defence in depth, their comments no longer claim a hole that is
+    closed, and the three tests that used to build such a key through the
+    generic encoding now pin the refusal instead, since their fixtures
+    cannot exist. `hbs2-peer`'s `testVersionedKeys` asserted the opposite
+    of this fix -- it established that a key plus `"AAA"` decoded as an
+    ordinary `RefLogRequest`, an experiment in versioning keys by
+    appending bytes -- and now asserts the refusal, in both the bare and
+    the wrapped form, plus the short-key direction.
+
   - **`hbs2-core`: a kilobyte of well-formed blocks could stop any peer
     that walked a root somebody else chose.** A merkle node lists child
     hashes and nothing stops two of them being equal, so the block graph

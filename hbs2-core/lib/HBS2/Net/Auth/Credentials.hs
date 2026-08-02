@@ -18,6 +18,8 @@ import HBS2.Hash
 import Data.Config.Suckless
 
 import Control.Applicative
+import Codec.CBOR.Decoding (Decoder,decodeBytes,decodeListLen,decodeWord)
+import Codec.CBOR.Encoding (Encoding,encodeBytes,encodeListLen,encodeWord)
 import Codec.Serialise
 import Crypto.Saltine.Core.Sign (Keypair(..))
 import Crypto.Saltine.Core.Sign qualified as Sign
@@ -41,11 +43,73 @@ instance Signatures 'HBS2Basic where
 type instance KeyActionOf Sign.PublicKey = 'Sign
 type instance KeyActionOf Encrypt.PublicKey = 'Encrypt
 
-instance Serialise Sign.Signature
-instance Serialise Sign.PublicKey
-instance Serialise Sign.SecretKey
-instance Serialise Encrypt.PublicKey
-instance Serialise Encrypt.SecretKey
+-- The keys and the signature go over the wire and into hashes as CBOR, and they
+-- used to do it through DERIVED instances. Each of these types is a newtype over
+-- a ByteString, so the generic encoding is that ByteString and the generic
+-- decoding accepts a ByteString of ANY LENGTH. saltine's own decoder does not:
+-- it is the length check for the scheme, and it was being walked straight past.
+--
+-- What that cost is a check that could not fire. libsodium's verify takes no
+-- length argument, so it reads its thirty-two and sixty-four bytes out of
+-- whatever buffer it is handed. Append one byte to your own public key and you
+-- have a key that verifies your signatures exactly as the real one does and is a
+-- DIFFERENT VALUE, equal to nothing on anybody's list -- and every deny list in
+-- this project is a lookup on that value. Measured on this build before the
+-- change: a 35-byte public key decoded, and `Crypto.decode` on the same bytes
+-- answered Nothing, which is the whole of it in two lines. A key SHORTER than
+-- the scheme is worse and quieter, since the read then runs off the end of the
+-- buffer.
+--
+-- THE ENCODING IS UNCHANGED, byte for byte, and has to be: these bytes are
+-- inside signatures, inside block hashes, and inside every ref key derived from
+-- a public key, so a different spelling would invalidate the network and
+-- everything already stored in it. All five encode as a two-element array, the
+-- constructor tag, and the raw bytes -- @82 00 58 20 ...@ for the 32-byte ones
+-- and @82 00 58 40 ...@ for the 64-byte ones -- which is what the derived
+-- instances produced and what these produce. hbs2-core's test suite pins the
+-- prefixes and the round trip so that this cannot drift.
+--
+-- What changed is only that the decoder now runs the check the derived one
+-- skipped. A correctly generated key has always been the right length, so
+-- nothing legitimate decodes differently; what stops decoding is a key that was
+-- never one.
+saltineEncoding :: IsEncoding a => a -> Encoding
+saltineEncoding a = encodeListLen 2 <> encodeWord 0 <> encodeBytes (Crypto.encode a)
+
+saltineDecoder :: IsEncoding a => String -> Decoder s a
+saltineDecoder what = do
+  n <- decodeListLen
+  t <- decodeWord
+  unless (n == 2 && t == 0) do
+    fail (what <> ": not a key encoding")
+  bs <- decodeBytes
+  -- saltine's decoder IS the length check, and it is the only thing here that
+  -- knows the size the scheme wants, so it is asked rather than a constant of
+  -- our own being compared. Deliberately not a pair of numbers written down in
+  -- this module: that would be a second place for the sizes to be wrong.
+  maybe (fail (what <> ": wrong length for the scheme: " <> show (B8.length bs)))
+        pure
+        (Crypto.decode bs)
+
+instance Serialise Sign.Signature where
+  encode = saltineEncoding
+  decode = saltineDecoder "Sign.Signature"
+
+instance Serialise Sign.PublicKey where
+  encode = saltineEncoding
+  decode = saltineDecoder "Sign.PublicKey"
+
+instance Serialise Sign.SecretKey where
+  encode = saltineEncoding
+  decode = saltineDecoder "Sign.SecretKey"
+
+instance Serialise Encrypt.PublicKey where
+  encode = saltineEncoding
+  decode = saltineDecoder "Encrypt.PublicKey"
+
+instance Serialise Encrypt.SecretKey where
+  encode = saltineEncoding
+  decode = saltineDecoder "Encrypt.SecretKey"
 
 type family EncryptPubKey e :: Type
 
