@@ -45,7 +45,7 @@ spec = do
           r = href "rcpt"
           argv = [ keyWord repo, word (pretty s), word (pretty r), keyWord author
                  , mkStr @C "a title" ]
-      issueArgs argv `shouldBe` Just (repo, s, r, author, "a title")
+      issueArgs argv `shouldBe` Just (repo, s, r, author, "a title", [])
 
     it "reads them by name, in any order" $ do
       -- The reason the named form exists: FOUR base58 blobs in a row, and two
@@ -68,7 +68,7 @@ spec = do
                      , mkStr @C "--recipient", word (pretty r)
                      , mkStr @C "--sender", word (pretty s)
                      , mkStr @C "--target", keyWord repo ]
-      issueArgs named `shouldBe` Just (repo, s, r, author, "a title")
+      issueArgs named `shouldBe` Just (repo, s, r, author, "a title", [])
       -- The property, rather than two examples of it: order carries no meaning
       -- in the named form, which is the whole point of having it.
       issueArgs shuffled `shouldBe` issueArgs named
@@ -86,7 +86,64 @@ spec = do
                    , mkStr @C "--title", mkStr @C "t"
                    , mkStr @C k, mkStr @C "x" ]
       issueArgs (with "--titel") `shouldBe` Nothing
-      issueArgs (with "--label") `shouldBe` Nothing
+      issueArgs (with "--draft") `shouldBe` Nothing
+
+    it "takes the labels PEP-22 says it takes, as many as are given" $ do
+      -- PEP-22:280 spells the verb `hub issue new --target <repo> --title ...
+      -- [--label ...]`, and this used to REFUSE the flag and hard-code the
+      -- requested labels to []. So `labels_requested` in the render contract
+      -- (PEP-22:410) could never be populated by the tool that populates it, and
+      -- a person following the spec got a usage message that does not mention
+      -- labels.
+      repo <- aKey
+      author <- aKey
+      let labelled ls = [ mkStr @C "--target", keyWord repo
+                        , mkStr @C "--sender", word (pretty (href "s"))
+                        , mkStr @C "--recipient", word (pretty (href "r"))
+                        , mkStr @C "--author", keyWord author
+                        , mkStr @C "--title", mkStr @C "t" ]
+                        <> concat [ [mkStr @C "--label", mkStr @C l] | l <- ls ]
+          labelsOf = fmap (\(_,_,_,_,_,ls) -> ls) . issueArgs
+      labelsOf (labelled [])             `shouldBe` Just []
+      labelsOf (labelled ["bug"])        `shouldBe` Just ["bug"]
+      -- Repeatable, and in the order given: unlike every other flag here, a
+      -- second --label is not a contradiction to refuse.
+      labelsOf (labelled ["bug","ui"])   `shouldBe` Just ["bug","ui"]
+
+    it "will not take a flag as the value of a flag" $ do
+      -- `--title --draft` parsed cleanly and signed the string `--draft` as the
+      -- title. The title goes inside the author box, and the event-id is the
+      -- hash of that box, so it cannot be corrected afterwards: canon is
+      -- append-only. That is the hazard the named form exists to prevent,
+      -- reached by another route.
+      repo <- aKey
+      author <- aKey
+      let titled t = [ mkStr @C "--target", keyWord repo
+                     , mkStr @C "--sender", word (pretty (href "s"))
+                     , mkStr @C "--recipient", word (pretty (href "r"))
+                     , mkStr @C "--author", keyWord author
+                     , mkStr @C "--title", t ]
+      issueArgs (titled (mkStr @C "--draft")) `shouldBe` Nothing
+
+    it "accepts the --flag=value spelling, which was accepted nowhere" $ do
+      -- `--title=t` used to fall through and pair the whole word `--title=t`
+      -- with the NEXT one, then print a usage message that did not say what was
+      -- wrong. It is also the escape hatch that makes refusing `--title --draft`
+      -- affordable: a title that begins with a dash is still expressible.
+      repo <- aKey
+      author <- aKey
+      let argvEq t = [ mkStr @C ("--target=" <> show (pretty (AsBase58 repo)))
+                     , mkStr @C ("--sender=" <> show (pretty (href "s")))
+                     , mkStr @C ("--recipient=" <> show (pretty (href "r")))
+                     , mkStr @C ("--author=" <> show (pretty (AsBase58 author)))
+                     , mkStr @C ("--title=" <> t)
+                     , mkStr @C "--label=bug" ]
+      issueArgs (argvEq "a title")
+        `shouldBe` Just (repo, href "s", href "r", author, "a title", ["bug"])
+      -- A value may hold an '=' of its own: the split is on the first one only.
+      fmap (\(_,_,_,_,t,_) -> t) (issueArgs (argvEq "a=b")) `shouldBe` Just "a=b"
+      -- And the dash case the refusal above makes necessary.
+      fmap (\(_,_,_,_,t,_) -> t) (issueArgs (argvEq "--draft")) `shouldBe` Just "--draft"
 
     it "refuses a flag given twice instead of choosing" $ do
       repo <- aKey
@@ -106,7 +163,7 @@ spec = do
     it "refuses a partial named form rather than filling a blank" $ do
       repo <- aKey
       issueArgs [ mkStr @C "--target", keyWord repo ] `shouldBe` Nothing
-      issueArgs [] `shouldBe` Nothing
+      issueArgs ([] :: [Syntax C]) `shouldBe` Nothing
 
     it "refuses a value that is not the kind the name asks for" $ do
       -- A sigil is a hash and a target is a key; neither is "whatever parses".
@@ -132,7 +189,7 @@ spec = do
                      , mkStr @C "--recipient", word (pretty (href "r"))
                      , mkStr @C "--author", keyWord author
                      , mkStr @C "--title", t ]
-          titleOf = fmap (\(_,_,_,_,t) -> t) . issueArgs
+          titleOf = fmap (\(_,_,_,_,t,_) -> t) . issueArgs
       titleOf (titled (mkInt @C (2026 :: Int))) `shouldBe` Just "2026"
       titleOf (titled (mkStr @C "2026"))        `shouldBe` Just "2026"
       -- ...and a list is still not a title

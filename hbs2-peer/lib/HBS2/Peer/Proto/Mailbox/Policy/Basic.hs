@@ -88,7 +88,30 @@ parseBasicPolicy syn = do
   tpeers   <- newTVarIO mempty
   tsenders <- newTVarIO mempty
 
-  for_ syn $ \case
+  -- Клаузу, которую эта сборка не понимает, теперь нельзя пропустить молча.
+  -- Раньше в catch-all стояло `pure ()`, и функция всё равно возвращала Just:
+  -- `(peer alow all)` -- одна буква -- отбрасывалось без единого слова, а
+  -- loadPolicyContent докладывал об успешно прочитанной политике, и ящик
+  -- оставался настолько открытым, насколько говорит его действие по умолчанию.
+  -- По той же причине проверки `orThrowUser "invalid policy"` в hbs2-cli были
+  -- недостижимы.
+  --
+  -- Отказ целиком, а не по клаузе, и это безопасное направление: вызывающая
+  -- сторона падает обратно на defaultBasicPolicy, то есть deny/deny.
+  tbad <- newTVarIO (0 :: Int)
+
+  -- Раскладка не часть формата. parseTop делает список на строку, поэтому
+  -- несколько клауз на одной строке приходят одной формой, содержащей их; файл
+  -- мог быть переформатирован чем угодно. Без этого ужесточение выше отвергало
+  -- бы рабочую политику, записанную в одну строку.
+  let flat s = case s of
+        ListVal (ListVal{} : _) -> [ x | x@ListVal{} <- unList s ]
+        _                       -> [s]
+      unList = \case
+        ListVal xs -> xs
+        _          -> []
+
+  for_ (concatMap flat syn) $ \case
     ListVal [SymbolVal "peer", SymbolVal "allow", SymbolVal "all"]  -> do
       atomically $ writeTVar tpAction Allow
 
@@ -113,13 +136,15 @@ parseBasicPolicy syn = do
     ListVal [SymbolVal "sender", SymbolVal "deny", SignPubKeyLike who]  -> do
       atomically $ modifyTVar tsenders (HM.insert who Deny)
 
-    _ -> pure ()
+    _ -> atomically $ modifyTVar tbad succ
 
   a <- readTVarIO tpAction
   b <- readTVarIO tsAction
   c <- readTVarIO tpeers
   d <- readTVarIO tsenders
 
-  pure $ Just $ BasicPolicy  @s a b c d
+  bad <- readTVarIO tbad
+
+  pure $ if bad > 0 then Nothing else Just (BasicPolicy @s a b c d)
 
 

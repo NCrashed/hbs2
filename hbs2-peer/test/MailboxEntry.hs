@@ -1,0 +1,82 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | How a mailbox names the entry for a message, and the marker that says the
+-- entry is already in.
+--
+-- Both are STORAGE KEYS, so they are a format and not an implementation detail:
+-- change either derivation by a byte and every marker already written stops
+-- being found. Nothing would fail. The merge path would simply re-merge entries
+-- it has already merged, and the cheap early-out in @mailboxInQ@ -- which is
+-- what makes accepting a message twice affordable, and therefore what makes a
+-- policy refusal recoverable -- would never fire again. Slower, and silent.
+--
+-- So the two derivations are named functions with one definition each, used by
+-- the accept path and by the merge path alike, and the golden hashes below are
+-- what stops them drifting.
+module MailboxEntry (mailboxEntryTests) where
+
+import HBS2.Hash
+import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Peer.Proto.Mailbox.Entry
+import HBS2.Peer.Proto.Mailbox.Ref
+import HBS2.Net.Auth.Schema (CryptoScheme(..))
+import HBS2.Net.Proto.Types (CryptoAction(..),PubKey)
+import HBS2.Prelude.Plated (fromStringMay,pretty)
+
+import Data.ByteString (ByteString)
+import Data.Maybe (fromMaybe)
+
+import Test.Tasty
+import Test.Tasty.HUnit
+
+type S = 'HBS2Basic
+
+-- A fixed mailbox, so the goldens below are reproducible.
+mbox :: MailboxRefKey S
+mbox = MailboxRefKey key
+  where
+    key = fromMaybe (error "bad fixture key")
+            (fromStringMay @(PubKey 'Sign S) "BTThPdHKF8XnEq4m6wzbKHKA6geLFK4ydYhBXAqBdHSP")
+
+other :: MailboxRefKey S
+other = MailboxRefKey key
+  where
+    key = fromMaybe (error "bad fixture key")
+            (fromStringMay @(PubKey 'Sign S) "EJgvBg9bL2yKXk3GvZaYJgqpHy5kvpXdtEnAgoi4B5DN")
+
+mh :: ByteString -> HashRef
+mh = HashRef . hashObject
+
+mailboxEntryTests :: TestTree
+mailboxEntryTests = testGroup "mailbox entry derivations"
+  [ testCase "an exists-entry is a function of the message and nothing else" $ do
+      -- No clock, no policy, no mailbox: which is what lets the accept path
+      -- compute the entry hash WITHOUT storing anything, and so ask "is this
+      -- already in?" for the price of one lookup.
+      existsEntryHash (mh "a") @?= existsEntryHash (mh "a")
+      assertBool "different messages, different entries"
+        (existsEntryHash (mh "a") /= existsEntryHash (mh "b"))
+
+  , testCase "a merged marker names the mailbox as well as the entry" $ do
+      -- The same message in two mailboxes is two separate facts, and merging it
+      -- into one must not make the other look done.
+      let e = existsEntryHash (mh "a")
+      assertBool "two mailboxes, two markers" (mergedMarker mbox e /= mergedMarker other e)
+      assertBool "two entries, two markers"
+        (mergedMarker mbox e /= mergedMarker mbox (existsEntryHash (mh "b")))
+      mergedMarker mbox e @?= mergedMarker mbox e
+
+  , testCase "the derivations are the ones already on disk" $ do
+      -- GOLDEN, and the reason is that these are storage keys. A change here is
+      -- not a refactor: every marker written by every previous build stops being
+      -- found, the merge path silently redoes work it has already done, and the
+      -- early-out that makes a re-accepted message cheap never fires again.
+      -- Nothing breaks loudly, which is exactly why it is pinned.
+      show (pretty (existsEntryHash (mh "a")))
+        @?= "FsRJKCQewTby4JUgy57tLtJVNvTdr15frMKZMod9Hpxy"
+      show (pretty (mergedMarker mbox (existsEntryHash (mh "a"))))
+        @?= "4APUBZi1KgcUjmf9T3Yybk6kTyR6JK8yGfpffX7uJXVp"
+  ]

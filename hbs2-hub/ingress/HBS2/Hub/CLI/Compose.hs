@@ -16,11 +16,14 @@ module HBS2.Hub.CLI.Compose
   , sendLetter
   , issueUsage
   , issueArgs
+  , codeNoKey
+  , codeNotStored
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -90,7 +93,7 @@ sendLetter ob sender rcpts box reply = do
   -- it as its origin, and retention deletes by it. A sender that cannot name
   -- what it sent cannot correlate the acknowledgement it gets back.
   h <- putBlock (obStorage ob) (serialise msg)
-         >>= orThrowUser "cannot store the message"
+         >>= maybe (throwIO (NotStored "the peer would not store the message")) pure
 
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
   -- discarding that printed a message hash and left with a zero exit having sent
@@ -98,19 +101,54 @@ sendLetter ob sender rcpts box reply = do
   -- silence as an answer; on the write side the same mistake is worse, because
   -- the caller believes a letter is in a mailbox.
   --
-  -- What this establishes and NOTHING MORE: the RPC round-tripped. The reason is
-  -- in the peer's types rather than here -- @Output RpcMailboxSend@ is @()@, the
-  -- handler is @void $ mailboxSendMessage@, and @mailboxSendMessage@ fires the
-  -- protocol inside @deferred@ and returns @Right ()@ unconditionally. So a
-  -- policy refusal, a mailbox the peer has never heard of and a storage failure
-  -- are all indistinguishable from delivery, and no wording here can make them
-  -- otherwise. The message says what was checked; making it say more would need
-  -- a result type the RPC does not have. Named in the answer too: see the
-  -- @queued@ form the verb returns.
+  -- What this establishes and NOTHING MORE: the RPC round-tripped, and the peer
+  -- did not refuse. @Output RpcMailboxSend@ carries an
+  -- @Either MailboxServiceError ()@ now -- it was @()@, and the handler was
+  -- @void $ mailboxSendMessage@, so every refusal read as delivery -- but the
+  -- service function behind it STILL answers @Right ()@ unconditionally: it
+  -- fires the protocol inside @deferred@ and returns. So what can be reported
+  -- here are the refusals the peer reaches before that point, and delivery is
+  -- not among them. That is why the verb answers @queued@ and not @sent@, and
+  -- the word is still the honest one.
+  --
+  -- Typed exceptions rather than 'orThrowUser', and the difference is the exit
+  -- code. `orThrowUser` leaves through the RTS with 1, which PEP-22 gives to
+  -- usage errors, so "you mistyped a flag" and "your letter is in nobody's
+  -- mailbox" arrived as one number -- the exact confusion codes 17 and 18 were
+  -- added to end on the read side, and worse here, because the caller stops
+  -- watching for a letter that was never sent.
   callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) msg
-    >>= orThrowUser "the peer did not take the message: it stopped answering"
+    >>= maybe (throwIO (PeerSilent "the mailbox send")) pure
+    >>= either (throwIO . NotStored . show
+                  . ("the peer refused the message:" <+>) . viaShow)
+               pure
 
   pure (HashRef h)
+
+-- | The peer answered and would not take the message.
+--
+-- Distinct from 'PeerSilent': the peer is answering, so the remedy is what it
+-- said rather than whether it is alive. Distinct from a usage error for the
+-- reason every code here is: nothing the caller could retype changes it.
+newtype NotStored = NotStored String
+
+instance Show NotStored where
+  show (NotStored what) =
+    what <> ". The letter is in no mailbox: check the peer's log."
+
+instance Exception NotStored
+
+-- | No signing key for the author this letter claims.
+--
+-- Above 'codePeerSilent', and added rather than folded into 1, because a hook
+-- that cannot tell "this key is not in the keyman here" from "you mistyped a
+-- flag" cannot act on either.
+codeNoKey :: Int
+codeNoKey = 19
+
+-- | And what a peer that would not store the message exits with.
+codeNotStored :: Int
+codeNotStored = 20
 
 -- | @hub issue new@ and the other compose verbs.
 composeEntries :: forall c m . ( IsContext c
@@ -145,7 +183,7 @@ composeEntries = do
              <> line <> "everywhere else (the inbox lists it, a folded event carries"
              <> line <> "it as its origin), and the event-id the thread will have." )
     $ entry $ bindMatch "hub:issue:new" \case
-        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title)) -> lift do
+        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title, labels)) -> lift do
 
           -- Only when there is something to read. On a terminal this used to
           -- block with no prompt, which reads as a hang rather than as a
@@ -155,7 +193,10 @@ composeEntries = do
                     False -> getContents
 
           creds <- runKeymanClientRO (loadCredentials author)
-                     >>= orThrowUser ("no credentials for" <+> pretty (AsBase58 author))
+                     >>= maybe (liftIO (refuse (show ("no signing key here for"
+                                                       <+> pretty (AsBase58 author)))
+                                               codeNoKey))
+                               pure
 
           -- Milliseconds, because that is what the declared timestamp is
           -- (PEP-19): in seconds, a close and a reopen in the same second
@@ -165,7 +206,14 @@ composeEntries = do
           -- Every field the letter layer bounds is bounded before anything is
           -- signed, because an oversized field in a signed box is a letter no
           -- hub will fold and the signature cannot be redone over less.
-          let content = AOpen repo HubIssue (fromString title) []
+          -- The labels the author ASKS for, which is all an author can do with a
+          -- label: PEP-19 makes applying one an owner-signed set event, and
+          -- PEP-22 renders these as `labels_requested` and never as `labels`,
+          -- "showing these as labels would let a stranger label their own
+          -- issue". They were hard-coded empty here, so the field the render
+          -- contract specifies could never be populated by the tool that is
+          -- supposed to populate it.
+          let content = AOpen repo HubIssue (fromString title) (fmap fromString labels)
                           (bodyOf body) Nothing Nothing now
 
           for_ (oversizedField content) $ \f ->
@@ -178,6 +226,8 @@ composeEntries = do
               ob = Outbound sto api rpcTimeout
 
           h <- sendLetter ob senderSigil [rcptSigil] box noReplyChannel
+                 `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
+                 `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
 
           -- Both hashes, because they answer different questions and only one
           -- of them is guessable from the other. The message hash is how the
@@ -231,10 +281,14 @@ composeEntries = do
 --
 -- Total, and exported so that a test can ask what a command line means without
 -- a peer, a keyman or a dictionary.
-issueArgs :: [Syntax c] -> Maybe (RepoRef, HashRef, HashRef, HubKey, String)
+issueArgs :: forall c . IsContext c
+          => [Syntax c] -> Maybe (RepoRef, HashRef, HashRef, HubKey, String, [String])
 issueArgs = \case
   [ SignPubKeyLike repo, HashLike sender, HashLike rcpt
-    , SignPubKeyLike author, (titleOf -> Just title) ] -> Just (repo, sender, rcpt, author, title)
+    , SignPubKeyLike author, (titleOf -> Just title) ] ->
+      -- No labels positionally: a repeatable value has no position, and the
+      -- positional form stays only because it is what exists.
+      Just (repo, sender, rcpt, author, title, [])
   ss -> named ss
   where
     -- A title is TEXT, and a person is allowed to call an issue "2026".
@@ -263,20 +317,50 @@ issueArgs = \case
       rcpt   <- one kvs "--recipient" >>= hashOf
       author <- one kvs "--author"    >>= signKey
       title  <- one kvs "--title"     >>= titleOf
-      pure (repo, sender, rcpt, author, title)
+      -- Repeatable, unlike every other flag here, and so read with 'every'
+      -- rather than 'one'. Bounds are not applied at this layer: 'oversizedField'
+      -- owns them, and it is the same check the fold will make.
+      labels <- traverse titleOf (every kvs "--label")
+      pure (repo, sender, rcpt, author, title, labels)
 
-    knownFlags = ["--target","--sender","--recipient","--author","--title"]
+    knownFlags = ["--target","--sender","--recipient","--author","--title","--label"]
 
     -- Exactly one, so that `--title a --title b` is a refusal rather than a
     -- silent choice between them.
-    one kvs k = case [ v | (k',v) <- kvs, k' == k ] of
+    one kvs k = case every kvs k of
       [v] -> Just v
       _   -> Nothing
 
+    every kvs k = [ v | (k',v) <- kvs, k' == k ]
+
+    pairs :: [Syntax c] -> Maybe [(String, Syntax c)]
     pairs = \case
       [] -> Just []
-      (StringLike k : v : rest) | "--" `List.isPrefixOf` k -> ((k,v) :) <$> pairs rest
+      -- `--flag=value`, which was accepted nowhere and named in no usage text:
+      -- `--title=t` fell through to the case below, paired `--title=t` with the
+      -- NEXT word, and printed a usage message that did not say what was wrong.
+      -- It is also the spelling that lets a value legitimately begin with a
+      -- dash, which is what makes the refusal below affordable.
+      (StringLike k : rest)
+        | Just (k', v) <- splitFlag k -> ((k', mkStr @c v) :) <$> pairs rest
+      (StringLike k : v : rest)
+        | "--" `List.isPrefixOf` k, not (flagLike v) -> ((k,v) :) <$> pairs rest
       _ -> Nothing
+
+    -- A flag where a value belongs is a MISSING value, not a value. Without
+    -- this, `hub issue new ... --title --draft` parsed cleanly and signed the
+    -- string `--draft` as the title -- into the author box and therefore into
+    -- the event-id, which is the hash of that box, so it cannot be corrected
+    -- afterwards: canon is append-only. That is the same hazard the named form
+    -- was introduced for, reached by a different route.
+    flagLike = \case
+      StringLike s -> "--" `List.isPrefixOf` s
+      _            -> False
+
+    -- Split on the FIRST '=' only, so a value may contain one.
+    splitFlag s = case List.break (== '=') s of
+      (k, '=' : v) | "--" `List.isPrefixOf` k, length k > 2 -> Just (k, v)
+      _                                                     -> Nothing
 
     signKey = \case
       SignPubKeyLike x -> Just x
@@ -291,8 +375,17 @@ issueUsage :: Doc ann
 issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
           <> line <> "                     --recipient <recipient-sigil>"
           <> line <> "                     --author <author-key> --title <title>"
+          <> line <> "                     [--label <label>]..."
           <> line <> "   or: hub issue new <repo-key> <sender-sigil> <recipient-sigil>"
           <> line <> "                     <author-key> <title>"
+          <> line
+          <> line <> "  --label may be given more than once. A label here is a"
+          <> line <> "  REQUEST: applying one is the owner's to sign (PEP-19), so"
+          <> line <> "  these are rendered as labels_requested and never as labels."
+          <> line
+          <> line <> "  --flag=value is accepted too, and is the spelling to use"
+          <> line <> "  when a value begins with a dash: `--title --draft` is a"
+          <> line <> "  missing title, not a title of `--draft`, and is refused."
           <> line
           <> line <> "  The body is read from stdin when stdin is not a terminal."
           <> line <> "  Prefer the named form: the two keys and the two sigils are"

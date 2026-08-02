@@ -253,6 +253,139 @@
 
 ## Fixed
 
+  - **`hbs2-peer`: a mailbox with no policy lost every letter that
+    arrived, permanently.** Three things had to be true at once and all
+    three were. `mailboxGetPolicy` falls back to `defaultBasicPolicy`,
+    which is `Deny Deny`, so a mailbox that has not had a policy set
+    accepts nothing. The `RoutedEntry` dedup marker was written by the
+    protocol handler immediately after gossip, ten seconds BEFORE
+    `mailboxInQ` evaluated that policy. And a message the policy refused
+    was `mzero`d out of existence: never stored, the queue already
+    flushed. So every later gossip of the same message was suppressed as
+    `seen`, and creating a mailbox and not setting a policy in the same
+    breath was silent, permanent loss -- unrecoverable even after the
+    policy was fixed.
+
+    The marker gates GOSSIP now, which is what it is for, and nothing
+    else. Accepting is a write to a bounded queue; the expensive part (a
+    signature check per recipient, a policy read and parse with no cache)
+    is in `mailboxInQ`, which gained a cheap early-out for a message
+    already merged into that mailbox. So a re-gossiped message costs one
+    lookup when it is already in, and gets another chance when it is not.
+    The default stays deny: failing closed is right, and it was the other
+    two that made it a data-loss bug.
+
+  - **`hbs2-peer`: a full input queue was counted as a successful
+    download.** `mailboxAcceptMessage` answered `()`, dropped on a full
+    `TBQueue` and incremented a counter nothing read. The merge path
+    called it from inside the walk over a downloaded tree, did not treat
+    a drop as a failure, and so removed the tree from the download queue
+    as complete, with its own `FIXME: what-if-message-queue-full?` on the
+    line above. A burst larger than the 8000-slot queue was permanent loss
+    with no diagnostic and no retry. It answers whether it took the
+    message now, the drop is logged and published on the probe, and the
+    download stays in the queue so the next poll walks the tree again.
+
+  - **`hbs2-peer`: the merge path skipped the peer policy entirely.** The
+    walk over a downloaded status tree called `mailboxAcceptMessage` with
+    `mzero` for the peer, and `mailboxInQ` reads `Nothing` as "no peer to
+    check" -- which is right for a message this node injected itself and
+    wrong here. A peer denied by `(peer deny <key>)` only had to serve its
+    messages inside a status tree instead of sending them, and every one
+    of them was admitted with the peer check skipped. The announcing peer
+    is carried on the download and passed through.
+
+  - **`hbs2-peer`: a status for a mailbox the peer does not host queued a
+    download that never expired.** `mailboxAcceptStatus` did no existence
+    check, so any handshaked peer could announce a status for a key it
+    invented and have us store its policy block and ask the network for a
+    root it chose. Entries leave `inMailboxDownloadQ` only when the tree
+    downloads completely and without a single failure, so a root whose
+    blocks never arrive stayed forever and was re-polled every two
+    seconds: N bogus statuses, N permanent entries, N permanent download
+    requests. The mailbox must be one we host now, which bounds the queue
+    by the number we hold, and both download queues expire an entry after
+    an hour using the timestamps they were already recording and never
+    reading. Giving up is not losing: `mailboxCheckQ` re-asks for the
+    statuses of our own mailboxes on its own cycle.
+
+  - **`hbs2-peer`: four mailbox RPC methods could not express failure, so
+    the CLI reported success for everything.** `RpcMailboxCreate`,
+    `RpcMailboxDelete` and `RpcMailboxSend` had `Output = ()` and their
+    handlers `void`ed the result; `RpcMailboxList` collapsed errors with
+    `fromRight mempty`. The service functions behind all four DO return
+    `Either MailboxServiceError`, so the information existed and was
+    thrown away at the boundary: `mailbox create` printed `()` and exited
+    0 whether the row was written or SQLite threw, `mailbox list` printed
+    an empty list for "no mailboxes" and for "database not ready" alike,
+    and `mailbox send` reported success for a message whose signature does
+    not verify. All four carry the `Either` now and the CLI runs it
+    through the same `orThrowPassIO` the other verbs already used.
+
+    `MailboxAPIProto` is bumped. The request side did not change, so a
+    peer would still have acted on an old client's call and only the reply
+    would have failed to decode, leaving the client reporting failure for
+    something that happened; a new id makes the mismatch refuse to connect
+    instead. Client and daemon ship in one release, so this only matters
+    to a mixed install.
+
+    Note what this does NOT establish for `hub issue new`:
+    `mailboxSendMessage` still answers `Right ()` unconditionally, since
+    it fires the protocol inside `deferred` and returns. The verb still
+    says `queued` rather than `sent`, and the comment there now says which
+    half changed.
+
+  - **`hbs2-peer`: a misspelled policy clause was a silent no-op, and the
+    file still read as valid.** `parseBasicPolicy` ended its clause loop
+    in a `_ -> pure ()` catch-all and returned `Just` regardless, so
+    `(peer alow all)` was dropped without a word while `loadPolicyContent`
+    reported a policy it had successfully read, and the mailbox ran on
+    whatever its default action said. The `orThrowUser "invalid policy"`
+    guards in `hbs2-cli` were unreachable for the same reason. An
+    unrecognised clause now fails the whole file, which is the safe
+    direction: callers fall back to `defaultBasicPolicy`, which is
+    deny/deny. Clauses are flattened first, so a policy written on one
+    line is still read -- layout is not part of the format, and without
+    that the new strictness would have refused a working file.
+
+  - **`hbs2-peer`: `mailbox set-policy` truncated the version to
+    `Word32`.** The CLI takes an `Integer` and the payload field is a
+    `Word32`, with `fromIntegral` between them: `set-policy KEY -1 f`
+    stored 4294967295. `mailboxSetPolicy` accepts only a strictly greater
+    version and there is no lowering path, so a typo bricked policy
+    updates for that mailbox permanently, silently, and reported success.
+    The range is checked before anything is signed.
+
+  - **`hbs2-hub`: `hub issue new` takes `--label`, which PEP-22 specifies
+    and the code refused.** The flag was not in `knownFlags`, so the guard
+    that makes a typo a refusal also refused this, and the requested
+    labels were hard-coded to `[]` -- so `labels_requested` in the render
+    contract could never be populated by the tool that populates it, and a
+    person following the spec got a usage message that does not mention
+    labels. It is repeatable, and it is a REQUEST: PEP-19 makes applying a
+    label the owner's to sign, which is why the contract renders these
+    separately from `labels`.
+
+  - **`hbs2-hub`: a flag in the value position was taken as the value.**
+    `hub issue new ... --title --draft` parsed cleanly and signed the
+    string `--draft` as the title, into the author box and therefore into
+    the event-id, which is the hash of that box: canon is append-only, so
+    it cannot be corrected. A `--`-prefixed token is a missing value now.
+    `--flag=value` is accepted as well, which it was nowhere before
+    (`--title=t` paired the whole word with the NEXT one and printed a
+    usage message that did not say why), and is the spelling for a value
+    that legitimately begins with a dash.
+
+  - **`hbs2-hub`: every `hub issue new` failure exited 1**, the code
+    PEP-22 reserves for usage errors, so "you mistyped a flag" and "your
+    letter is in nobody's mailbox" were one number and the caller had been
+    told nothing that would make them keep watching for it. It is 18 for a
+    peer that stopped answering (the same row `hub inbox` uses, widened
+    rather than duplicated), 19 for no signing key here for the author, 20
+    for a peer that answered and would not take the message. An oversized
+    field stays at 1, which is what 1 is for. PEP-22's table is updated;
+    the codes are a contract and may be added to, not reassigned.
+
   - **`hbs2-peer`: two peers whose clocks differed in one direction
     never synchronised a mailbox.** The freshness check on a peer's
     mailbox status was `abs (now - nonce) < 10`, which reads as a

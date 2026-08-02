@@ -24,7 +24,6 @@ import PeerTypes
 import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.RPC.API.Mailbox
 
-import Data.Either
 import Lens.Micro.Platform
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
@@ -45,8 +44,8 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxCreate where
 
   handleMethod (puk, t) = do
     AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
-    void $ mailboxCreate @HBS2Basic mbs t puk
     debug $ "rpc.RpcMailboxCreate" <+> pretty (AsBase58 puk) <+> pretty t
+    mailboxCreate @HBS2Basic mbs t puk
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxSetPolicy where
 
@@ -73,15 +72,14 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxDelete where
 
   handleMethod puk = do
     AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
-    void $ mailboxDelete @HBS2Basic mbs puk
     debug $ "rpc.RpcMailboxDelete" <+> pretty (AsBase58 puk)
+    mailboxDelete @HBS2Basic mbs puk
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxList where
 
   handleMethod _ = do
     AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
-    r <- mailboxListBasic @HBS2Basic mbs
-    pure $ fromRight mempty r
+    mailboxListBasic @HBS2Basic mbs
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxSend where
 
@@ -89,7 +87,7 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxSend where
     co <- getRpcContext @MailboxAPI @RPC2Context
     let w = rpcMailboxService co
     debug $ "rpc.RpcMailboxSend"
-    void $ mailboxSendMessage w mess
+    mailboxSendMessage w mess
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxDeleteMessages where
 

@@ -51,7 +51,14 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
                         -> Maybe (PubKey 'Sign s) -- ^ peer
                         -> Message s
                         -> MessageContent s
-                        -> m ()
+                        -- ^ True when the message was taken. It answered @()@,
+                        -- and the only implementation drops on a full queue and
+                        -- increments a counter nothing reads, so a burst larger
+                        -- than the queue was lost with no diagnostic and no
+                        -- retry -- and the download path counted the drop as a
+                        -- success and removed the tree from its queue as
+                        -- complete.
+                        -> m Bool
 
   mailboxAcceptDelete   :: forall m . (ForMailbox s, MonadIO m)
                         => a
@@ -190,9 +197,27 @@ mailboxProto inner adapter mess = deferred @p do
 
         seen <- hasBlock sto routedHash <&> isJust
 
+        -- Маркер гейтит ТОЛЬКО пересылку, и это исправление.
+        --
+        -- Раньше он гейтил и приём тоже, а приём -- это очередь, за которой
+        -- через десять секунд идёт policy. Порядок был такой: пишем маркер,
+        -- потом решаем. Сообщение, отвергнутое политикой, нигде не сохранялось,
+        -- очередь уже была слита, а любая повторная рассылка того же сообщения
+        -- гасилась как `seen`. То есть отказ был окончательным.
+        --
+        -- А политика по умолчанию -- `defaultBasicPolicy`, то есть Deny/Deny, и
+        -- она берётся всякий раз, когда для ящика не выставлено ничего. Значит:
+        -- создать ящик, не успеть выставить политику -- и каждое письмо,
+        -- пришедшее в этот промежуток, потеряно навсегда, даже после того, как
+        -- политику поправят.
+        --
+        -- Приём стоит одну запись в ограниченную очередь; дорогое (проверка
+        -- подписи на получателя, чтение и разбор policy) живёт в mailboxInQ, и
+        -- там теперь есть дешёвый ранний выход для сообщения, которое в этом
+        -- ящике уже лежит. Так что повтор обходится дёшево, а отказ перестал
+        -- быть вечным.
         unless seen $ lift do
           gossip mess
-          let whoever = if inner then Nothing else Just pip
 
           -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
           --   сейчас policy проверяется для почтового ящика,
@@ -203,10 +228,13 @@ mailboxProto inner adapter mess = deferred @p do
           --   с другой стороны -- мы не поддерживаем, а другие,
           --   может, поддерживают.
 
-          mailboxAcceptMessage adapter whoever msg content
           -- TODO: expire-block-and-collect-garbage
           --   $class: leak
           void $ putBlock sto routed
+
+        lift do
+          let whoever = if inner then Nothing else Just pip
+          void $ mailboxAcceptMessage adapter whoever msg content
 
       -- NOTE: CheckMailbox-auth
       --   поскольку пир не владеет приватными ключами,

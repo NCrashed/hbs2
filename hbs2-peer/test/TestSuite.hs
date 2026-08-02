@@ -11,6 +11,8 @@ import HBS2.Misc.PrettyStuff
 
 import MailboxMerge (mailboxMergeTests)
 import MailboxStatus (mailboxStatusTests)
+import MailboxPolicy (mailboxPolicyTests)
+import MailboxEntry (mailboxEntryTests)
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -138,6 +140,8 @@ main =
         testCase "testVersionedKeys" testVersionedKeysHashes
       , mailboxMergeTests
       , mailboxStatusTests
+      , mailboxPolicyTests
+      , mailboxEntryTests
       ]
 
 

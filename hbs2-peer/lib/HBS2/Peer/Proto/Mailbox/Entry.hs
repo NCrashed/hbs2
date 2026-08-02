@@ -5,6 +5,8 @@
 module HBS2.Peer.Proto.Mailbox.Entry where
 
 import HBS2.Prelude
+import HBS2.Hash
+import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.Ref
 
@@ -62,5 +64,28 @@ data MergedEntry s = MergedEntry (MailboxRefKey s) HashRef
                    deriving stock (Generic)
 
 instance ForMailbox s => Serialise (MergedEntry s)
+
+-- | Запись, которой ящик говорит «это сообщение у меня есть».
+--
+-- Функция ОДНОГО сообщения: доказательство пустое, поэтому хеш записи можно
+-- посчитать, ничего не сохраняя. На этом стоит дешёвый ранний выход в
+-- mailboxInQ, который позволяет принимать одно и то же сообщение повторно, не
+-- переплачивая за него проверкой подписи и разбором policy.
+existsEntry :: HashRef -> MailboxEntry
+existsEntry = Exists (ProofOfExist mzero)
+
+-- | Хеш этой записи.
+existsEntryHash :: HashRef -> HashRef
+existsEntryHash = HashRef . hashObject . serialise . existsEntry
+
+-- | Маркер «эта запись уже влита в этот ящик».
+--
+-- Именованная функция, а не три отдельных выражения, ровно по той причине, по
+-- которой рядом живут admitDeleted и enqueueMerge: маркер выводят и путь
+-- слияния, и приём, и разойдись они хоть на байт -- ранний выход перестанет
+-- срабатывать, и никто об этом не узнает, потому что молча делать лишнюю работу
+-- не больно. Тест держит вывод на месте.
+mergedMarker :: ForMailbox s => MailboxRefKey s -> HashRef -> Hash HbSync
+mergedMarker mbox entry = hashObject (serialise (MergedEntry mbox entry))
 
 

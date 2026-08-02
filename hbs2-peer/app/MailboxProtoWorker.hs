@@ -115,6 +115,11 @@ data MailboxDownload s =
   , mailboxDownWhen    :: Word64
   , mailboxDownPolicy  :: Maybe PolicyVersion
   , mailboxDownDone    :: Bool
+    -- | Who announced this tree. Carried so that the messages found inside it
+    -- are admitted under the same peer policy as the ones that arrive by
+    -- 'SendMessage': the merge path passed 'mzero' here, which 'mailboxInQ'
+    -- reads as "no peer to check".
+  , mailboxDownPeer    :: PubKey 'Sign s
   }
   deriving stock (Generic)
 
@@ -143,6 +148,20 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
 okay :: Monad m => good -> m (Either bad good)
 okay good = pure (Right good)
 
+-- | Сколько держать незавершённую загрузку, прежде чем сдаться.
+--
+-- Оба поля времени -- mailboxDownWhen и policyDownloadWhen -- писались и не
+-- читались никем, а запись уходила из очереди только по полностью успешной
+-- загрузке. Значит корень, блоки которого не придут никогда, оставался там
+-- навсегда и переспрашивался каждые две секунды.
+--
+-- Сдаться не значит потерять: mailboxCheckQ переспрашивает статусы своих ящиков
+-- по кругу, поэтому живая загрузка вернётся в очередь сама. Час -- это с большим
+-- запасом на большое дерево и всё ещё конечно.
+mailboxDownTTL, policyDownTTL :: Word64
+mailboxDownTTL = 3600
+policyDownTTL  = 3600
+
 -- 'PlainMessageDelete' moved to HBS2.Peer.Proto.Mailbox.Merge, beside the
 -- decision that has to read the same predicate. It lived here, in an executable
 -- module, which is part of why the merge path never consulted it: nothing that
@@ -167,13 +186,24 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
       pure (AnyPolicy co)
 
   mailboxAcceptMessage MailboxProtoWorker{..} peer m c = do
-    atomically do
+    took <- atomically do
       full <- isFullTBQueue inMessageQueue
       if full then do
         modifyTVar inMessageQueueDropped succ
+        pure False
       else do
         writeTBQueue inMessageQueue (peer, m,c)
         modifyTVar   inMessageQueueInNum succ
+        pure True
+
+    -- Said out loud. The counter above is published on the probe now, but a
+    -- drop is a message that will not arrive, and a peer's log is where somebody
+    -- looks when one did not.
+    unless took do
+      warn $ red "mailbox: input queue full, message dropped"
+               <+> pretty (HashRef (hashObject (serialise m)))
+
+    pure took
 
   mailboxAcceptDelete MailboxProtoWorker{..} mbox dmp box = do
     debug $ red "<<>> mailbox: mailboxAcceptDelete" <+> pretty mbox
@@ -410,6 +440,25 @@ instance ( s ~ Encryption e, e ~ L4Proto
 
       dbe <- ContT $ maybe1 mdbe (pure $ Left (MailboxCreateFailed "database not ready"))
 
+      -- Ящик должен быть нашим, и этой проверки здесь не было вовсе.
+      --
+      -- Без неё любой пир после хендшейка объявлял статус для ключа, который сам
+      -- же и выдумал, а мы на каждую пару (версия, хеш) клали запись в
+      -- inMailboxDownloadQ и просили скачать выбранный им корень. Запись уходит
+      -- оттуда только когда дерево скачано целиком и без единой неудачи, так что
+      -- корень, блоки которого не придут никогда, оставался там навсегда: N
+      -- фальшивых статусов -- N вечных записей и N вечных запросов на загрузку,
+      -- переспрашиваемых каждые две секунды. Плюс сама policy пишется блоком до
+      -- всякой проверки.
+      --
+      -- Теперь очередь ограничена сверху числом ящиков, которые мы держим.
+      t <- getMailboxType_ dbe ref
+
+      when (isNothing t) do
+        debug $ "mailbox: status for a mailbox we do not host, ignored" <+> pretty ref
+
+      void $ ContT $ maybe1 t (okay ())
+
       p0 <- loadPolicyPayloadFor dbe mpwStorage ref
               <&> fmap (sppPolicyVersion . snd) . ((unboxSignedBox0 . snd) =<<)
               <&> fromMaybe 0
@@ -426,7 +475,8 @@ instance ( s ~ Encryption e, e ~ L4Proto
                 startDownloadStuff me h
                 -- one download per version per hash
                 let downKey = HashRef $ hashObject (serialise (v,h))
-                atomically $ modifyTVar inMailboxDownloadQ (HM.insert downKey (MailboxDownload ref h now v False))
+                atomically $ modifyTVar inMailboxDownloadQ
+                  (HM.insert downKey (MailboxDownload ref h now v False who))
               okay ()
 
       case mbsMailboxPolicy of
@@ -652,10 +702,15 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           inMessageMergeQueueSize <- readTVar inMessageMergeQueue <&> HM.size
           inPolicyDownloadQSize <- readTVar inPolicyDownloadQ <&> HM.size
           inMailboxDownloadQSize <- readTVar inMailboxDownloadQ <&> HM.size
+          -- Дропы тоже. Счётчик существовал и не читался ничем: четыре размера
+          -- очередей отчитывались, а единственное число, которое означает
+          -- потерянное сообщение, -- нет.
+          dropped <- readTVar inMessageQueueDropped
           pure $ [ ("mpwFetchQ", fromIntegral mpwFetchQSize)
                  , ("inMessageMergeQueue", fromIntegral inMessageMergeQueueSize)
                  , ("inPolicyDownloadQ", fromIntegral inPolicyDownloadQSize)
                  , ("inMailboxDownloadQ", fromIntegral inMailboxDownloadQSize)
+                 , ("inMessageQueueDropped", fromIntegral dropped)
                  ]
         acceptReport pro values
         debug $ "I'm" <+> yellow "mailboxProtoWorker"
@@ -686,6 +741,30 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
             mbox <- getMailboxType_ @s dbe theMailbox
                        >>= toMPlus
+
+            -- Уже в этом ящике -- дальше делать нечего.
+            --
+            -- Дешёвый ранний выход, и он то, что делает повторный приём
+            -- доступным по цене: маркер RoutedEntry больше не гейтит приём (см.
+            -- ветку SendMessage в HBS2.Peer.Proto.Mailbox), поэтому одно и то же
+            -- сообщение приходит сюда при каждой повторной рассылке. Дорогое
+            -- ниже -- проверка подписи на каждого получателя и чтение с разбором
+            -- policy без всякого кэша -- платится теперь только за сообщение,
+            -- которого в ящике ещё нет.
+            --
+            -- Хеш записи -- функция одного лишь сообщения, поэтому его можно
+            -- посчитать, ничего не сохраняя. Сообщение, отвергнутое политикой,
+            -- не сохранялось, значит и маркера у него нет: оно пройдёт дальше и
+            -- получит ещё одну попытку, когда у ящика появится политика. Ровно
+            -- то, ради чего приём и был отвязан от маркера.
+            let ha0     = HashRef (hashObject (serialise m))
+                mergedH = mergedMarker theMailbox (existsEntryHash ha0)
+
+            merged <- hasBlock sto mergedH <&> isJust
+
+            when merged do
+              debug $ "mailbox: already merged, skip" <+> pretty theMailbox <+> pretty ha0
+              mzero
 
             -- FIXME: excess-sign-check
             (sender, _) <- unboxSignedBox0 (messageContent m) & toMPlus
@@ -718,8 +797,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             debug $ yellow "mailbox: message stored" <+> pretty theMailbox <+> pretty ha
 
             -- TODO: add-policy-reference
-            let proof = ProofOfExist mzero
-            h' <- enqueueBlock sto (serialise (Exists proof ha))
+            h' <- enqueueBlock sto (serialise (existsEntry ha))
 
             for_ h' $ \h -> do
               atomically do
@@ -843,7 +921,16 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                         <&> fmap (,1)
 
       polling (Polling 10 10) policies $ \(pk,PolicyDownload{..}) -> do
-        done <- findMissedBlocks mpwStorage pk <&> L.null
+        now <- liftIO $ getPOSIXTime <&> round
+
+        expired <- pure (clockSkew now policyDownloadWhen > policyDownTTL)
+
+        when expired do
+          warn $ red "mailbox: giving up on a policy download" <+> pretty pk
+                   <+> parens ("after" <+> pretty policyDownTTL <+> "s")
+          atomically $ modifyTVar inPolicyDownloadQ (HM.delete pk)
+
+        done <- if expired then pure False else findMissedBlocks mpwStorage pk <&> L.null
 
         when done $ flip runContT pure do
 
@@ -876,7 +963,17 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                         <&> fmap (,10)
 
       polling (Polling 2 2) mail $ \(pk, down@MailboxDownload{..}) -> do
-        done <- findMissedBlocks mpwStorage mailboxStatusRef <&> L.null
+        now <- liftIO $ getPOSIXTime <&> round
+
+        expired <- pure (clockSkew now mailboxDownWhen > mailboxDownTTL)
+
+        when expired do
+          warn $ red "mailbox: giving up on a state download" <+> pretty pk
+                   <+> parens ("after" <+> pretty mailboxDownTTL <+> "s")
+          atomically $ modifyTVar inMailboxDownloadQ (HM.delete pk)
+
+        done <- if expired then pure False
+                           else findMissedBlocks mpwStorage mailboxStatusRef <&> L.null
 
         fails <- newTVarIO 0
 
@@ -909,7 +1006,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                 -- FIXME: invent-better-filter
                 --  $class: leak
                 let mergedEntry = serialise (MergedEntry mailboxRef h)
-                let mergedH = mergedEntry & hashObject
+                let mergedH = mergedMarker mailboxRef h
 
                 already <- getBlock mpwStorage mergedH
 
@@ -969,9 +1066,27 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                                 void $ putBlock mpwStorage mergedEntry
 
                               Just (_, content) -> do
-                                -- FIXME: what-if-message-queue-full?
-                                mailboxAcceptMessage me mzero normal content
-                                pure ()
+                                -- A full queue is a FAILURE of this download,
+                                -- and it used not to be counted as one: the
+                                -- entry was walked, the message was dropped on
+                                -- the floor, `fails` stayed at zero, and the
+                                -- tree was removed from the queue below as
+                                -- complete. So a burst larger than the queue was
+                                -- permanent loss with a counter to show for it.
+                                -- Left in the queue, the next poll walks the
+                                -- tree again and the message gets another go.
+                                --
+                                -- The announcing peer is passed on, rather than
+                                -- mzero. `mailboxInQ` reads Nothing as "no peer
+                                -- to check", which is right for a message this
+                                -- node injected itself and wrong here: a peer
+                                -- denied by `(peer deny <key>)` only had to
+                                -- serve its messages inside a status tree
+                                -- instead of sending them, and every one of them
+                                -- was admitted with the peer check skipped.
+                                took <- mailboxAcceptMessage me (Just mailboxDownPeer) normal content
+                                unless took do
+                                  atomically $ modifyTVar fails succ
 
           failNum <- readTVarIO fails
 

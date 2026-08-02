@@ -89,10 +89,11 @@ runMailboxCLI rpc s = do
               case syn of
                 [ StringLike "--key", SignPubKeyLike puk, MailboxTypeLike tp ] -> do
 
-                  r <- callRpcWaitMay @RpcMailboxCreate t api (puk, tp)
-                         >>= orThrowUser "rpc call timeout"
+                  callRpcWaitMay @RpcMailboxCreate t api (puk, tp)
+                    >>= orThrowUser "rpc call timeout"
+                    >>= orThrowPassIO
 
-                  liftIO $ print $ viaShow r
+                  liftIO $ print $ "created" <+> pretty (AsBase58 puk) <+> pretty tp
 
                 [ StringLike "--sigil", HashLike sh, StringLike tp ] -> do
                   -- TODO: implement-create-by-sigil
@@ -126,8 +127,9 @@ runMailboxCLI rpc s = do
               mess <- deserialiseOrFail @(Message HBS2Basic) blob
                         & either (const $ error "malformed message") pure
 
-              _ <- callRpcWaitMay @RpcMailboxSend t api mess
-                     >>= orThrowUser "rpc call timeout"
+              callRpcWaitMay @RpcMailboxSend t api mess
+                >>= orThrowUser "rpc call timeout"
+                >>= orThrowPassIO
 
               pure ()
 
@@ -188,6 +190,19 @@ runMailboxCLI rpc s = do
 
                         pure sppPolicyVersion
 
+                -- The version is a Word32 on the wire and an Integer here, and
+                -- `fromIntegral` between them wraps. `set-policy KEY -1 f` stored
+                -- 4294967295, and mailboxSetPolicy accepts only a STRICTLY
+                -- GREATER version, so that mailbox could never have its policy
+                -- updated again and there is no lowering path. A typo bricked it
+                -- permanently, silently, and reported success.
+                ver <- if v >= 0 && v <= toInteger (maxBound :: Word32)
+                         then pure (fromIntegral v :: Word32)
+                         else orThrowUser
+                                ("policy version out of range (0 .."
+                                   <+> pretty (maxBound :: Word32) <> "):" <+> pretty v)
+                                Nothing
+
                 -- TODO: validate-policy
 
                 creds <- runKeymanClientRO (loadCredentials m)
@@ -203,7 +218,7 @@ runMailboxCLI rpc s = do
 
                 notice $ "stored policy as" <+> pretty hash
 
-                let spp = SetPolicyPayload @HBS2Basic m (fromIntegral v) (HashRef hash)
+                let spp = SetPolicyPayload @HBS2Basic m ver (HashRef hash)
 
                 let box = makeSignedBox @HBS2Basic (view peerSignPk creds) (view peerSignSk creds) spp
 
@@ -225,6 +240,7 @@ runMailboxCLI rpc s = do
 
               v <- callRpcWaitMay @RpcMailboxList t api ()
                      >>= orThrowUser "rpc call timeout"
+                     >>= orThrowPassIO
 
               liftIO $ print $ vcat (fmap fmtMbox v)
 
@@ -311,6 +327,7 @@ runMailboxCLI rpc s = do
             [ SignPubKeyLike mbox ]-> lift do
               callRpcWaitMay @RpcMailboxDelete t api mbox
                  >>= orThrowUser "rpc call timeout"
+                 >>= orThrowPassIO
 
             _ -> throwIO $ BadFormException @C nil
 

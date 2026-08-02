@@ -113,7 +113,9 @@ and a tree full of forged events were the same event.
 | 15   | git ran and did not answer                              |
 | 16   | the tree listed and its files went out of step with git |
 | 17   | the peer does not hold this mailbox (`hub inbox`)       |
-| 18   | the peer is running and stopped answering (`hub inbox`)  |
+| 18   | the peer is running and stopped answering (`hub inbox`, `hub issue new`) |
+| 19   | no signing key here for the author (`hub issue new`)     |
+| 20   | the peer answered and would not store the message (`hub issue new`) |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
@@ -125,6 +127,14 @@ situations with three different remedies and one exit code between them. `hub
 inbox` also exits 2, with the sense the row above gives it: the queue was read
 and part of the mailbox tree was not, so the list is incomplete in both
 directions.
+
+19 and 20 are the same correction on the write side, where it matters more: every
+failure of `hub issue new` used to exit 1, so "you mistyped a flag" and "your
+letter is in nobody's mailbox" were one number, and the caller had been told
+nothing that would make them keep watching for it. 18 is REUSED rather than
+duplicated, because a peer that stopped answering is the same situation and the
+same remedy whichever verb met it; widening a row is not reassigning one. An
+oversized field stays at 1: it is a bad argument, which is what 1 is for.
 
 The last two lines of a clean run are normative, because a hook parses them:
 
