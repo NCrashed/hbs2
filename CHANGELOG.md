@@ -253,6 +253,49 @@
 
 ## Fixed
 
+  - **`hbs2-core`: `findMissedBlocks` started a fresh walk for every
+    nested merkle root it met.** The walk over one tree is bounded by
+    `walkMerkleUnique`, which enters a node once; the function's OWN
+    recursion was not. A leaf payload may name a nested merkle root, and
+    each one began again with an empty visited set, so N leaf entries all
+    naming the same nested root cost N complete walks of it, multiplying
+    at every level of nesting. Polynomial rather than exponential, but the
+    exponent is the nesting depth and the root is one somebody else chose.
+    The visited set is now shared across the whole recursion, so the cost
+    is the number of distinct blocks reachable from the root, once -- and
+    that also bounds what `findMissedBlocks` can accumulate, since it
+    collects the stream with `S.toList_`. Deduplicating is sound for the
+    same reason it is sound in `walkMerkleUnique`: the answer is a set.
+
+  - **`hbs2-peer`: a replayed delete rebuilt the whole mailbox tree,
+    every two seconds.** Every delete box an owner issues is public,
+    gossiped and stored as a block, and PEP-21 fold-then-delete makes
+    issuing them routine. `mailboxAcceptDelete` is called outside the
+    `seen` gate, and must be -- it is the only path by which an unfinished
+    merge completes -- so each re-receipt of the same box wrote a block,
+    queued a merge, and had `mailboxMergeQ` re-read the entire mailbox log
+    and rebuild the merkle from scratch on its next poll. Sending one
+    captured delete box on a loop was therefore an O(N) rebuild on a loop.
+
+    The accept path now derives the entry hash without touching storage
+    and asks whether it is already merged: one lookup. The merge loop
+    rebuilds only when the entry set actually changed, and writes its
+    merged markers in both branches, after `updateRef` in both, since a
+    marker that outlived a crash before the ref update would claim an
+    entry the tree does not hold.
+
+  - **`hbs2-peer`: the mailbox tree root depended on hash-table iteration
+    order.** `toPTree` chunks a list in its own order, and the list came
+    straight from `HS.toList`, so the root was a function of the
+    traversal and not of the entry set. That root is the fingerprint peers
+    compare to decide whether they are in sync, so two peers holding
+    identical entries but producing different orders would download from
+    each other indefinitely. HAMT iteration for a non-colliding key set is
+    stable in practice, which is why this had not been seen, but it is a
+    property of the container and not a promise. The list is sorted now,
+    which is also what makes "the set did not change" imply "the root will
+    not change" for the skip above. Existing mailboxes get one reshuffle.
+
   - **`hbs2-peer`: a mailbox with no policy lost every letter that
     arrived, permanently.** Three things had to be true at once and all
     three were. `mailboxGetPolicy` falls back to `defaultBasicPolicy`,

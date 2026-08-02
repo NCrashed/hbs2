@@ -14,18 +14,52 @@ import Streaming.Prelude (Stream, Of(..))
 import Control.Monad.Trans.Maybe
 import Control.Monad
 import Data.Coerce
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HS
+import Data.IORef
 import Data.Maybe
 
 -- TODO: slow-dangerous
 findMissedBlocks :: (MonadIO m) => AnyStorage -> HashRef -> m [HashRef]
 findMissedBlocks sto href = do
-  -- TODO: limit-recursion-depth?
   -- TODO: cache-results-limit-calls-freq
   -- trace $ "findMissedBlocks" <+> pretty href
   S.toList_ $ findMissedBlocks2 sto href
 
 findMissedBlocks2 :: (MonadIO m) => AnyStorage -> HashRef -> Stream (Of HashRef) m ()
-findMissedBlocks2 sto href = void $ runMaybeT do
+findMissedBlocks2 sto href = do
+  seen <- liftIO $ newIORef mempty
+  findMissedBlocksOn seen sto href
+
+-- | As 'findMissedBlocks2', with the set of roots already walked carried in.
+--
+-- The walk over ONE tree is bounded by 'walkMerkleUnique', which enters a node
+-- once. What that does not bound is this function's own recursion: a leaf
+-- payload may name a nested merkle root, and every one of them used to start a
+-- fresh walk with a fresh visited set. So N leaf entries all naming the same
+-- nested root cost N complete walks of it, and a tree of such trees multiplies
+-- again at every level -- polynomial rather than exponential, but the exponent
+-- is the nesting depth and the input is a root somebody else chose.
+--
+-- Sharing the set makes the whole recursion cost the number of DISTINCT blocks
+-- reachable from the root, once. It also bounds what 'findMissedBlocks' can
+-- accumulate, since it collects the stream with 'S.toList_'.
+--
+-- Deduplicating is sound here for the reason it is sound in 'walkMerkleUnique'
+-- and not in 'walkMerkle'': the question is which blocks a graph mentions that
+-- this node does not hold, and that is a SET. Nothing downstream counts
+-- occurrences.
+findMissedBlocksOn :: (MonadIO m)
+                   => IORef (HashSet HashRef)
+                   -> AnyStorage
+                   -> HashRef
+                   -> Stream (Of HashRef) m ()
+findMissedBlocksOn seen sto href = void $ runMaybeT do
+
+    already <- liftIO $ atomicModifyIORef' seen $ \v ->
+                 (HS.insert href v, HS.member href v)
+
+    guard (not already)
 
     self' <- getBlock sto (coerce href)
 
@@ -72,19 +106,19 @@ findMissedBlocks2 sto href = void $ runMaybeT do
                   unless here $ lift $ S.yield r
 
                 r <- case w of
-                      Merkle{}    -> lift $ lift $ findMissedBlocks sto hx
+                      Merkle{}    -> lift $ lift $ nested hx
                       MerkleAnn t -> lift $ lift do
                         -- FIXME: make-tail-recursive
 
                         b0 <- case _mtaMeta t of
-                                AnnHashRef hm -> findMissedBlocks sto (HashRef hm)
+                                AnnHashRef hm -> nested (HashRef hm)
                                 _ -> pure mempty
 
-                        b1 <- findMissedBlocks sto hx
+                        b1 <- nested hx
 
                         b2 <-  case _mtaCrypt t of
                                 (EncryptGroupNaClSymm hash _) ->
-                                  findMissedBlocks sto (HashRef hash)
+                                  nested (HashRef hash)
 
                                 _ -> pure mempty
 
@@ -93,4 +127,9 @@ findMissedBlocks2 sto href = void $ runMaybeT do
                       _ -> pure mempty
 
                 lift $ mapM_ S.yield r
+
+  where
+    -- A nested root goes back through the SAME visited set, which is the whole
+    -- of the fix: it used to call findMissedBlocks, and that starts a fresh one.
+    nested hx = S.toList_ (findMissedBlocksOn seen sto hx)
 

@@ -239,19 +239,41 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
       void $ ContT $ maybe1 t notOurs
 
-      h' <- putBlock sto (serialise box)
-
-      h <- ContT $ maybe1 h' storageFail
-
-      let proof = ProofOfDelete (Just (HashRef h))
-
+      -- Предикат разбирается до всякой записи, потому что из него и из бокса
+      -- выводится хеш записи, а из него -- маркер «уже влито».
       let what' = case dmp of
                    PlainMessageDelete x -> Just x
                    _ -> Nothing
 
       what <- ContT $ maybe1 what' unsupportedPredicate
 
-      deh' <- enqueueBlock sto (serialise (Deleted proof what))
+      -- Повторно пришедший delete теперь стоит один поиск.
+      --
+      -- Каждый delete-box, который выпускает владелец, публичен, рассылается по
+      -- сети и лежит блоком, а fold-then-delete из PEP-21 делает их выпуск
+      -- рутиной. Раньше каждое повторное получение одного и того же бокса писало
+      -- блок, ставило запись в очередь слияния, и mailboxMergeQ на следующем
+      -- опросе перечитывал ВЕСЬ лог ящика и пересобирал дерево целиком: повтор
+      -- одного публичного сообщения раз в две секунды -- это O(N) перестройка
+      -- раз в две секунды.
+      --
+      -- Вызов стоит вне гейта `unless seen` и должен там стоять: это
+      -- единственный путь, по которому доезжает незавершённый мерж. Поэтому
+      -- дешёвый выход нужен здесь. Оба хеша считаются без хранилища; putBlock
+      -- ниже вернёт ровно boxH, содержимое адресуется своим хешем.
+      let boxH   = HashRef (hashObject (serialise box))
+          entry  = deletedEntry boxH what
+          entryH = deletedEntryHash boxH what
+
+      merged <- hasBlock sto (mergedMarker mbox entryH) <&> isJust
+
+      void $ ContT $ maybe1 (guard (not merged) :: Maybe ()) (alreadyMerged entryH)
+
+      h' <- putBlock sto (serialise box)
+
+      void $ ContT $ maybe1 h' storageFail
+
+      deh' <- enqueueBlock sto (serialise entry)
                <&> fmap HashRef
 
       deh <- ContT $ maybe1 deh' storageFail
@@ -267,6 +289,8 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
       dbNotReady = err $ red "mailbox (delete)" <+> "database not ready"
       notOurs = debug $ red "mailbox (delete)"
                   <+> "not ours, ignored:" <+> pretty mbox
+      alreadyMerged e = debug $ "mailbox (delete): already merged, skip"
+                          <+> pretty mbox <+> pretty e
 
 instance ( s ~ Encryption e, e ~ L4Proto
          ) => IsMailboxService s (MailboxProtoWorker s e) where
@@ -898,15 +922,42 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
         v <- getRef sto r <&> fmap HashRef
         txs <- maybe1 v (pure mempty) (readLog (liftIO . getBlock sto) )
 
-        let mergedTx = HS.fromList txs <> newTxProven & HS.toList
+        let existing = HS.fromList txs
+            fresh    = newTxProven `HS.difference` existing
 
-        -- FIXME: size-hardcode-again
-        let pt = toPTree (MaxSize 6000) (MaxNum 1024) mergedTx
-        nref <- makeMerkle 0 pt $ \(_,_,bss) -> void $ liftIO $ putBlock sto bss
+        -- Перестройка только когда набор записей действительно изменился.
+        --
+        -- Ниже читается весь лог ящика и makeMerkle собирает дерево заново, то
+        -- есть цена опроса линейна по размеру ящика. Когда всё пришедшее уже в
+        -- дереве -- а повторно присланная запись выглядит именно так -- работа
+        -- целиком лишняя, и updateRef вдобавок переписывает ref тем же
+        -- значением.
+        if HS.null fresh then
+          debug $ yellow "mailbox unchanged" <+> pretty r
 
-        updateRef sto r nref
-        debug $ yellow "mailbox updated" <+> pretty r <+> pretty nref
+        else do
+          -- Отсортировано, и это не косметика. toPTree нарезает список по его
+          -- порядку, так что корень был функцией порядка обхода HashSet, а не
+          -- самого набора записей. А корень -- это отпечаток, по которому пиры
+          -- решают, синхронны они или нет (сравнение s0 в mailboxAcceptStatus):
+          -- два пира с одинаковым набором, но разным порядком, качали бы друг у
+          -- друга бесконечно. Порядок HAMT для набора без коллизий на практике
+          -- устойчив, но это свойство реализации контейнера, а не обещание --
+          -- и без него «набор не изменился» не означает «корень не изменится».
+          let mergedTx = L.sort (HS.toList (HS.union existing newTxProven))
 
+          -- FIXME: size-hardcode-again
+          let pt = toPTree (MaxSize 6000) (MaxNum 1024) mergedTx
+          nref <- makeMerkle 0 pt $ \(_,_,bss) -> void $ liftIO $ putBlock sto bss
+
+          updateRef sto r nref
+          debug $ yellow "mailbox updated" <+> pretty r <+> pretty nref
+
+        -- Маркеры пишутся ПОСЛЕ обновления ref и в обеих ветках. После -- потому
+        -- что маркер, переживший падение до updateRef, объявил бы влитым то,
+        -- чего в дереве нет. В обеих -- потому что в ветке без изменений записи
+        -- в дереве уже лежат, и маркер там правду и говорит; без него запись
+        -- возвращалась бы сюда на каждом опросе.
         for_ newTxProven $ \t -> do
           -- FIXME: use-bloom-filter-or-something
           --  $class: leak

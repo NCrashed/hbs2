@@ -69,6 +69,23 @@ mailboxEntryTests = testGroup "mailbox entry derivations"
         (mergedMarker mbox e /= mergedMarker mbox (existsEntryHash (mh "b")))
       mergedMarker mbox e @?= mergedMarker mbox e
 
+  , testCase "a deleted-entry is a function of the proof and the target" $ do
+      -- Both halves matter and for different reasons. The TARGET is what issue
+      -- #15 was about: a proof that does not name the message the entry removes
+      -- is not a proof of anything. The PROOF BOX is what makes a replayed
+      -- delete cheap to recognise, since the accept path can derive this hash
+      -- without writing a block and ask whether it is already merged.
+      let p = mh "proof"
+          t = mh "target"
+      deletedEntryHash p t @?= deletedEntryHash p t
+      assertBool "another proof, another entry"
+        (deletedEntryHash (mh "other") t /= deletedEntryHash p t)
+      assertBool "another target, another entry"
+        (deletedEntryHash p (mh "other") /= deletedEntryHash p t)
+      -- And it is not the same thing as saying the message exists.
+      assertBool "a delete is not an exists"
+        (deletedEntryHash p t /= existsEntryHash t)
+
   , testCase "the derivations are the ones already on disk" $ do
       -- GOLDEN, and the reason is that these are storage keys. A change here is
       -- not a refactor: every marker written by every previous build stops being
@@ -79,4 +96,6 @@ mailboxEntryTests = testGroup "mailbox entry derivations"
         @?= "FsRJKCQewTby4JUgy57tLtJVNvTdr15frMKZMod9Hpxy"
       show (pretty (mergedMarker mbox (existsEntryHash (mh "a"))))
         @?= "4APUBZi1KgcUjmf9T3Yybk6kTyR6JK8yGfpffX7uJXVp"
+      show (pretty (deletedEntryHash (mh "proof") (mh "target")))
+        @?= "BJh8zGhawTtCqx5GCCA5AVvK119vY3PaQcJpAmZZkN7"
   ]

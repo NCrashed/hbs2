@@ -78,6 +78,19 @@ existsEntry = Exists (ProofOfExist mzero)
 existsEntryHash :: HashRef -> HashRef
 existsEntryHash = HashRef . hashObject . serialise . existsEntry
 
+-- | Запись, которой ящик говорит «это сообщение удалено».
+--
+-- Первый аргумент -- блок с доказательством (подписанный владельцем delete-box),
+-- второй -- сообщение, которое он разрешает удалить. Оба хеша считаются без
+-- обращения к хранилищу, поэтому повторно пришедший delete можно опознать одним
+-- поиском, не заводя ничего в очередь слияния.
+deletedEntry :: HashRef -> HashRef -> MailboxEntry
+deletedEntry proof = Deleted (ProofOfDelete (Just proof))
+
+-- | Хеш этой записи.
+deletedEntryHash :: HashRef -> HashRef -> HashRef
+deletedEntryHash proof = HashRef . hashObject . serialise . deletedEntry proof
+
 -- | Маркер «эта запись уже влита в этот ящик».
 --
 -- Именованная функция, а не три отдельных выражения, ровно по той причине, по
