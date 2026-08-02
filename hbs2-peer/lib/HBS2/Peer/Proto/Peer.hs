@@ -11,7 +11,9 @@ import HBS2.Clock
 import HBS2.Net.Proto.Sessions
 import HBS2.Prelude.Plated
 import HBS2.Net.Auth.Credentials
+import HBS2.System.Logger.Simple
 
+import Data.ByteString qualified as BS
 import Data.Maybe
 import Codec.Serialise (Serialise)
 import Codec.Serialise qualified as Serialise
@@ -108,6 +110,42 @@ data PeerHandshakeAdapter e m =
   , ownReachableVia :: Set NetworkClass -- ^ classes this node declares itself reachable on (PEP-05)
   }
 
+-- | Длина нонса, который мы соглашаемся подписать в ответ на PeerPing.
+--
+-- Ровно та, которую выдаёт newNonce для этого протокола (BS.take 32 в
+-- инстансе HasNonces в "HBS2.Peer.Proto"), так что ни один честный пир от
+-- проверки не пострадает. Держать эти два числа порознь неприятно, но
+-- инстанс живёт в пакете, который этот модуль импортировать не может.
+--
+-- ЗАЧЕМ ОНА. Обработчик PeerPing подписывает пришедшие байты долговременным
+-- ключом подписи пира, а PingNonce -- это ByteString произвольной длины.
+-- Проверки не было вовсе, и это делало пинг оракулом подписи: кто угодно, без
+-- всякого хендшейка, посылал нам nonce = serialise payload и получал назад
+-- нашу подпись под этим payload. Дальше подпись вкладывается в SignedBox,
+-- который проверяет ровно verifySign pk sign bs над теми же байтами
+-- (makeSignedBox тоже подписывает голый serialise, без доменного тега), и
+-- получается, например, валидный голос Accept в refchan от нашего имени. Тот
+-- же ключ отдаётся и хендшейку, и refChanUpdateProto (PeerMain), так что
+-- разделения по ключам тут нет.
+--
+-- ЧТО ЭТО ЗАКРЫВАЕТ. Все интересные payload'ы длиннее 32 байт: в каждом есть
+-- хотя бы один 32-байтный ключ или хеш плюс ещё поля (AcceptTran, ProposeTran,
+-- MailBoxStatusPayload, SetPolicyPayload, SigilData). Ограничив длину, мы
+-- оставляем противнику только те типы, чья сериализация укладывается ровно в
+-- 32 байта.
+--
+-- ЧЕГО НЕ ЗАКРЫВАЕТ, и это честно. SignedBox над голым ByteString (refchan
+-- Propose и Notify) в 32 байта укладывается: CBOR-заголовок 58 1e плюс 30
+-- байт содержимого. Для Propose это тупик, потому что внутренние байты обязаны
+-- сами оказаться подписанным боксом автора, а бокс короче 96 байт не бывает.
+-- Остаётся Notify с 30 байтами произвольного содержимого от нашего имени.
+-- Настоящее лечение этого остатка -- доменный тег внутри подписываемых байт в
+-- makeSignedBox, но это ломает ВСЕ уже подписанные данные (сигилы, групповые
+-- ключи, головы refchan, письма, канон хаба), то есть это миграция формата, а
+-- не правка. Здесь она сознательно не делается.
+pingNonceSize :: Int
+pingNonceSize = 32
+
 
 peerHandShakeProto :: forall e s m proto . ( MonadIO m
                                            , Response e proto m
@@ -137,23 +175,34 @@ peerHandShakeProto adapter penv =
   \case
     PeerPing nonce  -> do
       pip <- thatPeer @proto
-      -- взять свои ключи
-      creds <- getCredentials @s
 
-      -- подписать нонс
-      let sign = makeSign @s (view peerSignSk creds) nonce
+      -- Подписываем только нонс правильной длины. Почему -- в haddock'е
+      -- pingNonceSize; коротко: без этой проверки пинг был оракулом подписи.
+      -- Отказ шумит в лог, потому что честный пир сюда не попадает никогда,
+      -- а молчаливый отказ в этом протоколе уже стоил одного расследования.
+      if BS.length nonce /= pingNonceSize then do
+        warn $ "peer: refused to sign a ping nonce of length"
+                 <+> pretty (BS.length nonce)
+                 <+> "from" <+> pretty pip
 
-      own <- peerNonce @e
+      else do
+        -- взять свои ключи
+        creds <- getCredentials @s
 
-      -- отправить обратно вместе с публичным ключом
-      response (PeerPong @e nonce sign (PeerData (view peerSignPk creds) own (ownReachableVia adapter)))
+        -- подписать нонс
+        let sign = makeSign @s (view peerSignSk creds) nonce
 
-      -- да и пингануть того самим
+        own <- peerNonce @e
 
-      se <- find (KnownPeerKey pip) id <&> isJust
+        -- отправить обратно вместе с публичным ключом
+        response (PeerPong @e nonce sign (PeerData (view peerSignPk creds) own (ownReachableVia adapter)))
 
-      unless se $ do
-        sendPing pip
+        -- да и пингануть того самим
+
+        se <- find (KnownPeerKey pip) id <&> isJust
+
+        unless se $ do
+          sendPing pip
 
     PeerPong nonce0 sign d -> do
       pip <- thatPeer @proto

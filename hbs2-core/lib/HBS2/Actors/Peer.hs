@@ -454,7 +454,12 @@ runPeerM :: forall e m . ( MonadUnliftIO m
 
 runPeerM env@PeerEnv{..} f  = flip runContT pure do
 
-  n <- liftIO getNumCapabilities <&> max 2 . div 2
+  -- Половина ядер, не меньше двух. Стояло `max 2 . div 2`, а это не деление
+  -- пополам: секция от div берёт делимым двойку, то есть выражение было
+  -- max 2 (2 `div` capabilities) и давало ровно 2 на любой машине -- на восьми
+  -- ядрах 2 `div` 8 = 0, и max поднимал результат до двойки. На этом пуле сидят
+  -- ВСЕ обработчики deferred, то есть все протоколы разом.
+  n <- liftIO getNumCapabilities <&> max 2 . (`div` 2)
 
   as <- liftIO $ replicateM n $ asyncLinked $ runPipeline _envDeferred
 

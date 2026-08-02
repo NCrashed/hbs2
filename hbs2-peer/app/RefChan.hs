@@ -992,18 +992,35 @@ logMergeProcess penv env q = withPeerM penv do
                     hd <- MaybeT $ lift $ getHead menv headRef
                     let quo = view refChanHeadQuorum hd & fromIntegral
                     guard $ HashMap.member pk (view refChanHeadPeers hd)
-                    pure [(hashRef, (quo,[href]))]
+                    -- Голос кладём ПОД КЛЮЧОМ ГОЛОСУЮЩЕГО. Раньше здесь был
+                    -- список хешей самих Accept-транзакций, а кворум считался
+                    -- как его длина после List.nub. Но AcceptTran2 несёт
+                    -- Maybe AcceptTime, поэтому один участник выписывает сколько
+                    -- угодно РАЗНЫХ Accept'ов на один и тот же propose, просто
+                    -- меняя отметку времени; хеши у них разные, nub их не
+                    -- схлопывает, и любой один пир из refChanHeadPeers набирал
+                    -- кворум в одиночку. Проверка членства (строка выше) этому
+                    -- не мешала: она спрашивает, кто голосует, а не сколько раз.
+                    --
+                    -- Онлайновый путь в refChanUpdateProto считает правильно
+                    -- (refChanRoundAccepts -- HashMap по ключу пира, кворум --
+                    -- его size); расходился с ним только этот, offline-путь.
+                    pure [(hashRef, (quo, HashMap.singleton pk href))]
 
-        let merge1 (q1, hs1) (q2, hs2) = (max q1 q2, List.nub (hs1 <> hs2) )
+        -- unionWith min, а не union: результат не должен зависеть от того, в
+        -- каком порядке транзакции попались в mergeList, иначе два честных узла
+        -- смёржат разные наборы и разойдутся.
+        let merge1 (q1, hs1) (q2, hs2) = (max q1 q2, HashMap.unionWith min hs1 hs2)
 
         let permitted = HashMap.fromListWith merge1 (mconcat (catMaybes r))
                             & HashMap.toList
 
         new <- S.toList_ do
                   forM_ permitted $ \(prop, (qx, accs)) -> do
-                    when (length accs >= qx) do
+                    -- Число РАЗЛИЧНЫХ голосующих.
+                    when (HashMap.size accs >= qx) do
                       S.yield prop
-                      S.each accs
+                      S.each (HashMap.elems accs)
 
         debug $ "new trans to merge" <+> pretty (AsBase58 chan) <+> pretty (length new)
 

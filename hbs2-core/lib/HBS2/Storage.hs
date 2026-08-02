@@ -95,12 +95,26 @@ instance (IsKey HbSync, MonadIO m) => Storage AnyStorage HbSync ByteString m  wh
   delRef (AnyStorage s) = liftIO . delRef s
 
 
+-- | Разбиение блока на куски.
+--
+-- Размер куска, не больший нуля, даёт пустой список, а не исключение. Раньше
+-- функция сразу шла в `divMod`, и вызов с нулём кидал DivideByZero. Это
+-- достижимо из сети: blockChunksProto берёт ChunkSize (Word16) прямо из пакета
+-- и передаёт сюда, а исключение из обработчика на пайплайне deferred уходит в
+-- связанный поток (runPipeline не ловит ничего, запускается через asyncLinked)
+-- и валит процесс целиком. То есть один пакет с size = 0 был выключателем
+-- демона.
+--
+-- Пустой список -- правильный ответ и по смыслу: на кусок нулевой длины блок
+-- не делится никак, и отвечать тут нечем.
 calcChunks :: forall a b . (Integral a, Integral b)
            => Integer  -- | block size
            -> Integer  -- | chunk size
            -> [(a, b)]
 
-calcChunks s1 s2 = fmap (over _1 fromIntegral . over _2 fromIntegral)  chu
+calcChunks s1 s2
+  | s2 <= 0   = []
+  | otherwise = fmap (over _1 fromIntegral . over _2 fromIntegral)  chu
   where
     (n,rest) = s1 `divMod` s2
     chu = [ (x*s2,s2) | x <- [0..n-1] ] <> [(n * s2, rest) | rest > 0]

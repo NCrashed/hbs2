@@ -149,26 +149,39 @@ main = do
              | otherwise -> liftIO (hubHelp dict)
 
   case (argv, verbOf (bound dict) argv) of
-    -- No arguments: a script on stdin, or the help if there is no stdin either.
-    ([], _) -> runHBS2Cli do
-      -- A TERMINAL means there is no script coming: a person typed the name of
-      -- the program and pressed return. Reading stdin then sat there until they
-      -- worked out that Ctrl-D was expected of them. A pipe or a file still gets
-      -- read, which is what a hook uses.
-      tty <- liftIO (IO.hIsTerminalDevice IO.stdin)
-      eof <- if tty then pure True else liftIO IO.isEOF
-      if eof
-        then liftIO (hubHelp dict)
-        else liftIO getContents
-               >>= either (liftIO . die . show) pure . parseTop
-               -- The same question as for a command line, and it was not asked
-               -- here: a script whose whole content is one audit paid the peer
-               -- probe anyway, which is the cost this branch exists to avoid in a
-               -- git hook, and a hook is exactly where a script arrives on stdin.
-               >>= \what ->
-                     if all (peerFree dict) what
-                       then (run dict what >>= eatNil display) >> silence
-                       else recover (run dict what >>= eatNil display) >> silence
+    -- No arguments: the help, and NOTHING ELSE. This branch used to read stdin
+    -- and run it as a script, and that was arbitrary code execution from any
+    -- byte source that happened to land on stdin.
+    --
+    -- Two things made it that rather than a convenience. First, the dictionary
+    -- below inherits SF.entries, so it binds `rm`, `touch`, `mkdir`, `mv`, `cp`
+    -- and the whole `run:proc:*` family. Second, and this is the half that made
+    -- garbage dangerous, the interpreter evaluates a form's ARGUMENTS before it
+    -- resolves the form's head, so a line that is not a command at all still
+    -- runs every form nested inside it. `NameNotBound` is raised afterwards, and
+    -- the damage is already done. HBS2.Hub.CLI.Argv records this same hazard
+    -- being removed from the ARGV path; the stdin path kept it.
+    --
+    -- What made it reachable by a stranger: the comment that used to be here
+    -- said "a hook is exactly where a script arrives on stdin", and git feeds
+    -- pre-receive and post-receive `<old> <new> <ref-name>` on stdin, where the
+    -- ref name is chosen by whoever pushes. Ref names forbid space and control
+    -- characters but ALLOW parentheses and quotes, so
+    -- `refs/heads/x(rm"/path")` passes git check-ref-format and deleted the
+    -- file. Verified against the built binary, with `touch`, `mkdir` and `rm`.
+    --
+    -- The hook use case does not need this: `hub verify <key>` takes argv, and
+    -- a hook should call it that way, with stdin left alone. Scripting keeps its
+    -- explicit spelling, `hbs2-hub --run <file>`, which also covers a pipeline
+    -- through `--run /dev/stdin` for anyone who really wants it. What is gone is
+    -- only the IMPLICIT reading, which nobody can opt out of.
+    --
+    -- Still worth doing separately: this tool has three verbs and does not need
+    -- `rm`/`mv`/`cp`/`run:proc:*` in its dictionary at all. Dropping SF.entries
+    -- would remove the primitives even if the two conditions above ever come
+    -- back. That is a decision about what the tool's scripting surface is, so it
+    -- is not taken here.
+    ([], _) -> hubHelp dict
 
     -- Arguments that name nothing. Distinguished from the empty case, which it
     -- used to share: falling into the stdin branch made a typo exit zero after

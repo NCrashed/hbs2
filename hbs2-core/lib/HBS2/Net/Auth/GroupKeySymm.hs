@@ -153,8 +153,31 @@ instance ForGroupKeySymm s => Semigroup (GroupKey 'Symm s) where
 
 instance Serialise GroupKeyIdScheme
 instance Serialise GroupKeyId
-instance Serialise Key
-instance Serialise SK.Nonce
+
+-- Те же проверяющие длину инстансы, что и для пяти ключевых типов в
+-- "HBS2.Net.Auth.Credentials", и по той же причине. Эти два были пропущены:
+-- стояло голое `instance Serialise Key` / `instance Serialise SK.Nonce`, то
+-- есть вывод через Generic, который принимает ByteString ЛЮБОЙ длины.
+--
+-- Куда это дотягивалось. Ветка Method2 в readFromMerkle разбирает
+-- `(SK.Nonce, ByteString)` прямо из блока данных, а блок берётся по хешу из
+-- дерева, которое опубликовал кто угодно. Дальше nonce уходит в
+-- SK.secretboxOpen, а saltine на выходе длину не проверяет тоже: указатель
+-- отдаётся в c_secretbox_open, который читает свои 24 байта безусловно. Нонс
+-- нулевой длины означает чтение за концом буфера. Заметьте, что Method2 в
+-- этом дереве не пишет никто (toEncryptOpts всюду Nothing), так что ветка
+-- существует ровно для того, чтобы по ней пришёл чужой.
+--
+-- Формат не меняется: saltineEncoding даёт encodeListLen 2 <> encodeWord 0 <>
+-- encodeBytes, а Generic над однополевым newtype над ByteString даёт ровно то
+-- же самое. Меняется только то, что негодная длина теперь не разбирается.
+instance Serialise Key where
+  encode = saltineEncoding
+  decode = saltineDecoder "SecretBox.Key"
+
+instance Serialise SK.Nonce where
+  encode = saltineEncoding
+  decode = saltineDecoder "SecretBox.Nonce"
 
 
 -- NOTE: hardcoded-hbs2-basic-auth-type
