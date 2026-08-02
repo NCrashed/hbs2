@@ -28,8 +28,6 @@ import HBS2.Defaults
 
 
 import Control.Applicative
-import Data.ByteArray.Hash qualified as BA
-import Data.ByteArray.Hash (SipHash(..), SipKey(..))
 import Codec.Serialise as Serialise
 import Codec.Serialise.Decoding qualified as Serialise
 import Crypto.KDF.HKDF qualified as HKDF
@@ -188,7 +186,6 @@ data instance ToEncrypt 'Symm s LBS.ByteString =
   , toEncryptNonce       :: BS.ByteString
   , toEncryptData        :: Stream (Of LBS.ByteString) IO ()
   , toEncryptMeta        :: AnnMetaData
-  , toEncryptOpts        :: Maybe EncryptGroupNaClSymmOpts
   }
   deriving (Generic)
 
@@ -351,6 +348,40 @@ typicalNonceLength = unsafePerformIO SK.newNonce & Saltine.encode & B8.length & 
 typicalKeyLength :: Integral a => a
 typicalKeyLength = unsafePerformIO SK.newKey & Saltine.encode & B8.length & fromIntegral
 
+-- A block's nonce comes from the block, not from where it sits in the tree.
+--
+-- The tree-level nonce is a hash of the payload's first megabyte, which is what
+-- lets an appended-to file keep its earlier blocks byte for byte and
+-- deduplicate against the previous version. It also means two payloads that
+-- share that megabyte derive the same key0, so a nonce that counted blocks
+-- would repeat and the two would encrypt under one keystream -- and one
+-- Poly1305 one-time key -- past the point where they diverge. Appending to a
+-- file under a long-lived group key does exactly that.
+--
+-- Deriving from content keeps both properties: an unchanged block still
+-- encrypts to the same bytes, a changed one cannot collide with what it
+-- replaced. The reader never repeats this computation, it takes the nonce
+-- stored beside the ciphertext, so the key stays with the writer and an
+-- observer holding ciphertext cannot search for collisions.
+blockNonceKey :: GroupSecret -> BS.ByteString
+blockNonceKey gks = HKDF.expand prk ("hbs2-block-nonce" :: BS.ByteString) typicalKeyLength
+  where
+    prk = HKDF.extractSkip @_ @HbSyncHash (Saltine.encode gks)
+
+blockNonce :: BS.ByteString -> Word64 -> ByteString -> SK.Nonce
+blockNonce nk i bs = nonceFrom @SK.Nonce (fromHbSyncHash digest)
+  where
+    digest = hashObject @HbSync
+               ( LBS.fromStrict nk <> LBS.fromStrict (N.bytestring64 i) <> bs )
+
+-- Method2 annotations carry the SipHash key their writer used, but no reader
+-- has ever read it: the nonce travels with the block. We keep the field so
+-- readers as old as the format still recognise the constructor, and we keep it
+-- empty -- a value derived from the group secret, written in the clear on every
+-- tree, would tell an observer which trees share a key.
+unusedSipOpts :: EncryptGroupNaClSymmOpts
+unusedSipOpts = EncryptGroupNaClSymmBlockSIP (0,0)
+
 instance NonceFrom SK.Nonce (SK.Nonce, Word64) where
   -- FIXME: maybe-slow-nonceFrom
   nonceFrom (n0, w) = fromJust $ Saltine.decode nss
@@ -393,34 +424,22 @@ instance ( MonadIO m
 
     let nonceS = toEncryptNonce source
 
-    let nonce0 = nonceFrom @SK.Nonce (toEncryptNonce source)
-
     gkh <- either pure (\k -> HashRef <$> writeAsMerkle sto (serialise k)) gk
 
     let prk = HKDF.extractSkip @_ @HbSyncHash (Saltine.encode key)
 
     let key0 = HKDF.expand prk nonceS typicalKeyLength & Saltine.decode & fromJust
 
-    let method = case toEncryptOpts source of
-          Nothing ->
-            EncryptGroupNaClSymm1 (fromHashRef gkh) nonceS
+    let nk = blockNonceKey key
 
-          Just o@(EncryptGroupNaClSymmBlockSIP{}) ->
-            EncryptGroupNaClSymm2 o (fromHashRef gkh) nonceS
+    -- Method1 stays readable but is no longer written: its nonce is the block
+    -- index, see blockNonce.
+    let method = EncryptGroupNaClSymm2 unusedSipOpts (fromHashRef gkh) nonceS
 
     let onBlock (i,bs) = do
-          case toEncryptOpts source of
-            Just (EncryptGroupNaClSymmBlockSIP (a,b)) -> do
-              let bss = LBS.toStrict bs
-              let (SipHash sip) = BA.sipHash (SipKey a b) bss
-              let nonceI = nonceFrom (nonce0, i + sip)
-              let encrypted = SK.secretbox key0 nonceI  bss
-              pure $ serialise (nonceI, encrypted)
-
-            _  -> do
-                    let nonceI = nonceFrom (nonce0, i)
-                    let encrypted = SK.secretbox key0 nonceI (LBS.toStrict bs)
-                    pure (LBS.fromStrict encrypted)
+          let nonceI = blockNonce nk i bs
+          let encrypted = SK.secretbox key0 nonceI (LBS.toStrict bs)
+          pure $ serialise (nonceI, encrypted)
 
     hashes' <- liftIO $ toEncryptData source
                 & S.zip (S.enumFrom (1 :: Word64) )

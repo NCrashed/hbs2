@@ -108,8 +108,8 @@ metaDataEntries = do
         gk1h <- writeAsMerkle sto (serialise gk1)
 
         case headBlk of
-          w@(MTreeAnn { _mtaCrypt = EncryptGroupNaClSymm _ nonce }) -> do
-            let w1 = w { _mtaCrypt = EncryptGroupNaClSymm gk1h nonce }
+          w@(MTreeAnn { _mtaCrypt = crypt@(EncryptGroupNaClSymm _ _) }) -> do
+            let w1 = w { _mtaCrypt = setGroupKeyHash gk1h crypt }
 
             h <- putBlock sto (serialise w1)
                    >>= orThrowUser "can't put block"

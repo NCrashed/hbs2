@@ -8,6 +8,7 @@ import TestDerivedKey
 import TestMerkleWalk
 import TestKeyEncoding
 import TestByPassFlow
+import TestEncryptedTree
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -39,6 +40,16 @@ main =
               testByPassFlowNotStolen
           , testCase "stays readable when two peers share a flow key"
               testByPassFlowSharedIsReadable
+          ]
+      , testGroup "an encrypted tree separates two payloads under one group key"
+          [ testCase "gives back what it was given"
+              testEncryptedTreeRoundTrip
+          , testCase "does not reuse a nonce when two payloads share a megabyte"
+              testEncryptedTreeSharedPrefixNoNonceReuse
+          , testCase "still charges an append only for the blocks that changed"
+              testEncryptedTreeAppendStillDedups
+          , testCase "reads a tree written before the nonce moved into the block"
+              testEncryptedTreeReadsLegacyMethod1
           ]
       ]
 

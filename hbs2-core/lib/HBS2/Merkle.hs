@@ -118,9 +118,12 @@ data MTreeEncryption
 
 instance Serialise MTreeEncryption
 
+-- Matches either method. It used to build as well, always as Method1, which
+-- made downgrading a Method2 annotation a one-word mistake: the blocks below it
+-- carry their own nonce and a Method1 reader would hand that nonce to secretbox
+-- as ciphertext. Rewrite the group key with setGroupKeyHash instead.
 pattern EncryptGroupNaClSymm :: Hash HbSync -> ByteString -> MTreeEncryption
-pattern EncryptGroupNaClSymm a b  <- ( isEncryptGroupNaClSymm -> Just (a, b) ) where
-  EncryptGroupNaClSymm a b = EncryptGroupNaClSymm1 a b
+pattern EncryptGroupNaClSymm a b  <- ( isEncryptGroupNaClSymm -> Just (a, b) )
 
 isEncryptGroupNaClSymm :: MTreeEncryption
                        -> Maybe (Hash HbSync, ByteString)
@@ -128,6 +131,14 @@ isEncryptGroupNaClSymm = \case
   EncryptGroupNaClSymm2 _ a b -> Just (a,b)
   EncryptGroupNaClSymm1  a b  -> Just (a,b)
   _                           -> Nothing
+
+-- Points an existing annotation at another group key, keeping its method and
+-- nonce. Anything that is not group-encrypted comes back untouched.
+setGroupKeyHash :: Hash HbSync -> MTreeEncryption -> MTreeEncryption
+setGroupKeyHash h = \case
+  EncryptGroupNaClSymm1   _ n -> EncryptGroupNaClSymm1   h n
+  EncryptGroupNaClSymm2 o _ n -> EncryptGroupNaClSymm2 o h n
+  other                       -> other
 
 
 data MTree a = MNode MNodeData [Hash HbSync] | MLeaf a

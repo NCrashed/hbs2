@@ -227,6 +227,7 @@ test-suite test
                   , TestMerkleWalk
                   , TestKeyEncoding
                   , TestByPassFlow
+                  , TestEncryptedTree
 
     -- other-extensions:
 
@@ -268,5 +269,7 @@ test-suite test
         , time
         , unordered-containers
         , network-byte-order
+        , cryptonite
+        , text
 
 

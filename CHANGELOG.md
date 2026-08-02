@@ -2,6 +2,45 @@
 
 ## Security
 
+  - **`hbs2-core`: two versions of an encrypted file went out under one
+    keystream.** An encrypted tree derives its content key from the group
+    secret and a nonce that is a hash of the payload's first megabyte, and
+    every block's nonce was that value with the block's position mixed in.
+    Two payloads sharing that megabyte therefore agreed on the key AND on
+    the whole nonce sequence, so past the point where they diverged each
+    pair of blocks was a two-time pad: XOR the ciphertexts and the
+    plaintexts' XOR falls out, with the Poly1305 one-time key repeating
+    alongside. No key material was needed, only the ciphertext blocks any
+    peer replicates.
+
+    Appending to a file does exactly this, and the group secret it needs
+    is long lived by design: `hbs2-sync` carries one secret for the life
+    of a synced directory, including across changes to the reader list,
+    and `hbs2-git3` keeps one in the repository manifest. Editing a file
+    over a megabyte long past its first megabyte, then syncing it, was
+    enough.
+
+    Per-block nonces now come from the block, keyed by a value derived
+    from the group secret and never published, and travel with the
+    ciphertext. A block that changed cannot collide with what it replaced;
+    a block that did not still encrypts to the same bytes, so an append
+    still costs only the blocks it touched. The metadata block, which has
+    a single nonce and no room for that derivation, takes a nonce hashed
+    from the metadata rather than from the payload.
+
+    This is the format's Method2, which has been in the reader since the
+    format was introduced, so trees written by a fixed peer are read by
+    every released version. Method1 trees keep decrypting. What no longer
+    happens is writing one: new blocks are framed as a nonce and a box, so
+    a tree written now does not deduplicate against a copy of itself
+    written before, and re-encrypting an existing repository or directory
+    stores it once more.
+
+    The prefix rule itself is unchanged and still deliberate. What it
+    leaks is unchanged too: identical payloads under one group key still
+    encrypt identically, which is what makes the deduplication work and
+    what tells a holder of the ciphertext that two payloads are the same.
+
   - **`hbs2-core`: any peer could take over the encrypted flow to any
     other peer, by naming its nonce first.** `ByPass` names a flow by a
     32-bit key built from two 16-bit nonces, one per end. Half of that

@@ -89,18 +89,10 @@ createTreeWithMetadata sto mgk meta lbs = do -- flip runContT pure do
 
       gks <- orThrowUser "can't get groupkey's secret" mgks
 
-      -- FIXME: consider-other-nonce-calculation
-      --   надо считать начальный нонс (от чего / как?)
-      --   нонс: да так-то пофиг от чего, но:
-      --     если брать рандомные места в байтстроке --
-      --     она зафорсится
-      --     что вообще зависит от начального нонса:
-      --       если в файл будет допись в конец, то
-      --       "старые" блоки останутся такими же, как были
-      --       что хорошо для дедуплицирования, но
-      --       потенциально это менее безопасно.
-      --   можно еще с метаданными похэшировать, тогда
-      --   нонс будет более уникальный; но поменялись метаданные -- поменялось всё
+      -- Hashing a prefix rather than the whole payload is what makes an append
+      -- reuse the previous version's blocks. Safe only because the per-block
+      -- nonce comes from the block, see blockNonce in
+      -- HBS2.Net.Auth.GroupKeySymm.
       let s0 = LBS.take ( 1024 * 1024 ) lbs
 
       let (HbSyncHash nonce) = hashObject @HbSync s0
@@ -113,7 +105,7 @@ createTreeWithMetadata sto mgk meta lbs = do -- flip runContT pure do
       hmeta <- putBlock sto (serialise seb)
                  >>= orThrowUser "can't put block"
 
-      let source = ToEncryptSymmBS gks (Right gk) nonce segments  (AnnHashRef hmeta) Nothing
+      let source = ToEncryptSymmBS gks (Right gk) nonce segments (AnnHashRef hmeta)
 
       runExceptT $ writeAsMerkle sto source <&> HashRef
 

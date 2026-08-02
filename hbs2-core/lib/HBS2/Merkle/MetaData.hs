@@ -102,6 +102,9 @@ instance ForGroupKeySymm s => ForEncryptedTree s (DefaultEncryptedTreeSource s) 
 
   getMetaData (DefSource m _) = m
 
+  -- Hashing a prefix rather than the whole payload is what makes an append
+  -- reuse the previous version's blocks. Safe only because the per-block nonce
+  -- comes from the block, see blockNonce in HBS2.Net.Auth.GroupKeySymm.
   getNonce (DefSource _ lbs) = do
     let s0 = LBS.take ( 1024 * 1024 ) lbs
     let (HbSyncHash nonce) = hashObject @HbSync s0
@@ -121,12 +124,22 @@ createEncryptedTree sto gks gk what = do
 
   let segments = readChunkedBS lbs (getBlockSize what)
 
-  seb <- encryptBlock sto gks (Right gk) (Just nonce) (ShortMetadata (getMetaData @s what))
+  let meta = ShortMetadata (getMetaData @s what)
+
+  -- The metadata block gets a nonce of its own, hashed from the metadata.
+  -- encryptBlock has a single block and so a single nonce, with no room for the
+  -- per-block derivation the tree uses; handing it the tree nonce would give
+  -- two payloads that share a first megabyte one keystream for two different
+  -- metadata blocks. Hashing the plaintext keeps the block convergent and makes
+  -- a repeated nonce mean a repeated block.
+  let (HbSyncHash mnonce) = hashObject @HbSync (serialise meta)
+
+  seb <- encryptBlock sto gks (Right gk) (Just mnonce) meta
 
   hmeta <- putBlock sto (serialise seb)
              >>= orThrow StorageError
 
-  let source = ToEncryptSymmBS gks (Right gk) nonce segments  (AnnHashRef hmeta) Nothing
+  let source = ToEncryptSymmBS gks (Right gk) nonce segments (AnnHashRef hmeta)
 
   runExceptT (writeAsMerkle sto source <&> HashRef) >>= orThrowPassIO
 
