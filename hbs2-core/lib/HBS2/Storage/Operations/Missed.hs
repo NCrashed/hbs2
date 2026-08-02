@@ -41,7 +41,16 @@ findMissedBlocks2 sto href = void $ runMaybeT do
       here <- hasBlock sto (coerce r) <&> isJust
       unless here $ lift $ S.yield r
 
-    lift $ walkMerkle (fromHashRef href) (lift . getBlock sto) $ \(hr :: Either (Hash HbSync) [HashRef]) -> do
+    -- walkMerkleUnique, and the href is whatever root the caller was given: this
+    -- is reached from the mailbox status handler with a root another peer chose.
+    -- A plain walk follows every edge, so a chain of nodes each naming its one
+    -- child twice costs 2^depth for depth+1 blocks -- nine seconds at depth 22,
+    -- and it never returns at depth 40, for about two kilobytes of well-formed
+    -- blocks. The answer here is the SET of blocks this graph mentions that we
+    -- do not hold, so entering each node once is what the question asks for, and
+    -- it bounds what findMissedBlocks can accumulate to the number of distinct
+    -- blocks rather than the number of paths to them.
+    lift $ walkMerkleUnique (fromHashRef href) (lift . getBlock sto) $ \(hr :: Either (Hash HbSync) [HashRef]) -> do
       case hr of
         -- FIXME: investigate-this-wtf
         Left hx -> S.yield (HashRef hx)

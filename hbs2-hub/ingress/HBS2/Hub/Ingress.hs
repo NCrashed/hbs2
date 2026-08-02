@@ -42,7 +42,7 @@ import HBS2.Hub.Letter
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Merkle (walkMerkle)
+import HBS2.Merkle (walkMerkleUnique)
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
@@ -371,7 +371,15 @@ readInbox ig mbox = do
     readEntries tree = do
       acc <- newTVarIO []
       bad <- newTVarIO []
-      walkMerkle @[HashRef] (coerce tree) (igBlock ig . HashRef) $ \case
+      -- walkMerkleUnique, because this tree is a stranger's: the mailbox is
+      -- public by design and its root is whatever the peer merged. A plain walk
+      -- follows every edge, so a chain of nodes each naming its one child twice
+      -- costs 2^depth for depth+1 blocks, and about a kilobyte of well-formed
+      -- blocks is nine seconds at depth 22 and does not finish at depth 40. What
+      -- this reader wants is the set of entries the tree holds -- the result goes
+      -- straight into liveMessages, which is a set difference -- so entering a
+      -- node once is the answer to the question being asked.
+      walkMerkleUnique @[HashRef] (coerce tree) (igBlock ig . HashRef) $ \case
         Left miss -> atomically $ modifyTVar bad (HashRef miss :)
         Right hs -> do
           es <- forM hs $ \h -> (h,) <$> readEntry h

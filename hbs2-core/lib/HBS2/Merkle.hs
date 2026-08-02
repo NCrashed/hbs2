@@ -13,10 +13,13 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Data
 import Data.Foldable (traverse_)
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HashSet
 import Data.List qualified as List
 import Data.Word
 import Lens.Micro.Platform
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.State.Strict (StateT,evalStateT,gets,modify')
 import Control.Monad
 -- import Prettyprinter
 
@@ -189,6 +192,15 @@ makeMerkle h0 pt f = fst <$> go h0 pt
 --   в меркл дерево, или вообще делать cons-ячейки,
 --   но что уж теперь.
 
+-- | Walk a merkle tree, sinking every node.
+--
+-- FOLLOWS EVERY EDGE, including an edge to a node it has already entered, and
+-- that is deliberate: reconstructing content depends on a repeated leaf being
+-- emitted once per occurrence. It also means the cost is the number of PATHS
+-- and not the number of blocks, so a root somebody else chose can cost 2^depth
+-- for depth+1 blocks. Use 'walkMerkleUnique'' where the question is about a set
+-- of blocks rather than a sequence of bytes; the numbers and the reasoning are
+-- in its haddock.
 walkMerkle' :: forall a m . (Serialise (MTree a), (Serialise (MTreeAnn a)), Monad m)
            => Hash HbSync
            -> ( Hash HbSync -> m (Maybe LBS.ByteString) )
@@ -227,6 +239,90 @@ walkMerkle :: forall a m . (Serialise (MTree a), Serialise (MTreeAnn a), Seriali
 walkMerkle root flookup sink = do
 
   walkMerkle' root flookup withTree
+
+  where
+    withTree = \case
+        (Right (MLeaf s))   -> sink (Right s)
+        (Right (MNode _ _)) -> pure ()
+        Left hx             -> sink (Left hx)
+
+
+-- | As 'walkMerkle'', but each node block is entered at most once.
+--
+-- A merkle "tree" here is whatever the block graph turns out to be, and a node
+-- lists child hashes with nothing stopping two of them being equal. 'walkMerkle''
+-- follows every edge, so a chain in which every node names its one child TWICE
+-- costs 2^depth for depth+1 blocks. Measured against this module, with the
+-- blocks in a map so that the cost is the walk and nothing else:
+--
+-- >  depth   blocks         visits    seconds
+-- >      4        5             31      0.000
+-- >     16       17         131071      0.127
+-- >     20       21        2097151      2.084
+-- >     22       23        8388607      8.958
+--
+-- Twenty-three blocks is about a kilobyte, it is well-formed, and it is
+-- four times the cost for every two levels added: forty-one blocks is 2^40
+-- visits and does not finish. A peer serves those blocks the ordinary way, so
+-- anything that walks a root somebody else chose can be stopped with a
+-- kilobyte. That reaches the mailbox status handler, and 'findMissedBlocks'
+-- from there.
+--
+-- WHY THIS IS A SEPARATE FUNCTION and not a fix to 'walkMerkle''. Skipping a
+-- repeated node is only sound when the caller is asking about a SET. It is not
+-- sound for reading content: 'readFromMerkle' concatenates leaf payloads in
+-- traversal order, and identical runs of content hash identically, so a file of
+-- ten megabytes of zeroes genuinely does have the same leaf block listed many
+-- times over. Deduplicating there would silently return a shorter file. So the
+-- traversal that reconstructs bytes keeps following every edge, and the callers
+-- that are asking which blocks a graph mentions use this.
+--
+-- The visited set also bounds what a caller can accumulate: the number of
+-- distinct blocks, rather than the number of paths to them.
+walkMerkleUnique' :: forall a m . (Serialise (MTree a), (Serialise (MTreeAnn a)), Monad m)
+           => Hash HbSync
+           -> ( Hash HbSync -> m (Maybe LBS.ByteString) )
+           -> ( Either (Hash HbSync) (MTree a) -> m () )
+           -> m ()
+
+walkMerkleUnique' root flookup sink = evalStateT (go root) mempty
+  where
+    go :: Hash HbSync -> StateT (HashSet (Hash HbSync)) m ()
+    go hash = do
+      seen <- gets (HashSet.member hash)
+      unless seen do
+        modify' (HashSet.insert hash)
+        bs0 <- lift (flookup hash)
+        case bs0 of
+          Nothing -> lift (sink (Left hash))
+          Just bs -> case deserialiseOrFail @(MTree a) bs of
+            Right t -> walkTree t
+            Left{}  -> case deserialiseOrFail @(MTreeAnn a) bs of
+              -- See the MerkleAnn-note above: an annotated tree is a different
+              -- block shape holding the same tree, and bytes that are neither
+              -- are not an error here, they are simply not a tree.
+              Right (MTreeAnn { _mtaTree = t }) -> walkTree t
+              Left{}                            -> pure ()
+
+    walkTree :: MTree a -> StateT (HashSet (Hash HbSync)) m ()
+    walkTree = \case
+      n@(MLeaf _)        -> lift (sink (Right n))
+      n@(MNode _ hashes) -> lift (sink (Right n)) >> traverse_ go hashes
+
+-- | As 'walkMerkle', but each node block is entered at most once.
+--
+-- The leaf-payload half of 'walkMerkleUnique''. For anything asking which
+-- blocks a graph mentions; NOT for reconstructing content, for the reason
+-- 'walkMerkleUnique'' gives.
+walkMerkleUnique :: forall a m . (Serialise (MTree a), Serialise (MTreeAnn a), Serialise a, Monad m)
+           => Hash HbSync
+           -> ( Hash HbSync -> m (Maybe LBS.ByteString) )
+           -> ( Either (Hash HbSync) a -> m () )
+           -> m ()
+
+walkMerkleUnique root flookup sink = do
+
+  walkMerkleUnique' root flookup withTree
 
   where
     withTree = \case

@@ -2,6 +2,65 @@
 
 ## Security
 
+  - **`hbs2-core`: a kilobyte of well-formed blocks could stop any peer
+    that walked a root somebody else chose.** A merkle node lists child
+    hashes and nothing stops two of them being equal, so the block graph
+    is a DAG and the number of paths through it is not the number of
+    blocks in it. `walkMerkle'` follows every edge, so a chain in which
+    every node names its one child twice costs 2^depth for depth+1
+    blocks. Measured with the blocks in a map, so the cost is the walk
+    and nothing else:
+
+    ```
+     depth   blocks         visits    seconds
+         4        5             31      0.000
+        16       17         131071      0.127
+        20       21        2097151      2.084
+        22       23        8388607      8.958
+    ```
+
+    Twenty-three blocks is about a kilobyte, every hash in it resolves,
+    there is no cycle, and a peer serves it the ordinary way. Depth 40 is
+    forty-one blocks and does not finish. `mailboxAcceptStatus` hands an
+    announced root to `findMissedBlocks`, which walks it and additionally
+    accumulates the result with `S.toList_`, so this was reachable from
+    any peer that had completed a handshake.
+
+    A visited set is NOT the fix for `walkMerkle'`, and the sibling
+    `deepScan` keeping one is not the precedent it looks like. Skipping a
+    repeated node is only sound when the caller is asking about a set:
+    `readFromMerkle` concatenates leaf payloads in traversal order, and
+    identical runs of content are identical blocks and hash the same, so
+    a file of ten megabytes of zeroes genuinely does have one leaf block
+    named many times. Deduplicating there returns a shorter file, with no
+    error. So `walkMerkle'` still follows every edge, and new
+    `walkMerkleUnique'`/`walkMerkleUnique` enter each node once, for the
+    callers whose question is which blocks a graph mentions:
+    `findMissedBlocks`, the mailbox worker's walk of a downloaded status
+    tree, and `hbs2-hub`'s ingress read of a mailbox. On the same inputs:
+
+    ```
+     depth   blocks         visits    seconds
+        20       21             21      0.000
+        22       23             23      0.000
+        40       41             41      0.000
+        64       65             65      0.000
+    ```
+
+    The visited set also bounds what those callers can accumulate, to the
+    number of distinct blocks rather than the number of paths to them.
+
+    `hbs2-core`'s test suite has a group for this, with the bomb at depth
+    40 and a case pinning that the plain walk still repeats a leaf a tree
+    names twice, since that is the property `readFromMerkle` stands on
+    and the one a future dedup would quietly break.
+
+    Not fixed here: `walkMerkle'` remains unbounded for callers that read
+    content, which is correct but means a hostile tree still costs them
+    paths rather than blocks, and `findMissedBlocks2`'s own recursion
+    into nested merkle roots does not share a visited set across calls.
+    Both are polynomial rather than exponential now.
+
   - **`hbs2-hub`: an argument beginning with `(` or `[` was executed.**
     `argvAtom` parsed such a word as a form and handed it to the
     evaluator, described in its own haddock as "the script escape hatch

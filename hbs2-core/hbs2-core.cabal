@@ -224,6 +224,7 @@ test-suite test
                   , HasProtocol
                   , TestScheduled
                   , TestDerivedKey
+                  , TestMerkleWalk
 
     -- other-extensions:
 

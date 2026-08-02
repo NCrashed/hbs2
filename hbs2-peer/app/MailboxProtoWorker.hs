@@ -889,7 +889,15 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
           -- FIXME: assume-huge-mailboxes
 
-          walkMerkle @[HashRef] (coerce mailboxStatusRef) (getBlock mpwStorage) $ \case
+          -- walkMerkleUnique, because mailboxStatusRef is a root ANOTHER PEER
+          -- chose. A plain walk follows every edge, so a chain of nodes each
+          -- naming its one child twice costs 2^depth for depth+1 blocks: about a
+          -- kilobyte of well-formed blocks, served the ordinary way, is nine
+          -- seconds at depth 22 and does not finish at depth 40. The question
+          -- here is which entries the tree mentions, which is a set, so entering
+          -- a node once is the right answer as well as the affordable one; the
+          -- work below is idempotent per entry anyway.
+          walkMerkleUnique @[HashRef] (coerce mailboxStatusRef) (getBlock mpwStorage) $ \case
             Left what -> do
               err $ red "mailbox: missed block for tree" <+> pretty mailboxStatusRef <+> pretty what
               atomically $ modifyTVar fails succ
