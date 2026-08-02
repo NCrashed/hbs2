@@ -526,6 +526,32 @@
     refused as `AlreadyInCanon`. No deny-list is applied either: PEP-21
     policy lives in the repo manifest and there is no manifest reader.
 
+  - **`hbs2-hub`: the tracker can be read.** Accepting an issue into
+    canon and then having no verb that shows it was a strange place to
+    stop: `hub verify` prints an audit, which is counts and problems,
+    and never a title or a status. `hub issue list`, `hub issue show`,
+    `hub pr list`, `hub pr show` and `hub log` are the read side, and
+    like `hub verify` they need no peer and no key, because canon is a
+    git ref and the fold over it is all they print.
+
+    A title, a label and a body arrive in a letter anybody may send, so
+    every one of them is printed through `safeText`: a title carrying a
+    newline would otherwise forge a second row of the listing, and one
+    carrying an erase-line sequence would rewrite the row above it. Both
+    are tested by trying it. Order is imposed rather than taken from a
+    container: `frThreads` iterates in hash order, which is stable for a
+    build and is not a promise, so threads sort by number and events by
+    seq.
+
+    `--status` and `--label` narrow a listing. They are exact matches
+    and not the query DSL PEP-22 inherits from fixme-new, which compiles
+    to SQL over a materialized cache this build does not have; the help
+    says so rather than leaving the difference to be discovered. A label
+    is one an owner applied: what an author asked for on open is shown
+    separately and never counted, since applying one is an owner-signed
+    event (PEP-19) and merging the two would let a stranger label their
+    own issue.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

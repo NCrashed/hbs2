@@ -10,6 +10,7 @@ import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
+import HBS2.Hub.CLI.Read
 import HBS2.Hub.CLI.Verify
 
 import HBS2.CLI.Prelude
@@ -105,6 +106,7 @@ main = do
         acceptEntries
         composeEntries
         verifyEntries
+        readEntries
 
         -- BEFORE helpEntries, because the dictionary is a left-biased union and
         -- the first binding of a name wins. Overrides the inherited `help`, which
@@ -238,7 +240,15 @@ main = do
     -- all of it the peer probe, which is readProcess of `hbs2-peer poke` with no
     -- timeout. Against a wedged peer the two commands that hang are the two you
     -- would run to find out how to audit without one.
-    peerFreeNames = ["hub:verify"] <> helpNames
+    -- Every read verb, and they are peerless for the same reason `verify` is:
+    -- canon is a git ref in this repository and the fold over it needs nothing
+    -- else. Measured on the same wedged-peer case the note above describes,
+    -- this is the difference between a listing and a hang.
+    peerFreeNames = [ "hub:verify"
+                    , "hub:issue:list", "hub:issue:show"
+                    , "hub:pr:list", "hub:pr:show"
+                    , "hub:log"
+                    ] <> helpNames
 
     helpNames :: [Id]
     helpNames = ["help", "--help"]

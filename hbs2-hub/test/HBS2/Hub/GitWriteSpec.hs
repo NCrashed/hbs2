@@ -17,6 +17,7 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 import HBS2.Hub.Repo.GitWrite
+import HBS2.Hub.CLI.Read (threadsOf,noFilter,listDoc,showDoc,statusOf)
 import HBS2.Hub.Canon (renderMeta)
 
 import HBS2.Prelude.Plated (Pretty(..))
@@ -26,7 +27,7 @@ import HBS2.Net.Auth.Credentials
 import Control.Monad (void,(>=>))
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.HashMap.Strict qualified as HM
-import Data.List (sort)
+import Data.List (sort,isInfixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -228,3 +229,28 @@ spec = do
       void $ commitOk dir Nothing cw 1000
       v <- git dir ["cat-file", "-p", "refs/hbs2/meta:version"]
       v `shouldBe` Text.unpack (Text.strip renderMeta)
+
+    -- The whole chain in one assertion: mint, plan, commit to a real git ref,
+    -- read it back with the reader, and render it with the verb's own
+    -- function. Each half is covered on its own above and in ReadSpec; what
+    -- only this can catch is the two halves agreeing about everything except
+    -- the thing that joins them.
+    it "an issue written to canon is an issue the listing shows" $ withRepo $ \dir -> do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "a real issue" [] (Just "body") Nothing Nothing 1000)
+                 (canonOf repo 1 (Just 1))
+          p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+      cw <- either (fail . show) pure (planCanon [(p, ev)] [(1, eventId ev)])
+      void $ commitOk dir Nothing cw 1000
+
+      st <- readBack dir repo
+      case threadsOf HubIssue noFilter (stFold st) of
+        [t] -> do
+          tsNumber t `shouldBe` Just 1
+          statusOf t `shouldBe` "open"
+          unlines (fmap show (listDoc [t])) `shouldSatisfy` ("a real issue" `isInfixOf`)
+          unlines (fmap show (showDoc t)) `shouldSatisfy` ("body" `isInfixOf`)
+        other -> expectationFailure ("expected one issue, got " <> show (length other))
