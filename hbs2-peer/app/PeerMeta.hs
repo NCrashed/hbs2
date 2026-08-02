@@ -158,30 +158,44 @@ fillPeerMeta mtcp probePeriod = do
                           forM_ mtcp \tcp -> tcpAdoptName tcp p candidate
                           sendPing candidate
 
-                      port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))
-                      -- skipped for name-carrying (e.g. .onion) peers
-                      ipp  <- MaybeT (replacePort p port)
+                      -- The peer's HTTP API address, when it has one we could
+                      -- dial: it announces no http-port when the API is off or
+                      -- bound to its own loopback, and a name-carrying address
+                      -- (.onion) has no port to swap in.
+                      mipp <- lift $ runMaybeT do
+                          port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))
+                          MaybeT (replacePort p port)
 
                       lift do
 
-                          let peerHttpApiAddr = show (pretty ipp)
-                          -- check peerHttpApiAddr
+                          -- Every outcome has to land in the TVar, including
+                          -- "this peer has no HTTP API". Bailing out and
+                          -- leaving it at `Left` brings the prober back here
+                          -- every period for the rest of the peer's life,
+                          -- re-asking for meta it already has.
+                          addr <- case mipp of
+                            Nothing -> pure Nothing
+                            Just ipp -> do
 
-                          r :: Maybe () <- runMaybeT do
-                              resp <- MaybeT (liftIO $ fmap eitherToMaybe
-                                        $ race ( pause defBlockWaitMax )
-                                        (do
-                                            req  <- liftIO $ parseRequest [qc|http://{peerHttpApiAddr}/metadata|]
-                                            httpLbs req
-                                         )
-                                          `catch` (\(e :: SomeException) -> debug (viaShow e) >> pure (Left ()))
-                                    )
-                              MaybeT . pure $ case statusCode (getResponseStatus resp) of
-                                  200 -> Just ()
-                                  _   -> Nothing
+                              let peerHttpApiAddr = show (pretty ipp)
+                              -- check peerHttpApiAddr
 
-                          liftIO $ atomically $ writeTVar (_peerHttpApiAddress pinfo) $ Right $ peerHttpApiAddr <$ r
-                          mapM_ (liftIO . atomically . writeTVar (_peerMeta pinfo) . Just) $ peerMeta <$ r
+                              r :: Maybe () <- runMaybeT do
+                                  resp <- MaybeT (liftIO $ fmap eitherToMaybe
+                                            $ race ( pause defBlockWaitMax )
+                                            (do
+                                                req  <- liftIO $ parseRequest [qc|http://{peerHttpApiAddr}/metadata|]
+                                                httpLbs req
+                                             )
+                                              `catch` (\(e :: SomeException) -> debug (viaShow e) >> pure (Left ()))
+                                        )
+                                  MaybeT . pure $ case statusCode (getResponseStatus resp) of
+                                      200 -> Just ()
+                                      _   -> Nothing
+
+                              pure (peerHttpApiAddr <$ r)
+
+                          liftIO $ atomically $ writeTVar (_peerHttpApiAddress pinfo) (Right addr)
                           debug $ "Got peer meta from" <+> pretty p <+> ":" <+> viaShow peerMeta
 
                   _ -> do

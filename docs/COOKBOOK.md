@@ -81,6 +81,15 @@ trees from a browser. Trees stored with `hbs2:tree:metadata:file`
 serve with the correct `Content-Type` and `Content-Disposition`
 because those are taken from the metadata.
 
+The gateway binds `127.0.0.1` unless told otherwise, and it is read
+only: it will hand out any ref or tree the peer stores, to anyone who
+can open the port, without asking who they are. To serve it publicly,
+say so and put a reverse proxy in front of it:
+
+```
+http-listen "0.0.0.0"
+```
+
 ## Delete content from local storage
 
 Single block:

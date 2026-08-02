@@ -302,8 +302,14 @@ getKnownPeers  = do
 mkPeerMeta :: PeerConfig -> PeerEnv e -> Set NetworkClass -> AnnMetaData
 mkPeerMeta (PeerConfig syn) penv recipientClasses = do
 
+    -- Only a port a neighbour can actually open. The API binds loopback
+    -- unless `http-listen` says otherwise, and announcing a loopback port
+    -- just sends everyone probing an address that will never answer them.
     let mHttpPort :: Maybe Integer
-        mHttpPort = coerce $ runReader (cfgValue @PeerHttpPortKey @PeerHttpPort) syn
+        mHttpPort = do
+          (host, port) <- runReader peerHttpListen syn
+          guard (not (isLoopbackHost host))
+          pure port
 
     let mTcpPort :: Maybe Word16
         mTcpPort =

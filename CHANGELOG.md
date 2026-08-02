@@ -432,7 +432,67 @@
   - `cabal test` in CI covers `hbs2-peer` as well as `hbs2-hub`, since
     the above is only a regression test if something runs it.
 
+  - **`hbs2-peer`: one anonymous HTTP POST appended a forged transaction
+    to any reflog the peer polls.** `post "/reflog"` handed the request
+    body to the reflog worker and relayed it to every known peer before
+    looking at a signature. The worker's subscriber enqueued the
+    transaction twice: once through `reflogUpdate`, which verifies, and
+    once unconditionally on the line below it. The consumer that drains
+    that queue writes what it finds into the reflog and calls `updateRef`
+    without verifying anything itself. `polled` is true for every reflog
+    named in `poll`, that is, for every repository the peer hosts, so the
+    second enqueue was the whole hole.
+
+    Readers do not catch it either. `hbs2-git3`'s `readTxMay`
+    deserialises a transaction without checking its signature, and
+    `Import.hs` imports the complete checkpoint of highest rank, so a
+    forged `SequentialRef` carrying a large rank became the repository
+    state that clients pulled. The tree it pointed at could be staged
+    beforehand through the other unauthenticated endpoint, `put "/"`,
+    which stored 4 MiB per request into block storage and handed back the
+    hash, an anonymous file host and an unbounded disk besides.
+
+    Both write endpoints are gone and the HTTP API is read only. Posting
+    a reflog transaction goes through `RpcRefLogPost` on the RPC socket,
+    which is what `hbs2-cli`'s `hbs2:reflog:tx:post` already used, and
+    storing a block goes the same way. The unconditional enqueue is gone
+    too, so nothing reaches the reflog that `reflogUpdate` has not
+    verified, whatever emitted the event. `hbs2-tests`' `create-raw-tx`,
+    the only in-tree caller of the removed route, is deleted.
+
+  - **`hbs2-peer`: the HTTP API listened on every interface by default.**
+    A config with no `http-port` clause fell through to port 5005, and
+    scotty's warp settings bind `0.0.0.0`, so a peer served its storage
+    to the network without anyone having chosen that. Nothing behind the
+    port asks who is calling: whoever reaches it reads any ref, tree or
+    block the peer holds.
+
+    It now binds `127.0.0.1` unless a new `http-listen` key says
+    otherwise, in warp's host syntax (an address, a host name, or `*`,
+    `*4`, `*6`). `http-port` still means the port and `http-port "off"`
+    still switches the API off entirely; the peer logs the address it
+    settled on at startup. **This changes behaviour on upgrade:** a peer
+    that is reached over HTTP from another machine needs `http-listen
+    "0.0.0.0"` written into its config. The NixOS module grew an
+    `httpAddress` option with the same loopback default.
+
+    A loopback binding is no longer announced in peer-meta, because a
+    port a neighbour cannot open is nothing but an invitation to probe
+    it.
+
 ## Fixed
+
+  - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its
+    metadata forever.** `fillPeerMeta` abandoned its whole `runMaybeT`
+    when a neighbour's meta carried no `http-port`, or when the peer's
+    address carries a name no port can be swapped into (an `.onion`),
+    leaving `_peerHttpApiAddress` at `Left`, the value that means "not
+    asked yet". Every probe period it therefore re-requested meta it
+    already held and subscribed another `PeerMetaEventKey` handler, which
+    the 600 second sweeper dropped and the next round put back. Having no
+    HTTP API is now recorded as the answer it is. This cost little while
+    every peer announced a port; with loopback the default, it would have
+    been every neighbour of every peer.
 
   - **`hbs2-peer`: the mailbox database was published before its tables
     existed.** `mailboxStateEvolve` wrote the `DBPipeEnv` into `mailboxDB`

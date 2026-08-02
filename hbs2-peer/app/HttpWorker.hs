@@ -21,13 +21,13 @@ import HBS2.Misc.PrettyStuff
 
 import PeerTypes
 import PeerConfig
-import RefLog ( doRefLogBroadCast )
 
 import Data.Config.Suckless
 
 import Data.Maybe
 import Data.ByteString.Lazy qualified as LBS
 import Network.HTTP.Types.Status
+import Network.Wai.Handler.Warp (defaultSettings, setHost, setPort)
 import Network.Wai.Middleware.RequestLogger
 import Text.InterpolatedString.Perl6 (qc)
 
@@ -39,13 +39,11 @@ import Data.ByteString.Builder (byteString, Builder)
 import Control.Concurrent
 import Data.Either
 import Codec.Serialise (deserialiseOrFail)
-import Data.Aeson (object, (.=))
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Text qualified as Text
 import Data.Text.Lazy qualified as LT
 import Data.HashMap.Strict qualified as HM
 import Control.Monad.Reader
-import Lens.Micro.Platform (view)
 import System.FilePath
 import Control.Monad.Except
 import Control.Monad.Trans.Maybe
@@ -117,14 +115,21 @@ httpWorker (PeerConfig syn) pmeta = do
 
   sto <- getStorage
 
-  let port' = runReader (cfgValue @PeerHttpPortKey @PeerHttpPort) syn
-              & (fmap fromIntegral . coerce)
+  let listen = runReader peerHttpListen syn
 
-  penv <- ask
+  maybe1 listen none $ \(host, port) -> liftIO do
 
-  maybe1 port' none $ \port -> liftIO do
+    -- Loopback unless `http-listen` says otherwise, so say out loud which one
+    -- it turned out to be: an operator who used to reach this port from
+    -- another machine has to be able to see why it stopped answering.
+    notice $ "http api listens on" <+> pretty host <> ":" <> pretty port
 
-    scotty port $ do
+    let opts = defaultOptions
+                 { settings = setHost (fromString host)
+                            $ setPort (fromIntegral port) defaultSettings
+                 }
+
+    scottyOpts opts $ do
       middleware logStdout
 
       -- defaultHandler do
@@ -224,41 +229,18 @@ httpWorker (PeerConfig syn) pmeta = do
             maybe1 va (status status404) $ \val -> do
               text [qc|{pretty val}|]
 
-      -- FIXME: to-replace-to-rpc
-      post "/reflog" do
-        bs <- LBS.take 4194304 <$> body
-        let msg' =
-              deserialiseOrFail @(RefLogUpdate L4Proto) bs
-                & either (const Nothing) Just
-        case msg' of
-          Nothing -> do
-            status status400
-            json $ object ["error" .= "unable to parse RefLogUpdate message"]
-          Just msg -> do
-            let pubk = view refLogId msg
-            liftIO $ withPeerM penv $ do
-              emit @e RefLogUpdateEvKey (RefLogUpdateEvData (pubk, msg, Nothing))
-              doRefLogBroadCast msg
-            status status200
-
       get "/metadata" do
           raw $ serialise $ pmeta
 
-      put "/" do
-        -- FIXME: optional-header-based-authorization
-        --   signed nonce + peer key?
-
-        -- TODO: ddos-protection
-        -- FIXME: fix-max-size-hardcode
-        bs <- LBS.take 4194304 <$> body
-        -- let ha = hashObject @HbSync bs
-        -- here <- liftIO $ hasBlock sto ha <&> isJust
-
-        mbHash <- liftIO $ putBlock sto bs
-
-        case mbHash of
-          Nothing -> status status500
-          Just h  -> text [qc|{pretty h}|]
+      -- There used to be a `post "/reflog"` and a `put "/"` here, both taking
+      -- writes from anyone who could open the port. `put "/"` stored a block
+      -- and handed back its hash, which is an anonymous file host and a disk
+      -- that grows until it is full. `post "/reflog"` was worse: it handed the
+      -- transaction to the reflog worker and relayed it to every known peer
+      -- without ever looking at the signature. Both are already reachable over
+      -- the RPC socket (RpcRefLogPost, and block storage through the peer API),
+      -- which is where a caller that is entitled to write belongs. HTTP is
+      -- read-only.
 
   warn "http port not set"
   forever $ pause @'Seconds 600

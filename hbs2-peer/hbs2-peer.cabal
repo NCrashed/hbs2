@@ -206,11 +206,16 @@ test-suite test
         MailboxStatus
         MailboxPolicy
         MailboxEntry
+        HttpListen
+        -- from app/: HttpListen exercises the config resolution the peer
+        -- itself uses, so it reads the real module rather than a copy.
+        PeerConfig
+        PeerLogger
 
     -- other-extensions:
 
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   test
+    hs-source-dirs:   test, app
     main-is:          TestSuite.hs
     build-depends:
           base, hbs2-peer, hbs2-core
@@ -246,6 +251,8 @@ test-suite test
         , temporary
         , unliftio
         , resourcet
+        , text
+        , interpolatedstring-perl6
 
 
 

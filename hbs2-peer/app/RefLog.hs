@@ -155,9 +155,15 @@ reflogWorker conf brains adapter = do
                 pa <- toPeerAddr @e pip
                 acceptAnnouncesFromPeer @e conf pa
 
+    -- Only `reflogUpdate` may enqueue, because only it checks the signature.
+    -- There used to be a second, unconditional `writeTQueue` right here, and
+    -- the worker that drains the queue writes what it finds into the reflog
+    -- without looking at the signature itself. Anything that emitted this
+    -- event without verifying first (the HTTP endpoint did, before it was
+    -- removed) could therefore append a forged transaction to any reflog this
+    -- peer polls.
     when (buddy || polled) $ liftIO do
       reflogUpdate reflog Nothing v
-      atomically $ writeTQueue pQ (reflog, [v])
 
   reflogMon <- liftIO $ newTVarIO (mempty :: HashSet (Hash HbSync))
 

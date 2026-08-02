@@ -35,6 +35,7 @@ data FeatureSwitch =
 data PeerListenTCPKey
 data PeerDownloadLogKey
 data PeerHttpPortKey
+data PeerHttpListenKey
 data PeerTcpProbeWaitKey
 data PeerUseHttpDownload
 data PeerBrainsDBPath
@@ -123,6 +124,14 @@ instance HasCfgKey PeerListenTCPKey (Maybe String) where
 instance HasCfgKey PeerHttpPortKey b where
   key = "http-port"
 
+-- The address the HTTP API binds to, in warp's host syntax: a literal
+-- address, a host name, or "*" / "*4" / "*6" for every interface. Absent
+-- means loopback, and that is the point: nothing behind this port asks who
+-- is calling, so serving it to the network has to be something the operator
+-- wrote down rather than something that happens by omission.
+instance HasCfgKey PeerHttpListenKey (Maybe String) where
+  key = "http-listen"
+
 instance HasCfgKey PeerTcpProbeWaitKey (Maybe Integer) where
   key = "tcp-probe-wait"
 
@@ -178,6 +187,24 @@ instance {-# OVERLAPPING #-} (HasConf m, HasCfgKey PeerHttpPortKey b, b ~ PeerHt
           Just (TextLike "off")  -> PeerHttpPort Nothing
           Just (LitIntVal n)     -> (PeerHttpPort (Just n))
           _                      -> (PeerHttpPort (Just 5005))
+
+defHttpListenHost :: String
+defHttpListenHost = "127.0.0.1"
+
+-- | Where the HTTP API listens: the bind address and the port, or Nothing
+--   when `http-port "off"` switched it off. `http-port` keeps meaning the
+--   port and nothing else; the address comes from `http-listen`.
+peerHttpListen :: HasConf m => m (Maybe (String, Integer))
+peerHttpListen = do
+  port <- cfgValue @PeerHttpPortKey @PeerHttpPort
+  host <- cfgValue @PeerHttpListenKey @(Maybe String)
+  let PeerHttpPort p = port
+  pure $ fmap (fromMaybe defHttpListenHost host,) p
+
+-- | Whether a bind address keeps the API to this host. A loopback binding is
+--   worth nothing to a neighbour, so it is not announced in peer-meta.
+isLoopbackHost :: String -> Bool
+isLoopbackHost h = h `elem` ["127.0.0.1", "::1", "localhost"]
 
 cfgName :: FilePath
 cfgName = "config"

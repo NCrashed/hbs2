@@ -34,6 +34,7 @@ let
     ''}
     rpc "${cfg.rpcAddress}:${toString cfg.rpcPort}"
     http-port ${toString cfg.httpPort}
+    http-listen "${cfg.httpAddress}"
     key "${cfg.keyFile}"
     storage "${cfg.storageDir}"
     accept-block-announce *
@@ -106,6 +107,18 @@ in {
       type = types.port;
       default = 5001;
       description = "HTTP API port for local applications.";
+    };
+
+    httpAddress = mkOption {
+      type = types.str;
+      default = "127.0.0.1";
+      description = ''
+        Address the HTTP API binds to. Loopback by default: the API has no
+        authentication of any kind, so anything that can reach the port can
+        read every ref and tree this peer stores. Set it to "0.0.0.0" only
+        to run this peer as a public read-only gateway, and put a reverse
+        proxy in front of it.
+      '';
     };
 
     storageDir = mkOption {
