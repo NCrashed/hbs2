@@ -272,8 +272,49 @@ inboxDoc = fmap render . irLetters
 -- A list rather than an action, so that a test can ask what this run would say
 -- without capturing a handle.
 inboxNotes :: InboxRead -> [Doc ann]
-inboxNotes r = settledNote <> missingNote <> policyNote
+inboxNotes r = settledNote <> missingNote <> omittedNote <> keymanNote <> policyNote
   where
+    -- Truncation, said with a number. A mailbox is public, so how many letters
+    -- are in it is a stranger's choice; this reader opens at most
+    -- 'maxInboxLetters' of them and used to open all of them and hold every body
+    -- resident. What it will not do is truncate quietly: a list that is missing
+    -- letters is wrong, so it says how many and leaves non-zero.
+    omittedNote
+      | irOmitted r <= 0 = []
+      | otherwise =
+          [ "hub:" <+> pretty (irOmitted r) <+> "more letter(s) in this mailbox"
+              <+> "were not opened:" <+> pretty maxInboxLetters <+> "is the most"
+              <+> "one read will take. The list above is a prefix, in hash order,"
+              <+> "and is therefore incomplete." ]
+
+    -- The one this reader CANNOT tell apart, said out loud rather than implied.
+    --
+    -- 'NotForUs' comes from 'ReadNoGroupKeyAccess', and the keyman answers
+    -- Nothing for "no key of mine is a recipient" AND for an index that was
+    -- never updated, a key file it cannot read, and credentials that do not
+    -- parse. So a node with a keyman that cannot be consulted shows a full queue
+    -- in which every single line says "not sealed to any key this node holds",
+    -- once per letter, with a zero exit -- which reads as "none of this is mine"
+    -- and is indistinguishable from it.
+    --
+    -- Only when EVERY letter says it, because that is the shape a broken keyman
+    -- makes and a mailbox where some letters are ours does not.
+    keymanNote
+      | not (List.null (irLetters r))
+      , all notForUs (irLetters r) =
+          [ "hub: all" <+> pretty (length (irLetters r)) <+> "letters report"
+              <+> "\"not sealed to any key this node holds\". That is also what a"
+              <+> "keyman this node cannot consult looks like from here -- an"
+              <+> "index never updated, an unreadable key file, credentials that"
+              <+> "do not parse all answer the same way. If some of these should"
+              <+> "be yours, check `hbs2-keyman list` before concluding they are"
+              <+> "not." ]
+      | otherwise = []
+
+    notForUs lv = case lvLetter lv of
+      Left NotForUs -> True
+      _             -> False
+
     -- Not an error, and not silence either. Every letter listed is real; the
     -- mailbox was simply still arriving, which is the routine state of a first
     -- read of a big one, since the peer rewrites the mailbox ref on every merged
@@ -339,11 +380,17 @@ maxMissingLines = 100
 
 -- | 0, or what the caller has to act on.
 --
--- Only the missing blocks, and deliberately: an unsettled read is a shorter
--- answer, a read with holes is a WRONG one.
+-- Missing blocks and a truncated read, and deliberately not an unsettled one: an
+-- unsettled read is a SHORTER answer, and both of these are WRONG ones. A hole
+-- in the tree loses letters and resurrects folded ones; a read that stopped at
+-- 'maxInboxLetters' simply does not contain letters that are in the mailbox.
+-- Both are 2, because the remedy is the same -- do not treat this list as the
+-- mailbox -- and the numbers are a contract that may be added to, not
+-- reassigned.
 inboxCode :: InboxRead -> Int
 inboxCode r
   | not (List.null (irMissing r)) = 2
+  | irOmitted r > 0               = 2
   | otherwise = 0
 
 -- One line per letter, in the order the fields matter to somebody deciding what

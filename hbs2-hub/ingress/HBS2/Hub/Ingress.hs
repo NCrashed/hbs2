@@ -32,6 +32,7 @@ module HBS2.Hub.Ingress
   , openMessage
   , awaitMailbox
   , maxFetchRounds
+  , maxInboxLetters
   , fetchRound
   , rpcTimeout
   ) where
@@ -56,6 +57,7 @@ import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (sort)
+import Data.List qualified as List
 
 -- | What reading an inbox needs from the outside, gathered so the walk below
 -- can be read without knowing how any of it is served.
@@ -118,6 +120,17 @@ data OpenError =
     -- peer downloads mailbox contents on its own schedule and this is the
     -- ordinary state of a mailbox that was just fetched.
     NotFetched
+    -- | The block IS here, and it is not a message.
+    --
+    -- Split out of 'NotFetched', which said "not fetched yet" about it: a wait,
+    -- for something that will never change. An operator retried forever and the
+    -- exit code stayed 0. 'readEntries', fifteen lines above the site that got
+    -- this wrong, already draws exactly this distinction for tree blocks ("a
+    -- block that is here but does not decode as an entry counts as a miss too"),
+    -- so the module knew the difference and did not apply it here.
+    --
+    -- Nobody is named: the envelope is inside the bytes that did not decode.
+  | NotAMessage
     -- | No key this node holds appears in the message's group key. Ordinary: a
     -- mailbox accepts messages sealed to anybody, and one addressed to another
     -- maintainer is a line in the queue rather than a problem.
@@ -156,6 +169,7 @@ data OpenError =
 instance Pretty OpenError where
   pretty = \case
     NotFetched      -> "not fetched yet"
+    NotAMessage     -> "the block is here and is not a message"
     NotForUs        -> "not sealed to any key this node holds"
     GroupKeyByRef   -> "group key by reference, which this build cannot resolve"
     Undecipherable  -> "a key resolved for it and the ciphertext did not open"
@@ -216,8 +230,31 @@ data InboxRead = InboxRead
     -- 'awaitMailbox'). An empty inbox is therefore only believable when this is
     -- 'True'.
   , irSettled :: Bool
+    -- | How many live messages were left unopened because 'maxInboxLetters' was
+    -- reached. Zero for every ordinary read.
+    --
+    -- A field and not a log line, for the reason 'irMissing' is one: a truncated
+    -- queue is a WRONG queue, not a shorter one, and one a stranger can cause. A
+    -- mailbox is public, so the number of letters in it is chosen by whoever
+    -- writes to it, and this reader used to open every single one and hold every
+    -- 'LetterView' -- each carrying a body of up to 'maxInlineBody' -- resident
+    -- before printing a line. Ten thousand letters is one RPC per tree node,
+    -- one per entry, one per message, a keyman lookup and a secretbox open each,
+    -- and a few hundred megabytes. The canon reader next door carries three
+    -- bounds and its own refusal for each; this had none.
+  , irOmitted :: Int
   }
   deriving stock (Eq,Show)
+
+-- | The most letters one @hub inbox@ will open.
+--
+-- Not a guess about mailboxes, a guess about PEOPLE: this is a triage queue that
+-- somebody reads, and a thousand lines is already past what anybody works
+-- through in a sitting. It bounds the resident cost at roughly a thousand bodies
+-- rather than however many a stranger cared to send, and what is left out is
+-- counted and said rather than dropped.
+maxInboxLetters :: Int
+maxInboxLetters = 1000
 
 -- | The peer does not have this mailbox, so there is nothing to read and there
 -- never will be.
@@ -356,7 +393,7 @@ readInbox :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
 readInbox ig mbox = do
   (root, settled) <- awaitMailbox ig mbox
   case root of
-    Nothing   -> pure (InboxRead [] [] settled)
+    Nothing   -> pure (InboxRead [] [] settled 0)
     Just tree -> do
       (entries, misses) <- readEntries tree
       -- Sorted explicitly. This used to be HS.toList with a comment claiming it
@@ -364,8 +401,14 @@ readInbox ig mbox = do
       -- property of the container's implementation and not a promise it makes.
       -- A triage queue that reorders itself on a dependency bump is one a
       -- maintainer cannot work through a page at a time.
-      lvs <- mapM (openMessage ig) (sort (HS.toList (liveMessages entries)))
-      pure (InboxRead lvs misses settled)
+      -- Sorted BEFORE the bound is applied, so which thousand you get is a
+      -- function of the mailbox and not of the order the walk happened to
+      -- return: a truncated queue that reshuffles between runs would be worse
+      -- than a truncated one.
+      let live = sort (HS.toList (liveMessages entries))
+          (taken, left) = List.splitAt maxInboxLetters live
+      lvs <- mapM (openMessage ig) taken
+      pure (InboxRead lvs misses settled (length left))
 
   where
     readEntries tree = do
@@ -406,8 +449,12 @@ readInbox ig mbox = do
 openMessage :: MonadUnliftIO m => Ingress m -> HashRef -> m LetterView
 openMessage ig mh = do
   blk <- igBlock ig mh
+  -- Two answers, not one. These used to be the same `Nothing`, so "the peer has
+  -- not downloaded this yet" and "the peer has it and it is not a message" both
+  -- printed "not fetched yet" and left with 0: the first is a wait and the
+  -- second never changes, and only one of them is worth retrying.
   case blk >>= either (const Nothing) Just . deserialiseOrFail @(Message HBS2Basic) of
-    Nothing  -> pure (LetterView mh Nothing (Left NotFetched) Nothing)
+    Nothing  -> pure (LetterView mh Nothing (Left (unreadable blk)) Nothing)
     Just msg -> do
       -- The envelope signer is recovered separately from the decryption, and
       -- that is the point. It is authenticated by this call alone, so on every
@@ -460,6 +507,13 @@ openMessage ig mh = do
             }
 
   where
+    -- WHICH of the two "no message here" answers this is. They were one, so a
+    -- block the peer holds and cannot be a message printed "not fetched yet":
+    -- a wait, for something that will never change, retried forever with a zero
+    -- exit. 'readEntries' fifteen lines above draws exactly this distinction for
+    -- tree blocks, so the module knew it and did not apply it here.
+    unreadable = maybe NotFetched (const NotAMessage)
+
     -- Two exception types, not one, and this is where a stranger could close the
     -- queue. readMessage's own errors are ReadMessageError, but its last step
     -- decrypts, and that raises OperationError: DecryptionError for ciphertext
@@ -484,6 +538,9 @@ openMessage ig mh = do
     -- is known instead of inheriting an answer.
     envelopeFor e k = case e of
       BadEnvelopeSig   -> Nothing
+      -- Nobody to name either: the envelope is inside the bytes that did not
+      -- decode. Spelled out rather than wildcarded, like the rest of these.
+      NotAMessage      -> Nothing
       NotFetched       -> k
       NotForUs         -> k
       GroupKeyByRef    -> k

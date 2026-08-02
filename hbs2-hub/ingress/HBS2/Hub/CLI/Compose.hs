@@ -39,6 +39,7 @@ import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEntry)
 
+import Data.Char (isSpace)
 import Data.List qualified as List
 import Data.Text qualified as Text
 import System.Exit (die)
@@ -259,7 +260,14 @@ composeEntries = do
     -- A trailing newline from the shell is not part of the body, and an empty
     -- body is absent rather than a zero-length one: the fold reports a
     -- reference to a part with no body, and "" would look like content.
-    bodyOf s = case Text.strip (Text.pack s) of
+    --
+    -- TRAILING only. This was 'Text.strip', which also removes LEADING
+    -- whitespace, so a body whose first line is an indented code block or a
+    -- quoted diff was signed as different bytes from the file that was piped in
+    -- -- and the body is inside the author box, so it is inside the event-id and
+    -- cannot be corrected afterwards. The comment above described the trailing
+    -- half and the code did both.
+    bodyOf s = case Text.dropWhileEnd isSpace (Text.pack s) of
       t | Text.null t -> Nothing
         | otherwise   -> Just t
 
@@ -386,6 +394,14 @@ issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
           <> line <> "  --flag=value is accepted too, and is the spelling to use"
           <> line <> "  when a value begins with a dash: `--title --draft` is a"
           <> line <> "  missing title, not a title of `--draft`, and is refused."
+          <> line
+          <> line <> "  --target and --recipient are NOT cross-checked, and cannot"
+          <> line <> "  be here: the sigil says which mailbox the letter lands in,"
+          <> line <> "  --target says which repository it is about, and resolving"
+          <> line <> "  one from the other needs that repository's manifest, which"
+          <> line <> "  this verb does not read. A letter naming one repo and sent"
+          <> line <> "  to another's hub is signed, delivered and then dropped at"
+          <> line <> "  fold time as WrongTarget, with no reply path to tell you."
           <> line
           <> line <> "  The body is read from stdin when stdin is not a terminal."
           <> line <> "  Prefer the named form: the two keys and the two sigils are"

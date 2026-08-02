@@ -199,8 +199,12 @@ main = do
     found dict s = do
       let named (Id t) = Text.unpack t
       case sort [ n | k <- HM.keys dict, let n = named k, s `isPrefixOf` n ] of
-        [] -> liftIO $ putStrLn ("no entry name starts with " <> show s
-                                  <> " (this matches names, not descriptions)")
+        -- On stderr and non-zero, like the unknown-verb branch thirty lines up.
+        -- This printed the miss on STDOUT and exited 0, so `hub help "$v" || die`
+        -- learned nothing and the diagnostic landed in the stream a caller was
+        -- capturing as output.
+        [] -> liftIO $ refuse ("no entry name starts with " <> show s
+                                 <> " (this matches names, not descriptions)") 1
         _  -> helpList False (Just s)
 
     -- A dictionary name back to the word a user typed, so that `help` can route

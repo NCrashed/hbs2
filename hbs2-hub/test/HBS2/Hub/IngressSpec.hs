@@ -201,6 +201,22 @@ spec = do
       irMissing r `shouldBe` [mh "tree"]
       irLetters r `shouldBe` []
 
+    it "tells a block that has not arrived from one that is not a message" $ do
+      -- These were one answer. "not fetched yet" is a WAIT, and it was what a
+      -- block the peer holds and cannot decode also said -- a wait for something
+      -- that will never change, retried forever, with a zero exit. readEntries
+      -- draws exactly this distinction for tree blocks fifteen lines above the
+      -- site that got it wrong.
+      absent <- openMessage stub (mh "m")
+      lvLetter absent `shouldBe` Left NotFetched
+
+      let junk ig = ig { igBlock = const (pure (Just "not a message at all")) }
+      present <- openMessage (junk stub) (mh "m")
+      lvLetter present `shouldBe` Left NotAMessage
+      -- and nobody is named for it: the envelope is inside the bytes that did
+      -- not decode.
+      lvEnvelope present `shouldBe` Nothing
+
     it "answers rather than throwing when a message decrypts to rubbish" $ do
       -- The bug this commit is named for, and one nothing could reach while the
       -- mapping lived inside readInbox's where clause. A key IS found for this
@@ -248,7 +264,7 @@ spec = do
       -- These were one constructor. The five call for five different things:
       -- wait, ignore, wait for a feature, suspect corruption, block the sender.
       -- Asserting they print differently is asserting the caller can act.
-      let es = [NotFetched, NotForUs, GroupKeyByRef, Undecipherable, BadEnvelopeSig]
+      let es = [NotFetched, NotAMessage, NotForUs, GroupKeyByRef, Undecipherable, BadEnvelopeSig]
           said = fmap (show . pretty) es
       length (HS.fromList said) `shouldBe` length es
       -- and none of them is the sentence the letter layer uses for decrypted

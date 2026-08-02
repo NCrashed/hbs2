@@ -253,6 +253,60 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: `hub inbox` said "not fetched yet" about a block it
+    holds.** A message block that is present and does not decode as a
+    message shared `NotFetched` with one that has not arrived: a wait, for
+    something that will never change, retried forever with a zero exit.
+    `readEntries`, fifteen lines above the site that got this wrong, draws
+    exactly that distinction for tree blocks. It is `NotAMessage` now, and
+    it names nobody, since the envelope is inside the bytes that did not
+    decode.
+
+  - **`hbs2-hub`: a keyman that cannot be consulted looked like a mailbox
+    with nothing for you in it.** `ReadNoGroupKeyAccess` is what an index
+    that was never updated, a key file the process cannot read and
+    credentials that do not parse all come back as, and it becomes
+    `NotForUs` -- printed once per letter, with a zero exit, reading as
+    "none of this is mine" and indistinguishable from it. Distinguishing
+    them needs a keyman API that says which it was; what this reader can
+    do honestly, and now does, is name the other possibility when EVERY
+    letter in the queue says it, and point at `hbs2-keyman list`.
+
+  - **`hbs2-hub`: `hub inbox` had no bound on how much it would read.** A
+    mailbox is public, so the number of letters in it is chosen by whoever
+    writes to it, and this opened every one and held every `LetterView` --
+    each carrying a body of up to `maxInlineBody` -- resident before
+    printing a line: one RPC per tree node, one per entry, one per
+    message, a keyman lookup and a secretbox open each. The canon reader
+    next door carries three bounds and a refusal for each; this had none.
+    `maxInboxLetters` is 1000, chosen as a guess about people rather than
+    about mailboxes, and what is left out is counted in `irOmitted`, said
+    in a note and exits 2 -- a list missing letters is wrong, not short.
+    The order is applied before the cut, so which thousand you get does
+    not reshuffle between runs.
+
+  - **`hbs2-hub`: `hub help <unknown>` reported the miss on stdout and
+    exited 0**, so `hub help "$v" || die` learned nothing and the
+    diagnostic landed in the stream a caller was capturing as output. It
+    goes through the same `refuse` as every other failure: stderr, exit 1.
+
+  - **`hbs2-hub`: `hub issue new` stripped leading whitespace from the
+    body.** `Text.strip` was used where the comment beside it described
+    removing a trailing newline, so a body whose first line is an indented
+    code block or a quoted diff was signed as different bytes from the
+    file that was piped in -- and the body is inside the author box, and
+    therefore inside the event-id, so it could not be corrected
+    afterwards. Trailing only now.
+
+  - `hub issue new`'s usage says that `--target` and `--recipient` are not
+    cross-checked and why: the sigil decides which mailbox the letter
+    lands in, `--target` says which repository it is about, and resolving
+    one from the other needs that repository's manifest, which this verb
+    deliberately does not read. A letter naming one repo and sent to
+    another's hub is signed, delivered, and dropped at fold time as
+    `WrongTarget` with no reply path. Saying so is not a fix; it is what
+    can be said until the manifest reader exists.
+
   - **`hbs2-core`: `findMissedBlocks` started a fresh walk for every
     nested merkle root it met.** The walk over one tree is bounded by
     `walkMerkleUnique`, which enters a node once; the function's OWN
