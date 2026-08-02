@@ -253,6 +253,74 @@
 
 ## Fixed
 
+  - **`hbs2-peer`: the mailbox database was published before its tables
+    existed.** `mailboxStateEvolve` wrote the `DBPipeEnv` into `mailboxDB`
+    and created the schema afterwards, so between the two a `CheckMailbox`
+    from any peer reached `getMailboxType_` and got `no such table:
+    mailbox`. Nothing contains that: the proto handler runs through
+    `deferred`, which is `addJob` onto `_envDeferred`, and the pipeline
+    runner is started with `asyncLinked`, so the exception leaves the
+    pipeline for the linked thread rather than staying inside the
+    request. The window reopened on every restart of the worker, with the
+    network fully live -- which is exactly when a request arrives. The
+    schema is created first now. Containing OTHER SQLite errors on that
+    path is a separate change and is not in this one.
+
+  - **`hbs2-peer`: a policy could name a mailbox it was not signed for.**
+    `mailboxSetPolicy` never compared `sppMailboxKey` against the signer,
+    and the two halves of the code disagreed about which one identifies
+    the policy: the row is written under the SIGNER and `policyDownloadQ`
+    reads the current version under `sppMailboxKey`. A policy naming
+    somebody else's mailbox was version-compared against theirs and stored
+    under its own, so it could step over a legitimate update by version
+    number. It could never be written under another key -- the write is
+    always keyed by the signer -- but two answers to "whose policy is
+    this" is one too many. The payload must now name its signer.
+
+    `RpcMailboxSetPolicy` also took a mailbox key and ignored it entirely,
+    so `mailbox set-policy KEY <version> <file>` set the policy of
+    whatever the BOX named and reported success for `KEY`. The handler
+    checks the two agree.
+
+  - **`hbs2-peer`: deleting a mailbox left its policy behind.** There is
+    no foreign key between the tables and `mailboxDelete` removed only the
+    `mailbox` row, so recreating the same key resurrected the old policy
+    -- including for a mailbox deleted precisely to reset an open
+    `(sender allow all)`. Both rows go in one transaction now.
+
+  - **`hbs2-peer`: a delete whose proof had not arrived was dropped, not
+    retried.** `HBS2.Peer.Proto.Mailbox.Merge`'s own header says the fetch
+    case is deliberately left to the worker "so that a proof still in
+    flight is retried rather than refused". The worker refused it: the
+    whole pending set leaves the merge queue in one transaction before any
+    of it is examined, an entry with no proof block aborts its `runMaybeT`
+    on the way to `admitDeleted`, and nothing put it back. Recovery
+    happened only by accident, when a later status announcement re-walked
+    a tree that still held the entry. It is re-enqueued now, which is what
+    the header always claimed.
+
+  - `hbs2-peer` CLI honesty, four small ones. `mailbox create --sigil` and
+    `--sigil-file` are documented in `--help` and were live
+    `error "not implemented"` -- a bare sentence under a GHC call stack,
+    which reads as a crash; they refuse by name now and the help says
+    NOT IMPLEMENTED YET. `mailbox` with no arguments parsed to `[]`, ran
+    nothing, printed nothing and exited 0; it prints the help. `mailbox
+    get` and `mailbox status` printed an EMPTY LINE for a mailbox the peer
+    does not hold, since `pretty Nothing` is `mempty`, which reads as "it
+    is there and empty"; `get` now tells "no such mailbox" from "held, no
+    ref merged yet" by asking for the status, and both name the remedy.
+    `mailbox create` for an existing mailbox with a DIFFERENT type
+    answered success and changed nothing (`on conflict do nothing`); it is
+    a refusal naming both types, while a repeat with the same type stays
+    idempotent.
+
+  - `mailbox create ... relay` warns that relay semantics are not
+    implemented. `MailboxType` is stored and printed and no branch in the
+    peer reads it, so a `relay` mailbox in this build is the same
+    unbounded accumulator a `hub` one is, and `messageTTL` and
+    `messageCreated` are signed, stored and read by nothing. Better said
+    at create time than discovered from the disk.
+
   - **`hbs2-hub`: `hub inbox` said "not fetched yet" about a block it
     holds.** A message block that is present and does not decode as a
     message shared `NotFetched` with one that has not arrived: a wait, for

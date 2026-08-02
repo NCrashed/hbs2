@@ -303,6 +303,23 @@ instance ( s ~ Encryption e, e ~ L4Proto
 
       dbe <- ContT $ maybe1 mdbe (pure $ Left (MailboxCreateFailed "database not ready"))
 
+      -- Существующий ящик ДРУГОГО типа -- это отказ, а не тишина.
+      --
+      -- `on conflict do nothing` ниже оставляет старую строку как есть, и раньше
+      -- этот путь всё равно отвечал Right (): `create --key K relay` для ящика,
+      -- заведённого как hub, сообщал об успехе и не менял ничего. Тип решает,
+      -- как ящик себя ведёт, так что это ровно тот ответ, за который потом
+      -- никто не сможет зацепиться. Повтор с ТЕМ ЖЕ типом остаётся успехом:
+      -- create идемпотентен, и на это опираются скрипты.
+      existing <- getMailboxType_ dbe (MailboxRefKey @s p)
+
+      case existing of
+        Just t0 | t0 /= t ->
+          exit $ Left (MailboxCreateFailed
+                        (show $ "mailbox" <+> pretty (AsBase58 p) <+> "already exists as"
+                                  <+> pretty t0 <> ", not" <+> pretty t))
+        _ -> none
+
       r <- liftIO $ try @_ @SomeException $ withDB dbe do
              insert [qc|
              insert into mailbox (recipient,type)
@@ -329,6 +346,18 @@ instance ( s ~ Encryption e, e ~ L4Proto
       -- check policy signature
       (who, spp) <- unboxSignedBox0 sbox
                       & orThrowError (MailboxAuthError "invalid signature")
+
+      -- Ящик, названный ВНУТРИ полиси, должен быть тем, кто её подписал.
+      --
+      -- Этой проверки не было, и два пути расходились: строка пишется под
+      -- ключом ПОДПИСАНТА (ниже), а policyDownloadQ читает текущую версию под
+      -- sppMailboxKey. Полиси, называющая внутри чужой ящик, сравнивалась по
+      -- версии с чужим и записывалась под свой -- то есть могла молча
+      -- перепрыгнуть законное обновление чужого ящика по номеру версии.
+      -- Записать чужую полиси это не давало (ключ записи всегда подписант), но
+      -- два ответа на вопрос «чья это полиси» -- на один больше, чем нужно.
+      unless (sppMailboxKey spp == who) do
+        throwError (MailboxAuthError "policy names a mailbox it is not signed for")
 
       dbe <- readTVarIO mailboxDB
                 >>= orThrowError (MailboxSetPolicyFailed "database not ready")
@@ -382,8 +411,16 @@ instance ( s ~ Encryption e, e ~ L4Proto
       debug $ red "delete fucking mailbox" <+> pretty (MailboxRefKey @s mbox)
 
       -- TODO: actually-purge-messages-and-attachments
-      withDB dbe do
+
+      -- Обе строки, и в одной транзакции.
+      --
+      -- Полиси не удалялась, а внешнего ключа между таблицами нет, поэтому она
+      -- переживала ящик: пересоздание того же ключа воскрешало старую. Для
+      -- ящика, который удалили ИМЕННО ЧТОБЫ сбросить открытую
+      -- `(sender allow all)`, это возвращало его открытым.
+      liftIO $ withDB dbe $ Q.transactional do
         insert [qc| delete from mailbox where recipient = ? |] (Only (MailboxRefKey @s mbox))
+        insert [qc| delete from policy where mailbox = ? |] (Only (MailboxRefKey @s mbox))
 
       delRef mpwStorage (MailboxRefKey @s mbox)
 
@@ -902,6 +939,21 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                   when (isNothing mbox) do
                     startDownloadStuff me h
                     warn $ red "<<~~~>>" <+> "Proof not found!" <+> pretty h
+                    -- И обратно в очередь. Заголовок HBS2.Peer.Proto.Mailbox.Merge
+                    -- прямо говорит, что этот случай оставлен воркеру, "so that a
+                    -- proof still in flight is retried rather than refused" -- а
+                    -- воркер его отбрасывал: весь набор уходит из очереди одной
+                    -- транзакцией ДО разбора, запись без доказательства обрывает
+                    -- свой runMaybeT на toMPlus ниже, и вернуть её было некому.
+                    -- Восстанавливалось это только случайно, когда более поздний
+                    -- статус приводил к повторному обходу дерева, всё ещё
+                    -- содержащего запись.
+                    --
+                    -- Растёт это не бесконечно: очередь -- множество по хешу
+                    -- записи, а записи приходят только из ящиков, которые мы сами
+                    -- держим (см. проверки в mailboxAcceptDelete и
+                    -- mailboxAcceptStatus).
+                    atomically $ modifyTVar inMessageMergeQueue (enqueueMerge r th)
 
                   bs <- toMPlus mbox
 
@@ -1197,8 +1249,18 @@ mailboxStateEvolve readConf MailboxProtoWorker{..}  = do
 
   dbe <- newDBPipeEnv dbPipeOptsDef (mailboxDir </> "state.db")
 
-  atomically $ writeTVar mailboxDB (Just dbe)
-
+  -- Таблицы создаются ДО того, как база становится видимой остальным.
+  --
+  -- Было наоборот, и между двумя строчками существовало окно, в котором
+  -- mailboxDB уже отдаёт Just, а таблиц ещё нет. Любой CheckMailbox от любого
+  -- пира в этот момент доходит до getMailboxType_ и получает
+  -- "no such table: mailbox". Ловить это некому: обработчик протокола идёт через
+  -- deferred, то есть addJob в _envDeferred, а runPipeline _envDeferred запущен
+  -- через asyncLinked (HBS2.Actors.Peer), так что исключение уходит из
+  -- пайплайна в связанный поток, а не остаётся внутри запроса.
+  --
+  -- Окно открывалось заново при каждом перезапуске воркера peerThread, когда
+  -- сеть уже полностью жива, то есть ровно тогда, когда запрос и придёт.
   withDB dbe $ Q.transactional do
     ddl [qc|create table if not exists
              mailbox ( recipient text not null
@@ -1213,6 +1275,8 @@ mailboxStateEvolve readConf MailboxProtoWorker{..}  = do
                     , primary key (mailbox)
                     )
            |]
+
+  atomically $ writeTVar mailboxDB (Just dbe)
 
   pure dbe
 

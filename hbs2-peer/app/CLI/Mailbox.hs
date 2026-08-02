@@ -35,6 +35,7 @@ import Data.ByteString qualified as BS
 import Data.Either
 import Data.Coerce
 import Data.Config.Suckless.Script
+import Data.List qualified as List
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Maybe
@@ -95,15 +96,35 @@ runMailboxCLI rpc s = do
 
                   liftIO $ print $ "created" <+> pretty (AsBase58 puk) <+> pretty tp
 
-                [ StringLike "--sigil", HashLike sh, StringLike tp ] -> do
-                  -- TODO: implement-create-by-sigil
-                  warn $ "create by sigil (hash)"
-                  error "not implemented"
+                  -- Сказано вслух, потому что тип принимается и ничем не
+                  -- пользуется. MailboxType лежит в базе и печатается, и больше
+                  -- на него не смотрит ни одна ветка в пире: в статье relay это
+                  -- ограниченное хранилище, вытесняющее старое, а в этой сборке
+                  -- это тот же неограниченный накопитель, что и hub. Пусть тот,
+                  -- кто набрал relay, узнает об этом сейчас, а не когда диск
+                  -- кончится.
+                  when (tp == MailboxRelay) do
+                    warn $
+                      "relay semantics (a bounded store that evicts the"
+                        <+> "oldest) are NOT implemented in this build. This mailbox"
+                        <+> "will behave exactly like a hub: it accumulates without"
+                        <+> "bound. messageTTL and messageCreated are signed and"
+                        <+> "stored, and read by nothing."
 
-                [ StringLike "--sigil-file", StringLike f, StringLike tp ] -> do
+                -- A refusal, not an `error`. These are documented in --help and
+                -- in the examples, so they are spellings somebody types on
+                -- purpose, and what they got was a bare "not implemented" with a
+                -- GHC call stack under it -- which reads as a crash rather than
+                -- as a verb that does not exist yet. Kept as branches so the
+                -- refusal names the flag instead of falling into the generic
+                -- BadFormException; see the TODOs, which are the actual work.
+                [ StringLike "--sigil", HashLike _sh, StringLike _tp ] ->
+                  -- TODO: implement-create-by-sigil
+                  notImplemented "--sigil"
+
+                [ StringLike "--sigil-file", StringLike _f, StringLike _tp ] ->
                   -- TODO: implement-create-by-sigil-file
-                  warn $ "create by sigil file" <+> pretty f
-                  error "not implemented"
+                  notImplemented "--sigil-file"
 
                 _ -> throwIO $ BadFormException @C nil
 
@@ -140,7 +161,24 @@ runMailboxCLI rpc s = do
               v <- callRpcWaitMay @RpcMailboxGet t api m
                      >>= orThrowUser "rpc call timeout"
 
-              liftIO $ print $ pretty v
+              -- `pretty Nothing` is mempty, so this printed an EMPTY LINE and
+              -- exited 0, which reads as "the mailbox is there and empty". Two
+              -- different nothings hide behind it, and the status call tells
+              -- them apart: the peer writes a mailbox ref only when a merge
+              -- lands, so a mailbox it holds and has not merged yet has no ref
+              -- either.
+              case v of
+                Just h  -> liftIO $ print $ pretty h
+                Nothing -> do
+                  st <- callRpcWaitMay @RpcMailboxGetStatus t api m
+                          >>= orThrowUser "rpc call timeout"
+                          >>= orThrowPassIO
+                  liftIO $ print $ case st of
+                    Nothing -> "no such mailbox on this peer:"
+                                 <+> pretty (AsBase58 m)
+                                 <+> "(create it with `mailbox create --key ... hub`)"
+                    Just{}  -> "the peer holds this mailbox and has no ref for it yet:"
+                                 <+> pretty (AsBase58 m)
 
              _ -> throwIO $ BadFormException @C nil
 
@@ -152,7 +190,12 @@ runMailboxCLI rpc s = do
                      >>= orThrowUser "rpc call timeout"
                      >>= orThrowPassIO
 
-              liftIO $ print $ pretty v
+              -- Same empty line as `get` had, and here there is only one thing
+              -- Nothing can mean: the peer does not hold this mailbox.
+              liftIO $ print $ case v of
+                Just st -> pretty st
+                Nothing -> "no such mailbox on this peer:" <+> pretty (AsBase58 m)
+                             <+> "(create it with `mailbox create --key ... hub`)"
 
              _ -> throwIO $ BadFormException @C nil
 
@@ -341,7 +384,14 @@ runMailboxCLI rpc s = do
     caller <- ContT $ withMyRPC @MailboxAPI rpc
     stoAPI <- ContT $ withMyRPC @StorageAPI rpc
     let sto = AnyStorage (StorageClient stoAPI)
-    lift $ run (dict sto caller) cli >>= eatNil display
+
+    -- `hbs2-peer mailbox` with nothing after it parsed to [], ran nothing,
+    -- printed nothing and exited 0, which is indistinguishable from a command
+    -- that worked. The help is what somebody typing the bare noun was after.
+    let cli' | List.null cli = [mkList [mkSym @C "help"]]
+             | otherwise     = cli
+
+    lift $ run (dict sto caller) cli' >>= eatNil display
 
 
 -- man entries
@@ -352,17 +402,28 @@ createMailBoxDesc = [qc|
 
 create --key KEY TYPE
 
-; creates a mailbox using key from a SIGIL with HASH (should stored first)
+; NOT IMPLEMENTED YET: creates a mailbox using key from a SIGIL with HASH
 
 create --sigil HASH TYPE
 
-; creates a mailbox using key from a SIGIL from FILE
+; NOT IMPLEMENTED YET: creates a mailbox using key from a SIGIL from FILE
 
 create --sigil-file FILE TYPE
 
 TYPE ::= hub | relay
 
 |]
+
+-- | A spelling this build documents and does not do.
+--
+-- Named rather than `error "not implemented"`, which is what these were: a bare
+-- sentence under a GHC call stack, which reads as a crash rather than as a verb
+-- that is not here yet, and says nothing about which of the two it was.
+notImplemented :: MonadIO m => String -> m ()
+notImplemented what =
+  orThrowUser ( "`create" <+> pretty what <> "` is documented and not"
+                  <+> "implemented yet; use `create --key <sign-key> <type>`" )
+              (Nothing @())
 
 createMailBoxExamples :: ManExamples
 createMailBoxExamples = [qc|

@@ -52,7 +52,16 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxSetPolicy where
   handleMethod (puk, sbox) = do
     AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
     debug $ "rpc.RpcMailboxSetPolicy" <+> pretty (AsBase58 puk)
-    mailboxSetPolicy @HBS2Basic mbs sbox
+    -- puk was taken and ignored entirely: the mailbox came from the box alone,
+    -- so `mailbox set-policy KEY ... file` set the policy of whatever the BOX
+    -- named and reported success for KEY. It costs one signature check to say so
+    -- instead, which is affordable on a method an operator invokes by hand.
+    case unboxSignedBox0 @(SetPolicyPayload HBS2Basic) sbox of
+      Nothing -> pure (Left (MailboxAuthError "invalid signature"))
+      Just (_, spp)
+        | sppMailboxKey spp /= puk ->
+            pure (Left (MailboxAuthError "the policy is signed for another mailbox"))
+        | otherwise -> mailboxSetPolicy @HBS2Basic mbs sbox
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxGetStatus where
 
