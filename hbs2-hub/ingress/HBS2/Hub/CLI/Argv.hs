@@ -13,7 +13,7 @@ module HBS2.Hub.CLI.Argv
 import HBS2.CLI.Prelude
 
 import Control.Applicative ((<|>))
-import Data.List (intercalate,isPrefixOf)
+import Data.List (intercalate)
 
 -- | One shell word, as one atom.
 --
@@ -40,8 +40,6 @@ import Data.List (intercalate,isPrefixOf)
 --
 -- So the lexer is asked for one thing only, and believed about even less:
 --
---   * a word starting with @(@ or @[@ is a form. That is the script escape hatch
---     and the one place a user is asking to be lexed.
 --   * a number or a boolean is taken only if rendering it gives back exactly the
 --     characters typed, which is what keeps @hub pr merge 12@ an integer while
 --     leaving @007@ alone. 007 and 7 are different words, and the lexer's opinion
@@ -50,6 +48,32 @@ import Data.List (intercalate,isPrefixOf)
 --   * everything else is a string, verbatim. Symbols in particular: a bare word
 --     from argv is data, and evaluating it as a name is how @head@ became a
 --     lambda.
+--
+-- A word starting with @(@ or @[@ USED to be parsed as a form and handed to the
+-- evaluator, described here as "the script escape hatch and the one place a user
+-- is asking to be lexed". It was neither, and this is why it is gone.
+--
+-- It applied to the VALUE OF A FLAG, not only to a word in the verb position,
+-- and the evaluator evaluates a verb's arguments before the verb's pattern match
+-- runs. The dictionary this tool shares with hbs2-cli holds @run:proc:quiet@,
+-- @call:proc@, @rm@, @mv@, @cp@, @setenv@ and @cd@, so on this build
+--
+-- > hbs2-hub inbox '(run:proc:quiet "sh" "-c" "touch /tmp/proof")'
+--
+-- created the file and then printed the inbox usage. PEP-22 has a renderer that
+-- "shells out to the CLI" with text a stranger wrote on the web, which is the
+-- version of that where nobody typed anything.
+--
+-- It also contradicted the paragraph above it. @--title '(pwd)'@ would have
+-- signed what the form EVALUATED to, and this tool's whole claim is that it
+-- signs what was typed; @--title '[bug] segfault'@ died with
+-- @NameNotBound (Id \"bug\")@, and a bracketed tag is how a great many people
+-- spell an issue title. Both are now the strings they look like.
+--
+-- Nothing is unreachable as a result. A form as the FIRST word never got here
+-- anyway (@verbOf@'s @plain@ excludes a leading bracket, so it exits as an
+-- unknown verb), and a script still arrives the two ways it always did: on
+-- stdin, and through @--run \<file\>@.
 --
 -- A quoted word gets no special treatment either, and that is a CHANGE. It used
 -- to be handed to the lexer on the argument that "the quotes are the request",
@@ -65,28 +89,24 @@ import Data.List (intercalate,isPrefixOf)
 -- so every key, sigil and hash still binds. What changes is that they bind to
 -- the bytes that were typed.
 argvAtom :: String -> Syntax C
-argvAtom s
-  | isForm s = case parseTop s of
-      Right [x] -> x
-      _         -> mkStr @C s
-  -- parseTop makes a list per LINE, so a single atom on a line of its own comes
-  -- back wrapped in one. Requiring exactly that shape is also what rejects a word
-  -- holding more than one atom: @Crash on startup@ parses fine and is three
-  -- symbols, which is not an argument.
-  | otherwise = case parseTop s of
-      Right [ListVal [x]] | keeps x -> x
-      _ -> mkStr @C s
+-- parseTop makes a list per LINE, so a single atom on a line of its own comes
+-- back wrapped in one. Requiring exactly that shape is also what rejects a word
+-- holding more than one atom: @Crash on startup@ parses fine and is three
+-- symbols, which is not an argument.
+argvAtom s = case parseTop s of
+  Right [ListVal [x]] | keeps x -> x
+  _ -> mkStr @C s
   where
-    -- The wrapper around a lone atom and a genuine one-element form are the SAME
-    -- value, so nothing in the parsed result can tell them apart: unwrapping
-    -- unconditionally turned @(list)@ into the bare symbol @list@, which
-    -- evaluates to a lambda instead of calling it. What distinguishes them is
-    -- what the user typed, and only there.
-    isForm t = any (`isPrefixOf` t) ["(", "["]
-
     -- The ONLY thing the lexer is believed about, and only when its answer is
     -- the characters it was given. Anything else -- a symbol, a quoted string, a
     -- word holding several atoms -- is text.
+    --
+    -- It is also what makes the one-element shape above safe to unwrap. The
+    -- wrapper around a lone atom and a genuine one-element form are the SAME
+    -- value, so nothing in the parsed result can tell them apart, and unwrapping
+    -- unconditionally turned @(list)@ into the bare symbol @list@, which
+    -- evaluates to a lambda instead of calling it. A List is not a literal, so
+    -- it never gets past here.
     keeps x = case x of
       LitIntVal _        -> roundTrips
       LitScientificVal _ -> roundTrips

@@ -52,6 +52,7 @@ import Codec.Serialise (Serialise,serialise)
 import Data.ByteString.Base64 qualified as B64
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
+import Data.Char (isSpace)
 import Data.List (mapAccumL)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -424,8 +425,8 @@ clausesWith byteLimit formLimit txt = do
       List _ xs -> xs
       _         -> []
 
--- How many forms a text opens and how many escape sequences it contains,
--- counting only the parentheses the parser will see as parentheses.
+-- How many items a text opens at the top level, and how many escape sequences
+-- it contains, counting only the punctuation the parser will see as punctuation.
 --
 -- Counting every '(' in the file was a bound on the CONTRIBUTOR rather than on
 -- the attacker: a body is a string literal, code in a body has brackets, and
@@ -436,40 +437,77 @@ clausesWith byteLimit formLimit txt = do
 -- The escapes are counted in the same pass because the same state machine
 -- already has to know where they are, and because they are the other half of
 -- the cost: see 'maxEscapes'.
+--
+-- WHAT IS COUNTED IS AN ITEM AT THE TOP LEVEL, and the previous version of this
+-- counted punctuation instead. That is the whole of the correction, and the hole
+-- it closes was reachable through @hub verify@ on any repository, measured end
+-- to end on this build with a @version@ file of bare atoms separated by spaces
+-- and holding not one newline:
+--
+-- >  honest file:   45 ms
+-- >   32 KB:      2225 ms
+-- >   64 KB:      8899 ms
+-- >  128 KB:     36581 ms
+--
+-- Four times the cost for twice the input, and 128 KB is well inside
+-- 'maxEventBytes'. That file reported ONE form and passed every bound, because
+-- an atom opens no bracket and ends at no newline. The cost is 'parseTop'
+-- accumulating top-level items with a left-nested append, so it is quadratic in
+-- how many items the top level has and in nothing else: the same 65536 atoms
+-- moved inside one enclosing form parse in 317 ms, which is why depth is tracked
+-- here and why an atom is counted at depth zero only.
+--
+-- A string literal at the top level is an item by the same argument and is
+-- counted the same way, since @\"a\" \"b\" \"c\"@ needs no bracket either.
+--
+-- Nothing a writer emits is counted differently than before: 'renderEvent' puts
+-- one bracketed clause on each line, so the top level of a real file holds no
+-- bare atom and no bare string, and the count stays two per line against a limit
+-- of a hundred and twenty-eight.
 scanText :: Text -> (Int, Int)
-scanText = seen . Text.foldl' step (0 :: Int, 0 :: Int, Plain)
+scanText = seen . Text.foldl' step (0 :: Int, 0 :: Int, Plain, 0 :: Int, False)
   where
-    seen (n,e,_) = (n,e)
+    seen (n,e,_,_,_) = (n,e)
 
-    step (n, e, st) c = case st of
-      InComment | c == '\n'   -> (n + 1, e, Plain)
-                | otherwise   -> (n, e, InComment)
-      InEscape                -> (n, e, InString)
-      InString  | c == '\\'   -> (n, e + 1, InEscape)
-                | c == '"'    -> (n, e, Plain)
-                | otherwise   -> (n, e, InString)
-      Plain     | c == '"'    -> (n, e, InString)
+    -- The last two components are how deep in brackets the scan is, and whether
+    -- it is in the middle of a bare token. Both exist to answer one question --
+    -- is this character the START of an item at the TOP level -- which cannot be
+    -- answered by looking at the character alone.
+    step (n, e, st, d, tok) c = case st of
+      InComment | c == '\n'   -> (n + 1, e, Plain, d, False)
+                | otherwise   -> (n, e, InComment, d, tok)
+      InEscape                -> (n, e, InString, d, tok)
+      InString  | c == '\\'   -> (n, e + 1, InEscape, d, tok)
+                | c == '"'    -> (n, e, Plain, d, False)
+                | otherwise   -> (n, e, InString, d, tok)
+      -- Counted where it opens and not where it closes, so the item is counted
+      -- once; the closing quote comes back through the InString branch above.
+      Plain     | c == '"'    -> (item, e, InString, d, False)
                 -- A comment is tracked for one reason: a quote inside one
                 -- would otherwise put this counter into a string it is not in,
                 -- and everything after it would go uncounted.
-                | c == ';'    -> (n, e, InComment)
-                | opens c     -> (n + 1, e, Plain)
-                | otherwise   -> (n, e, Plain)
+                | c == ';'    -> (n, e, InComment, d, False)
+                | closes c    -> (n, e, Plain, max 0 (d - 1), False)
+                | nests c     -> (n + 1, e, Plain, d + 1, False)
+                | marks c     -> (n + 1, e, Plain, d, False)
+                | isSpace c   -> (n, e, Plain, d, False)
+                | otherwise   -> (item, e, Plain, d, True)
+      where
+        -- One count for the whole run of characters that makes up a bare token,
+        -- and none at all for a token inside a form.
+        item | d > 0     = n
+             | tok       = n
+             | otherwise = n + 1
 
-    -- Every character that opens a form, and a newline is one of them.
-    --
-    -- The parser makes a list per bracket pair, a list per quote, quasiquote or
-    -- unquote, and a list per non-empty LINE, and the cost is superlinear in
-    -- how many lists it makes. Each spelling of the same attack was cheaper
-    -- than the last: counting only '(' let "[]" through at four minutes a file,
-    -- and counting brackets alone let bare atoms one per line through at over a
-    -- minute for eighty kilobytes, growing sixfold per doubling. A newline is
-    -- the cheapest of the three, two bytes an item and no punctuation at all.
-    --
-    -- Counting newlines as well as brackets double-counts an ordinary event
-    -- file, which is what a bound can afford to do: a real one is a dozen or so
-    -- lines against a limit of a hundred and twenty-eight.
-    opens c = c `elem` ("([{'`,\n" :: String)
+    -- The brackets, which are the only punctuation that nests.
+    nests  c = c `elem` ("([{" :: String)
+    closes c = c `elem` (")]}" :: String)
+
+    -- A quote, quasiquote or unquote makes a list of what follows it, and a
+    -- non-empty LINE makes a list of what is on it. Neither nests, so neither
+    -- moves the depth; both are still counted wherever they appear, which is
+    -- what they were counted as before and is left alone.
+    marks  c = c `elem` ("'`,\n" :: String)
 
 -- Where a scan of the text is, for 'scanText'.
 data Scan = Plain | InString | InEscape | InComment

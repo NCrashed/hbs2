@@ -274,7 +274,22 @@ mailboxProto inner adapter mess = deferred @p do
         --   авторизовываться по времени.
         --   возможно, надо слать нонс в CheckMailbox
         --   и тут его проверять
-        unless ( abs (now - mbsMailboxPayloadNonce) < 10 ) $ exit ()
+
+        -- Разница через clockSkew, а не через abs: оба операнда Word64, на
+        -- беззнаковом типе abs это тождество, и вычитание заворачивается. Если
+        -- часы отвечающего были впереди хотя бы на секунду, now - nonce давало
+        -- около 2^64 и статус отбрасывался. Окно читалось как десять секунд в обе
+        -- стороны, а было десятью секундами в одну, и два честных пира с
+        -- расхождением часов в другую сторону не синхронизировали ящик никогда.
+        -- Подробности -- в хаддоке clockSkew.
+        --
+        -- Молча: exit () ничего не пишет, поэтому теперь есть строка в логе.
+        let skew = clockSkew now mbsMailboxPayloadNonce
+
+        unless ( skew < 10 ) do
+          debug $ red "mailbox:" <+> "status dropped, clock skew"
+                    <+> pretty skew <+> "s from" <+> pretty (AsBase58 who)
+          exit ()
 
         -- NOTE: possible-poisoning-attack
         --  левый пир генерирует merkle tree сообщений и посылает его.

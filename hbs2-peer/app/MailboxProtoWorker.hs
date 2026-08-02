@@ -183,6 +183,32 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
     flip runContT pure do
 
+      -- Ящик должен быть наш, и это та же проверка, которую делает
+      -- mailboxSendDelete прямо ниже. Здесь её не было вообще: ни таблицы
+      -- mailbox, ни policy -- только TODO выше.
+      --
+      -- Что это стоило. Ключ, которым подписан proof, и есть ключ ящика (см.
+      -- admitDeleted), поэтому любой пир после хендшейка мог сгенерировать
+      -- одноразовую пару, подписать DeleteMessagesPayload на самого себя и
+      -- прислать DeleteMessages: мы писали блок бокса, писали блок Deleted,
+      -- ставили мерж в очередь и в mailboxMergeQ звали updateRef на
+      -- MailboxRefKey, о котором не слышали никогда. Повторить с новой парой --
+      -- и так сколько угодно раз, причём сообщение ещё и уходит дальше по сети
+      -- (gossip выше по стеку, в mailboxProto). То есть незнакомец заводил у нас
+      -- ref'ы и занимал диск в темпе, который выбирал сам.
+      --
+      -- Policy тут по-прежнему не спрашивается: дефолт BasicPolicy это
+      -- Deny/Deny, и включить её на этом пути значит запретить владельцу
+      -- удалять в своём же ящике, пока policy не выставлена явно. Это отдельный
+      -- разговор, TODO выше про него и остаётся.
+      mdbe <- readTVarIO mailboxDB
+
+      dbe <- ContT $ maybe1 mdbe dbNotReady
+
+      t <- getMailboxType_ dbe mbox
+
+      void $ ContT $ maybe1 t notOurs
+
       h' <- putBlock sto (serialise box)
 
       h <- ContT $ maybe1 h' storageFail
@@ -194,8 +220,6 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
                    _ -> Nothing
 
       what <- ContT $ maybe1 what' unsupportedPredicate
-
-      let de = Deleted proof what
 
       deh' <- enqueueBlock sto (serialise (Deleted proof what))
                <&> fmap HashRef
@@ -210,6 +234,9 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
     where
       storageFail = err $ red "mailbox (storage:critical)" <+> "block writing failure"
       unsupportedPredicate = err $ red "mailbox (unsuported-predicate)"
+      dbNotReady = err $ red "mailbox (delete)" <+> "database not ready"
+      notOurs = debug $ red "mailbox (delete)"
+                  <+> "not ours, ignored:" <+> pretty mbox
 
 instance ( s ~ Encryption e, e ~ L4Proto
          ) => IsMailboxService s (MailboxProtoWorker s e) where

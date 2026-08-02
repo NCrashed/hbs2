@@ -22,6 +22,7 @@ module HBS2.Peer.Proto.Mailbox.Types
   , MessageTTL(..)
   , DeleteMessagesPayload(..)
   , SetPolicyPayload(..)
+  , clockSkew
   , module HBS2.Net.Proto.Types
   , HashRef
   ) where
@@ -145,6 +146,23 @@ data MailBoxStatusPayload s =
   , mbsMailboxPolicy        :: Maybe (SignedBox (SetPolicyPayload s) s)
   }
   deriving stock (Generic)
+
+-- | How far apart two clock readings are, in whichever direction.
+--
+-- A named function over 'Word64' for what used to be spelled
+-- @abs (now - nonce)@ at the one place that compares our clock against the nonce
+-- in a 'MailBoxStatusPayload'. On an UNSIGNED type 'abs' is the identity and the
+-- subtraction wraps, so a responder whose clock was one second AHEAD produced a
+-- difference of about 2^64 and had its status dropped, silently. The window read
+-- as ten seconds either way and was ten seconds in one direction only, which is
+-- two honest peers never syncing a mailbox and nothing saying why.
+--
+-- Symmetric by construction, so it cannot be got wrong by passing the arguments
+-- the other way round, which is the other half of why it is a function and not
+-- an expression at the call site.
+clockSkew :: Word64 -> Word64 -> Word64
+clockSkew a b | a >= b    = a - b
+              | otherwise = b - a
 
 data DeleteMessagesPayload (s :: CryptoScheme) =
   DeleteMessagesPayload

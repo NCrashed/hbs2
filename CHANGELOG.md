@@ -2,6 +2,111 @@
 
 ## Security
 
+  - **`hbs2-hub`: an argument beginning with `(` or `[` was executed.**
+    `argvAtom` parsed such a word as a form and handed it to the
+    evaluator, described in its own haddock as "the script escape hatch
+    and the one place a user is asking to be lexed". It was neither. It
+    applied to the VALUE OF A FLAG as much as to the verb position, and
+    the evaluator evaluates a verb's arguments before the verb's pattern
+    match runs, so
+
+    ```
+    hbs2-hub inbox '(run:proc:quiet "sh" "-c" "touch /tmp/proof")'
+    ```
+
+    created the file and then printed the inbox usage. The dictionary
+    this tool shares with `hbs2-cli` also holds `rm`, `mv`, `cp`,
+    `call:proc`, `setenv` and `cd`. PEP-22 specifies a renderer that
+    "shells out to the CLI" with comment text a stranger wrote on the
+    web, which is the version of this where nobody typed anything.
+
+    It also contradicted the rule the same module states two paragraphs
+    higher: `--title '(pwd)'` would have signed what the form evaluated
+    to, in a tool whose claim is that it signs what was typed, and canon
+    is append-only. The daily-use half was `--title '[bug] segfault'`
+    exiting with `NameNotBound (Id "bug")`, an internal constructor
+    naming a word nobody typed, for a title spelling a great many people
+    use.
+
+    The branch is gone and every argument is now the string it looks
+    like. Nothing became unreachable: a form as the first word never got
+    this far anyway (`verbOf` excludes a leading bracket, so it exits as
+    an unknown verb), and a script still arrives on stdin or through
+    `--run <file>`. The property test that covers this function now
+    generates brackets, which it did not while they meant "lex me".
+
+  - **`hbs2-hub`: a canon file could cost `hub verify` a minute of CPU
+    while reporting one clause.** `scanText` counted the characters that
+    open a form -- brackets, the quote family, a newline -- and a bare
+    atom is none of them. `parseTop` accumulates top-level items with a
+    left-nested append, so its cost is quadratic in how many items the
+    top level has, and a `version` file of atoms separated by spaces and
+    holding not one newline passed every bound. Measured end to end on
+    this build, `hub verify` against such a repository:
+
+    ```
+    honest file:      45 ms
+     32 KB:         2225 ms
+     64 KB:         8899 ms
+    128 KB:        36581 ms
+    ```
+
+    Four times the cost for twice the input, and 128 KB is well inside
+    `maxEventBytes`; the walk clock is only checked between blobs, so two
+    such files run to twice that before `CanonTooSlow` fires. Anybody
+    with write access to a tree could stop every fold and every verify in
+    every clone, which is the attack `maxClauses` exists to stop, in a
+    spelling the bound did not count.
+
+    What is counted is now an ITEM AT THE TOP LEVEL: brackets and the
+    quote family and newlines as before, plus a bare atom or a bare
+    string literal where the depth is zero. Depth is tracked because the
+    cost is in the top level and nowhere else -- the same 65536 atoms
+    moved inside one enclosing form parse in 317 ms -- so nesting is not
+    penalised. Nothing a writer emits counts differently: `renderEvent`
+    puts one bracketed clause on each line, so a real file has no bare
+    atom at the top level and its count is unchanged. The same file now
+    takes 45 ms and exits 7.
+
+  - **`hbs2-hub`: an envelope signer was not checked for being a key, so
+    a deny list was bypassed by appending one byte.** The ingress
+    recovered the envelope signer with `unboxSignedBox0`, which does not
+    check the recovered key's length; `unboxChecked`, in this package,
+    does, and says why in a comment this path did not follow. The
+    `Serialise` instances for a signing key and a signature are generic
+    over a newtype, so they take any length and walk past the length
+    check the crypto library does in its own decoder, and libsodium then
+    reads its thirty-two bytes and ignores the rest.
+
+    So a sender who appended junk to their own public key produced an
+    envelope that verified under a key equal to nothing anybody has on a
+    list, and `openLetterAs`'s one envelope-level check -- documented
+    there as the only thing keeping a stranger out of the parked set --
+    never fired. Each padding also changed the message hash, so one
+    letter became N distinct entries, N stored blocks on every relaying
+    peer and N queue lines, each printing as `(not a key: N bytes)`:
+    nothing for a maintainer to copy into a block list either. A key that
+    is not a key is now no identity at all, and the letter is refused as
+    `BadEnvelopeSig`.
+
+  - **`hbs2-peer`: a network delete created storage refs for mailboxes
+    the peer does not host.** `mailboxAcceptDelete` never consulted the
+    `mailbox` table, unlike `mailboxSendDelete` four screens below it,
+    which refuses an unknown mailbox before it does anything. The key
+    that signs a delete proof IS the mailbox key, so any peer that had
+    finished a handshake could generate a throwaway keypair, sign a
+    payload naming its own key, and send `DeleteMessages`: the receiver
+    wrote the box block, wrote a `Deleted` entry block, enqueued a merge
+    and then called `updateRef` on a `MailboxRefKey` it had never heard
+    of. Repeat with a fresh keypair for as long as you like, and the
+    message is gossiped onward first, so the whole network does it.
+
+    The check `mailboxSendDelete` already makes is now made here too.
+    Policy is still not consulted on this path: the default `BasicPolicy`
+    is deny-all, and applying it here would stop an owner deleting in
+    their own mailbox until a policy is set explicitly. The `TODO` above
+    the function stays for that.
+
   - **`hbs2-peer`: a mailbox delete proof was not bound to the message it
     deleted (#15).** When merging a mailbox tree served by another peer,
     the worker checked that the entry's proof was a delete box signed by
@@ -46,6 +151,30 @@
 
   - `cabal test` in CI covers `hbs2-peer` as well as `hbs2-hub`, since
     the above is only a regression test if something runs it.
+
+## Fixed
+
+  - **`hbs2-peer`: two peers whose clocks differed in one direction
+    never synchronised a mailbox.** The freshness check on a peer's
+    mailbox status was `abs (now - nonce) < 10`, which reads as a
+    ten-second window either side. Both operands are `Word64`: on an
+    unsigned type `abs` is the identity and the subtraction wraps, so a
+    responder whose clock was a single second AHEAD produced a difference
+    of about 2^64 and had its status discarded. The window was ten
+    seconds in one direction only, and the discard goes through `exit ()`
+    and logs nothing, so the failure had no symptom beyond a mailbox that
+    did not sync.
+
+    The difference is now `clockSkew`, a named function that subtracts
+    the smaller from the larger and is symmetric by construction, so the
+    call site cannot get it wrong by writing the arguments the other way
+    round. A refused status now says so, with the skew and who sent it.
+
+    `clockSkew` is pure and exported, and `hbs2-peer`'s test suite has a
+    `MailboxStatus` group covering both directions, both sides of the
+    boundary, symmetry and the ends of the range. That suite previously
+    held one module, so the arithmetic that was wrong here was arithmetic
+    nothing could ask a question of.
 
 ## Fixed in the release artifacts
 

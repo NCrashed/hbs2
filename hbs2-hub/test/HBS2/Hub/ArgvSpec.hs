@@ -42,11 +42,15 @@ kept s = case argvAtom s of
   x | Just t <- said x -> t === s
     | otherwise        -> show (pretty x) === s
 
--- Words a person would plausibly type as a title or a key, avoiding the two
--- characters that mean "lex me": a quote (which is a request to be read as a
--- string literal) and a leading paren (which is a request to be read as a form).
--- Everything else is fair game, and the point of the property is that all of it
--- comes back whole.
+-- Words a person would plausibly type as a title or a key, avoiding the one
+-- character that means "lex me": a quote, which is a request to be read as a
+-- string literal. Everything else is fair game, and the point of the property is
+-- that all of it comes back whole.
+--
+-- Brackets are IN the alphabet, and they were not while a bracketed word was
+-- parsed as a form. That exclusion was the property agreeing not to look at the
+-- case that turned out to execute commands, which is the failure mode the cover
+-- monitors below exist to catch elsewhere.
 titleish :: Gen String
 titleish = do
   n <- choose (1, 40 :: Int)
@@ -56,7 +60,7 @@ titleish = do
   pure (if all (`elem` ("0123456789.-" :: String)) s then 'x' : s else s)
   where
     alphabet = ['a'..'z'] <> ['A'..'Z'] <> ['0'..'9']
-                 <> " ;#&*+-.:/!@^_=<>?,|~$%"
+                 <> " ;#&*+-.:/!@^_=<>?,|~$%" <> "()[]"
 
 spec :: Spec
 spec = do
@@ -114,12 +118,35 @@ spec = do
       said (argvAtom "\"quoted text\"") `shouldBe` Just "\"quoted text\""
       said (argvAtom "\"C:\\temp\"") `shouldBe` Just "\"C:\\temp\""
 
-    it "still reads an explicit form, which is the script escape hatch" $ do
-      -- The one place a user IS asking to be lexed. Unwrapping this the way a
-      -- bare word is unwrapped turned `(list)` into the symbol `list`, which
-      -- evaluates to a lambda instead of calling it.
-      isList (argvAtom "(list 1 2)") `shouldBe` True
-      isList (argvAtom "[1 2]") `shouldBe` True
+    it "never hands a bracketed word to the evaluator" $ do
+      -- THE OTHER ONE THAT MATTERS, and the reason the form branch is gone. A
+      -- word starting with `(` or `[` used to be parsed and evaluated, and this
+      -- applied to the VALUE OF A FLAG, not only to the verb position -- the
+      -- evaluator evaluates a verb's arguments before the verb's pattern match
+      -- runs. On the build before this test:
+      --
+      --   hbs2-hub inbox '(run:proc:quiet "sh" "-c" "touch /tmp/proof")'
+      --
+      -- created the file and then printed the inbox usage. The dictionary this
+      -- tool shares with hbs2-cli also holds rm, mv, cp, setenv and cd, and
+      -- PEP-22 has a renderer that shells out to this CLI with text a stranger
+      -- wrote on the web.
+      let bomb = "(run:proc:quiet \"sh\" \"-c\" \"touch /tmp/proof\")"
+      isList (argvAtom bomb) `shouldBe` False
+      said (argvAtom bomb) `shouldBe` Just bomb
+      isList (argvAtom "(list 1 2)") `shouldBe` False
+      said (argvAtom "(list 1 2)") `shouldBe` Just "(list 1 2)"
+      said (argvAtom "[1 2]") `shouldBe` Just "[1 2]"
+
+    it "keeps a bracketed tag in a title, which is how issues get titled" $ do
+      -- The daily-use half of the same defect: `--title '[bug] segfault'` exited
+      -- with `NameNotBound (Id "bug")`, an internal constructor naming a word
+      -- nobody typed. `[bug]` became a call and the evaluator resolved `bug`
+      -- before the hand-written usage fallback could run at all.
+      said (argvAtom "[bug] segfault") `shouldBe` Just "[bug] segfault"
+      -- And the signing half: this would have signed what the form evaluated to,
+      -- in a tool whose stated claim is that it signs what was typed.
+      said (argvAtom "(pwd)") `shouldBe` Just "(pwd)"
 
     it "loses nothing from any word it is given" $
       -- The property the examples above are cases of, and the one a future

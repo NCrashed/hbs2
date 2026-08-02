@@ -407,8 +407,23 @@ openMessage ig mh = do
       -- mailbox the bulk of the queue is letters sealed to somebody else. Taking
       -- the key from readMessage's success value left all of them anonymous,
       -- which is a queue with no key to block by.
-      let envelope = fmap fst
-                       (unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg))
+      --
+      -- CHECKED FOR BEING A KEY, which 'unboxSignedBox0' does not do and
+      -- 'unboxChecked' does. The Serialise instances for a signing key and a
+      -- signature are generic over a newtype, so they take any length and walk
+      -- past the length check the crypto library does on its own decoder;
+      -- libsodium then reads its thirty-two bytes and ignores the rest. So a
+      -- sender who appends one byte to their own public key produces an envelope
+      -- that verifies under a key equal to nothing anybody has on a list, and
+      -- 'openLetterAs' has exactly one envelope-level check -- @allowed
+      -- envelopeSigner@ -- which therefore never fired. Each padding also changes
+      -- the message hash, so one letter became N stored blocks and N queue lines,
+      -- each printing as @(not a key: N bytes)@: nothing to copy into a block
+      -- list either. The reasoning is 'unboxChecked's, written down there in
+      -- full; this is the path it was not applied to.
+      let envelope = case unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg) of
+            Just (k, _) | validHubKey k -> Just k
+            _                           -> Nothing
 
       opened <- tryOpen msg
       case opened of
@@ -420,9 +435,13 @@ openMessage ig mh = do
             , lvEnvelope = envelope
             , lvLetter   = case (envelope, md) of
                 (_, Left e)           -> Left (BadLetterHere e)
-                -- Unreachable: readMessage succeeding means the same unbox
-                -- succeeded. Answered rather than asserted, because the one
-                -- thing this function must not do is throw.
+                -- REACHABLE, and it was not before the key above was checked for
+                -- being a key: readMessage succeeding means the same unbox
+                -- succeeded, so the only way here is an envelope whose signature
+                -- verifies under something that is not a key. A key that is not
+                -- one is not an identity, so there is nobody to attribute the
+                -- letter to and nothing for a deny list to match, and refusing it
+                -- is the only answer that does not invent a sender.
                 (Nothing, _)          -> Left BadEnvelopeSig
                 (Just who, Right md') -> openWith who md'
             , lvEventId  = either (const Nothing) letterEventId md
