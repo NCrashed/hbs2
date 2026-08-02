@@ -31,6 +31,7 @@ import HBS2.Peer.Proto
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Merge
+import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Net.Messaging.Unix
@@ -133,6 +134,10 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
   , mpwStorage            :: AnyStorage
   , mpwCredentials        :: PeerCredentials s
   , mpwFetchQ             :: TVar (HashSet (MailboxRefKey s))
+    -- | Nonces we have put in our own outgoing 'CheckMailbox' requests. A
+    -- 'MailboxStatus' is an answer to one of ours or it is somebody talking
+    -- unprompted; see "HBS2.Peer.Proto.Mailbox.Nonce".
+  , mpwCheckNonces        :: CheckNonces (MailboxRefKey s)
   , inMessageQueue        :: TBQueue (Maybe (PubKey 'Sign s), Message s, MessageContent s)
   , inMessageMergeQueue   :: TVar (HashMap (MailboxRefKey s) (HashSet HashRef))
   , inPolicyDownloadQ     :: TVar (HashMap HashRef (PolicyDownload s))
@@ -178,12 +183,32 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
   mailboxGetStorage = pure . mpwStorage
 
-  mailboxGetPolicy MailboxProtoWorker{..} mbox =  do
+  mailboxGetPolicy me mbox = do
     let def = AnyPolicy (defaultBasicPolicy @s)
-    fromMaybe def  <$> runMaybeT do
-      dbe <- readTVarIO mailboxDB >>= toMPlus
-      co  <- loadPolicyContent dbe mpwStorage mbox
-      pure (AnyPolicy co)
+    fromMaybe def <$> mailboxGetPolicyMay @s me mbox
+
+  -- Только записанная владельцем policy, без подстановки умолчания.
+  --
+  -- Различие проходит по СТРОКЕ в таблице, а не по читаемости содержимого: если
+  -- строка есть, а блок потерян или клауза от более новой сборки не
+  -- разбирается, loadPolicyContentAt отдаёт deny/deny, и это правильная сторона
+  -- -- владелец что-то сказал. Nothing означает ровно одно: не говорил ничего.
+  --
+  -- Пока дерево policy ЕЩЁ КАЧАЕТСЯ, строки нет вовсе: её пишет
+  -- mailboxSetPolicy, а policyDownloadQ зовёт его уже после того, как
+  -- findMissedBlocks вернул пусто. Так что незакончённая загрузка -- это
+  -- Nothing, а не deny/deny.
+  --
+  -- Один select, а не два: хеш, по которому проверяется наличие, он же и
+  -- читается. Эта функция стоит под mailboxGetPolicy, то есть на пути приёма
+  -- каждого сообщения для каждого получателя.
+  mailboxGetPolicyMay MailboxProtoWorker{..} mbox = runMaybeT do
+    dbe <- readTVarIO mailboxDB >>= toMPlus
+    ha  <- policyHashFor dbe mbox >>= toMPlus
+    AnyPolicy <$> loadPolicyContentAt mpwStorage mbox ha
+
+  mailboxCheckNonce MailboxProtoWorker{..} mbox nonce =
+    acceptCheckNonce mpwCheckNonces mbox nonce
 
   mailboxAcceptMessage MailboxProtoWorker{..} peer m c = do
     took <- atomically do
@@ -386,6 +411,23 @@ instance ( s ~ Encryption e, e ~ L4Proto
                     on conflict (mailbox) do update set hash = excluded.hash
                   |] (MailboxRefKey @s who, PolicyHash what)
 
+      -- Политика, которая молчит про пиров, запрещает их всех.
+      --
+      -- parseBasicPolicy ставит bpDefaultPeerAction = Deny, поэтому
+      -- `(sender allow all)` без единой клаузы про peer -- это deny всем пирам.
+      -- Раньше это стоило приёма сообщений от пиров; теперь -- ещё и ответа на
+      -- CheckMailbox, и приёма чужих статусов, то есть ящик перестаёт
+      -- синхронизироваться вовсе. Сокращённые рецепты в PEP-21 записаны именно
+      -- так; полный, с `(peer allow all)`, есть в PEP-18.
+      --
+      -- Предупреждение тут, а не в самих проверках: сюда приходят только при
+      -- смене политики, а проверки -- на каждый запрос.
+      pol <- loadPolicyContentAt mpwStorage (MailboxRefKey @s who) what
+
+      when (bpDefaultPeerAction pol == Deny && HM.null (bpPeers pol)) do
+        warn $ red "mailbox: policy denies every peer for" <+> pretty (AsBase58 who)
+                 <> line <> indent 2 ( "no (peer allow ...) clause, so this mailbox"
+                                       <+> "will neither answer nor accept a status" )
 
       void $ runMaybeT do
         msp <- mailboxGetStatus me (MailboxRefKey @s who)
@@ -617,10 +659,7 @@ loadPolicyPayloadFor :: forall s m . (ForMailbox s, MonadIO m)
               -> MailboxRefKey s
               -> m (Maybe (HashRef, SignedBox (SetPolicyPayload s) s))
 loadPolicyPayloadFor dbe sto who = do
-  phash <- withDB dbe do
-             select @(Only PolicyHash) [qc|select hash from policy where mailbox = ?|] (Only who)
-             <&> fmap (coerce @_ @HashRef . fromOnly)
-             <&> headMay
+  phash <- policyHashFor dbe who
 
   runMaybeT do
      ha <- toMPlus phash
@@ -629,6 +668,21 @@ loadPolicyPayloadFor dbe sto who = do
                 <&> deserialiseOrFail
                 >>= toMPlus
      pure (ha, what)
+
+-- | The block a mailbox's policy row points at, if it has one.
+--
+-- The row on its own, without reading what it names. That is the distinction
+-- 'mailboxGetPolicyMay' turns on: a policy whose content cannot be read is still
+-- a policy the owner wrote, and only the absence of the ROW means nothing was
+-- ever said.
+policyHashFor :: forall s m . (ForMailbox s, MonadIO m)
+              => DBPipeEnv
+              -> MailboxRefKey s
+              -> m (Maybe HashRef)
+policyHashFor dbe who = withDB dbe do
+  select @(Only PolicyHash) [qc|select hash from policy where mailbox = ? limit 1|] (Only who)
+    <&> fmap (coerce @_ @HashRef . fromOnly)
+    <&> headMay
 
 
 loadPolicyPayloadUnboxed :: forall s m . (ForMailbox s, MonadIO m)
@@ -643,15 +697,32 @@ loadPolicyPayloadUnboxed dbe sto mbox = do
    <&> join
    <&> fmap snd
 
-loadPolicyContent :: forall s m . (s ~ HBS2Basic, ForMailbox s, MonadIO m)
-                  => DBPipeEnv
-                  -> AnyStorage
-                  -> MailboxRefKey s
-                  -> m (BasicPolicy s)
-loadPolicyContent dbe sto mbox = do
+-- | Read and parse the policy a known block names.
+--
+-- Takes the hash rather than looking it up, because every caller has it
+-- already: 'mailboxGetPolicyMay' needs the row anyway, to tell "no policy" from
+-- "a policy we cannot read", and it sits on the message ingest path, once per
+-- message per recipient. The version that did its own lookup meant two queries
+-- for one answer on that path.
+--
+-- Every failure below lands on 'defaultBasicPolicy', which is deny/deny. That is
+-- deliberate and it is the closed direction: an unreadable block, a merkle tree
+-- that will not read, or a clause this build does not understand all mean the
+-- owner said something we did not catch.
+loadPolicyContentAt :: forall s m . (s ~ HBS2Basic, ForMailbox s, MonadIO m)
+                    => AnyStorage
+                    -> MailboxRefKey s
+                    -> HashRef
+                    -> m (BasicPolicy s)
+loadPolicyContentAt sto mbox ha = do
   let def = defaultBasicPolicy @s
   fromMaybe def <$> runMaybeT do
-    SetPolicyPayload{..} <- loadPolicyPayloadUnboxed dbe sto mbox >>= toMPlus
+    box <- getBlock sto (coerce ha)
+             >>= toMPlus
+             <&> deserialiseOrFail @(SignedBox (SetPolicyPayload s) s)
+             >>= toMPlus
+
+    SetPolicyPayload{..} <- unboxSignedBox0 box & toMPlus <&> snd
 
     lbs' <- runExceptT (readFromMerkle sto (SimpleKey (coerce sppPolicyRef)))
 
@@ -701,6 +772,7 @@ createMailboxProtoWorker pc pe sto = do
   --   $class: hardcode
   MailboxProtoWorker pe sto pc
     <$> newTVarIO mempty
+    <*> newCheckNonces
     <*> newTBQueueIO 8000
     <*> newTVarIO mempty
     <*> newTVarIO mempty
@@ -1208,20 +1280,24 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
         t <- getMailboxType_ dbe r
         maybe1 t none $ \_ -> do
           debug $ yellow "mailbox: SEND FETCH REQUEST FOR" <+> pretty r
-          now <- liftIO (getPOSIXTime <&> round)
-          gossip (MailBoxProtoV1 @s @e (CheckMailbox  (Just now) (coerce r)))
+          -- Нонс, а не отметка времени: то, что вернётся эхом, и есть проверка
+          -- свежести ответа. См. HBS2.Peer.Proto.Mailbox.Nonce.
+          nonce <- issueCheckNonce mpwCheckNonces r
+          gossip (MailBoxProtoV1 @s @e (CheckMailbox  (Just nonce) (coerce r)))
 
     mailboxCheckQ dbe = do
 
       -- FIXME: mailbox-check-period
-      --   right now  it's 60 seconds for debug purposes
-      --   remove hardcode to smth reasonable
+      --   ten minutes, hardcoded. The comment here said sixty seconds "for
+      --   debug purposes" long after the number below stopped being sixty;
+      --   checkNonceTTL is chosen against this value, so it is worth it saying
+      --   what it is.
       let mboxes = liftIO (listMailboxes @s dbe <&> fmap (set _2 600) )
 
       polling (Polling 10 10) mboxes $ \r -> do
         debug $ yellow "mailbox: SEND FETCH REQUEST FOR" <+> pretty r
-        now <- liftIO (getPOSIXTime <&> round)
-        gossip (MailBoxProtoV1 @s @e (CheckMailbox  (Just now) (coerce r)))
+        nonce <- issueCheckNonce mpwCheckNonces r
+        gossip (MailBoxProtoV1 @s @e (CheckMailbox  (Just nonce) (coerce r)))
 
 mailboxStateEvolve :: forall e s m . ( MonadIO m
                                      , MonadUnliftIO m

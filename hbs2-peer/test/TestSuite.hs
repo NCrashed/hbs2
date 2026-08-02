@@ -21,6 +21,7 @@ import Data.Maybe
 import Data.ByteString
 import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise
+import Crypto.Saltine (sodiumInit)
 import Crypto.Saltine.Core.Sign qualified as Sign
 
 
@@ -133,7 +134,12 @@ testVersionedKeysHashes = do
   pure ()
 
 main :: IO ()
-main =
+main = do
+  -- The nonce store draws from libsodium, and the peer initialises it in
+  -- PeerMain before anything can ask. The suite has no such entry point, so it
+  -- does it here.
+  sodiumInit
+
   defaultMain $
     testGroup "root"
       [

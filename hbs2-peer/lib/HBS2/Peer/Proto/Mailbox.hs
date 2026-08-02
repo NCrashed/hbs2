@@ -24,6 +24,7 @@ import HBS2.Peer.Proto.Peer
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.Message
 import HBS2.Peer.Proto.Mailbox.Entry
+import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Ref
 
@@ -45,6 +46,27 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   mailboxGetStorage     :: forall m . MonadIO m => a -> m AnyStorage
 
   mailboxGetPolicy      :: forall m . MonadIO m => a -> MailboxRefKey s -> m (AnyPolicy s)
+
+  -- | The mailbox's policy if one was ever set for it, and 'Nothing' if none
+  -- was.
+  --
+  -- 'mailboxGetPolicy' cannot answer this: it falls back to
+  -- @defaultBasicPolicy@, which is deny/deny, so "the owner denied this peer"
+  -- and "nobody has written a policy yet" arrive as the same value. That is the
+  -- right fallback where a message is being admitted and the wrong one for
+  -- deciding whether to ANSWER a 'CheckMailbox' -- applied there it would stop
+  -- every mailbox that has no policy from ever syncing.
+  mailboxGetPolicyMay   :: forall m . MonadIO m => a -> MailboxRefKey s -> m (Maybe (AnyPolicy s))
+
+  -- | Is this nonce one we issued for this mailbox, recently?
+  --
+  -- The requester's half of the 'CheckMailbox' challenge-response. See
+  -- "HBS2.Peer.Proto.Mailbox.Nonce".
+  mailboxCheckNonce     :: forall m . MonadIO m
+                        => a
+                        -> MailboxRefKey s
+                        -> Word64 -- ^ nonce as it came back in the status
+                        -> m Bool
 
   mailboxAcceptMessage  :: forall m . (ForMailbox s, MonadIO m)
                         => a
@@ -137,6 +159,8 @@ instance ForMailbox s => IsMailboxService s (AnyMailboxService s) where
 instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxGetCredentials (AnyMailboxAdapter a) = mailboxGetCredentials @s a
   mailboxGetPolicy (AnyMailboxAdapter a) = mailboxGetPolicy @s a
+  mailboxGetPolicyMay (AnyMailboxAdapter a) = mailboxGetPolicyMay @s a
+  mailboxCheckNonce (AnyMailboxAdapter a) = mailboxCheckNonce @s a
   mailboxGetStorage (AnyMailboxAdapter a) = mailboxGetStorage @s a
   mailboxAcceptMessage (AnyMailboxAdapter a) = mailboxAcceptMessage @s a
   mailboxAcceptDelete (AnyMailboxAdapter a) = mailboxAcceptDelete @s a
@@ -268,8 +292,18 @@ mailboxProto inner adapter mess = deferred @p do
       --      - требовать авторизацию (CheckMailboxAuth не нужен т.к. пир авторизован
       --        и так и известен в протоколе)
       --
+      -- РЕШЕНО (2026-08-02): взят путь из последнего абзаца выше -- того, где
+      -- сказано, что CheckMailboxAuth не нужен, потому что пир и так
+      -- авторизован и известен протоколу. Ответ гейтится policy пира, нового
+      -- сообщения не заводится. Нумерованный пункт 1, в отличие от этого,
+      -- предлагал завести CheckMailboxAuth{}; он НЕ взят.
+      --
+      -- Метаданные НЕ шифруются, и позиция такая: статус ящика -- публичная в
+      -- принципе информация, раз тела писем зашифрованы; владелец, которого это
+      -- не устраивает, пишет policy. Подробности и разбор совместимости --
+      -- docs/drafts/checkmailbox-auth-context.md.
 
-      CheckMailbox _ k ->  do
+      CheckMailbox nonce k ->  do
 
         debug $ red "mailbox:" <+> "CheckMailbox"
 
@@ -277,11 +311,65 @@ mailboxProto inner adapter mess = deferred @p do
 
         void $ runMaybeT do
 
-          s <- mailboxGetStatus adapter (MailboxRefKey @s k)
+          let mbox = MailboxRefKey @s k
+
+          -- Статус СНАЧАЛА, policy потом, и порядок тут не косметический.
+          --
+          -- mailboxGetStatus начинается с getMailboxType_, то есть с одного
+          -- индексного select, и на чужой ящик выходит сразу. А чтение policy --
+          -- это второй select, getBlock, проверка подписи, обход merkle-дерева,
+          -- разбор текста, и всё это без кэша. Гейт, стоящий первым, продавал бы
+          -- любому хендшейкнутому пиру всю эту работу за пакет в сорок байт с
+          -- любым ключом в поле, причём на общем пуле deferred, где живут и
+          -- остальные протоколы.
+          s <- mailboxGetStatus adapter mbox
                  >>= toMPlus
                  >>= toMPlus
 
-          let box = makeSignedBox @s (view peerSignPk creds) (view peerSignSk creds) s
+          -- Кому отвечаем. Раньше -- любому, кто прошёл хендшейк.
+          --
+          -- Что это закрывает: корень дерева ящика (отпечаток синхронизации) и
+          -- то, как он движется по мере прихода писем. Чего НЕ закрывает: сам
+          -- факт, что мы держим этот ящик -- его mailboxCheckQ каждые десять
+          -- минут сам рассылает госсипом всем известным пирам, включая тех,
+          -- кому policy говорит deny.
+          --
+          -- Ящик БЕЗ policy отвечает всем, как и раньше. Наивное
+          -- `mailboxGetPolicy` тут было бы регрессией, а не защитой: оно падает на
+          -- defaultBasicPolicy, то есть deny/deny, и остановило бы синхронизацию
+          -- каждому ящику, которому политику не выставляли -- это ровно та
+          -- ловушка, в которую уже попадал путь приёма сообщений.
+          --
+          -- А если policy записана, но её содержимое не читается или не
+          -- разбирается (блок потерян, клауза от более новой сборки),
+          -- mailboxGetPolicyMay вернёт Just deny/deny, и мы не ответим. Владелец
+          -- что-то сказал, мы не расслышали -- это не повод считать, что он не
+          -- говорил ничего. Заметьте: пока дерево policy ЕЩЁ КАЧАЕТСЯ, строки в
+          -- таблице нет вовсе (её пишет mailboxSetPolicy, а policyDownloadQ
+          -- зовёт его уже после того, как всё скачано), так что это не тот
+          -- случай, и ящик всё это время отвечает всем.
+          --
+          -- TODO: cache-parsed-policy
+          --   $class: performance
+          --   чтение и разбор policy повторяются на каждый входящий CheckMailbox
+          --   и на каждое (сообщение, получатель) в mailboxInQ. Кэш по
+          --   (ящик, хеш policy) убрал бы и то и другое.
+          unless inner do
+            po <- mailboxGetPolicyMay @s adapter mbox
+            allowed <- maybe (pure True) (\p -> policyAcceptPeer @s p pip) po
+            unless allowed do
+              debug $ red "mailbox:" <+> "CheckMailbox declined by peer policy"
+                        <+> pretty mbox <+> pretty (AsBase58 pip)
+              mzero
+
+          -- Эхо нонса запрашивающего вместо собственных часов, и это весь фикс
+          -- на стороне отвечающего: формат сообщения тот же, поле то же.
+          --
+          -- Nothing -- это старый пир, который нонса не шлёт вовсе; ему остаётся
+          -- отметка часами, как было.
+          let s' = maybe s (\n -> s { mbsMailboxPayloadNonce = n }) nonce
+
+          let box = makeSignedBox @s (view peerSignPk creds) (view peerSignSk creds) s'
 
           lift $ lift $ response @_ @p (MailBoxProtoV1 (MailboxStatus box))
 
@@ -297,25 +385,42 @@ mailboxProto inner adapter mess = deferred @p do
 
         unless ( who == _peerSignKey ) $ exit ()
 
-        -- FIXME: timeout-hardcode
-        --   может быть вообще не очень хорошо
-        --   авторизовываться по времени.
-        --   возможно, надо слать нонс в CheckMailbox
-        --   и тут его проверять
-
-        -- Разница через clockSkew, а не через abs: оба операнда Word64, на
-        -- беззнаковом типе abs это тождество, и вычитание заворачивается. Если
-        -- часы отвечающего были впереди хотя бы на секунду, now - nonce давало
-        -- около 2^64 и статус отбрасывался. Окно читалось как десять секунд в обе
-        -- стороны, а было десятью секундами в одну, и два честных пира с
-        -- расхождением часов в другую сторону не синхронизировали ящик никогда.
-        -- Подробности -- в хаддоке clockSkew.
+        -- Нонс, который мы сами и выдали, а не сравнение двух чужих друг другу
+        -- часов. Это то, о чём говорил FIXME, стоявший тут годами: поле в
+        -- CheckMailbox было с самого начала, отвечающий его выбрасывал и ставил
+        -- свои часы, и «свежесть» означала лишь, что чьи-то часы близки к нашим.
+        -- Записанный статус прошлого обмена переигрывался, пока окно не
+        -- закроется.
         --
-        -- Молча: exit () ничего не пишет, поэтому теперь есть строка в логе.
+        -- Теперь ответ считается свежим, если эхом вернулся нонс, который мы
+        -- отправляли ИМЕННО про этот ящик. Часов в этой проверке нет.
+        fresh <- mailboxCheckNonce @s adapter (MailboxRefKey mbsMailboxKey) mbsMailboxPayloadNonce
+
+        -- Переходный запасной путь, и он временный.
+        --
+        -- Отвечающий, который эту сборку ещё не поставил, штампует статус своими
+        -- часами и никакого нонса не эхает. Обратное направление работает само:
+        -- старый запрашивающий кладёт в нонс своё время, новый отвечающий эхает
+        -- его назад, и старая проверка окна проходит. Ломается только это, и без
+        -- запасного пути ящик со старым пиром не синхронизировался бы вовсе.
+        --
+        -- Сюда же попадает НЕЗАПРОШЕННЫЙ статус: mailboxSetPolicy рассылает его
+        -- госсипом, чтобы новая policy разошлась, и никакого нонса мы под него не
+        -- выдавали. Значит убрать этот путь -- не просто снять пять строк: сперва
+        -- нужно решить, как живёт та рассылка.
+        --
+        -- Пока путь жив, выигрыш только в корректности (см. clockSkew), не в
+        -- стойкости: подставить правдоподобное время может кто угодно.
+        --
+        -- Само правило -- statusIsFresh, отдельная функция: обе его половины
+        -- вместе больше не проверяются нигде, кроме как здесь, а это ровно то
+        -- состояние, в котором прошлое правило и прожило годы со сломанной
+        -- арифметикой.
         let skew = clockSkew now mbsMailboxPayloadNonce
 
-        unless ( skew < 10 ) do
-          debug $ red "mailbox:" <+> "status dropped, clock skew"
+        -- Молча: exit () ничего не пишет, поэтому теперь есть строка в логе.
+        unless ( statusIsFresh fresh now mbsMailboxPayloadNonce ) do
+          debug $ red "mailbox:" <+> "status dropped, no nonce of ours and clock skew"
                     <+> pretty skew <+> "s from" <+> pretty (AsBase58 who)
           exit ()
 
@@ -339,6 +444,26 @@ mailboxProto inner adapter mess = deferred @p do
         --
         --  а вот policy мы как раз можем публиковать с подписью автора,
         --  он участвует в процессе обновления policy.
+        --
+        -- СДЕЛАНО (2026-08-02): проверка ниже -- это первый из названных выше
+        -- способов. Чей статус мы ПРИНИМАЕМ, и это вторая половина вопроса, чьи
+        -- вопросы мы готовы слышать.
+        --
+        -- Одного нонса тут мало и не могло хватить: CheckMailbox уходит
+        -- госсипом, значит нонс есть у каждого связанного пира, и «свежесть» для
+        -- них всех истинна. Нонс отвечает на вопрос «это ответ на мой вопрос», а
+        -- не на вопрос «вправе ли этот пир отвечать».
+        --
+        -- Умолчание то же, что и на стороне ответа: policy нет -- принимаем от
+        -- всех, как раньше. Проверка стоит после проверки свежести, потому что
+        -- чтение policy дороже.
+        po <- mailboxGetPolicyMay @s adapter (MailboxRefKey mbsMailboxKey)
+        trusted <- maybe (pure True) (\p -> policyAcceptPeer @s p who) po
+
+        unless trusted do
+          debug $ red "mailbox:" <+> "status declined by peer policy"
+                    <+> pretty (AsBase58 mbsMailboxKey) <+> "from" <+> pretty (AsBase58 who)
+          exit ()
 
         void $ mailboxAcceptStatus adapter (MailboxRefKey mbsMailboxKey) who content
 

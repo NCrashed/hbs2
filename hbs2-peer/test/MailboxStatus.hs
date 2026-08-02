@@ -12,10 +12,24 @@
 -- about 2^64 and had its status dropped by @exit ()@, which logs nothing. Two
 -- honest peers with their clocks off in that direction never synchronised a
 -- mailbox and nothing anywhere said why.
+--
+-- The groups below it are the rule that replaces it: the requester now judges a
+-- status by whether it echoes a nonce the requester itself issued, for the
+-- mailbox it issued it about. The clock window survives as a fallback for TWO
+-- reasons, and only the first is transitional -- a responder on an older build
+-- echoes nothing, and @mailboxSetPolicy@ gossips a status nobody asked for, for
+-- which no nonce exists at any protocol version. Whoever comes to delete the
+-- fallback has to answer the second one.
 module MailboxStatus (mailboxStatusTests) where
 
+import HBS2.Clock (getPOSIXTime)
 import HBS2.Peer.Proto.Mailbox.Types (clockSkew)
+import HBS2.Peer.Proto.Mailbox.Nonce
 
+import Control.Monad (replicateM)
+import Data.Functor ((<&>))
+import Data.HashMap.Strict qualified as HM
+import Data.List (nub)
 import Data.Word (Word64)
 
 import Test.Tasty
@@ -28,7 +42,177 @@ window :: Word64
 window = 10
 
 mailboxStatusTests :: TestTree
-mailboxStatusTests = testGroup "mailbox status freshness"
+mailboxStatusTests = testGroup "mailbox status"
+  [ mailboxStatusClockTests
+  , mailboxStatusNonceTests
+  , mailboxStatusStoreTests
+  , mailboxStatusFreshTests
+  ]
+
+-- | The store as it is actually used, clock and generator included.
+--
+-- The group below this one tests the decision; this one tests that the peer
+-- writes down what it asked. Without it 'issueCheckNonce' could stop recording
+-- the nonce, or record it under another key, and every other test stays green
+-- while the peer silently refuses every status it gets -- on precisely the path
+-- this change exists to fix.
+mailboxStatusStoreTests :: TestTree
+mailboxStatusStoreTests = testGroup "mailbox status nonce store"
+  [ testCase "a nonce we issued comes back accepted, and only for its mailbox" $ do
+      ns <- newCheckNonces :: IO (CheckNonces String)
+      n  <- issueCheckNonce ns "boxA"
+      issued <- acceptCheckNonce ns "boxA" n
+      assertBool "the nonce we just issued is accepted" issued
+      elsewhere <- acceptCheckNonce ns "boxB" n
+      assertBool "the same nonce for another mailbox is refused" (not elsewhere)
+      invented <- acceptCheckNonce ns "boxA" (n + 1)
+      assertBool "a nonce we did not issue is refused" (not invented)
+
+  , testCase "two requests for one mailbox do not evict each other" $ do
+      -- mailboxFetchQ and mailboxCheckQ can both have a request outstanding for
+      -- the same mailbox. "One nonce per mailbox, replaced on insert" is the
+      -- natural thing to write while bounding the map, and it would silently
+      -- drop the answer to whichever request was older.
+      ns <- newCheckNonces :: IO (CheckNonces String)
+      a  <- issueCheckNonce ns "boxA"
+      b  <- issueCheckNonce ns "boxA"
+      assertBool "two draws differ" (a /= b)
+      first'  <- acceptCheckNonce ns "boxA" a
+      second' <- acceptCheckNonce ns "boxA" b
+      assertBool "the older request is still answerable" first'
+      assertBool "the newer request is answerable"       second'
+
+  , testCase "a nonce is drawn, not read off the clock" $ do
+      -- The property the whole change rests on, and nothing else asserts it: a
+      -- revert to the `getPOSIXTime <&> round` this replaced would pass every
+      -- other test in this file.
+      ns  <- newCheckNonces :: IO (CheckNonces String)
+      now <- getPOSIXTime <&> round
+      nonces <- replicateM 16 (issueCheckNonce ns "boxA")
+      assertBool "sixteen draws are sixteen values" (length (nub nonces) == 16)
+      assertBool "none of them is a plausible clock reading"
+        (all (\n -> clockSkew now n > 1000000) nonces)
+
+  , testCase "the TTL is the number the changelog and the draft both name" $
+      -- Every other TTL assertion is written in terms of checkNonceTTL, so
+      -- setting it to 5 would leave them all green and two documents wrong.
+      checkNonceTTL @?= 60
+  ]
+
+-- | The accept-either rule the handler applies, as one function.
+--
+-- Both halves are tested apart in the groups above; this is the only thing that
+-- asserts they are combined with @||@. Flipping that to @&&@ breaks sync with
+-- every peer on an older build AND the unsolicited policy broadcast, and until
+-- this group existed the suite stayed green through it.
+mailboxStatusFreshTests :: TestTree
+mailboxStatusFreshTests = testGroup "mailbox status freshness rule"
+  [ testCase "our own nonce is enough, whatever the clock says" $ do
+      assertBool "matching nonce, absurd clock"  (statusIsFresh True 1000 999999999)
+      assertBool "matching nonce, equal clock"   (statusIsFresh True 1000 1000)
+      assertBool "matching nonce, clock at zero" (statusIsFresh True 1000 0)
+
+  , testCase "without a nonce of ours the old clock window still admits a status" $ do
+      -- The transitional half. It is what an un-upgraded responder and the
+      -- unsolicited policy broadcast both land on.
+      assertBool "one second apart"    (statusIsFresh False 1000 1001)
+      assertBool "nine seconds apart"  (statusIsFresh False 1000 1009)
+      assertBool "nine the other way"  (statusIsFresh False 1009 1000)
+
+  , testCase "without a nonce and outside the window, a status is refused" $ do
+      assertBool "ten seconds apart is out" (not (statusIsFresh False 1000 1010))
+      assertBool "the other direction too"  (not (statusIsFresh False 1010 1000))
+      assertBool "a random-looking value is out"
+        (not (statusIsFresh False 1000 17324509382145098234))
+
+  , testCase "the window is the one the rule says it is" $
+      statusFreshWindow @?= 10
+  ]
+
+-- | The nonce store, which is what freshness now means.
+--
+-- Written over 'String' keys rather than a 'MailboxRefKey': the store is
+-- polymorphic in the key precisely so that the decision can be asked questions
+-- without standing up a peer, a mailbox or a signing key.
+mailboxStatusNonceTests :: TestTree
+mailboxStatusNonceTests = testGroup "mailbox status nonce"
+  [ testCase "a nonce we issued for this mailbox is fresh" $ do
+      let m = insertCheckNonce 1000 "boxA" 7777 HM.empty
+      assertBool "our own nonce comes back" (lookupCheckNonce 1000 "boxA" 7777 m)
+
+  , testCase "a nonce we never issued is not fresh" $ do
+      let m = insertCheckNonce 1000 "boxA" 7777 HM.empty
+      assertBool "an invented nonce is refused"
+        (not (lookupCheckNonce 1000 "boxA" 7778 m))
+      assertBool "an empty store accepts nothing"
+        (not (lookupCheckNonce 1000 "boxA" 7777 HM.empty))
+
+  , testCase "a nonce is bound to the mailbox it was issued for" $ do
+      -- THE POINT OF KEYING BY MAILBOX. CheckMailbox goes out by gossip, so
+      -- every connected peer sees the nonce; without this a peer could take the
+      -- nonce it was shown for one mailbox and answer with a status for another.
+      let m = insertCheckNonce 1000 "boxA" 7777 HM.empty
+      assertBool "the same nonce for another mailbox is refused"
+        (not (lookupCheckNonce 1000 "boxB" 7777 m))
+
+  , testCase "a nonce is not consumed by the peer that answers first" $ do
+      -- A CheckMailbox is gossiped and every peer holding the mailbox may
+      -- answer. Taking the first answer and refusing the rest would throw away
+      -- the reason to ask more than one.
+      let m = insertCheckNonce 1000 "boxA" 7777 HM.empty
+      assertBool "first answer"  (lookupCheckNonce 1001 "boxA" 7777 m)
+      assertBool "second answer" (lookupCheckNonce 1002 "boxA" 7777 m)
+      assertBool "third answer"  (lookupCheckNonce 1003 "boxA" 7777 m)
+
+  , testCase "a nonce expires, and the boundary is where the TTL says" $ do
+      let m = insertCheckNonce 1000 "boxA" 7777 HM.empty
+      assertBool "one second later"
+        (lookupCheckNonce 1001 "boxA" 7777 m)
+      assertBool "a second short of the TTL"
+        (lookupCheckNonce (1000 + checkNonceTTL - 1) "boxA" 7777 m)
+      assertBool "exactly the TTL is already too old"
+        (not (lookupCheckNonce (1000 + checkNonceTTL) "boxA" 7777 m))
+      assertBool "well past the TTL"
+        (not (lookupCheckNonce (1000 + 2 * checkNonceTTL) "boxA" 7777 m))
+
+  , testCase "a clock that jumps backwards expires nonces rather than freezing them" $ do
+      -- Distance, not difference, for the reason clockSkew exists: an entry
+      -- stamped in what is now the future must age out like any other instead of
+      -- staying valid until the clock catches up.
+      let m = insertCheckNonce 100000 "boxA" 7777 HM.empty
+      assertBool "issued far in the future is not fresh now"
+        (not (lookupCheckNonce 1000 "boxA" 7777 m))
+      assertBool "and nothing wraps at the bottom of the range"
+        (not (lookupCheckNonce 0 "boxA" 7777 m))
+
+  , testCase "inserting prunes what has expired" $ do
+      -- What keeps the map bounded without a sweeper.
+      let m0 = insertCheckNonce 1000 "boxA" 1 HM.empty
+          m1 = insertCheckNonce 1001 "boxB" 2 m0
+          m2 = insertCheckNonce (1000 + checkNonceTTL + 1) "boxC" 3 m1
+      HM.size m0 @?= 1
+      HM.size m1 @?= 2
+      HM.size m2 @?= 1
+      assertBool "the survivor is the one just added"
+        (HM.member ("boxC", 3) m2)
+
+  , testCase "pruning keeps what is still live" $ do
+      let m0 = insertCheckNonce 1000 "boxA" 1 HM.empty
+          m1 = insertCheckNonce 1000 "boxB" 2 m0
+      HM.size (pruneCheckNonces 1001 m1) @?= 2
+      HM.size (pruneCheckNonces (1000 + checkNonceTTL) m1) @?= 0
+
+  , testCase "pruning drops an entry stamped in the future" $ do
+      -- The lookup side of a backwards clock jump is covered above; this is the
+      -- prune side, and prune is what bounds the map. An entry that prune keeps
+      -- forever is a leak, not just a stale accept.
+      let m = HM.singleton ("boxA" :: String, 7777 :: Word64) 100000
+      HM.size (pruneCheckNonces 1000 m) @?= 0
+      HM.size (pruneCheckNonces 100000 m) @?= 1
+  ]
+
+mailboxStatusClockTests :: TestTree
+mailboxStatusClockTests = testGroup "mailbox status freshness"
   [ testCase "a responder whose clock is ahead is still fresh" $ do
       -- THE REGRESSION. Before the fix this was 18446744073709551615 and the
       -- status was discarded; a peer one second ahead of us is the ordinary

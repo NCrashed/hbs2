@@ -248,6 +248,106 @@
     reappearing in the queue. Both call sites go through `enqueueMerge`
     now.
 
+  - **`hbs2-peer`: a mailbox status was judged by a clock, and any peer
+    that finished a handshake could ask for one.** `CheckMailbox` has
+    carried a nonce field since it was written; the responder threw it
+    away and stamped the reply with ITS OWN clock, and the requester
+    compared that against its own inside a ten-second window. That is not
+    evidence the status answers anything: it says somebody's clock is
+    near ours, so a status captured from an earlier exchange replays for
+    as long as the window lasts. The responder now echoes the
+    requester's nonce, which turns the same two fields into a
+    challenge-response WITH NO CHANGE TO THE WIRE FORMAT. Nonces come
+    from libsodium's `randombytes_buf` rather than from a clock or from
+    `System.Random` -- splitmix's `mix64` is invertible, and two observed
+    outputs give the whole sequence -- are bound to the mailbox they were
+    issued about, live 60 seconds, and are not consumed by whoever
+    answers first, since a gossiped request is meant to be answered by
+    several peers. The TTL is short because a nonce we still accept is a
+    window in which a genuine status captured off the wire replays, and
+    the rule it replaces allowed ten seconds.
+
+    Be clear about what the echo does and does not buy. A `CheckMailbox`
+    is gossiped, so every connected peer is handed the nonce and any of
+    them can echo it. The rule answers "is this a reply to something I
+    asked recently", not "was this peer entitled to reply" -- that is
+    what policy is for, below. Binding to the mailbox stops a nonce shown
+    for one mailbox being spent on a status for another.
+
+    The old clock window is kept as an accept-either fallback, and while
+    it is there the gain is correctness rather than strength: anybody can
+    put a plausible timestamp in a reply. Two things need it. A responder
+    that has not upgraded does not echo at all; and `mailboxSetPolicy`
+    gossips an unsolicited `MailboxStatus`, so that a new policy
+    propagates without waiting for the next poll, which has no nonce at
+    any version -- and that broadcast is not only the owner's, since
+    `policyDownloadQ` reaches it on every peer that finishes downloading
+    a policy. Dropping the fallback is a separate change with that
+    broadcast as its precondition. The rule is now one function,
+    `statusIsFresh`, because both halves together were asserted nowhere,
+    which is the state the previous rule lived in for years with broken
+    arithmetic.
+
+    Answering is now gated on `policyAcceptPeer`, and so is ACCEPTING
+    somebody else's status. The first is what the module's own `NOTE:
+    CheckMailbox-auth` describes in its closing lines and needs no new
+    message, since a peer is already authorized and known to the
+    protocol. The second is what `NOTE: possible-poisoning-attack` asked
+    for in as many words -- restrict in policy which peers may serve
+    status, ignore the rest -- and no nonce could substitute for it, for
+    the reason above. Before this, a mailbox key was enough for any
+    handshaked peer to read that mailbox's merkle root, the sync
+    fingerprint, and watch it move as letters arrived; and any handshaked
+    peer could announce a root of its choosing and have it downloaded.
+    What the gate does NOT hide is that we hold the mailbox at all:
+    `mailboxCheckQ` broadcasts a `CheckMailbox` for every mailbox we host
+    to every known peer every ten minutes, denied peers included.
+
+    Applying the policy naively would have been a regression and not a
+    fix: `mailboxGetPolicy` substitutes `defaultBasicPolicy`, which is
+    deny/deny, so every mailbox that has never had a policy written would
+    have stopped syncing, which is the trap the message-accept path
+    already hit. A new `mailboxGetPolicyMay` answers "did the owner ever
+    write one", and a mailbox with no policy answers everybody, as
+    before. Presence is the row in the `policy` table, not whether its
+    content can be read, so a policy whose block is lost or whose clauses
+    this build cannot parse yields deny/deny: the owner said something we
+    did not catch, which is not the owner saying nothing. A policy tree
+    that is still DOWNLOADING is not that case and answers everybody --
+    the row is written by `mailboxSetPolicy`, which `policyDownloadQ`
+    reaches only once the tree is complete.
+
+    **Upgrade note.** `parseBasicPolicy` defaults the peer action to
+    deny, so a deployed policy that says nothing about peers -- `(sender
+    allow all)` with no `(peer allow all)`, which is how the shorter
+    recipes in PEP-21 are written -- denies every peer. Until now that
+    cost such a mailbox only inbound messages, which `mailboxInQ` was
+    already dropping under the same default; now it also stops the
+    mailbox syncing. `mailboxSetPolicy` warns when it stores a policy
+    that admits no peer at all. PEP-18's full recipe includes the clause.
+
+    Mailbox metadata is still not encrypted, and the position of record
+    is now written beside that `NOTE` rather than left as an open
+    question: status is public in principle because the message bodies
+    are encrypted, and an owner who wants otherwise writes a policy.
+
+    Cost, since the gate reads a policy on a path a remote peer can
+    drive: the check runs AFTER the cheap "do we host this" lookup, so a
+    `CheckMailbox` naming a mailbox we do not hold costs what it always
+    did, and `mailboxGetPolicyMay` reads the row once instead of twice,
+    which also halves the policy queries on the message-ingest path.
+    Caching the parsed policy per (mailbox, policy hash) would remove the
+    rest and is marked in-tree, not done here.
+
+    The nonce store lives in `HBS2.Peer.Proto.Mailbox.Nonce`; the store
+    itself is a `TVar`, and both decisions over it are pure functions, so
+    `hbs2-peer`'s `mailbox status` groups can ask them questions: binding
+    to the mailbox, the TTL boundary, a clock jumping backwards, pruning,
+    that the first answer does not consume the nonce, that a nonce is
+    drawn rather than read off the clock, and that the accept-either rule
+    is a disjunction. The decisions this took, and what was deliberately
+    not done, are in `docs/drafts/checkmailbox-auth-context.md`.
+
   - `cabal test` in CI covers `hbs2-peer` as well as `hbs2-hub`, since
     the above is only a regression test if something runs it.
 
