@@ -63,7 +63,8 @@ Its reach and limits, as the code stands:
     new policy clauses this PEP proposes (`pow`, `rate`, `quota`) are
     backward-compatible: an old peer ignores them and simply enforces less.
     This applies only to the policy clauses; the PoW witness itself is a
-    wire-format change (see Proof-of-work).
+    wire-format change of a much harder kind, and an old peer does not
+    ignore it but drops the whole message (see Proof-of-work).
   - A message is gossiped before the policy drop decision (a known
     `maybe-dont-gossip-message-if-dropped-by-policy` gap). So policy bounds
     what a peer stores, not what transits the gossip network; storage is the
@@ -80,32 +81,114 @@ proof-of-work, checkable on the envelope before accept. It is not implemented
 today (only a code comment and the design paper anticipate it), so this pins
 the shape.
 
-  - Witness placement. The PoW nonce is a dedicated unsigned field in the
-    `SendMessage` wire message, beside `messageContent`, not inside
-    `MessageFlags`. `MessageFlags` lives inside `MessageContent`, which is
-    signed and whose serialization defines `messageHash`; a nonce there would
-    be self-referential (every grind attempt would change `MessageContent`,
-    force an ed25519 re-sign, and shift the very `messageHash` the work binds
-    to). A field outside the signature is solved after signing, over the final
-    `messageHash`, and needs no authenticity of its own: it is
-    self-verifying. The witness is checked only at accept and is not stored in
-    the mailbox tree (it gates submission over gossip, not tree replication
-    between a mailbox's own hosts). Note this is a wire-format change, not a
-    policy-only one: a new field on `SendMessage` an old peer cannot parse, so
-    it needs a new message constructor or a protocol-version bump (unlike the
-    policy clauses below, which old peers safely ignore). Until peers upgrade,
-    a mixed network simply has some peers that do not enforce PoW.
-  - Binding. The work targets `H(mailboxKey || messageHash || nonce)` having
-    at least D leading zero bits, where `messageHash` is the hash the peer
-    already computes for dedup. Binding to `mailboxKey` prevents reusing one
-    solution across mailboxes; binding to `messageHash` ties it to this exact
+What the wire allows. Three facts about the mailbox protocol decide every
+choice below, and all three are read off the code rather than assumed:
+
+  - `MailBoxProto` is a derived generic `Serialise` sum
+    (`Peer/Proto.hs:160`, protocol id 13001), so constructors are tagged by
+    position and records are encoded by arity. Appending a constructor leaves
+    every existing encoding untouched. Adding a field to an existing record
+    changes that record's arity, and an old peer then fails to decode every
+    message carrying that record, not only the new ones. For `MessageFlags`,
+    `MessageContent` or `Message` that means all mailbox traffic, so no
+    variant of this PEP adds a field to any of them.
+  - Relaying re-encodes. `gossip mess` is `request pip msg`
+    (`app/PeerTypes.hs:380`), and `request` sends `AnyMessage proto (encode
+    msg)` (`Actors/Peer.hs:289`): the value that was decoded is serialised
+    again. Nothing a relaying peer cannot parse survives a hop. In particular
+    the trailing-bytes tolerance of `deserialiseOrFail`, which the peer's own
+    test suite records (`test/TestSuite.hs:91`), buys nothing here: an
+    appendix reaches the first peer and dies there.
+  - A failed decode is silent. `maybe (pure ()) ... (decoder msg)`
+    (`Actors/Peer.hs:518`) drops the message with no log, no counter and no
+    reply to the sender.
+
+Together these say there is no ignore-and-forward path in this protocol. A
+witness that must reach the hosting peer is a fork of the relay path, and the
+only choice left is how wide the break is.
+
+  - Witness placement. A new constructor, appended last to
+    `MailBoxProtoMessage`:
+
+    ```haskell
+    SendMessageStamped (Message s) MessageStamp
+    ```
+
+    Appended last because tags are positional; inserting it anywhere else
+    renumbers `DeleteMessages` and breaks deployed peers on messages that
+    have nothing to do with PoW.
+
+    Outside `Message`, not inside it, and this is what fixes the identity the
+    work binds to. The peer stores `putBlock sto (serialise m)` with
+    `m :: Message s` (`MailboxProtoWorker.hs:925`), so keeping the witness
+    out of `Message` keeps the stored blob and its hash identical whether the
+    message arrived stamped or plain. The witness is checked at accept and is
+    not stored in the tree: it gates submission over gossip, not tree
+    replication between a mailbox's own hosts.
+
+    The stamp carries the nonce, the difficulty it claims, and the mailbox
+    key it was solved for. The key has to be in there: a message names
+    several recipients, the work is bound to one of them, and a verifier
+    cannot tell which without being told. It also lets the pre-gossip check
+    below run on a peer that does not host the mailbox and has no policy for
+    it. The stamp is unsigned and needs no authenticity, because it is
+    self-verifying against the message it names, and a stamp naming a key
+    that is not among `messageRecipients` is simply not a stamp for this
     message.
+  - Binding. The work targets
+
+    ```
+    H(mailboxKey || hashObject (serialise (msg :: Message s)) || nonce)
+    ```
+
+    having at least D leading zero bits. Binding to `mailboxKey` prevents
+    reusing one solution across mailboxes. Binding to the hash of `Message`
+    ties it to this exact message, and to precisely the bytes that will
+    occupy disk if it is accepted, so the work is paid for the thing that
+    costs storage.
+
+    NOT the hash the peer computes for dedup. That one is
+    `hashObject (serialise mess)` over the whole `MailBoxProto` value
+    (`Proto/Mailbox.hs:218`), which now contains the stamp, so binding to it
+    would be circular: every grind attempt would change the hash the work
+    binds to. The `Message` hash is fixed before the grind starts, which is
+    also what keeps the grind hash-only: the message is signed once, before
+    solving, and the solver never touches ed25519.
+  - Dedup of a restamp. The `RoutedEntry` marker for a stamped message is
+    computed over `serialise msg`, not over `serialise mess`, so re-sending
+    one message under a fresh nonce is recognized as the same message.
+    Without that rule a spammer buys a second flood for each fresh solution;
+    with it, a restamp is `seen` and goes nowhere. Storage dedup already
+    collapses the duplicate either way; this is about gossip amplification.
+    That marker and the binding above are the same hash, which is not a
+    coincidence: one identity names the message for the work, for the dedup
+    and for the block it becomes.
+  - Where it is checked, which is two places, because the flood and the disk
+    are different surfaces. The protocol handler gossips before any policy is
+    consulted (`Proto/Mailbox.hs:255`, with `policyAcceptMessage` running
+    later in the queue drain at `MailboxProtoWorker.hs:915`), and at gossip
+    time the handler does not yet know which mailbox the message is for, so
+    it cannot read `(pow D)`. Hence:
+
+      - a peer-global minimum difficulty, declared in the peer's own config,
+        checked in the `SendMessageStamped` branch before `gossip`. It bounds
+        what this peer will amplify. Zero by default, so a peer that has not
+        been told otherwise behaves as today.
+      - the per-mailbox `(pow D)` from the signed policy, checked in
+        `policyAcceptMessage`. It bounds what this peer stores.
+
+    `policyAcceptMessage` currently takes the policy, the sender key and
+    `MessageContent`, so it cannot see the stamp. It gains a parameter
+    carrying it. That is an internal change in five places (the class in
+    `Proto/Mailbox/Policy.hs:24`, the `AnyPolicy` forwarder just below, the
+    `BasicPolicy` instance, the `pure True` stub in `MailboxProtoWorker.hs`,
+    and the one call site) and touches no wire format.
   - What it bounds. Each distinct message costs fresh work, so PoW bounds the
-    rate of distinct messages a spammer can create. It does not stop
-    re-sending one solved message, but that is a replay, and the peer's dedup
-    (a `hasBlock` on the `RoutedEntry` hash) skips both gossip and accept for
-    an already-seen message, so a replay adds nothing to storage and does not
-    even re-amplify over gossip. PoW plus dedup together bound growth.
+    rate of distinct messages a spammer can create. Replay of one solved
+    message is bounded by dedup, not by work: `hasBlock` on the `RoutedEntry`
+    hash skips both gossip and accept for a message already seen, so a replay
+    adds nothing to storage and does not re-amplify. PoW plus dedup together
+    bound growth.
   - Difficulty in policy. D is declared in the signed policy (`(pow D)`),
     versioned like the rest, so the owner tunes it. There is no per-tier PoW
     clause: a tier is already its own mailbox with its own policy (Trust
@@ -119,9 +202,51 @@ the shape.
     timestamp inside the window is not stopped. The real bound is the work per
     message, not the window.
 
-Must be built: the dedicated PoW witness field on `SendMessage`, a
-`policyAcceptMessage` that verifies it against the policy's D, and the `hub`
-client-side solver.
+The PoW deployment cost, accepted deliberately
+============================================
+
+A stamped letter travels only over a path of upgraded peers. An old peer that
+receives `SendMessageStamped` cannot decode it, and by the third fact above
+it does nothing at all: no gossip, no store, no reply. It is a black hole, not
+a peer that merely enforces less.
+
+This is accepted rather than worked around. The alternatives were weighed and
+none of them are better:
+
+  - A trailing unsigned witness after the encoded value would be ignored by
+    old peers, which sounds like exactly what is wanted, but relaying
+    re-encodes, so it survives one hop and reaches no hub that is not the
+    sender's direct neighbour.
+  - A field on `MessageFlags`, `MessageContent` or `Message` breaks decoding
+    of all mailbox traffic for old peers, which is strictly worse than
+    breaking only the stamped part of it.
+  - Reusing the reserved `messageSchema :: Maybe HashRef` slot inside the
+    flags is the one shape that changes no wire format at all: old peers
+    relay it untouched, and the work can bind the content hash so the grind
+    stays hash-only. It was rejected because it spends a reserved extension
+    point on a nonce, puts the witness in the tree forever, and makes the
+    stamp part of what the author signs. If the deployment gap turns out to
+    hurt more than expected, this is the fallback to reconsider, and it is
+    recorded here for that reason rather than as a live option.
+
+What the gap actually costs is small, because PoW is not for everyone. The
+known-contributor tier carries no `(pow D)` and keeps using plain
+`SendMessage`, so contributor traffic is unaffected. The open tier is where
+strangers submit, and a stranger whose submission does not arrive is the
+failure mode PoW exists to produce, only for the wrong reason. The mitigation
+is on the client: `hub` reads the target mailbox's policy before composing,
+so it knows whether the mailbox wants a stamp, and it can say so instead of
+sending into silence.
+
+There is no rejection signal at all, which is the one genuinely unpleasant
+part: a stamp that is too weak, a stamp that is stale, and an old peer
+somewhere in the path are indistinguishable to the sender. All three look
+like nothing happening.
+
+Must be built: the `SendMessageStamped` constructor and the `MessageStamp`
+type, the peer-global floor check before `gossip`, the `policyAcceptMessage`
+signature change and its check against `(pow D)`, the `RoutedEntry` rule for
+restamps, and the `hub` client-side solver.
 
 
 Rate limiting and quotas
@@ -467,7 +592,9 @@ Exists today:
 
 Must be built:
 
-  - Peer layer: the envelope PoW field and its `policyAcceptMessage` check,
+  - Peer layer: the `SendMessageStamped` constructor and `MessageStamp`, the
+    peer-global difficulty floor checked before `gossip`, the
+    `policyAcceptMessage` signature change and its check against `(pow D)`,
     rate/quota state and checks, the `(pow|rate|quota ...)` policy clauses,
     and gossip-after-policy (closing the gossip-before-policy gap) scoped
     correctly: policy gates storage and gossip only for mailboxes the peer
@@ -505,14 +632,28 @@ PoW everywhere. Charging PoW on every inbox, including known contributors,
 adds friction for good actors. Rejected in favour of trust tiers: PoW on the
 open inbox, allow-list (no PoW) on the known-contributor inbox.
 
+A PoW witness that old peers keep relaying. Two shapes would have avoided the
+deployment gap: a witness trailing the encoded value, and a nonce in the
+reserved `messageSchema` slot inside the signed flags. The first does not
+work at all, because relaying re-encodes and the appendix dies at the first
+hop. The second does work, and was still rejected: it spends a reserved
+extension point, writes the witness into the tree forever, and folds the
+stamp into what the author signs. Rejected in favour of a new constructor and
+an honest break, with the reasoning kept in Proof-of-work so it can be
+revisited if the gap hurts.
+
 
 Open questions
 ============
 
-- Exact PoW function and difficulty encoding (leading-zero-bits vs a target),
-  and whether difficulty adapts automatically or only by policy version.
+- Which hash the PoW target uses (the peer's `HbSync` hash or a function
+  chosen for grinding), and whether difficulty adapts automatically or only
+  by policy version. The difficulty encoding is settled: D leading zero bits.
 - Where the freshness window for PoW is enforced and how much clock skew to
   tolerate.
+- Whether a sender should get any signal for a refused submission. Today a
+  weak stamp, a stale stamp and an old peer in the path are all silence, and
+  the client can only guess by reading the mailbox policy beforehand.
 - Whether the triage inner-author deny-list should be public canon (auditable,
   but names the banned) or private hub state.
 - Rate/quota state durability across peer restarts, and whether it is
