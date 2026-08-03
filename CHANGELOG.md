@@ -693,6 +693,28 @@
 
     That completes PEP-20's delta path: propose, verify, stage, merge.
 
+  - **`hbs2-hub`: `hub maintainer add|remove|list`.** The verbs over
+    PEP-21 delegation, which the fold and the bridge already decided:
+    who may bless a canon event is a function of the log, and adding or
+    withdrawing a key is an ordinary owner-signed event.
+
+    Only the repository's own key may write one, so there is no `--as`.
+    PEP-19 rule 5 requires both signatures on a delegation to be the
+    owner's exactly, because a delegate that could delegate could grow
+    the maintainer set; offering a flag that can only be wrong would
+    mint an event the fold then drops with the seq already spent.
+
+    The help says the thing a person adding a maintainer will assume
+    otherwise: signing is not publishing. A delegate may sign events
+    every clone will admit and cannot push `refs/hbs2/meta` to put them
+    there, which needs the reflog key. How their events reach canon is a
+    deployment question, and PEP-21 answers it three ways.
+
+    `list` marks the owner, because the owner is in the set by
+    definition rather than by any event, and a reader comparing the list
+    against the log would otherwise find one entry with nothing behind
+    it.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

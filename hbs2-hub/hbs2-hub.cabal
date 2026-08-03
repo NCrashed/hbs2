@@ -119,6 +119,7 @@ library hub-ingress
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
+      HBS2.Hub.CLI.Maintainer
       HBS2.Hub.CLI.Pr
       HBS2.Hub.CLI.Read
       HBS2.Hub.CLI.Verify
@@ -191,6 +192,7 @@ test-suite spec
       HBS2.Hub.ManifestSpec
       HBS2.Hub.BridgeSpec
       HBS2.Hub.CanonSpec
+      HBS2.Hub.MaintainerSpec
       HBS2.Hub.PrSpec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
