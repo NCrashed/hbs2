@@ -47,7 +47,10 @@ full repo sender rcpt author =
   ]
 
 spec :: Spec
-spec = do
+spec = spec1 >> spec2
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-20 hub pr new: arguments" $ do
 
@@ -107,3 +110,46 @@ spec = do
     chunk2 (a:b:rest) = [a,b] : chunk2 rest
     chunk2 _ = []
     dropPair i xs = take i xs <> drop (i + 2) xs
+
+-- Recording a merge publishes a sentence about history, and canon is
+-- append-only. The arguments are what that sentence is made of.
+spec2 :: Spec
+spec2 =
+  describe "PEP-20 hub pr merge: arguments" $ do
+
+    it "reads a complete call and defaults the canon key to the repo" $ do
+      repo <- aKey
+      prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
+                        , "--commit", "abc", "--into", "refs/heads/master" ])
+        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" repo)
+
+    it "takes a delegate's key when one is named" $ do
+      repo <- aKey ; bob <- aKey
+      fmap pmAs (prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
+                                   , "--commit", "abc", "--into", "master"
+                                   , "--as", b58 bob ]))
+        `shouldBe` Just bob
+
+    it "refuses a call missing any of the four" $ do
+      repo <- aKey
+      let whole = [ "--repo", b58 repo, "--number", "7"
+                  , "--commit", "abc", "--into", "master" ]
+      sequence_ [ prMergeArgs (argv (take i whole <> drop (i + 2) whole))
+                    `shouldBe` Nothing
+                | i <- [0, 2 .. length whole - 2] ]
+
+    -- An issue number is a Word64 in canon. A negative literal would wrap into
+    -- one nobody minted, and the thread lookup would then answer "no such
+    -- number" about a number the caller never typed.
+    it "refuses a number that is not one" $ do
+      repo <- aKey
+      let with n = prMergeArgs (argv [ "--repo", b58 repo, "--number", n
+                                     , "--commit", "abc", "--into", "master" ])
+      with "-1" `shouldBe` Nothing
+      with "seven" `shouldBe` Nothing
+
+    it "refuses a repeated flag rather than resolving it" $ do
+      repo <- aKey
+      prMergeArgs (argv [ "--repo", b58 repo, "--number", "7", "--number", "8"
+                        , "--commit", "abc", "--into", "master" ])
+        `shouldBe` Nothing

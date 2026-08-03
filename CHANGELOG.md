@@ -674,6 +674,25 @@
     verify, and they mean it for different reasons, so the decision is
     its own exported function rather than a branch inside the verb.
 
+  - **`hbs2-hub`: `hub pr merge` records a merge, and refuses to record
+    one that did not happen.** It records rather than performs:
+    PEP-20 leaves the integration to whatever policy the repository uses
+    (merge, rebase, squash, fast-forward), so the maintainer does that
+    with git and then tells canon.
+
+    What it checks is the sentence it is about to publish. A merge event
+    says a proposal was integrated, and if the commit it names does not
+    contain the tip the contributor signed for, that is false in every
+    clone forever. git answers the question exactly, so it is asked
+    before anything is written and nothing is written when the answer is
+    no.
+
+    The merge event sets the status to merged by itself, which is what
+    PEP-19 specifies: no second `set` is written, because canon would
+    otherwise claim a merged pull request was open until it arrived.
+
+    That completes PEP-20's delta path: propose, verify, stage, merge.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

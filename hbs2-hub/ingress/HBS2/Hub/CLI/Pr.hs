@@ -24,12 +24,23 @@ module HBS2.Hub.CLI.Pr
   , prNewArgs
   , PrNew(..)
   , codeBundleFailed
+  , codeNoSuchPr
+  , codeNotMerged
+  , prMergeUsage
+  , prMergeArgs
+  , PrMerge(..)
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Bridge
+import HBS2.Hub.Fold
+import HBS2.Hub.Repo
+import HBS2.Hub.Repo.Git (withGitCanon)
+import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
+import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey)
 
@@ -48,6 +59,9 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.HashMap.Strict qualified as HM
+import Data.Maybe (fromMaybe)
+import Data.Word (Word64)
 import Data.Text qualified as Text
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Exit (die)
@@ -115,7 +129,97 @@ prEntries = do
           >> pure nil
         _ -> liftIO (die (show prNewUsage))
 
+  brief "record that a pull request was merged"
+    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+           , arg "string" "--commit sha", arg "string" "--into ref" ]
+    $ desc ( "RECORDS a merge; it does not perform one. PEP-20 leaves the"
+             <> line <> "integration to whatever policy the repository uses --"
+             <> line <> "merge, rebase, squash, fast-forward -- so do that with"
+             <> line <> "git, push the branch, and then tell canon what happened."
+             <> line
+             <> line <> "What it checks is the claim it is about to publish: that"
+             <> line <> "--commit really contains the tip the contributor signed"
+             <> line <> "for. Canon is append-only, so a merge event naming a"
+             <> line <> "commit that does not carry the proposal would be a false"
+             <> line <> "statement in every clone forever."
+             <> line
+             <> line <> "The merge event sets the status to merged by itself"
+             <> line <> "(PEP-19). No second 'set' is written and none should be:"
+             <> line <> "canon would claim a merged pull request was open until it"
+             <> line <> "arrived." )
+    $ entry $ bindMatch "hub:pr:merge" $ nil_ \case
+        (prMergeArgs -> Just pm) -> lift (prMerge pm)
+        _ -> liftIO (die (show prMergeUsage))
+
   where
+
+    prMerge pm = do
+      creds <- runKeymanClientRO (loadCredentials (pmAs pm))
+                 >>= maybe (liftIO (refuse (show ("no signing key here for"
+                                                   <+> pretty (AsBase58 (pmAs pm))))
+                                           codeNoKey))
+                           pure
+
+      (parent, fr) <- withGitCanon (\cs -> readCanon cs (pmRepo pm)) >>= \case
+        Right st -> pure (Just (stCommit st), stFold st)
+        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+
+      -- The thread by its number, which is what a person has in front of them.
+      -- Canon is the only place that maps one to the other, and it is the map
+      -- the fold rebuilt rather than the convenience index in the tree.
+      t <- case [ x | x <- HM.elems (frThreads fr), tsNumber x == Just (pmNumber pm) ] of
+             (x:_) -> pure x
+             []    -> liftIO $ refuse (show ("canon holds no thread numbered"
+                                               <+> pretty (pmNumber pm)))
+                                      codeNoSuchPr
+
+      pr <- case (tsKind t, tsPR t) of
+              (HubPR, Just pr) -> pure pr
+              _ -> liftIO $ refuse (show ("#" <> pretty (pmNumber pm)
+                                            <+> "is not a pull request"))
+                                   codeNoSuchPr
+
+      -- THE CHECK THIS VERB EXISTS FOR. A merge event says a proposal was
+      -- integrated; if the commit it names does not contain the tip the
+      -- contributor signed for, that sentence is false, and canon is
+      -- append-only. git answers it exactly.
+      let tip = prSourceTip (psCoords pr)
+      anc <- isAncestor Nothing tip (pmCommit pm)
+               >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
+      unless anc $
+        liftIO $ refuse (show ( "the commit named does not contain the proposed tip"
+                                  <> line <> "  proposed" <+> pretty tip
+                                  <> line <> "  merge   " <+> pretty (pmCommit pm)
+                                  <> line <> "  nothing was written" ))
+                        codeNotMerged
+
+      now <- liftIO getPOSIXTime <&> floor . (* 1000)
+
+      let ctx = TriageCtx (pmAs pm, _peerSignSk creds) (const True) (pmRepo pm)
+          content = AMerge (tsId t) (pmCommit pm) (pmInto pm) now
+
+      acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e)) codeNotMerged))
+                    pure
+               (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
+
+      plan <- either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
+                (planCanon [(eventPath acc, acEvent acc)] (numberIndexOf fr))
+
+      commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan)
+                                                   ("hub: merged #" <> tshow (pmNumber pm))
+                                                   now))
+                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
+
+      liftIO $ print $ vcat
+        [ "merged #" <> pretty (pmNumber pm) <+> "into" <+> pretty (pmInto pm)
+        , "event" <+> pretty (eventId (acEvent acc))
+        , "commit" <+> pretty commit
+        , "status is now merged; PEP-19 has the merge event set it, so no"
+            <+> "second event was written"
+        ]
+
+    tshow :: Word64 -> Text
+    tshow = fromString . show
 
     prNew pn = do
 
@@ -209,3 +313,50 @@ prNewArgs syn = do
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
     asText = \case { StringLike s -> Just (Text.pack s) ; _ -> Nothing }
+
+-- | What @hub pr merge@ was asked to record.
+data PrMerge = PrMerge
+  { pmRepo   :: RepoRef
+  , pmNumber :: Word64
+  , pmCommit :: Text        -- ^ the merge commit, in this repository
+  , pmInto   :: Text        -- ^ the branch it landed on
+  , pmAs     :: HubKey      -- ^ the canon key; defaults to the repo key
+  }
+  deriving stock (Eq,Show)
+
+prMergeUsage :: Doc ()
+prMergeUsage =
+  "usage: hbs2-hub pr merge --repo <key> --number <n> --commit <sha> --into <ref> [--as <key>]"
+
+-- | Canon holds no such pull request, or the number names something else.
+codeNoSuchPr :: Int
+codeNoSuchPr = 29
+
+-- | The merge was not recorded, and canon is unchanged.
+--
+-- One code for every way of stopping, because they all mean the same thing to
+-- whoever runs this: nothing was published and the repository is as it was.
+codeNotMerged :: Int
+codeNotMerged = 30
+
+prMergeArgs :: forall c . [Syntax c] -> Maybe PrMerge
+prMergeArgs syn = do
+  repo <- flagged "--repo" asKey
+  n    <- flagged "--number" asNum
+  sha  <- flagged "--commit" asText
+  into <- flagged "--into" asText
+  pure (PrMerge repo n sha into (fromMaybe repo (flagged "--as" asKey)))
+  where
+    flagged :: forall v . String -> (Syntax c -> Maybe v) -> Maybe v
+    flagged k f = case [ v | (StringLike k', f -> Just v) <- zip syn (drop 1 syn)
+                           , k' == k ] of
+                    [v] -> Just v
+                    _   -> Nothing
+
+    asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    asText = \case { StringLike s -> Just (Text.pack s) ; _ -> Nothing }
+    -- A number, and a non-negative one. An issue number is a Word64 in canon,
+    -- and a negative literal would wrap into one nobody minted.
+    asNum  = \case
+      LitIntVal i | i >= 0 -> Just (fromIntegral i :: Word64)
+      _ -> Nothing
