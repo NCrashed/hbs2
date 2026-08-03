@@ -14,6 +14,8 @@ module HBS2.Hub.CLI.Compose
   ( composeEntries
   , Outbound(..)
   , sendLetter
+  , sendLetterWith
+  , attachToLetter
   , issueUsage
   , issueArgs
   , codeNoKey
@@ -39,6 +41,7 @@ import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEntry)
 
+import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
 import Data.List qualified as List
 import Data.Text qualified as Text
@@ -73,19 +76,42 @@ sendLetter
   -> SignedBox AuthorContent HubScheme  -- ^ the inner box, already signed by the author
   -> ReplyChannel
   -> m HashRef
-sendLetter ob sender rcpts box reply = do
-  let cms = CreateMessageServices
-              (obStorage ob)
-              (runKeymanClientRO . loadCredentials)
-              (runKeymanClientRO . loadKeyRingEntry)
+sendLetter ob sender rcpts = sendLetterWith ob sender rcpts []
 
+-- | Store a letter's attachments, and say what they are called.
+--
+-- The first half of sending a letter that references its own attachment, and
+-- it has to be a separate call for the reason the peer's 'createAttachments'
+-- does: a part is named by the hash of its encrypted tree, PEP-18 puts that
+-- hash inside the signed inner box (@body-part@, @bundle-part@), so the tree
+-- exists before the box that names it is signed.
+--
+-- The answer is in the order the parts were given.
+attachToLetter
+  :: MonadUnliftIO m
+  => Outbound
+  -> HashRef                  -- ^ sender sigil
+  -> [HashRef]                -- ^ recipient sigils
+  -> [([(Text, Text)], m LBS.ByteString)]
+  -> m [HashRef]
+attachToLetter ob sender rcpts parts =
+  createAttachments (services ob) (Left sender) (fmap Left rcpts) parts
+
+-- | Seal a letter around parts that already exist, and hand it to the peer.
+sendLetterWith
+  :: MonadUnliftIO m
+  => Outbound
+  -> HashRef
+  -> [HashRef]
+  -> [HashRef]                -- ^ parts, from 'attachToLetter'
+  -> SignedBox AuthorContent HubScheme
+  -> ReplyChannel
+  -> m HashRef
+sendLetterWith ob sender rcpts parts box reply = do
   flags <- defMessageFlags
 
-  -- No attachments here: an inline body is what this verb sends, and a
-  -- body-part is a separate decision with its own size rule (PEP-18). Passing
-  -- 'mempty' rather than an empty list of readers keeps the parts secret from
-  -- being generated for nothing.
-  msg <- createMessage cms flags Nothing (Left sender) (fmap Left rcpts) mempty
+  msg <- createMessageWith (services ob) flags Nothing (Left sender) (fmap Left rcpts)
+           parts
            (letterPayload (MessageData hubMsgVersion (Letter box reply)))
 
   -- Stored before it is sent, and this is not belt-and-braces. The peer takes a
@@ -125,6 +151,15 @@ sendLetter ob sender rcpts box reply = do
                pure
 
   pure (HashRef h)
+
+-- Where the message builder gets its keys. One definition, because the two
+-- halves of sending must resolve the same credentials: the parts key and the
+-- message key are wrapped for one set of recipients.
+services :: Outbound -> CreateMessageServices HubScheme
+services ob = CreateMessageServices
+  (obStorage ob)
+  (runKeymanClientRO . loadCredentials)
+  (runKeymanClientRO . loadKeyRingEntry)
 
 -- | The peer answered and would not take the message.
 --

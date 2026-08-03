@@ -64,7 +64,7 @@ ok :: Show e => Either e a -> IO a
 ok = either (fail . show) pure
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
@@ -238,3 +238,20 @@ spec2 =
         -- signed one tip and shipped the objects for another.
         r <- acceptBundle (Just theirs) (bnBytes b) "feature" base
         r `shouldBe` Left (BundleTipMismatch base tip)
+
+-- The fork point, which is what a contributor's bundle is a range from. It is
+-- computed rather than asked for: too old and the bundle is the whole history,
+-- too new and the maintainer cannot apply it.
+spec3 :: Spec
+spec3 =
+  describe "PEP-20 delta path: the fork point" $ do
+
+    it "finds where the branch left the trunk" $ withWork $ \dir base _ -> do
+      got <- ok =<< mergeBase (Just dir) "master" "feature"
+      got `shouldBe` base
+
+    it "refuses a ref name it would not pass to git" $ withWork $ \dir _ _ -> do
+      r <- mergeBase (Just dir) "master" "--output=/tmp/pwned"
+      case r of
+        Left (BundleBadName what _) -> what `shouldBe` "ref name"
+        other -> expectationFailure ("expected a refusal, got " <> show other)

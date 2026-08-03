@@ -24,6 +24,7 @@ module HBS2.Hub.Repo.GitBundle
   ( bundleRange
   , acceptBundle
   , isAncestor
+  , mergeBase
   , stagePull
   , pullRef
   , Bundled(..)
@@ -202,6 +203,20 @@ acceptBundle cwd bytes ref signedTip = runExceptT do
 
     when (got /= signedTip) $ throwError (BundleTipMismatch signedTip got)
     pure got
+
+-- | Where two refs forked, which is the @base@ a PR is a delta against.
+--
+-- Computed rather than asked for, because a contributor who has to name it
+-- names it wrong: too old makes the bundle the whole history, too new makes a
+-- bundle the maintainer cannot apply. It is still overridable, since a
+-- contributor rebasing onto something the maintainer does not have yet knows
+-- something git does not.
+mergeBase :: MonadUnliftIO m
+          => Maybe FilePath -> Text -> Text -> m (Either BundleError Text)
+mergeBase cwd a b = runExceptT do
+  checked "ref name" validRefName a
+  checked "ref name" validRefName b
+  ExceptT $ oneLine cwd "merge-base" ["merge-base", Text.unpack a, Text.unpack b]
 
 -- | Is @a@ an ancestor of @b@?
 --

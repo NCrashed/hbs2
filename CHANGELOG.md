@@ -608,6 +608,32 @@
     the message key also opens the back-channel that a contributor's
     personal mailbox address rides in.
 
+  - **`hbs2-hub`: `hub pr new` proposes a change as a bundle.** The
+    contributor's end of PEP-20's delta path: build a git bundle of
+    `base..--from` in this repository, ship it as an encrypted
+    attachment, and sign coordinates that name it. The bundle's size is
+    the delta, so proposing a change to a large repository does not
+    transfer the repository.
+
+    The order is the whole difficulty, and it is why `sendLetter` split
+    the way `createMessage` did: a part is named by the hash of its
+    encrypted tree and PEP-18 puts that hash inside the signed box, so
+    the bundle exists before the box that names it. `attachToLetter`
+    stores the parts, `sendLetterWith` seals a letter around parts that
+    already exist, and `sendLetter` is the no-attachment case.
+
+    `--base` defaults to the merge-base of `--onto` and `--from`, which
+    is what a contributor almost always means; naming it is for the case
+    where git's answer is wrong, such as a rebase onto something the
+    maintainer does not have. The tip comes from the bundle rather than
+    from a second lookup: it is the tip of the ref the bundle recorded,
+    which is what the maintainer's fetch will produce, and asking git
+    again would answer a different question.
+
+    Not done yet, and needed before a maintainer can act on one of
+    these: the read side has to fetch and decrypt the attachment, and
+    triage has to run the verification and stage the tip.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its
