@@ -715,6 +715,50 @@
     against the log would otherwise find one entry with nothing behind
     it.
 
+  - **`hbs2-hub`: `hub inbox reject`, and the rule it is the first to
+    obey.** A letter can be dropped from the triage queue without being
+    folded. It writes a tombstone, which is what "delete" means here:
+    the queue stops showing the letter and no disk is freed, because
+    nothing in this build walks a mailbox and deletes blocks.
+
+    The mailbox key signs it. The peer takes the signer of the payload
+    as the mailbox being deleted from, so a repo key or a delegate's
+    canon key produces a delete against a mailbox nobody has.
+
+    `--repo` is optional and its absence is a real difference rather
+    than a default: without a canon to consult, the check that refuses a
+    letter already folded cannot run, and the verb says which of the two
+    happened instead of implying it looked.
+
+    That check is PEP-21 retention's canon-awareness, now settled in the
+    drafts: the protected set is derived from canon and not recorded
+    anywhere, and a hub may not drop an attachment canon references.
+    Neither half is urgent, because what they guard against does not
+    exist yet -- `delBlock` is in the storage class and nothing walks a
+    mailbox to call it -- but they are the obligation a purge inherits.
+
+  - **`hbs2-hub`: `hub policy show`, `hub block` and `hub unblock`.**
+    PEP-21's peer layer over the existing BasicPolicy: read a mailbox's
+    accept policy, add a sender-deny clause, take one out. The help says
+    which of the two layers this is, because the difference decides
+    whether the operator is finished. A deny here matches the ENVELOPE
+    key before anything is decrypted, so it bounds what the peer stores
+    and relays; anyone holding a decrypted letter can re-send it under a
+    fresh envelope, and keeping an author out of canon is the triage
+    layer, which this build does not have.
+
+    The file it writes is sorted. `getAsSyntax` renders a policy from
+    two hash maps, so its clause order is hash order, and this text is
+    hashed and versioned: without an imposed order, reading a policy and
+    writing it back unchanged would produce different bytes. For the
+    same reason a block that changes nothing writes nothing, since a
+    version bump republishes the file to every peer holding the mailbox.
+
+    Unblocking removes the clause rather than setting it to allow: an
+    allow beside a default of allow says nothing and never goes away,
+    and against a default of deny it would grant something the operator
+    did not ask this verb for.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

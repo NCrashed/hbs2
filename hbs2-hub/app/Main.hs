@@ -11,6 +11,7 @@ import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
+import HBS2.Hub.CLI.Policy
 import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Read
 import HBS2.Hub.CLI.Reject
@@ -113,6 +114,7 @@ main = do
         prEntries
         maintainerEntries
         rejectEntries
+        policyEntries
 
         -- BEFORE helpEntries, because the dictionary is a left-biased union and
         -- the first binding of a name wins. Overrides the inherited `help`, which
