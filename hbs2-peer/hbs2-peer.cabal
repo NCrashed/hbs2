@@ -206,6 +206,7 @@ test-suite test
         MailboxStatus
         MailboxPolicy
         MailboxEntry
+        MessageParts
         HttpListen
         -- from app/: HttpListen exercises the config resolution the peer
         -- itself uses, so it reads the real module rather than a copy.
@@ -218,7 +219,7 @@ test-suite test
     hs-source-dirs:   test, app
     main-is:          TestSuite.hs
     build-depends:
-          base, hbs2-peer, hbs2-core
+          base, hbs2-peer, hbs2-core, hbs2-storage-simple
         , async
         , bytestring
         , cache

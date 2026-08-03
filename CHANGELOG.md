@@ -588,6 +588,26 @@
     all. The audit reader deliberately keeps its own, which has bounds
     this does not.
 
+  - **`hbs2-peer`: a sender can name its own attachment in the payload it
+    signs.** `createMessage` built a message's parts itself, from
+    producers, and returned when they were already inside a signed box.
+    A part is named by the hash of its encrypted tree, so a sender that
+    wanted to REFERENCE one learned the name after the signature was
+    over bytes that did not mention it. PEP-18's letters need exactly
+    that (`body-part`, `bundle-part`), and it was not expressible.
+
+    It is now two functions: `createAttachments` stores the parts and
+    says what they are called, `createMessageWith` builds the message
+    around parts that already exist. `createMessage` keeps its signature
+    and is the two of them in a row, so every existing caller is
+    unaffected and the wire format is untouched.
+
+    The separation the split had to preserve is that the parts carry a
+    group key of their own, never the message's. PEP-18 turns on it:
+    folding an attachment into public canon publishes the key to it, and
+    the message key also opens the back-channel that a contributor's
+    personal mailbox address rides in.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

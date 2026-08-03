@@ -72,6 +72,15 @@ data CreateMessageServices s =
 --
 -- The 'GroupSecret' argument therefore applies to @messageData@ only; the
 -- parts always get a freshly generated one.
+--
+-- ONE CALL BUILDS BOTH, which is all a sender needs unless it has to SIGN a
+-- reference to its own attachment. A part is named by the hash of its
+-- encrypted tree, so a payload that names one has to be written after the tree
+-- exists, and this makes the tree and signs the payload in that order with
+-- nothing in between. PEP-18's letters do need to (@body-part@,
+-- @bundle-part@), so the two halves are also available separately:
+-- 'createAttachments' then 'createMessageWith'. This is the two of them in a
+-- row.
 createMessage :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
               => CreateMessageServices s
               -> MessageFlags
@@ -81,34 +90,61 @@ createMessage :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
               -> [([(Text, Text)], m LBS.ByteString)] -- ^ message parts
               -> ByteString                  -- ^ payload
               -> m (Message s)
-createMessage CreateMessageServices{..} flags gks sender' rcpts' parts bs = do
+createMessage cms flags gks sender' rcpts' parts bs = do
+  trees <- createAttachments cms sender' rcpts' parts
+  createMessageWith cms flags gks sender' rcpts' trees bs
 
-  pips <- getKeys
+-- | Store a message's attachments, and say what they are called.
+--
+-- Separate from the message so a sender can name a part in the payload it is
+-- about to sign. The hash of an encrypted tree is what names it, so the tree
+-- has to exist first; a caller that could only pass a producer to
+-- 'createMessage' would learn the name after the signature was already over
+-- bytes that did not mention it.
+--
+-- The parts share ONE freshly generated group key, wrapped for the same
+-- recipients, and it is not the message's. See 'createMessage' for why that
+-- separation is load-bearing rather than tidy. Each tree embeds that key, so a
+-- reader given a part hash and the parts secret needs nothing from the message
+-- the part arrived in, which is what lets a fold publish an attachment without
+-- publishing the letter around it.
+--
+-- The answer is in the order the parts were given, so a caller with two of
+-- them can tell which is which.
+createAttachments :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
+                  => CreateMessageServices s
+                  -> Either HashRef (Sigil s)    -- ^ sender
+                  -> [Either HashRef (Sigil s)]  -- ^ sigil keys (recipients)
+                  -> [([(Text, Text)], m LBS.ByteString)]
+                  -> m [HashRef]
+createMessageWith :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
+                  => CreateMessageServices s
+                  -> MessageFlags
+                  -> Maybe GroupSecret
+                  -> Either HashRef (Sigil s)
+                  -> [Either HashRef (Sigil s)]
+                  -> [HashRef]                   -- ^ parts already stored
+                  -> ByteString
+                  -> m (Message s)
 
-  (sender, recipients) <- case pips of
-                           []                 -> throwIO SenderNotSet
-                           ( s : rs@(_ : _) ) -> pure (s,rs)
-                           _                  -> throwIO RecipientsNotSet
+createAttachments cms@CreateMessageServices{..} sender' rcpts' parts = do
 
-  gk <- generateGroupKey @s gks (fmap snd pips)
+  (sender, pips) <- resolveKeys cms sender' rcpts'
 
-  -- A second group key over the same recipients, with a secret of its own.
-  -- Nothing is passed here on purpose: the caller's secret, if any, is for
-  -- messageData, and the whole point is that the parts do not share it.
+  -- A group key over the same recipients as the message will have, with a
+  -- secret of its own. Nothing is passed here on purpose: a caller's secret,
+  -- if any, is for messageData, and the whole point is that the parts do not
+  -- share it.
   gkParts <- generateGroupKey @s Nothing (fmap snd pips)
 
   KeyringEntry pk sk _ <- cmLoadKeyringEntry (snd sender)
                             >>= orThrow (NoKeyringFound (show $ pretty $ AsBase58 (snd sender)))
 
-  gks <- lookupGroupKey sk pk gk & orThrow SenderNoAccesToGroupKey
-
   gksParts <- lookupGroupKey sk pk gkParts & orThrow SenderNoAccesToGroupKey
-
-  encrypted <- encryptBlock cmStorage gks (Right gk) Nothing  bs
 
   -- Each tree carries its own group key, so a reader given a part hash
   -- resolves the key from the tree and never needs the message it arrived in.
-  trees <- for parts $ \(meta, lbsRead)-> do
+  for parts $ \(meta, lbsRead)-> do
 
     let mt = vcat [ pretty k <> ":" <+> dquotes (pretty v)
                   | (k,v) <- HM.toList (HM.fromList meta)
@@ -117,6 +153,20 @@ createMessage CreateMessageServices{..} flags gks sender' rcpts' parts bs = do
 
     lbs <- lbsRead
     createEncryptedTree cmStorage gksParts gkParts (DefSource mt lbs)
+
+createMessageWith cms@CreateMessageServices{..} flags gks sender' rcpts' trees bs = do
+
+  (sender, pips) <- resolveKeys cms sender' rcpts'
+  let recipients = drop 1 pips
+
+  gk <- generateGroupKey @s gks (fmap snd pips)
+
+  KeyringEntry pk sk _ <- cmLoadKeyringEntry (snd sender)
+                            >>= orThrow (NoKeyringFound (show $ pretty $ AsBase58 (snd sender)))
+
+  gks' <- lookupGroupKey sk pk gk & orThrow SenderNoAccesToGroupKey
+
+  encrypted <- encryptBlock cmStorage gks' (Right gk) Nothing  bs
 
   let content = MessageContent @s
                   flags
@@ -134,6 +184,28 @@ createMessage CreateMessageServices{..} flags gks sender' rcpts' parts bs = do
 
   pure $ MessageBasic box
 
+-- | The sender and everybody the message is for, out of sigils.
+--
+-- Both halves of building a message need this, and they must agree: the parts
+-- key and the message key are wrapped for one set of recipients, and two
+-- resolutions that disagreed would produce a message whose attachments some
+-- recipient cannot open. Resolving twice from the same arguments gives the
+-- same answer, so the cost is a second read of the sigils and not a risk.
+--
+-- The sender is returned apart from the list because it is the one whose
+-- keyring this side has to hold, and it is also the first element: the group
+-- keys are wrapped for the sender too, so a sender can read back what it sent.
+resolveKeys :: forall s m . (MonadUnliftIO m, s ~ HBS2Basic)
+            => CreateMessageServices s
+            -> Either HashRef (Sigil s)
+            -> [Either HashRef (Sigil s)]
+            -> m ((PubKey 'Sign s, PubKey 'Encrypt s), [(PubKey 'Sign s, PubKey 'Encrypt s)])
+resolveKeys CreateMessageServices{..} sender' rcpts' = do
+  pips <- getKeys
+  case pips of
+    []              -> throwIO SenderNotSet
+    ( s : _ : _ )   -> pure (s, pips)
+    _               -> throwIO RecipientsNotSet
   where
     getKeys = do
       S.toList_ $ for_ (sender' : rcpts') $ \case

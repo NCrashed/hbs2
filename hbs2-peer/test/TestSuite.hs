@@ -13,6 +13,7 @@ import MailboxMerge (mailboxMergeTests)
 import MailboxStatus (mailboxStatusTests)
 import MailboxPolicy (mailboxPolicyTests)
 import MailboxEntry (mailboxEntryTests)
+import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 
 import Test.Tasty
@@ -150,6 +151,7 @@ main = do
       , mailboxPolicyTests
       , mailboxEntryTests
       , httpListenTests
+      , messagePartsTests
       ]
 
 
