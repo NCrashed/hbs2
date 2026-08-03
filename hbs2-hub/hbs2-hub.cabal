@@ -122,6 +122,7 @@ library hub-ingress
       HBS2.Hub.CLI.Maintainer
       HBS2.Hub.CLI.Pr
       HBS2.Hub.CLI.Read
+      HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Verify
 
 -- The CLI itself.
@@ -197,6 +198,7 @@ test-suite spec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
       HBS2.Hub.ReadSpec
+      HBS2.Hub.RejectSpec
       HBS2.Hub.RepoSpec
       HBS2.Hub.GitBundleSpec
       HBS2.Hub.GitRepoSpec

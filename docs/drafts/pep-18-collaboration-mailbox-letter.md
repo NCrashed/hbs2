@@ -380,10 +380,11 @@ years earlier. This is the whole reason `createMessage` gives the parts a
 secret of their own.
 
 A canon reader fetches the referenced encrypted tree over hbs2 and decrypts it
-with the published secret. For this to keep working, the fold
-also pins the referenced part trees so retention does not garbage-collect
-them when it deletes the accepted letter from the mailbox (PEP-21 makes purge
-canon-aware); only parts of unfolded or rejected letters are reclaimed. Note the attachment blocks are
+with the published secret. For this to keep working, retention does not
+reclaim a part tree canon references: the protected set is derived from canon
+rather than recorded anywhere, and a hub may not drop what it published a
+reference and a key to (PEP-21 "Retention", decided 2026-08-04). Only parts of
+unfolded or rejected letters are reclaimed. Note the attachment blocks are
 hbs2 storage objects fetched over the same transport as the git data, not git
 blobs inside the meta tree; making attachments git-native blobs is possible
 but is a later option, not required here.

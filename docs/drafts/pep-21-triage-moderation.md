@@ -283,13 +283,36 @@ it hands out.
     But an accepted event's `body-part`/`bundle-part` hashrefs live in the
     published author box forever, and PEP-18/PEP-19 promise a clone can fetch
     and decrypt those trees with the published `part-secret`. So the referenced
-    part trees must NOT be purged. At fold, the hub pins the part trees an
-    accepted event references (content addressing makes this a pin, not a copy:
-    the same blocks, simply excluded from the GC predicate), and deletion
-    removes only the message envelope and any parts the accepted event does not
-    reference. Purge (below) then applies only to blocks of unfolded or
-    rejected letters. Without this, an accepted issue's screenshot or a merged
-    PR's bundle would become `unavailable` (PEP-22) after GC.
+    part trees must NOT be purged. Deletion removes only the message envelope
+    and any parts the accepted event does not reference. Purge (below) then
+    applies only to blocks of unfolded or rejected letters. Without this, an
+    accepted issue's screenshot or a merged PR's bundle would become
+    `unavailable` (PEP-22) after GC.
+
+    DECIDED 2026-08-04, and the two halves are separate. First: the protected
+    set is DERIVED FROM CANON, not stored. There is no pin table and there
+    should not be one. A purge must read canon anyway, since only canon says
+    which letters were folded; the fold already yields the set as `frParts`;
+    and a table maintained beside canon is a second owner of one fact, whose
+    drift would be discovered as deleted bytes. The predicate is therefore
+    "reachable from canon", which is also the only correct shape: parts are
+    content-addressed, so one tree can be referenced by two letters and
+    "belongs to this message" is not a question with an answer.
+
+    Second: a hub MAY NOT delete an attachment canon references, for as long as
+    it references it. The alternative reading is defensible on the wire -- what
+    PEP-18 publishes is the key, not a promise that any one peer stores the
+    bytes -- and it is rejected here: a clone that can see a reference and its
+    key and find the bytes nowhere has a forge with broken attachments, and the
+    hub that published the reference is the one peer certain to have had them.
+    The cost is accepted: disk grows monotonically with what is folded, and
+    retention bites only on the unfolded and the rejected.
+
+    NOTE ON WHAT EXISTS. Neither half is urgent, because the thing they guard
+    against does not exist: `delBlock` is in the storage class and nothing
+    walks a mailbox to call it, so `DeleteMessages` today writes a tombstone
+    and frees nothing. What is decided above is the obligation a purge inherits
+    the day somebody writes one.
   - Compound predicates. Extend the honored predicate set (the And/Or
     structure already exists but is rejected) so an owner can prune in bulk:
     all messages from a banned envelope key, or all older than a timestamp.
