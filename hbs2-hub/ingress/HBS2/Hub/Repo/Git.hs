@@ -24,6 +24,8 @@ module HBS2.Hub.Repo.Git
   , parseListing
   , nowSeconds
   , gitIn
+  , gitRun
+  , GitTrouble(..)
   ) where
 
 import HBS2.Hub.Repo
@@ -34,6 +36,7 @@ import HBS2.CLI.Prelude hiding (filter)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
+import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
@@ -1445,3 +1448,50 @@ whichRepository = [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
 -- GIT_CONFIG_* are in NO list: a config that turns off gpg signing or sets
 -- safe.directory is the caller's business, and this only reads.
 
+
+-- | The two answers a git call gives that are not about the command.
+--
+-- Everything else is: a non-zero exit means one thing to the writer, another
+-- to the bundle plumbing, and for one caller it is not a failure at all (an
+-- absent ref exits 1). So the runner decides these two and hands the rest
+-- back, rather than inventing a vocabulary every caller has to translate out
+-- of.
+data GitTrouble =
+    GitUnstartable Text   -- ^ git could not be started, or stopped being there
+  | GitStalled Text       -- ^ git ran and did not finish in the time allowed
+  deriving stock (Eq,Show)
+
+-- | Run one git command to completion, bounded.
+--
+-- For callers whose input is their own: the writer's files and the bundle
+-- plumbing's arguments, all produced by this build. The audit reader next door
+-- does NOT use this, and should not: it reads a tree a stranger wrote and
+-- needs the per-chunk bounds, the shared @cat-file --batch@ and the teardown
+-- escalation that this does not have.
+--
+-- @extra@ goes to 'gitIn'. @what@ names the command in a message; the args
+-- carry it too, and quoting them whole would put a caller's path in a report.
+gitRun :: MonadUnliftIO m
+       => Maybe FilePath          -- ^ which repository, or the discovered one
+       -> [(String,String)]       -- ^ forced environment, see 'gitIn'
+       -> Int                     -- ^ seconds before giving up
+       -> Text                    -- ^ what to call it if it does not answer
+       -> [String]
+       -> LBS.ByteString          -- ^ stdin
+       -> m (Either GitTrouble (ExitCode, ByteString, ByteString))
+gitRun cwd extra secs what args input = do
+  cfg <- gitIn cwd extra (proc "git" args)
+  let piped = setStdin (byteStringInput input)
+                (setStdout byteStringOutput (setStderr byteStringOutput cfg))
+  r <- tryAny (timeout (secs * 1000000) (readProcess piped))
+  pure case r of
+    -- The runtime's words are kept as evidence, for the reason the reader
+    -- states at length: they are the only thing that tells a git that is not
+    -- installed from a fork that failed for want of process slots.
+    Left e -> Left (GitUnstartable ( "git " <> what <> " could not be started: "
+                                       <> Text.pack (show e) ))
+    Right Nothing ->
+      Left (GitStalled ( "git " <> what <> " did not finish in "
+                           <> Text.pack (show secs) <> "s" ))
+    Right (Just (code, out, err)) ->
+      Right (code, LBS.toStrict out, LBS.toStrict err)

@@ -39,6 +39,7 @@ module HBS2.Hub.Repo
   , BlobResult(..)
   , Told(..)
   , NameProblem(..)
+  , told
   , planCanon
   , numberIndexOf
   , CanonCommit(..)

@@ -36,7 +36,7 @@ module HBS2.Hub.Repo.GitWrite
   ) where
 
 import HBS2.Hub.Repo
-import HBS2.Hub.Repo.Git (gitIn)
+import HBS2.Hub.Repo.Git (gitRun,GitTrouble(..))
 
 import HBS2.CLI.Prelude hiding (filter)
 
@@ -101,9 +101,9 @@ sink cwd indexFile = CanonSink
       when (now /= cnParent cw) $
         throwError (RefMoved (cnParent cw) now)
 
-      let at = cnWhen cw
+      let whenMs = cnWhen cw
 
-      oids <- traverse (ExceptT . blobOf at) (cnFiles cw)
+      oids <- traverse (ExceptT . blobOf whenMs) (cnFiles cw)
 
       -- read-tree FIRST and into an index that does not exist yet, which is
       -- how the new commit keeps every file the parent had. Without a parent
@@ -111,18 +111,18 @@ sink cwd indexFile = CanonSink
       -- orphan root PEP-19 asks for.
       _ <- case cnParent cw of
              Nothing -> pure ""
-             Just p  -> ExceptT (run at "read-tree" ["read-tree", Text.unpack p] mempty)
+             Just p  -> ExceptT (run whenMs "read-tree" ["read-tree", Text.unpack p] mempty)
 
-      _ <- ExceptT (run at "update-index" ["update-index", "-z", "--index-info"]
+      _ <- ExceptT (run whenMs "update-index" ["update-index", "-z", "--index-info"]
                         (LBS.fromStrict (indexInfo (zip (fmap fst (cnFiles cw)) oids))))
 
-      tree <- ExceptT (run at "write-tree" ["write-tree"] mempty) <&> Text.strip . dec
+      tree <- ExceptT (run whenMs "write-tree" ["write-tree"] mempty) <&> Text.strip . dec
 
       -- -c commit.gpgsign=false, because this machine's owner may well sign
       -- their own commits and a canon commit is not theirs to sign. Unattended
       -- triage must not stop on a pinentry, and a signature over plumbing that
       -- wraps somebody else's signed boxes would say something untrue.
-      commit <- ExceptT (run at "commit-tree"
+      commit <- ExceptT (run whenMs "commit-tree"
                              ( [ "-c", "commit.gpgsign=false", "commit-tree"
                                , Text.unpack tree ]
                                <> concat [ ["-p", Text.unpack p] | Just p <- [cnParent cw] ] )
@@ -138,7 +138,7 @@ sink cwd indexFile = CanonSink
       -- accepts racing therefore leave one refusal and one commit, rather than
       -- one of them silently winning with an event minted against a canon that
       -- had already moved.
-      _ <- ExceptT (run at "update-ref"
+      _ <- ExceptT (run whenMs "update-ref"
                         [ "update-ref", Text.unpack metaRef, Text.unpack commit
                         , maybe "" Text.unpack (cnParent cw) ]
                         mempty)
@@ -165,16 +165,16 @@ sink cwd indexFile = CanonSink
     raw 0 "show-ref" ["show-ref", "--verify", "--quiet", Text.unpack metaRef] mempty >>= \case
       Left e -> pure (Left e)
       Right (ExitFailure 1, _, _) -> pure (Right Nothing)
-      Right (ExitFailure c, _, err) -> pure (Left (refusal "show-ref" c err))
+      Right (ExitFailure c, _, said) -> pure (Left (refusal "show-ref" c said))
       Right (ExitSuccess, _, _) ->
         raw 0 "rev-parse" ["rev-parse", "--verify", Text.unpack metaRef <> "^{commit}"] mempty
           <&> \case
             Left e -> Left e
             Right (ExitSuccess, out, _) -> Right (Just (Text.strip (dec out)))
-            Right (ExitFailure c, _, err) -> Left (refusal "rev-parse" c err)
+            Right (ExitFailure c, _, said) -> Left (refusal "rev-parse" c said)
 
-  blobOf at (_, content) =
-    run at "hash-object" ["hash-object", "-w", "--stdin"] (LBS.fromStrict content)
+  blobOf whenMs (_, content) =
+    run whenMs "hash-object" ["hash-object", "-w", "--stdin"] (LBS.fromStrict content)
       <&> fmap (Text.strip . dec)
 
   -- The stdin update-index reads: mode, object id, path, NUL-terminated.
@@ -213,39 +213,29 @@ sink cwd indexFile = CanonSink
 
   -- The common case: git ran, and a non-zero exit is a refusal.
   run :: Word64 -> Text -> [String] -> LBS.ByteString -> m (Either CanonUnwritable ByteString)
-  run at what args input = raw at what args input <&> (>>= done what)
+  run whenMs what args input = raw whenMs what args input <&> (>>= done what)
 
   done what = \case
     (ExitSuccess, out, _) -> Right out
-    (ExitFailure c, _, err) -> Left (refusal what c err)
+    (ExitFailure c, _, e0) -> Left (refusal what c e0)
 
   -- What git said, and when it said nothing, that it said nothing and with
   -- which code. An empty quoted block is a refusal that names no reason, which
   -- is how "canon does not exist yet" first arrived here.
-  refusal what c err
+  refusal what c e0
     | Text.null said = WriterRefused what
         (ReaderSays ("exited " <> Text.pack (show c) <> " and said nothing"))
     | otherwise = WriterRefused what (ToolSaid said)
-    where said = Text.dropWhileEnd (`elem` ("\r\n" :: String)) (dec err)
+    where said = Text.dropWhileEnd (`elem` ("\r\n" :: String)) (dec e0)
 
-  -- Git ran, and this is what it did. Only the two answers that are NOT about
-  -- the command are decided here; what a non-zero exit means is the caller's,
-  -- because for one of them it is not a failure at all.
+  -- Git ran, and this is what it did. The two answers that are not about the
+  -- command come from 'gitRun', which the bundle plumbing shares; a non-zero
+  -- exit is the caller's to read, because for one caller here it is not a
+  -- failure at all.
   raw :: Word64 -> Text -> [String] -> LBS.ByteString
       -> m (Either CanonUnwritable (ExitCode, ByteString, ByteString))
-  raw at what args input = do
-    cfg <- gitIn cwd (extraEnv at) (proc "git" args)
-    let piped = setStdin (byteStringInput input)
-                  (setStdout byteStringOutput (setStderr byteStringOutput cfg))
-    r <- tryAny (timeout (callSeconds * 1000000) (readProcess piped))
-    pure case r of
-      -- The runtime's words are kept as evidence, for the reason the reader
-      -- states: they are the only thing that tells a git that is not installed
-      -- from a fork that failed for want of process slots.
-      Left e -> Left (WriterFailed ( "git " <> what <> " could not be started: "
-                                       <> Text.pack (show e) ))
-      Right Nothing ->
-        Left (WriterStalled ( "git " <> what <> " did not finish in "
-                                <> Text.pack (show callSeconds) <> "s" ))
-      Right (Just (code, out, err)) ->
-        Right (code, LBS.toStrict out, LBS.toStrict err)
+  raw whenMs what args input =
+    gitRun cwd (extraEnv whenMs) callSeconds what args input <&> \case
+      Left (GitUnstartable e) -> Left (WriterFailed e)
+      Left (GitStalled e)     -> Left (WriterStalled e)
+      Right r                 -> Right r

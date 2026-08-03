@@ -552,6 +552,42 @@
     event (PEP-19) and merging the two would let a stranger label their
     own issue.
 
+  - **`hbs2-hub`: the git side of a pull request.** PEP-20's delta path
+    as far as git is concerned: build a bundle of `base..source-ref` and
+    report the tip it recorded, take a stranger's bundle in, answer the
+    ancestor question, and stage a proposed tip under
+    `refs/hbs2/pulls/<n>/head`. What is still missing above it is the
+    letter that carries the bundle, the triage that runs this, and the
+    merge event.
+
+    A ref name and a sha arrive inside a contributor's signed box, which
+    says who wrote them and nothing about what they are, and both reach
+    a git command line. git reads a leading dash as an option, so a
+    `source-ref` of `--upload-pack=...` would be a signed letter that
+    runs a program. Every value is checked against a shape first, and
+    the shape is narrower than what git would accept. `fsck` is turned
+    on explicitly for the fetch, twice, because git leaves it off and
+    these are a stranger's objects.
+
+    The signed tip is an argument to the fetch rather than something the
+    caller compares afterwards. It is the step the whole delta path
+    rests on, git's own hashing binds the content to it, and a check the
+    caller performs is a check the caller can omit; the one who omits it
+    stages unsigned objects under a number. Staging is a
+    compare-and-swap for the same reason canon's ref move is: a pull ref
+    that moved means somebody else used that number.
+
+    An empty range gets its own answer instead of git's prose. It is the
+    ordinary mistake (nothing committed yet, or the base named as the
+    branch itself), not a failure.
+
+    One git runner now serves the canon writer and this, in
+    `Repo/Git.hs` beside `gitIn`. It decides only the two answers that
+    are not about the command, so each caller reads a non-zero exit in
+    its own vocabulary; for one of them an exit of 1 is not a failure at
+    all. The audit reader deliberately keeps its own, which has bounds
+    this does not.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

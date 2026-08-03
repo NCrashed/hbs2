@@ -31,7 +31,6 @@ import Data.List (sort,isInfixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
 import System.Environment qualified as Env
 import System.IO.Temp (withSystemTempDirectory)
