@@ -37,6 +37,9 @@ module HBS2.Hub.Ingress
   , rpcTimeout
   , LetterRaw(..)
   , rawMessage
+  , PartFacts(..)
+  , PartTrouble(..)
+  , measurePart
   ) where
 
 import HBS2.Hub.Types
@@ -45,7 +48,9 @@ import HBS2.Hub.Letter
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Merkle (walkMerkleUnique)
+import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,MTreeAnn(..)
+                   , pattern EncryptGroupNaClSymm )
+import HBS2.Data.Detect (tryDetect,BlobType(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
@@ -58,9 +63,16 @@ import Crypto.Saltine.Class qualified as Saltine
 import Data.Coerce (coerce)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.Set qualified as Set
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (sort)
 import Data.List qualified as List
+import Data.Word (Word64)
+import Data.Text qualified as Text
+import Data.Maybe (isJust)
+import Streaming.Prelude qualified as S
+import Control.Monad.Except (runExceptT,throwError)
 
 -- | What reading an inbox needs from the outside, gathered so the walk below
 -- can be read without knowing how any of it is served.
@@ -73,6 +85,24 @@ data Ingress m = Ingress
     -- gives and what every reader here consumes: a strict field made the wiring
     -- toStrict on the way in and all three readers fromStrict on the way back.
     igBlock    :: HashRef -> m (Maybe LBS.ByteString)
+    -- | How big a block is, without fetching it. 'Nothing' means it is not here.
+    --
+    -- Its own call rather than @length <$> igBlock@, and that is the whole
+    -- point of it: measuring an attachment by fetching it is what the size gate
+    -- exists to avoid (PEP-18), so the one place that needs a size before
+    -- deciding anything must be able to ask for the size alone.
+  , igSize     :: HashRef -> m (Maybe Integer)
+    -- | Decrypt a part, and hand back the secret that opened it.
+    --
+    -- The secret comes back because canon needs it and cannot derive it: at
+    -- fold the owner publishes it beside the event so that a public clone can
+    -- decrypt an attachment it can see referenced (PEP-18 "Attachments in
+    -- public canon"). A reader that only returned the bytes would leave the
+    -- fold with a reference nobody but the maintainers can follow.
+    --
+    -- 'Left' is "this node cannot open it", which is a state and not a
+    -- failure: a part sealed to another maintainer is ordinary.
+  , igOpenPart :: HashRef -> m (Either Text (LBS.ByteString, BS.ByteString))
     -- | Does the peer hold this mailbox at all? 'Nothing' means it does not.
     --
     -- A function rather than the 'ServiceCaller' this used to be, and so is the
@@ -570,6 +600,14 @@ openMessage ig mh = do
 -- and 'Show' on the view would have to start hiding fields.
 data LetterRaw = LetterRaw
   { lrEnvelope :: HubKey
+    -- | The parts the MESSAGE carries.
+    --
+    -- Named here because the accept path has to produce evidence about each of
+    -- them, and the message is the only thing that says which they are: what
+    -- the letter references is the sender's claim, and a letter naming a part
+    -- its message does not carry is a case the bridge answers rather than one
+    -- this should paper over.
+  , lrParts    :: [HashRef]
   , lrData     :: MessageData
   , lrSecret   :: MessageSecret
   }
@@ -599,7 +637,7 @@ rawMessage ig mh = do
         unless (validHubKey who) (throwIO ReadSignCheckFailed)
         case parsePayload payload of
           Left e   -> pure (Left (BadLetterHere e))
-          Right md -> pure (Right (LetterRaw who md sec)))
+          Right md -> pure (Right (LetterRaw who (Set.toList (messageParts co)) md sec)))
       `catch` (pure . Left . readErr')
       `catch` (\(_ :: OperationError) -> pure (Left Undecipherable))
   where
@@ -607,3 +645,66 @@ rawMessage ig mh = do
       ReadSignCheckFailed  -> BadEnvelopeSig
       ReadNoGroupKey       -> GroupKeyByRef
       ReadNoGroupKeyAccess -> NotForUs
+
+-- | What a part turned out to be, without pulling its payload.
+--
+-- Both numbers are about the CIPHERTEXT, which is what the peer stores and
+-- what a transfer costs. That is the honest unit for a bound: the plaintext is
+-- a little smaller and is not knowable until it has been paid for.
+data PartFacts = PartFacts
+  { pfSize    :: Word64
+    -- | Every block of it is in local storage. 'False' is not an error: it is
+    -- the peer still downloading, which is 'HBS2.Hub.Bridge.PartPending' and a
+    -- reason to come back rather than to refuse.
+  , pfHere    :: Bool
+  }
+  deriving stock (Eq,Show)
+
+-- | Why a part could not even be measured.
+data PartTrouble =
+    PartNotFetchedYet     -- ^ its root block is not here, so nothing is known
+  | PartNotATree Text     -- ^ the root is here and is not an encrypted tree
+  | PartUnreadable Text   -- ^ it is a tree and this could not follow it
+  deriving stock (Eq,Show)
+
+instance Pretty PartTrouble where
+  pretty = \case
+    PartNotFetchedYet -> "the part has not been fetched yet"
+    PartNotATree e    -> "not an encrypted tree:" <+> pretty (safeText e)
+    PartUnreadable e  -> "cannot read the part's tree:" <+> pretty (safeText e)
+
+-- | Measure a part by walking its tree, without pulling the payload.
+--
+-- The size PEP-18's gate wants before it decides anything, and it is derived
+-- rather than believed. A tree of these does not declare its size anywhere
+-- (its metadata carries a file name and a mime type and nothing else), so the
+-- alternative to walking would be a number the sender wrote, which is the one
+-- thing a bound against a stranger must not be.
+--
+-- The walk reads the tree's NODES and asks the size of each leaf. A node is
+-- small and a size is not a fetch, so this costs one call per block and no
+-- payload: a part naming a hundred gigabytes is refused having transferred
+-- none of them, which is what the gate is for.
+measurePart :: MonadUnliftIO m => Ingress m -> HashRef -> m (Either PartTrouble PartFacts)
+measurePart ig h = do
+  root <- igBlock ig h
+  case root of
+    Nothing -> pure (Left PartNotFetchedYet)
+    Just bs -> case tryDetect (coerce h) bs of
+      MerkleAnn ann@MTreeAnn{ _mtaCrypt = EncryptGroupNaClSymm{} } -> walk ann
+      MerkleAnn MTreeAnn{} -> pure (Left (PartNotATree "the tree is not encrypted"))
+      _ -> pure (Left (PartNotATree "the root block is not a merkle tree"))
+  where
+    walk ann = do
+      leaves <- runExceptT $ S.toList_ $
+        walkMerkleTree (_mtaTree ann) (lift . lift . igBlock ig . HashRef) $ \case
+          Left miss -> lift (throwError (Text.pack (show (pretty miss))))
+          Right hs  -> S.each (hs :: [HashRef])
+      case leaves of
+        Left e   -> pure (Left (PartUnreadable e))
+        Right hs -> do
+          sizes <- traverse (igSize ig) hs
+          pure $ Right PartFacts
+            { pfSize = fromIntegral (sum [ s | Just s <- sizes ])
+            , pfHere = all isJust sizes
+            }

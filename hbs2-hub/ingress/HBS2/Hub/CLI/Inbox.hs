@@ -52,6 +52,11 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
+import HBS2.Net.Auth.GroupKeySymm (ToDecrypt,pattern ToDecryptBS)
+import HBS2.Storage.Operations.Class (readFromMerkle)
+import Crypto.Saltine.Class qualified as Saltine
+import Control.Monad.Except (runExceptT)
+import Data.Text qualified as Text
 
 import Data.Coerce (coerce)
 import Data.List qualified as List
@@ -434,6 +439,37 @@ overRpc sto api = Ingress
     -- see 'bounded'.
     igBlock  = \h -> bounded rpcTimeout "a block of the mailbox"
                        (liftIO (getBlock sto (coerce h)))
+    -- The size alone, which is the whole reason this is not `length <$>
+    -- igBlock`: the gate that refuses an oversized attachment has to fire
+    -- before the attachment is paid for.
+  , igSize   = \h -> bounded rpcTimeout "the size of a block"
+                       (liftIO (hasBlock sto (coerce h)))
+    -- THE SECRET IS CAUGHT ON THE WAY PAST, in an IORef, and that is not a
+    -- trick for want of a better one: 'ToDecryptBS' takes the resolver as a
+    -- function and returns only the plaintext, so the value canon needs is
+    -- visible exactly once, inside the call the reader makes. Widening the
+    -- reader's result is the alternative and it is in hbs2-core, used by
+    -- everything that reads an encrypted tree.
+    --
+    -- Called once per read by construction (the reader resolves one group key
+    -- for the whole tree), so there is no last-writer question to answer.
+  , igOpenPart = \h -> do
+      seen <- liftIO (newIORef Nothing)
+      -- Inline, because 'findSecret' is rank-2: a named binding would be
+      -- monomorphic in the monad the reader instantiates it at.
+      r <- liftIO $ runExceptT $ readFromMerkle sto
+             (ToDecryptBS (coerce h) (\gk -> liftIO do
+                 s <- runKeymanClientRO (extractGroupKeySecret gk)
+                 for_ s (writeIORef seen . Just)
+                 pure s))
+      case r of
+        Left e -> pure (Left (Text.pack (show e)))
+        Right bs -> liftIO (readIORef seen) >>= \case
+          Just s  -> pure (Right (bs, Saltine.encode s))
+          -- Unreachable through the reader above, which throws when it cannot
+          -- resolve. Answered rather than asserted because the alternative is
+          -- publishing a part-secret this build invented.
+          Nothing -> pure (Left "the part opened and its secret was not seen")
   , igStatus = \k ->
       callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
         >>= silent "the mailbox service"

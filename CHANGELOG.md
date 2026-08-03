@@ -634,6 +634,25 @@
     these: the read side has to fetch and decrypt the attachment, and
     triage has to run the verification and stage the tip.
 
+  - **`hbs2-hub`: an accepted letter's attachment reaches public canon.**
+    `hub inbox accept` handed the bridge `noMessageParts`, so a folded
+    event referencing an attachment carried no part-secret and a public
+    clone could see the reference and not the bytes (PEP-18
+    "Attachments in public canon"). It now measures each part the
+    message carries, opens the ones it can, and hands over real
+    evidence, so the owner publishes the secret the fold is supposed to.
+
+    The size comes from walking the part's tree rather than from a
+    declaration. PEP-18's gate refuses an oversized attachment before
+    anything is paid for it, and its note assumed a size in the tree's
+    root block; nothing in this project writes one, so the alternative
+    would have been a number the sender chose. The walk reads the tree's
+    nodes and asks each leaf's size without fetching it, which also
+    answers whether the part is fully downloaded, and that is the
+    difference between a wait and a refusal. An oversized part is
+    reported at its size and never opened, since decrypting one the gate
+    is about to refuse is the spend the gate exists to prevent.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

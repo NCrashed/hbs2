@@ -108,6 +108,8 @@ library hub-ingress
                     , mtl
                     , saltine
                     , filepath
+                    , streaming
+                    , containers
     exposed-modules:
       HBS2.Hub.Ingress
       HBS2.Hub.Repo.Git

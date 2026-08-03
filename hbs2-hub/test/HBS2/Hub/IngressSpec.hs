@@ -38,6 +38,12 @@ aKey = _peerSignPk <$> newCredentials @'HBS2Basic
 stub :: Ingress IO
 stub = Ingress
   { igBlock   = const (pure Nothing)
+    -- Both of these would BOTTOM if a test reached them, which is what a
+    -- missing field in a record construction does and is not what a stub
+    -- should be. The answers below are the honest ones for a node that holds
+    -- nothing.
+  , igSize    = const (pure Nothing)
+  , igOpenPart = const (pure (Left "nothing is here"))
   , igStatus  = const (pure (Just ()))
   , igFetch   = const (pure ())
   , igRoot    = const (pure Nothing)
@@ -71,7 +77,10 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = do
+spec = spec1 >> spec2
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-18 mailbox ingress" $ do
 
@@ -270,3 +279,22 @@ spec = do
       -- and none of them is the sentence the letter layer uses for decrypted
       -- bytes, which is what three of them used to claim
       said `shouldNotContain` [show (pretty (BadLetterHere MalformedPayload))]
+
+-- Measuring a part is how PEP-18's size gate learns what an attachment costs
+-- before anything is paid for it. Its two ways of learning nothing call for
+-- opposite things: a wait, and a refusal that will never change. Elsewhere in
+-- this module that distinction was drawn only after it had been got wrong.
+spec2 :: Spec
+spec2 =
+  describe "PEP-18 attachments: measuring one" $ do
+
+    it "says a part whose root is not here has not been fetched" $ do
+      r <- measurePart stub (mh "absent")
+      r `shouldBe` Left PartNotFetchedYet
+
+    it "tells that apart from a root that is here and is not a tree" $ do
+      let ig = stub { igBlock = const (pure (Just "not a merkle tree at all")) }
+      r <- measurePart ig (mh "present")
+      case r of
+        Left (PartNotATree _) -> pure ()
+        other -> expectationFailure ("expected PartNotATree, got " <> show other)

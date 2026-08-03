@@ -33,7 +33,7 @@ module HBS2.Hub.CLI.Accept
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
-import HBS2.Hub.Letter (EnvelopeSigner(..))
+import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
@@ -186,11 +186,35 @@ acceptEntries = do
 
       let ctx = TriageCtx (canonKey, _peerSignSk creds) (const True) repo
 
+      -- What is known about each attachment, gathered before the bridge is
+      -- asked. Measured first and opened second, and only when the size is one
+      -- this hub would carry: opening means decrypting, and decrypting a part
+      -- the gate is about to refuse for its size is exactly the spend the gate
+      -- exists to prevent (PEP-18). An oversized part is reported at its size
+      -- and the refusal comes back as PartTooLarge.
+      evidence <- for (lrParts raw) $ \h -> do
+        facts <- measurePart ig h
+        (,) h <$> case facts of
+          -- Not measurable is not fetched: the size is unknown, and zero is
+          -- the only honest stand-in for a number nothing has said yet.
+          Left _ -> pure (PartPending 0)
+          Right f
+            | not (pfHere f)             -> pure (PartPending (pfSize f))
+            | pfSize f > maxPartBytes    -> pure (PartLocked (pfSize f))
+            | otherwise -> igOpenPart ig h >>= \case
+                Left _ -> pure (PartLocked (pfSize f))
+                Right (_, sec) -> case mkPartSecret sec of
+                  Just s  -> pure (PartOpened (pfSize f) s)
+                  -- A secret of the wrong length is not a key, so this node
+                  -- cannot open the part however the read went.
+                  Nothing -> pure (PartLocked (pfSize f))
+
       acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e))
                                           codeTriageRefused))
                     pure
                (acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
-                             now msg (noMessageParts (lrSecret raw)) (lrData raw))
+                             now msg (attachments (lrSecret raw) evidence)
+                             (lrData raw))
 
       -- The index is regenerated from the fold, plus the number this accept
       -- just minted. Derived rather than re-folded because the derivation is
