@@ -653,6 +653,27 @@
     reported at its size and never opened, since decrypting one the gate
     is about to refuse is the spend the gate exists to prevent.
 
+  - **`hbs2-hub`: accepting a pull request verifies it and stages the
+    tip.** `hub inbox accept` now does the two steps PEP-20 puts either
+    side of the fold. It takes the bundle in with fsck on, checks that
+    what arrives is the commit the contributor signed for, and checks
+    that the signed base really is an ancestor of it; then, after the
+    canon commit, it stages the tip under `refs/hbs2/pulls/<n>/head`.
+
+    The order is the one the dependencies force and the one the spec
+    gives. Verification sits between the mint and the commit, because
+    minting writes nothing and the commit is the only step that
+    publishes, so a bundle that does not match leaves canon untouched
+    and no seq spent. Staging follows the commit, because the pull ref
+    needs the number and the number is not public until canon holds it.
+    A staging failure is reported and does not undo the fold: the
+    coordinates are in canon and the objects are already here, so it is
+    a step to repeat rather than something lost.
+
+    An issue and a fork-pointer pull request both have nothing here to
+    verify, and they mean it for different reasons, so the decision is
+    its own exported function rather than a branch inside the verb.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

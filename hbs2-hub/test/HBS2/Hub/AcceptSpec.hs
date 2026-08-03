@@ -41,7 +41,10 @@ aHash :: String -> HashRef
 aHash s = HashRef (hashObject (LBS.pack s))
 
 spec :: Spec
-spec = do
+spec = spec1 >> spec2
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-22 hub inbox accept: arguments" $ do
 
@@ -117,4 +120,46 @@ spec = do
       let h = aHash "a message"
       acceptArgs (argv [ "--mailbox", b58 mbox, "--repo", b58 repo
                        , "--repo", b58 other, "--message", show (pretty h) ])
+        `shouldBe` Nothing
+
+-- Whether an accept verifies anything at all. Three answers, and only one of
+-- them means "run the bundle checks": getting it wrong either skips
+-- verification on a real pull request or tries to verify an issue.
+spec2 :: Spec
+spec2 =
+  describe "PEP-20 hub inbox accept: what there is to verify" $ do
+
+    it "finds the bundle a pull request proposes" $ do
+      repo <- aKey
+      let part = aHash "the bundle"
+          c = PRCoords Nothing "refs/heads/feature" "aa" "refs/heads/master" "bb"
+                       (Just part)
+      bundleOf (AOpen repo HubPR "t" [] Nothing Nothing (Just c) 1)
+        `shouldBe` Just (part, "refs/heads/feature", "aa", "bb")
+
+    it "finds it on a revise too, which proposes new coordinates" $ do
+      let part = aHash "the second bundle"
+          c = PRCoords Nothing "refs/heads/feature" "cc" "refs/heads/master" "bb"
+                       (Just part)
+      bundleOf (ARevise (aHash "thread") c 1)
+        `shouldBe` Just (part, "refs/heads/feature", "cc", "bb")
+
+    it "has nothing to verify for an issue" $ do
+      repo <- aKey
+      bundleOf (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+        `shouldBe` Nothing
+
+    -- The fork-pointer path names a fork to fetch over hbs2 instead of
+    -- carrying an attachment (PEP-20). Nothing to check HERE is not the same
+    -- as nothing to check, and the difference is why this returns the parts
+    -- rather than a Bool.
+    it "has nothing to verify for a pull request that carries no bundle" $ do
+      repo <- aKey
+      let c = PRCoords (Just "hbs23://fork") "refs/heads/feature" "aa"
+                       "refs/heads/master" "bb" Nothing
+      bundleOf (AOpen repo HubPR "t" [] Nothing Nothing (Just c) 1)
+        `shouldBe` Nothing
+
+    it "has nothing to verify for a comment" $ do
+      bundleOf (AComment (aHash "thread") Nothing (Just "hi") Nothing 1)
         `shouldBe` Nothing

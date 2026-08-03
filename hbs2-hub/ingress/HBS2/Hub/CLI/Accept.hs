@@ -11,6 +11,14 @@
 -- door is read-only by construction and why this one re-reads canon rather
 -- than trusting anything it was handed.
 --
+-- FOR A PULL REQUEST it also does the two steps PEP-20 puts either side of the
+-- fold. The bundle is verified BEFORE anything is published: minting writes
+-- nothing, so the check sits between the mint and the commit and a refusal
+-- leaves canon untouched. The proposed tip is staged AFTER, because
+-- @refs\/hbs2\/pulls\/<n>\/head@ needs the number and the number is not public
+-- until canon holds it. So the order is verify, fold, stage, which is the
+-- order the spec gives and the only one the dependencies allow.
+--
 -- TWO THINGS PEP-22 PUTS IN THIS VERB ARE NOT HERE, and both are named on
 -- stdout after a successful accept rather than left for somebody to discover.
 -- The letter is NOT deleted from the mailbox: fold-then-delete is PEP-21
@@ -29,6 +37,8 @@ module HBS2.Hub.CLI.Accept
   , codeTriageRefused
   , codeCanonUnwritable
   , codeCanonUnplannable
+  , codeBundleUnusable
+  , bundleOf
   ) where
 
 import HBS2.Hub.Types
@@ -38,6 +48,7 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
+import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, codeMailboxUnknown, codePeerSilent, PeerSilent)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -53,6 +64,8 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Storage
 
+import Data.ByteString.Lazy qualified as LBS
+import Data.List qualified as List
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
 import System.Exit (die)
@@ -80,6 +93,38 @@ codeCanonUnwritable = 24
 -- and not the repository's state.
 codeCanonUnplannable :: Int
 codeCanonUnplannable = 25
+
+-- | The letter proposes a change whose objects are not usable: the bundle will
+-- not fetch, or it fetches something other than what the contributor signed
+-- for, or the signed base is not an ancestor of the signed tip.
+--
+-- Its own code because it is the contributor's doing and nothing on this side
+-- fixes it. Canon is untouched when it fires: the check sits between the mint,
+-- which writes nothing, and the commit, which is the only step that publishes.
+codeBundleUnusable :: Int
+codeBundleUnusable = 28
+
+-- | The bundle a letter proposes, and the claims to check it against.
+--
+-- 'Nothing' for an issue, which proposes no objects, and 'Nothing' for a pull
+-- request on the fork-pointer path, which names a fork to fetch over hbs2
+-- rather than carrying an attachment (PEP-20). Both mean "there is nothing to
+-- verify here", and they mean it for different reasons; what must not happen
+-- is the third answer, a PR with a bundle that goes unchecked because this
+-- said no.
+--
+-- Top level and exported for the reason every other decision in this package
+-- is: it decides whether an accept verifies anything at all, and inside a
+-- @where@ clause nothing could ask it.
+bundleOf :: AuthorContent -> Maybe (HashRef, Text, Text, Text)
+bundleOf = \case
+  AOpen _ _ _ _ _ _ (Just c) _ -> fromCoords c
+  ARevise _ c _                -> fromCoords c
+  _                            -> Nothing
+  where
+    fromCoords c = do
+      part <- prBundle c
+      pure (part, prSourceRef c, prSourceTip c, prBase c)
 
 acceptUsage :: Doc ()
 acceptUsage =
@@ -192,22 +237,28 @@ acceptEntries = do
       -- the gate is about to refuse for its size is exactly the spend the gate
       -- exists to prevent (PEP-18). An oversized part is reported at its size
       -- and the refusal comes back as PartTooLarge.
-      evidence <- for (lrParts raw) $ \h -> do
+      opened <- for (lrParts raw) $ \h -> do
         facts <- measurePart ig h
         (,) h <$> case facts of
           -- Not measurable is not fetched: the size is unknown, and zero is
           -- the only honest stand-in for a number nothing has said yet.
-          Left _ -> pure (PartPending 0)
+          Left _ -> pure (PartPending 0, Nothing)
           Right f
-            | not (pfHere f)             -> pure (PartPending (pfSize f))
-            | pfSize f > maxPartBytes    -> pure (PartLocked (pfSize f))
+            | not (pfHere f)             -> pure (PartPending (pfSize f), Nothing)
+            | pfSize f > maxPartBytes    -> pure (PartLocked (pfSize f), Nothing)
             | otherwise -> igOpenPart ig h >>= \case
-                Left _ -> pure (PartLocked (pfSize f))
-                Right (_, sec) -> case mkPartSecret sec of
-                  Just s  -> pure (PartOpened (pfSize f) s)
+                Left _ -> pure (PartLocked (pfSize f), Nothing)
+                Right (bs, sec) -> case mkPartSecret sec of
+                  -- The BYTES are kept as well as the secret. A pull request's
+                  -- bundle is verified below, and decrypting it twice for want
+                  -- of holding it once is the same spend the size gate above
+                  -- is careful about.
+                  Just s  -> pure (PartOpened (pfSize f) s, Just bs)
                   -- A secret of the wrong length is not a key, so this node
                   -- cannot open the part however the read went.
-                  Nothing -> pure (PartLocked (pfSize f))
+                  Nothing -> pure (PartLocked (pfSize f), Nothing)
+
+      let evidence = [ (h, ev) | (h, (ev, _)) <- opened ]
 
       acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e))
                                           codeTriageRefused))
@@ -215,6 +266,40 @@ acceptEntries = do
                (acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
                              now msg (attachments (lrSecret raw) evidence)
                              (lrData raw))
+
+      -- THE BUNDLE IS CHECKED BEFORE ANYTHING IS PUBLISHED, which is PEP-20's
+      -- order ("verify privately, fold, stage"): minting is pure and writes
+      -- nothing, so this sits between the mint and the commit and a refusal
+      -- here leaves canon untouched and no seq spent.
+      --
+      -- What it establishes is the one thing the delta path rests on: the
+      -- objects that arrive are the ones the contributor signed for. git's own
+      -- hashing binds the content to the tip, so a bundle that produces the
+      -- signed tip is theirs and one that does not is somebody else's.
+      for_ (bundleOf (acContent acc)) $ \(part, ref, tip, base) -> do
+        bytes <- case List.lookup part opened of
+          Just (_, Just bs) -> pure (LBS.toStrict bs)
+          -- The bridge admitted the letter, so the part opened; this is the
+          -- letter naming a part its own message does not carry, which the
+          -- gate answers as PartNotInMessage. Belt and braces, and it says
+          -- which part rather than crashing on a lookup.
+          _ -> liftIO $ refuse (show ("the letter names a bundle this message does"
+                                        <+> "not carry:" <+> pretty part))
+                               codeBundleUnusable
+
+        _ <- acceptBundle Nothing bytes ref tip
+               >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleUnusable)) pure
+
+        -- The ancestor relation is guaranteed by how the bundle was built
+        -- (base..source-ref), and it is checked anyway: the construction is
+        -- the CONTRIBUTOR's, and this is the maintainer deciding whether to
+        -- publish a number for it.
+        anc <- isAncestor Nothing base tip
+                 >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleUnusable)) pure
+        unless anc $
+          liftIO $ refuse (show ("the signed base is not an ancestor of the signed"
+                                   <+> "tip; the range is not what it says it is"))
+                          codeBundleUnusable
 
       -- The index is regenerated from the fold, plus the number this accept
       -- just minted. Derived rather than re-folded because the derivation is
@@ -231,11 +316,29 @@ acceptEntries = do
                   >>= either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable))
                              pure
 
+      -- AFTER the commit, because staging needs the number and the number is
+      -- not public until canon holds it (PEP-20). A failure here leaves a
+      -- folded PR with no staged tip, which is a repeatable step rather than
+      -- a lost one: the coordinates are in canon and the bundle's objects are
+      -- already in this repository.
+      staged <- case (acNumber acc, bundleOf (acContent acc)) of
+        (Just n, Just (_, _, tip, _)) ->
+          stagePull Nothing n tip Nothing >>= \case
+            Right () -> pure (Just (pullRef n))
+            Left e -> do
+              liftIO $ hPutDoc stderr
+                ( "hbs2-hub: the event is in canon and the tip is not staged:"
+                    <+> pretty e <> line
+                    <> "  re-run once the ref is free; nothing else is pending." <> line )
+              pure Nothing
+        _ -> pure Nothing
+
       liftIO $ print $ vcat
         [ "accepted" <+> pretty (eventId (acEvent acc))
         , "seq" <+> pretty (acSeq acc)
         , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
         , "commit" <+> pretty commit
+        , maybe mempty ("staged" <+>) (fmap pretty staged)
         , "left in the mailbox:" <+> pretty msg
             <+> "(no delete, no acknowledgement; see --help)"
         ]
