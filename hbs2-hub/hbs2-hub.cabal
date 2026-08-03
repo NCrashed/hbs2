@@ -55,8 +55,8 @@ library
     -- Declared per stanza and not in the shared block: a dependency every stanza
     -- inherits is one -Wunused-packages can never say anything useful about.
     build-depends:    base
-                    , hbs2-core
                     , suckless-conf
+                    , hbs2-core
                     , serialise
                     , unordered-containers
                     , cborg
@@ -111,12 +111,14 @@ library hub-ingress
                     , streaming
                     , containers
                     , suckless-conf
+                    , directory
     exposed-modules:
       HBS2.Hub.Ingress
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.GitBundle
       HBS2.Hub.Repo.GitWrite
       HBS2.Hub.CLI.Argv
+      HBS2.Hub.CLI.Ban
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
@@ -193,6 +195,7 @@ test-suite spec
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec
       HBS2.Hub.ManifestSpec
+      HBS2.Hub.BanSpec
       HBS2.Hub.BridgeSpec
       HBS2.Hub.CanonSpec
       HBS2.Hub.MaintainerSpec

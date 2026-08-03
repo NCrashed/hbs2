@@ -8,6 +8,7 @@ module Main where
 import HBS2.Hub.Types (safeText)
 import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
+import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
@@ -115,6 +116,7 @@ main = do
         maintainerEntries
         rejectEntries
         policyEntries
+        banEntries
 
         -- BEFORE helpEntries, because the dictionary is a left-biased union and
         -- the first binding of a name wins. Overrides the inherited `help`, which
@@ -255,7 +257,7 @@ main = do
     peerFreeNames = [ "hub:verify"
                     , "hub:issue:list", "hub:issue:show"
                     , "hub:pr:list", "hub:pr:show"
-                    , "hub:log", "hub:maintainer:list"
+                    , "hub:log", "hub:maintainer:list", "hub:ban:list"
                     ] <> helpNames
 
     helpNames :: [Id]

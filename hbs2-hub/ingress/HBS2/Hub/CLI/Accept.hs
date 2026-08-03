@@ -52,6 +52,7 @@ import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, codeMailboxUnknown, codePeerSilent, PeerSilent)
 import HBS2.Hub.CLI.Verify (codeOf)
+import HBS2.Hub.CLI.Ban (loadBans,allowedBy,codeNoBanList)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -161,10 +162,10 @@ acceptEntries = do
              <> line <> "work this build does not have. Accepting the same letter"
              <> line <> "twice is refused, so leaving it in the mailbox is safe."
              <> line
-             <> line <> "No deny-list is applied. PEP-21 policy lives in the repo"
-             <> line <> "manifest and there is no manifest reader yet, so a banned"
-             <> line <> "author's letter is accepted like any other. Read the queue"
-             <> line <> "with 'hub inbox' and decide before running this." )
+             <> line <> "This node's triage deny-list IS applied (see hub ban):"
+             <> line <> "a letter whose INNER author is denied here is refused"
+             <> line <> "before anything is minted. That list is local and"
+             <> line <> "unsigned; PEP-21 defers a published ban to hub-meta 2." )
     $ entry $ bindMatch "hub:inbox:accept" $ nil_ \case
         (acceptArgs -> Just a) -> lift (accept a)
         _ -> liftIO (die (show acceptUsage))
@@ -194,7 +195,23 @@ acceptEntries = do
 
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
-      let ig = overRpc sto api
+
+      -- This node's triage deny-list (PEP-21). Local and unsigned, because a
+      -- published ban needs a consensus change the spec defers to hub-meta 2,
+      -- so what it does is refuse to FOLD a banned author rather than claim
+      -- anything about them in canon.
+      --
+      -- Read before anything is opened, and a damaged list stops the accept:
+      -- carrying on with an empty one would fold exactly the letters somebody
+      -- took the trouble to ban.
+      bans <- loadBans repo
+                >>= either (\e -> liftIO (refuse (show ("the deny-list will not read:"
+                                                          <+> pretty e))
+                                                 codeNoBanList))
+                           pure
+
+      let allowed = allowedBy bans
+          ig = overRpc sto api
 
       -- THE LETTER MUST BE IN THIS MAILBOX. Reading it by hash alone would
       -- work, and would accept any message-shaped block the peer has ever
@@ -229,7 +246,7 @@ acceptEntries = do
       -- seconds two owner ops in one tick collapse to one event-id.
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let ctx = TriageCtx (canonKey, _peerSignSk creds) (const True) repo
+      let ctx = TriageCtx (canonKey, _peerSignSk creds) allowed repo
 
       -- What is known about each attachment, gathered before the bridge is
       -- asked. Measured first and opened second, and only when the size is one

@@ -759,6 +759,26 @@
     and against a default of deny it would grant something the operator
     did not ask this verb for.
 
+  - **`hbs2-hub`: `hub ban`, and the first predicate that is not `const
+    True`.** PEP-21's triage layer, which denies an INNER author: the
+    key inside the signed box, which a rewrapper cannot change, and
+    therefore the only deny that is authoritative for canon. `hub inbox
+    accept` now applies it, so a banned author's letter is refused
+    before anything is minted.
+
+    Local state and unsigned, which is PEP-21's own decision rather than
+    an omission: publishing a ban into canon needs a new author-content
+    op and an admission rule, and the spec defers that to `hub-meta 2`.
+    So the list does not travel, two hubs serving one repository may
+    disagree, and the verb says so. It lives outside the working tree
+    for the same reason: a file under the repository looks like
+    something that travels and is eventually committed by accident.
+
+    A file it cannot read stops an accept rather than reading as empty.
+    A deny-list that silently returns nothing when it is damaged is one
+    an attacker shortens by writing something odd into it, and the
+    accept it silently permits is the thing the list existed to stop.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its
