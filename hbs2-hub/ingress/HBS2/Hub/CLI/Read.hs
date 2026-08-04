@@ -51,7 +51,6 @@ import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 import HBS2.CLI.Prelude hiding (null)
 import HBS2.CLI.Run.Internal
 
-import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (pattern HashLike)
 
 import Data.HashMap.Strict qualified as HM

@@ -19,7 +19,6 @@ module HBS2.Hub.CLI.Argv
 import HBS2.CLI.Prelude
 
 import Control.Applicative ((<|>))
-import Control.Monad (guard)
 import Data.List (intercalate)
 import Data.List qualified as List
 import Data.Word (Word64)

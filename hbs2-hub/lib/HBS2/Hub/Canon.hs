@@ -248,15 +248,15 @@ capEscapes budget0 = snd . mapAccumL go budget0
     -- 'renderEvent', once per accept. Measured on this project's text-2.0.2:
     -- 0.97 s for that shape against 0.006 s for the same escapes at the front,
     -- and the same second again for every event a compaction re-renders.
-    cut n t = Text.take (go 0 n False t) t
+    cut n t = Text.take (walk 0 n False t) t
       where
-        go !i !left !inEsc s = case Text.uncons s of
+        walk !i !left !inEsc s = case Text.uncons s of
           Nothing -> i
           Just (c, rest)
-            | inEsc      -> go (i + 1) left False rest
-            | c /= '\\'  -> go (i + 1) left False rest
+            | inEsc      -> walk (i + 1) left False rest
+            | c /= '\\'  -> walk (i + 1) left False rest
             | left <= 0  -> i
-            | otherwise  -> go (i + 1) (left - 1) True rest
+            | otherwise  -> walk (i + 1) (left - 1) True rest
 
 -- What a truncated projection says about itself, in a form that costs nothing
 -- to parse and cannot be mistaken for the content: no escape, no quote, and the

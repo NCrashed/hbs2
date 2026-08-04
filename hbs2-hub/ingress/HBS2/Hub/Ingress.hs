@@ -773,7 +773,7 @@ measurePart ig h = do
       -- blow-up the data walk is bounded against. A bound that covers the half a
       -- caller has already decided to pay for is not a bound.
       dat <- measureTree spend (Right (_mtaTree ann))
-      key <- measureTree spend (Left gkh) <&> \case
+      gkey <- measureTree spend (Left gkh) <&> \case
         -- A key block that is not here is the peer still downloading, and
         -- 'pfHere' is the field that says so. Only the DATA tree calls a missing
         -- block a failure to measure, because a size it cannot see is a size
@@ -781,7 +781,7 @@ measurePart ig h = do
         -- bounded, and an absent one is bounded by definition.
         Left (PartUnreadable _) -> Right (PartFacts 0 False)
         other                   -> other
-      pure ((<>) <$> dat <*> key)
+      pure ((<>) <$> dat <*> gkey)
 
     -- The walk's error is a PartTrouble and not a Text, so that the budget's
     -- refusal arrives as ITSELF. Told "cannot read the part's tree", an

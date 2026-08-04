@@ -56,7 +56,6 @@ import HBS2.Storage.Operations.ByteString (pattern SimpleKey)
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
-import Data.Config.Suckless
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort)

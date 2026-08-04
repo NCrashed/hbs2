@@ -53,7 +53,6 @@ import Crypto.Saltine.Class qualified as Saltine
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
-import Data.List qualified as List
 import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
 import Data.Text qualified as Text

@@ -197,6 +197,42 @@ spec1 = do
           =<< pure (setWorkingDir other (proc "git" ["cat-file", "-e", Text.unpack tip]))
         code `shouldSatisfy` (/= ExitSuccess)
 
+    -- THE CASE THAT USED TO LEAVE ITS PACK BEHIND. The bundle is perfectly
+    -- good, so the fetch succeeds and writes the objects; what refuses is the
+    -- tip check afterwards. Every refused pull request was therefore disk a
+    -- stranger chose, in the maintainer's repository, until git gc got round to
+    -- it two weeks later. The fetch lands in a quarantine now and is repeated
+    -- into the repository only once the tip is the signed one.
+    it "leaves nothing behind when the tip is not the one that was signed" $
+      withSystemTempDirectory "hub-pair" $ \root -> do
+        let ours = root <> "/contributor"
+            theirs = root <> "/maintainer"
+
+        void $ git root ["init", "-q", ours]
+        writeFile (ours <> "/a.txt") "one\n"
+        void $ git ours ["add", "a.txt"]
+        void $ git ours ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        void $ git root ["clone", "-q", ours, theirs]
+
+        void $ git ours ["checkout", "-q", "-b", "feature"]
+        writeFile (ours <> "/b.txt") "two\n"
+        void $ git ours ["add", "b.txt"]
+        void $ git ours ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+
+        bytes <- bnBytes <$> (ok =<< bundleRange (Just ours) base "feature")
+
+        r <- acceptBundle (Just theirs) bytes "feature" (Text.replicate 40 "a")
+        case r of
+          Left (BundleTipMismatch _ got) -> got `shouldBe` tip
+          other -> expectationFailure ("expected a tip mismatch, got " <> show other)
+
+        -- The objects the good bundle carried are NOT here.
+        (code, _, _) <- readProcess . setStdin closed
+          =<< pure (setWorkingDir theirs (proc "git" ["cat-file", "-e", Text.unpack tip]))
+        code `shouldSatisfy` (/= ExitSuccess)
+
   describe "PEP-20 delta path: verifying and staging" $ do
 
     it "answers the ancestor question both ways" $ withWork $ \dir base tip -> do

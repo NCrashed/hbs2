@@ -53,7 +53,7 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
-import HBS2.Net.Auth.GroupKeySymm (ToDecrypt,pattern ToDecryptBS)
+import HBS2.Net.Auth.GroupKeySymm (pattern ToDecryptBS)
 import HBS2.Storage.Operations.Class (readFromMerkle)
 import Crypto.Saltine.Class qualified as Saltine
 import Control.Monad.Except (runExceptT)

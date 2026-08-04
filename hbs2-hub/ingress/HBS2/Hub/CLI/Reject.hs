@@ -45,7 +45,6 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Types.Refs (pattern HashLike)
 import HBS2.Data.Types.SignedBox (makeSignedBox)
 import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Peer.Proto.Mailbox

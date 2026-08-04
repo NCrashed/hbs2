@@ -103,6 +103,26 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         assertBool "another message does not"
           (not (stampOk harder bob two stamp))
 
+  , testCase "a stamp nobody solved is not a stamp" $
+      withStore $ \sto -> do
+        alice <- aPeer
+        (bobC, bobS) <- aPeer
+        let bob = view peerSignPk bobC
+
+        msg <- aMessage sto alice [bobS] (B8.pack "a letter")
+
+        -- The negative every other case here reaches through solveStamp: a
+        -- stamp that was never solved at all. Free to mint, and the whole
+        -- question PoW asks is whether it counts.
+        let free = MessageStamp1 bob 0
+        assertBool "the mailbox refuses work nobody did"
+          (not (stampOk harder bob msg free))
+        -- ...and at difficulty zero it is a stamp, because zero is a mailbox
+        -- that asks for nothing. That is what every mailbox predating PEP-21
+        -- is, so it has to keep working.
+        assertBool "a mailbox that charges nothing takes it"
+          (stampOk 0 bob msg free)
+
   , testCase "a stamp for a mailbox nobody addressed is not a stamp" $
       withStore $ \sto -> do
         alice <- aPeer

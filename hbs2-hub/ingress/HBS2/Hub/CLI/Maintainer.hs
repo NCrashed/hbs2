@@ -47,7 +47,6 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Exit (die)
 
 -- | The event was not written, and canon is unchanged.

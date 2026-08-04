@@ -47,6 +47,7 @@ import Data.Char (isHexDigit)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.Process.Typed (ExitCode(..))
 
@@ -199,19 +200,48 @@ acceptBundle cwd bytes ref signedTip = runExceptT do
 
     _ <- ExceptT $ call cwd bundleSeconds "bundle verify" ["bundle", "verify", path]
 
-    _ <- ExceptT $ call cwd bundleSeconds "fetch"
-           [ "-c", "transfer.fsckObjects=true"
-           , "-c", "fetch.fsckObjects=true"
-           , "fetch", path, Text.unpack ref ]
+    -- THE FETCH LANDS IN A QUARANTINE FIRST, and this is not tidiness. A fetch
+    -- that fails its connectivity check, and a bundle whose tip is not the one
+    -- the letter signed, both leave their pack in the maintainer's object store
+    -- anyway: git writes the objects and then refuses, and unreachable objects
+    -- outlive `git gc` by its two-week grace. So every refused pull request was
+    -- disk a stranger chose, for a fortnight, in somebody else's repository.
+    --
+    -- GIT_OBJECT_DIRECTORY is where new objects go and the repository's own
+    -- store is an alternate, so the prerequisites still resolve and nothing
+    -- written here is visible to anybody else. When it all checks out the fetch
+    -- is repeated without the quarantine, which costs one re-index of a pack
+    -- whose size is the delta and is the price of never writing a refused one.
+    objects <- ExceptT $ oneLine cwd "rev-parse" ["rev-parse", "--git-path", "objects"]
+    let quarantine = tmp </> "objects"
+        walled = [ ("GIT_OBJECT_DIRECTORY", quarantine)
+                 , ("GIT_ALTERNATE_OBJECT_DIRECTORIES", Text.unpack objects)
+                 ]
+        fetch env = callWith env cwd bundleSeconds "fetch"
+                      [ "-c", "transfer.fsckObjects=true"
+                      , "-c", "fetch.fsckObjects=true"
+                      , "fetch", path, Text.unpack ref ]
+
+    liftIO (createDirectoryIfMissing True quarantine)
+
+    _ <- ExceptT (fetch walled)
 
     -- FETCH_HEAD, which is what the fetch above just wrote, and not the ref
     -- name: fetching a bundle does not create a local branch, and resolving
     -- the name would find whatever this repository happens to have under it.
     -- That is the whole difference between checking what arrived and checking
     -- what was already here.
-    got <- ExceptT $ oneLine cwd "rev-parse" ["rev-parse", "FETCH_HEAD^{commit}"]
+    --
+    -- Resolved INSIDE the quarantine, because that is where the objects it
+    -- names are; outside it the commit does not exist yet.
+    got <- ExceptT $ callWith walled cwd smallSeconds "rev-parse"
+                       ["rev-parse", "FETCH_HEAD^{commit}"]
+             <&> fmap (Text.strip . Text.decodeUtf8Lenient)
 
     when (got /= signedTip) $ throwError (BundleTipMismatch signedTip got)
+
+    -- Only now, into the repository proper.
+    _ <- ExceptT (fetch [])
     pure got
 
 -- | Where two refs forked, which is the @base@ a PR is a delta against.

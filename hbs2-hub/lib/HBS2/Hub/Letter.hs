@@ -327,9 +327,9 @@ malformedRef = \case
     -- value rather than against something that exists: a wrong-length one would
     -- simply never match, which is a refusal made in the wrong place and after
     -- the expensive part.
-    part name p = bad name (ptPart p)
-                    <|> bad (name <> "-proof") (proofRef (ptProof p))
-    named name = (>>= part name)
+    partRef name p = bad name (ptPart p)
+                       <|> bad (name <> "-proof") (proofRef (ptProof p))
+    named name = (>>= partRef name)
     proofRef (PartProof h) = h
     coordsRefs c = named "bundle-part" (prBundle c)
 

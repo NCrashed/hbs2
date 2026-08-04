@@ -50,7 +50,6 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Types.Refs (pattern HashLike)
 import HBS2.Net.Auth.Credentials
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
@@ -65,7 +64,6 @@ import Data.HashMap.Strict qualified as HM
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
 import Data.Text qualified as Text
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Exit (die)
 
 -- | git would not build or would not answer.
