@@ -88,6 +88,22 @@ noFilter = Filter Nothing Nothing
 statusOf :: ThreadState -> Text
 statusOf = fromMaybe "open" . HM.lookup "status" . tsAttrs
 
+-- | The same, on its way to a terminal.
+--
+-- A status is an ATTRIBUTE VALUE, which is to say a stranger's bytes: it is
+-- whatever a @set@ event carried, and @requireNormalized@ asks that the value
+-- be in canonical form, not that it be a word. Four kilobytes of it are allowed
+-- ('maxAttrValue'), the fold raises no anomaly, and this printed it with a bare
+-- 'pretty' on the same line as a title that goes through 'safeText' -- so a
+-- repository whose canon says the status is @\\ESC[2K\\ESC[1Aopen@ rewrote the
+-- rows above it in every reader's terminal, once per thread. Reading a
+-- stranger's canon is the ordinary case for this verb: it is what a clone does.
+--
+-- Its own function so that both callers cannot drift, which is how the title
+-- and the status came to be printed by different rules in the first place.
+statusDoc :: ThreadState -> Doc ann
+statusDoc = pretty . safeText . statusOf
+
 -- | The labels an owner actually applied.
 --
 -- NOT 'tsLabelsRequested', which is what the author asked for: PEP-19 makes
@@ -119,7 +135,7 @@ threadsOf kind f fr =
 listDoc :: [ThreadState] -> [Doc ann]
 listDoc ts =
   [ hsep [ num (tsNumber t)
-         , fill 6 (pretty (statusOf t))
+         , fill 6 (statusDoc t)
          , title t
          , labels t ]
   | t <- ts ]
@@ -139,12 +155,12 @@ listDoc ts =
 showDoc :: ThreadState -> [Doc ann]
 showDoc t =
   [ hsep [ maybe "(no number)" (("#" <>) . pretty) (tsNumber t)
-         , pretty (statusOf t)
+         , statusDoc t
          , if tsRedacted t then "(redacted)" else pretty (safeText (tsTitle t)) ]
-  , "thread" <+> pretty (tsId t)
+  , "thread" <+> hashDoc (tsId t)
   , "kind" <+> viaShow (tsKind t)
-  , "author" <+> pretty (AsBase58 (tsAuthor t))
-  , "blessed-by" <+> pretty (AsBase58 (tsCanonBy t))
+  , "author" <+> keyDoc (tsAuthor t)
+  , "blessed-by" <+> keyDoc (tsCanonBy t)
   , "created" <+> pretty (tsCreated t) <+> "updated" <+> pretty (tsUpdated t)
   ]
   <> [ "labels" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
@@ -153,10 +169,19 @@ showDoc t =
   -- author asked, nobody applied it.
   <> [ "labels-requested" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
      | ls <- [tsLabelsRequested t], not (null ls) ]
-  <> [ "origin" <+> pretty o | Just o <- [tsOrigin t] ]
+  -- THROUGH hashDoc, every one of them, and that is a rule about the renderer
+  -- and not about these four fields. A HashRef is a newtype over a ByteString
+  -- with a derived Serialise instance, so it takes any width off the wire;
+  -- 'validHashRef' exists for that, the fold does not re-run it (Fold.hs calls
+  -- reply-to "carried through unvalidated"), and base58 is Integer base
+  -- conversion, i.e. quadratic. A 48 KiB reply-to inside 'maxBoxBytes' is
+  -- admitted canon and half a second of CPU per line. 'hashDoc' says what is
+  -- true of it instead, and 'HBS2.Hub.CLI.Inbox' next door already prints its
+  -- hashes this way.
+  <> [ "origin" <+> hashDoc o | Just o <- [tsOrigin t] ]
   -- The body's hash and the secret's presence, not the secret: a reader needs
   -- to know the body is fetchable and this is a terminal.
-  <> [ "body-part" <+> pretty h
+  <> [ "body-part" <+> hashDoc h
          <+> (if isJust (tsPartSecret t) then "(secret published)" else "(no secret)")
      | Just h <- [tsBodyPart t] ]
   <> [ coords p | Just p <- [tsPR t] ]
@@ -170,15 +195,15 @@ showDoc t =
 
     comment c =
       [ ""
-      , "---" <+> pretty (cId c)
-          <+> "by" <+> pretty (AsBase58 (cAuthor c))
+      , "---" <+> hashDoc (cId c)
+          <+> "by" <+> keyDoc (cAuthor c)
           <+> "at" <+> pretty (cFoldedTs c)
-          <> maybe mempty (\r -> " in reply to" <+> pretty r) (cReplyTo c)
+          <> maybe mempty (\r -> " in reply to" <+> hashDoc r) (cReplyTo c)
       ]
       <> ( if cRedacted c
              then ["(redacted)"]
              else maybe [] (\b -> [pretty (safeText b)]) (cBody c) )
-      <> [ "body-part" <+> pretty h | Just h <- [cBodyPart c] ]
+      <> [ "body-part" <+> hashDoc h | Just h <- [cBodyPart c] ]
 
 -- | The surviving events, oldest first.
 --
@@ -189,8 +214,8 @@ logDoc :: Maybe Word64 -> FoldResult -> [Doc ann]
 logDoc mnum fr =
   [ hsep [ fill 6 (pretty (lgSeq e))
          , pretty (opOf (lgContent e))
-         , pretty (lgEvent e)
-         , "by" <+> pretty (AsBase58 (lgAuthor e)) ]
+         , hashDoc (lgEvent e)
+         , "by" <+> keyDoc (lgAuthor e) ]
   | e <- frLog fr
   , maybe True (\n -> lgThread e `elem` fmap Just (threadsNumbered n)) mnum
   ]

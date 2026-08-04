@@ -11,8 +11,10 @@ import HBS2.Hub.Fold
 import HBS2.Hub.CLI.Read
 
 import HBS2.Net.Auth.Credentials
+import HBS2.Data.Types.Refs (HashRef(..))
 
 import Data.List (isInfixOf)
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word64)
@@ -122,6 +124,48 @@ spec = do
           fr = foldOf owner [(1, Just 1, anIssue repo "erase\ESC[2Kme")]
           out = rendered (listDoc (threadsOf HubIssue noFilter fr))
       out `shouldSatisfy` (not . ("\ESC" `isInfixOf`))
+
+    -- The test above names the LINE and populated one field of it. The status
+    -- sits on the same line and is the same kind of thing -- an attribute value
+    -- out of a signed event, four kilobytes of anything -- and it was printed
+    -- with a bare pretty while the title beside it was sanitised. Reading a
+    -- stranger's canon is what a clone does, so the owner of the repository
+    -- being read is not a trusted party here.
+    it "does not put one on it through the status either" $ do
+      owner <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "a title") (canonOf repo 1 (Just 1))
+          fr = foldEvents repo
+                 [ e1
+                 , mkEvent owner owner
+                     (ASet (eventId e1) "status" "\ESC[2K\ESC[1Aopen" 2000)
+                     (canonOf repo 2 Nothing) ]
+          [t] = threadsOf HubIssue noFilter fr
+      -- The fold really did take it: this is a test about printing, and it
+      -- would pass vacuously if the value never arrived.
+      statusOf t `shouldSatisfy` ("\ESC" `isInfixOf`) . Text.unpack
+      rendered (listDoc [t]) `shouldSatisfy` (not . ("\ESC" `isInfixOf`))
+      rendered (showDoc t)   `shouldSatisfy` (not . ("\ESC" `isInfixOf`))
+
+    -- A HashRef takes any width off the wire ('validHashRef' exists for that),
+    -- the fold carries reply-to through unvalidated, and base58 is quadratic:
+    -- 2.5 s for 64 KiB, measured in this project. One admitted comment is
+    -- enough, and `hub pr show` prints one line per comment.
+    it "prints a hash-shaped field that is not a hash by its size" $ do
+      owner <- kp
+      let repo = fst owner
+          wide = HashRef (fromString (replicate 40000 'z'))
+          e1 = mkEvent owner owner (anIssue repo "a title") (canonOf repo 1 (Just 1))
+          fr = foldEvents repo
+                 [ e1
+                 , mkEvent owner owner
+                     (AComment (eventId e1) (Just wide) (Just "a reply") Nothing 2000)
+                     (canonOf repo 2 Nothing) ]
+          [t] = threadsOf HubIssue noFilter fr
+          out = rendered (showDoc t)
+      out `shouldSatisfy` ("not a hash" `isInfixOf`)
+      -- and the forty thousand characters were never spent
+      length out `shouldSatisfy` (< 4000)
 
     it "shows a thread with its comment" $ do
       owner <- kp
