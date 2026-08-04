@@ -583,6 +583,46 @@ spec = do
       map drWhy (frDropped fr) `shouldBe` [UndecodableAuthor (fst alice) Undecodable]
       map anWhat (frAnomalies fr) `shouldBe` [DupNumber 3]
 
+    -- The seq half of the test above, which was missing. A ghost SPENT its seq
+    -- and remembered nothing about it, so a genuine collision -- a maintainer on
+    -- a newer build minting at N, an owner on this one minting at N because its
+    -- cursor had not seen that event -- was invisible on THIS build, the one
+    -- that can see it from the stamp alone, while the build that can read the
+    -- event reports it. Both orders, because the two sort by event-id between
+    -- them, which is to say arbitrarily, and an anomaly that depends on that is
+    -- one that shows up in half the clones.
+    it "reports a seq two events were stamped with, ghost or not" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          ghost = ghostEvent alice owner (canon repo 7 Nothing)
+          mine = mkEvent alice owner (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 2)
+                   (canon repo 7 (Just 1))
+      map anWhat (frAnomalies (foldEvents repo [ghost, mine])) `shouldBe` [DupSeq 7]
+      map anWhat (frAnomalies (foldEvents repo [mine, ghost])) `shouldBe` [DupSeq 7]
+      -- And a ghost alone is not a collision with itself.
+      map anWhat (frAnomalies (foldEvents repo [ghost])) `shouldBe` []
+
+    -- An origin is a MESSAGE hash and a message can be rewrapped, so the same
+    -- request honoured twice under two envelopes has two origins and one
+    -- honours-id: DupOrigin cannot see it. The bridge refuses a second honour
+    -- only when the first is already in its view, which is exactly the case
+    -- that did not happen when two maintainers honoured at once.
+    it "reports one request carried out twice, which two origins hide" $ do
+      owner <- kp
+      alice <- kp
+      req <- someHash
+      o1 <- someHash
+      o2 <- someHash
+      let repo = fst owner
+          e1 = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon repo 1 (Just 1))
+          closeAt sq o = mkEvent owner owner (AClose (eventId e1) Nothing sq)
+                           (\e -> CanonContent repo e sq Nothing (Just o) (Just req) sq Nothing)
+          fr = foldEvents repo [e1, closeAt 2 o1, closeAt 3 o2]
+      frDropped fr `shouldBe` []
+      map anWhat (frAnomalies fr) `shouldBe` [DupHonours req]
+
     it "does not spend a stamp blessed for another repository" $ do
       ownerB <- kp
       ownerC <- kp

@@ -9,11 +9,15 @@ module HBS2.Hub.ReadSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.CLI.Read
+import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Net.Auth.Credentials
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 
+import Data.Config.Suckless (C)
 import Data.List (isInfixOf)
+import Data.Maybe (isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -213,3 +217,26 @@ spec = do
       fmap (take 6) out `shouldBe` ["1     ", "2     "]
       out !! 0 `shouldSatisfy` ("open" `isInfixOf`)
       out !! 1 `shouldSatisfy` ("comment" `isInfixOf`)
+
+    -- A filter that silently does not run is worse than one that refuses: the
+    -- caller reads the output as filtered. Both of these came back as
+    -- `Filter Nothing Nothing`, which is every issue in the tracker with a zero
+    -- exit, from a command that named two labels or a numeric one.
+    it "refuses a repeated filter rather than dropping it" $ do
+      owner <- kp
+      let repo = fst owner
+          key = argvAtom (show (pretty (AsBase58 repo)))
+          call ws = listArgs @C (key : fmap argvAtom ws)
+      fmap snd (call []) `shouldBe` Just noFilter
+      fmap snd (call ["--label","bug"]) `shouldBe` Just (Filter Nothing (Just "bug"))
+      isJust (call ["--label","a","--label","b"]) `shouldBe` False
+      isJust (call ["--status","open","--status","closed"]) `shouldBe` False
+
+    -- argvAtom keeps a word that spells a number AS a number, so every
+    -- StringLike pattern misses it. A label may be a year.
+    it "takes a filter value that spells a number" $ do
+      owner <- kp
+      let repo = fst owner
+          key = argvAtom (show (pretty (AsBase58 repo)))
+      fmap snd (listArgs @C [key, argvAtom "--label", argvAtom "2026"])
+        `shouldBe` Just (Filter Nothing (Just "2026"))

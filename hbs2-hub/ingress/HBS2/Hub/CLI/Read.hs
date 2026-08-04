@@ -36,6 +36,7 @@ module HBS2.Hub.CLI.Read
   , showDoc
   , logDoc
   , statusOf
+  , listArgs
   , labelsOf
   , codeNoSuchThread
   ) where
@@ -44,6 +45,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
+import HBS2.Hub.CLI.Argv (flagText)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -335,19 +337,41 @@ readEntries = do
       (\_ -> exitWith (ExitFailure 141))
       (mapM_ print ds)
 
--- The two flags, in any order, after the repository key.
-listArgs :: [Syntax c] -> Maybe (HubKey, Filter)
+-- | The repository key, then the two flags, in any order.
+--
+-- Exported, like everything else here that decides something. It was not, and
+-- the module header is about exactly that: what lives in a @where@ clause
+-- cannot be asked a question, and this is what a listing means.
+--
+-- The bug that cost: a repeated flag made @flag@ answer Nothing while @ok@
+-- still passed (it looks at even-indexed words, and both @--label@s are in
+-- even positions), so `hub issue list K --label a --label b` came back as
+-- @Filter Nothing Nothing@ -- every issue in the tracker, exit zero, from a
+-- command that asked for two labels. `--label 2026` did the same by another
+-- route, since 'argvAtom' keeps a numeric word as a number and @StringLike@
+-- does not match one. A filter that silently does not run is worse than one
+-- that refuses: the caller reads the output as filtered.
+listArgs :: forall c . [Syntax c] -> Maybe (HubKey, Filter)
 listArgs syn = case syn of
-  (SignPubKeyLike repo : rest) | ok rest -> Just (repo, Filter (flag "--status" rest)
-                                                              (flag "--label" rest))
+  (SignPubKeyLike repo : rest) | ok rest -> do
+    st <- flag "--status" rest
+    lb <- flag "--label" rest
+    pure (repo, Filter st lb)
   _ -> Nothing
   where
-    flag n xs = case [ v | (StringLike n', StringLike v) <- zip xs (drop 1 xs)
+    -- A refusal of the WHOLE form now, and not of the flag alone.
+    flag n xs = case [ v | (StringLike n', Just v) <- zip xs (fmap textOf (drop 1 xs))
                          , n' == n ] of
-                  [v] -> Just (Text.pack v)
-                  -- A repeated flag is refused with the whole form rather than
-                  -- resolved: first-wins and last-wins are both a guess.
+                  []  -> Just Nothing
+                  [v] -> Just (Just (Text.pack v))
+                  -- A repeated flag is refused rather than resolved:
+                  -- first-wins and last-wins are both a guess.
                   _   -> Nothing
+
+    -- Through the same reading the compose verbs use: a status or a label that
+    -- spells a number is the word that was typed.
+    textOf :: Syntax c -> Maybe String
+    textOf = flagText
 
     -- Every word after the key belongs to one of the two flags. Anything else
     -- is a form this verb does not have, and answering it with an unfiltered

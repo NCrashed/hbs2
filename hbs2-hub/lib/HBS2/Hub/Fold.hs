@@ -51,6 +51,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
+import Data.List qualified as List
 import Data.Maybe (fromMaybe,isJust,isNothing)
 import Data.Text (Text)
 import Data.Word (Word32,Word64)
@@ -139,6 +140,14 @@ data Anomaly =
     -- | Two events folded from one Mailbox message. PEP-19 allows exactly one
     -- event per letter, so this is either a bug or two folders racing.
   | DupOrigin HashRef
+    -- | Two admitted events carrying out the SAME request. An origin is a
+    -- message hash and a message can be rewrapped, so the same request under
+    -- two envelopes has two origins and one honours-id: DupOrigin cannot see
+    -- it, and the bridge's AlreadyHonoured gate only protects a folder that
+    -- already has the first event in its view -- which is exactly the case that
+    -- did not happen when two maintainers honoured it at once, or when one
+    -- crashed between minting and publishing.
+  | DupHonours HashRef
     -- | An event naming an encrypted part with no @part-secret@ to open it.
     -- Admitted, because the reference is inside a signed author box and
     -- nothing is wrong with the event; what is missing is the key, and no
@@ -477,6 +486,7 @@ instance Pretty Anomaly where
     NumberWentBack a b  -> "number went from" <+> pretty a <+> "to" <+> pretty b
     FoldedTsWentBack a b -> "folded-ts went from" <+> pretty a <+> "to" <+> pretty b
     DupOrigin h         -> "two events folded from message" <+> hashDoc h
+    DupHonours h        -> "two events carrying out request" <+> hashDoc h
     PartWithoutSecret   -> "an attachment with no key published for it"
     SecretWithoutPart   -> "a key published for no attachment"
     UnusablePartSecret  -> "a part secret that cannot be a key"
@@ -560,8 +570,15 @@ foldCanon meta owner es
 foldEvents :: HubKey -> [Event] -> FoldResult
 foldEvents owner es = materializeWith owner items unstamped
   where
-    (unstamped, items) = foldr step ([],[]) es
-    step e (bad,oks) = case resolve e of
+    -- foldl' and a reversal, not foldr. The step pattern-matches its
+    -- accumulator, so the foldr was strict in it and built the whole spine on
+    -- the stack before returning anything -- over a canon bounded by
+    -- 'maxCanonFiles' files rather than by anything this fold chooses. The
+    -- reversal restores the input order exactly, so nothing downstream can tell:
+    -- both lists are consumed whole and one of them is sorted.
+    (unstamped, items) = swapEnds (List.foldl' step ([],[]) es)
+    swapEnds (a,b) = (reverse a, reverse b)
+    step (bad,oks) e = case resolve e of
       Right r     -> (bad, Whole r : oks)
       Left reason -> case ghostStamp e of
         Just (sp,num) -> (bad, Ghost (eventId e) reason sp num (canonBoxId (evCanonBox e)) : oks)
@@ -652,10 +669,29 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       -- maintainer's key beside it. The seq has always been spelled this way;
       -- this is the number catching up.
       go rest (dropAt eid (Just (spSeq sp)) (Just (spKey sp)) reason
-                 (if spendable sp s then seen num (stamp sp s) else s))
+                 (if spendable sp s then noted (seen num (stamp sp s)) else s))
       where
-        seen (Just n) t = t { sNumbers = HS.insert n (sNumbers t) }
-        seen Nothing t  = t
+        -- The SEQ is remembered as well as the number, and it was not. The two
+        -- halves of a stamp were treated alike everywhere except here: a ghost
+        -- spent its seq and left no trace of it, so a genuine collision -- a
+        -- maintainer on a newer build minting at seq N, an owner on this one
+        -- minting at N because its cursor had not seen that event -- was
+        -- invisible to `hub verify` on THIS build, the one that can see it from
+        -- the stamp alone, while the build that can read the event reports it.
+        -- Anomaly bookkeeping only: sSeqSeen feeds nothing but the report.
+        seen mn t = t { sNumbers = maybe (sNumbers t) (`HS.insert` sNumbers t) mn
+                      , sSeqSeen = HS.insert (spSeq sp) (sSeqSeen t)
+                      }
+
+        -- And said from here too, so that the collision is reported whichever
+        -- of the two sorts first: the order between them is by event-id, which
+        -- is to say arbitrary, and an anomaly that depends on it is one that
+        -- shows up in half the clones.
+        noted t
+          | HS.member (spSeq sp) (sSeqSeen s) =
+              t { sAnoms = Anomalous eid (spSeq sp) (spKey sp) (DupSeq (spSeq sp))
+                             : sAnoms t }
+          | otherwise = t
     go (Whole r : rest) s0
       -- Before the stamp, because a canon box signed for another repository is
       -- not a blessing here at all, and the content it blesses would be dropped
@@ -903,44 +939,54 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
                        Right t'    -> keep (Just thr) r s { sThreads = HM.insert thr t' (sThreads s) }
 
 -- Internal accumulator.
+-- | The accumulator of the ordered pass.
+--
+-- EVERY FIELD IS STRICT, and that is not a micro-optimisation. This record is
+-- rebuilt once per event and only two of its fields are ever forced during the
+-- pass, so a lazy one accumulated a thunk per event that CLOSED OVER THE WHOLE
+-- PREVIOUS RECORD: `sAnoms` is built from an expression mentioning `s`, which
+-- is an application thunk rather than a selector, so every superseded version
+-- of every HAMT in here was retained instead of dying. Peak residency went as
+-- O(N log N) in the number of events rather than O(N), for a fold nobody asked
+-- for the anomalies of.
 data St = S
-  { sMaint    :: HashSet HubKey
+  { sMaint    :: !(HashSet HubKey)
     -- Every key this log has EVER authorized, which only grows. Used for one
     -- thing, spending stamps, and separate from 'sMaint' because a withdrawn
     -- delegation must stop an event being ADMITTED without also making the
     -- seq it occupies available again (see 'stamp').
-  , sEver     :: HashSet HubKey
-  , sThreads  :: HashMap ThreadId ThreadState
-  , sSeen     :: HashMap EventId (Maybe ThreadId)
-  , sRedacted :: HashSet EventId
-  , sDropped  :: [Dropped]
-  , sMaxSeq    :: Word64
-  , sMaxNumber :: Word64
-  , sOrigins   :: HashSet HashRef
-  , sHonoured  :: HashSet EventId
+  , sEver     :: !(HashSet HubKey)
+  , sThreads  :: !(HashMap ThreadId ThreadState)
+  , sSeen     :: !(HashMap EventId (Maybe ThreadId))
+  , sRedacted :: !(HashSet EventId)
+  , sDropped  :: ![Dropped]
+  , sMaxSeq    :: !Word64
+  , sMaxNumber :: !Word64
+  , sOrigins   :: !(HashSet HashRef)
+  , sHonoured  :: !(HashSet EventId)
     -- Anomaly bookkeeping: what has been stamped already, and the last
     -- values seen, so a counter going backwards is visible.
-  , sSeqSeen    :: HashSet Word64
-  , sNumbers    :: HashSet Word64
-  , sLastNumber :: Word64
-  , sLastFolded :: Word64
+  , sSeqSeen    :: !(HashSet Word64)
+  , sNumbers    :: !(HashSet Word64)
+  , sLastNumber :: !Word64
+  , sLastFolded :: !Word64
     -- The folded-ts of the previous ADMITTED event, which is a different
     -- question from the high-water mark above and needs its own field: one is
     -- the floor the next mint is clamped to, the other is what a clock going
     -- backwards is measured against. Sharing them made an event that was not
     -- admitted raise the bar for the anomaly, so a strictly increasing log of
     -- admitted events reported itself as going backwards.
-  , sPrevFolded :: Word64
+  , sPrevFolded :: !Word64
     -- Newest first while accumulating. No sort key alongside, unlike
     -- 'sDropped': the pass runs in (seq, event-id, canon-box hash) order and
     -- appends, so reversing at the end is already the log's own order. A drop
     -- can happen before that order is established, which is why that one
     -- carries its seq.
-  , sAnoms      :: [Anomalous]
+  , sAnoms      :: ![Anomalous]
     -- Newest first while accumulating, like the anomalies and for the same
     -- reason: the pass runs in the order the log itself has.
-  , sLog        :: [LogEntry]
-  , sParts      :: HashSet HashRef
+  , sLog        :: ![LogEntry]
+  , sParts      :: !(HashSet HashRef)
   }
 
 -- | How far past the cursor a stamp from a withdrawn delegation may still
@@ -1009,6 +1055,7 @@ keep scope r s = s
         | Just n <- [num], sLastNumber s > 0, n <= sLastNumber s ]
       , [ FoldedTsWentBack (sPrevFolded s) folded | folded < sPrevFolded s ]
       , [ DupOrigin o | Just o <- [ccOrigin cc], HS.member o (sOrigins s) ]
+      , [ DupHonours o | Just o <- [ccHonours cc], HS.member o (sHonoured s) ]
       , [ PartWithoutSecret
         | referencesPart (rContent r), isNothing (ccPartSecret cc) ]
       , [ SecretWithoutPart

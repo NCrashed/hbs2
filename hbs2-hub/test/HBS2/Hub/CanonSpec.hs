@@ -178,6 +178,37 @@ spec = do
       let atBound = "(hub-event 1)\n(body \"" <> Text.replicate maxEscapes "\\n" <> "\")\n"
       parseEvent atBound `shouldBe` Left (MissingClause "author-box")
 
+    -- The fixture above puts an escape at every character, so the walk that
+    -- spends the budget stops after two thousand of them. The shape that COSTS
+    -- is the other one: ordinary text first and the escapes at the end, so the
+    -- walk runs the length of the body before the budget runs out. It used to
+    -- do that by index, which is O(i) on UTF-8 text and made the whole walk
+    -- quadratic: 0.97 s for this fixture, against 0.006 s for the same escapes
+    -- at the front, once per accept inside renderEvent and again for every
+    -- event a compaction re-renders. Measured, and not asserted as a duration,
+    -- because a clock in a unit suite is a flake; what is asserted is that the
+    -- answer did not change when the walk did.
+    it "truncates the same projection whether the escapes are early or late" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          plain = Text.replicate (maxInlineBody - 2 * (maxEscapes + 40)) "x"
+          tail' = Text.replicate (maxEscapes + 40) "\\"
+          late = mkEvent alice owner
+                   (AOpen repo HubIssue "t" [] (Just (plain <> tail')) Nothing Nothing 1)
+                   (canon repo 1 (Just 1) Nothing Nothing)
+          txt = renderEvent late
+      -- NOT 'escapesOf' here, and the difference is the fixture: that helper
+      -- counts backslash CHARACTERS, and an escaped backslash is two of them
+      -- while being one escape to the reader's scanner. What the bound is about
+      -- is what the reader counts, and the reader saying so is the assertion
+      -- below: over its budget it answers TooLarge "escapes".
+      Text.isInfixOf "projection truncated" txt `shouldBe` True
+      -- The plain prefix is kept whole: the budget is about escapes, and a walk
+      -- that stopped early would have thrown away text nothing was charging for.
+      Text.isInfixOf (Text.take 4096 plain) txt `shouldBe` True
+      parseEvent txt `shouldBe` Right (Just hubEventVersion, late)
+
     it "keeps the boxes readable under a title written to break the file" $ do
       owner <- kp
       alice <- kp

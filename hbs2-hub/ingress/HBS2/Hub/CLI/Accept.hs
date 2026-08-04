@@ -71,7 +71,8 @@ import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,listToMaybe)
-import System.Exit (die)
+import System.Exit (die,exitWith,ExitCode(..))
+import System.IO.Error (isResourceVanishedError)
 
 -- | And what a machine with no key for the canon identity exits with.
 codeNoCanonKey :: Int
@@ -391,17 +392,27 @@ acceptEntries = do
                 Left e   -> notStaged e
         _ -> pure Nothing
 
-      liftIO $ print $ vcat
-        [ "accepted" <+> pretty (eventId (acEvent acc))
-        , "seq" <+> pretty (acSeq acc)
-        , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
-        , "commit" <+> pretty commit
-        , maybe mempty ("staged" <+>) (fmap pretty staged)
-        , "left in the mailbox:" <+> pretty msg
-            <+> "(no delete, no acknowledgement; see --help)"
-        ]
-
-      for_ (omittedNote plan) (liftIO . print)
+      -- The same guard the three read verbs carry, and this is the verb that
+      -- needed it most. Everything above has happened: the event is minted, the
+      -- bundle is verified, the commit has landed and the ref is staged. A
+      -- closed pipe here (`hub inbox accept ... | head -1`) let the exception
+      -- out through main, which exits 1, the code PEP-22 gives to a bad
+      -- argument. A wrapper branching on that concluded the accept had failed,
+      -- about the one verb whose work cannot be undone.
+      liftIO $ handleJust
+        (\e -> if isResourceVanishedError e then Just () else Nothing)
+        (\_ -> exitWith (ExitFailure 141))
+        do
+          print $ vcat
+            [ "accepted" <+> pretty (eventId (acEvent acc))
+            , "seq" <+> pretty (acSeq acc)
+            , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
+            , "commit" <+> pretty commit
+            , maybe mempty ("staged" <+>) (fmap pretty staged)
+            , "left in the mailbox:" <+> pretty msg
+                <+> "(no delete, no acknowledgement; see --help)"
+            ]
+          for_ (omittedNote plan) print
 
     -- A commit message a human reading `git log refs/hbs2/meta` can act on.
     -- Not a place to put anything authoritative: everything that is signed is

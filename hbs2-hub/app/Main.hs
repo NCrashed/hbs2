@@ -254,10 +254,21 @@ main = do
     -- canon is a git ref in this repository and the fold over it needs nothing
     -- else. Measured on the same wedged-peer case the note above describes,
     -- this is the difference between a listing and a hang.
+    -- The WRITE verbs that reach nothing but this repository are here too, and
+    -- they were the ones the list most needed. Their constraints say so:
+    -- `banEntries` and `maintainerEntries` ask for neither HasStorage nor
+    -- HasClientAPI, so they cannot call a peer, and `pr merge` reaches only the
+    -- keyman, git and canon. Going through `recover` for them cost a
+    -- `hbs2-peer poke` with no timeout, so against a wedged peer the verbs that
+    -- hang were the ones an operator reaches for when things are going wrong,
+    -- with `ban list` beside them answering instantly.
     peerFreeNames = [ "hub:verify"
                     , "hub:issue:list", "hub:issue:show"
                     , "hub:pr:list", "hub:pr:show"
                     , "hub:log", "hub:maintainer:list", "hub:ban:list"
+                    , "hub:ban", "hub:unban"
+                    , "hub:maintainer:add", "hub:maintainer:remove"
+                    , "hub:pr:merge"
                     ] <> helpNames
 
     helpNames :: [Id]

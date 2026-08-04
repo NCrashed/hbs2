@@ -150,7 +150,16 @@ bundleRange cwd base ref = runExceptT do
   -- To stdout, so the bytes never touch a file this would then have to clean
   -- up. A bundle of a real range is megabytes, which is what the caller is
   -- about to encrypt and put in a message anyway.
-  out <- ExceptT $ call cwd bundleSeconds "bundle create"
+  -- LC_ALL=C, and only here. 'orEmpty' below reads git's PROSE, which is the
+  -- only signal git gives for an empty range (there is no exit code for it),
+  -- and prose is translated: the same refusal is "Refusing to create empty
+  -- bundle" under C, "Отклонение создания пустого пакета" under ru_RU and
+  -- "Erstellung eines leeren Pakets zurückgewiesen" under de_DE, so a
+  -- maintainer with a localised shell got a raw fatal: line instead of the
+  -- advice this error carries. Pinned for this ONE call rather than in
+  -- 'forcedEnv', because everywhere else git's own words are shown to a human
+  -- and translating them for that human is the right behaviour.
+  out <- ExceptT $ callWith [("LC_ALL","C")] cwd bundleSeconds "bundle create"
            ["bundle", "create", "-", Text.unpack base <> ".." <> Text.unpack ref]
            `orEmpty` "empty bundle"
 
@@ -292,8 +301,14 @@ checked what ok v = unless (ok v) (throwError (BundleBadName what v))
 run :: MonadUnliftIO m
     => Maybe FilePath -> Int -> Text -> [String]
     -> m (Either BundleError (ExitCode, ByteString, ByteString))
-run cwd secs what args =
-  gitRun cwd [] secs what args mempty <&> \case
+run = runWith []
+
+-- | The same, with environment this call needs and the others must not have.
+runWith :: MonadUnliftIO m
+        => [(String,String)] -> Maybe FilePath -> Int -> Text -> [String]
+        -> m (Either BundleError (ExitCode, ByteString, ByteString))
+runWith env cwd secs what args =
+  gitRun cwd env secs what args mempty <&> \case
     Left (GitUnstartable e) -> Left (BundleUnstartable e)
     Left (GitStalled e)     -> Left (BundleStalled e)
     Right r                 -> Right r
@@ -301,8 +316,13 @@ run cwd secs what args =
 -- The common case: a non-zero exit is a refusal, and stdout is the answer.
 call :: MonadUnliftIO m
      => Maybe FilePath -> Int -> Text -> [String] -> m (Either BundleError ByteString)
-call cwd secs what args =
-  run cwd secs what args <&> \case
+call = callWith []
+
+callWith :: MonadUnliftIO m
+         => [(String,String)] -> Maybe FilePath -> Int -> Text -> [String]
+         -> m (Either BundleError ByteString)
+callWith env cwd secs what args =
+  runWith env cwd secs what args <&> \case
     Left e -> Left e
     Right (ExitSuccess, out, _)     -> Right out
     Right (ExitFailure c, _, e0)    -> Left (refusal what c e0)

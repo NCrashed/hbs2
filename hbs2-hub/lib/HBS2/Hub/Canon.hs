@@ -237,15 +237,26 @@ capEscapes budget0 = snd . mapAccumL go budget0
 
     -- Walk to where the budget runs out. The state is (escapes left, is this
     -- character the second half of an escape sequence).
-    cut n t = Text.take (stop 0 n False) t
+    --
+    -- ONE PASS, by 'Text.uncons' rather than by index. This walked with
+    -- 'Text.index' and 'Text.compareLength', both O(i) on text's UTF-8
+    -- representation, so the walk was O(k^2) in the offset the budget runs out
+    -- at -- and that offset is not bounded by the escape count, since the loop
+    -- only stops at a backslash. A body of 32 KiB (exactly 'maxInlineBody')
+    -- made of ordinary text followed by eleven hundred backslashes is a
+    -- stranger's letter that costs a second of the triage loop's CPU, inside
+    -- 'renderEvent', once per accept. Measured on this project's text-2.0.2:
+    -- 0.97 s for that shape against 0.006 s for the same escapes at the front,
+    -- and the same second again for every event a compaction re-renders.
+    cut n t = Text.take (go 0 n False t) t
       where
-        stop i left inEsc = case Text.compareLength t i of
-          LT -> i
-          EQ -> i
-          GT | inEsc              -> stop (i + 1) left False
-             | Text.index t i /= '\\' -> stop (i + 1) left False
-             | left <= 0          -> i
-             | otherwise          -> stop (i + 1) (left - 1) True
+        go !i !left !inEsc s = case Text.uncons s of
+          Nothing -> i
+          Just (c, rest)
+            | inEsc      -> go (i + 1) left False rest
+            | c /= '\\'  -> go (i + 1) left False rest
+            | left <= 0  -> i
+            | otherwise  -> go (i + 1) (left - 1) True rest
 
 -- What a truncated projection says about itself, in a form that costs nothing
 -- to parse and cannot be mistaken for the content: no escape, no quote, and the
