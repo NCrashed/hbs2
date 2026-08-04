@@ -12,6 +12,7 @@ import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
+import HBS2.Hub.CLI.Own
 import HBS2.Hub.CLI.Policy
 import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Read
@@ -115,6 +116,7 @@ main = do
         prEntries
         maintainerEntries
         rejectEntries
+        ownEntries
         policyEntries
         banEntries
 
@@ -269,6 +271,8 @@ main = do
                     , "hub:ban", "hub:unban"
                     , "hub:maintainer:add", "hub:maintainer:remove"
                     , "hub:pr:merge"
+                    , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
+                    , "hub:redact"
                     ] <> helpNames
 
     helpNames :: [Id]

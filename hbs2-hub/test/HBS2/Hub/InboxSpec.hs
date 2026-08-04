@@ -116,11 +116,11 @@ spec = do
       -- "not downloaded yet" are one observation. Reporting nothing, quietly and
       -- with a zero exit, was the answer that made a first run against a live
       -- mailbox look like a mailbox with nothing in it.
-      let notes = fmap shown (inboxNotes (InboxRead [] [] False 0 mempty))
+      let notes = fmap shown (inboxNotes False (InboxRead [] [] False 0 mempty))
       notes `shouldSatisfy` any (isInfixOf "NOT the same as an empty mailbox")
 
     it "says a settled empty mailbox is empty, by saying nothing" $ do
-      fmap shown (inboxNotes (InboxRead [] [] True 0 mempty)) `shouldBe` []
+      fmap shown (inboxNotes False (InboxRead [] [] True 0 mempty)) `shouldBe` []
 
     it "tells a still-arriving queue from an incomplete one" $ do
       -- Different notes because they call for different things, and only one of
@@ -130,8 +130,8 @@ spec = do
       -- prevent.
       k <- aKey
       let one = [view (mh "m") (Just k) (Left NotForUs)]
-          arriving = fmap shown (inboxNotes (InboxRead one [] False 0 mempty))
-          holed    = fmap shown (inboxNotes (InboxRead one [mh "x"] True 0 mempty))
+          arriving = fmap shown (inboxNotes False (InboxRead one [] False 0 mempty))
+          holed    = fmap shown (inboxNotes False (InboxRead one [mh "x"] True 0 mempty))
       arriving `shouldSatisfy` any (isInfixOf "more letters may follow")
       arriving `shouldSatisfy` not . any (isInfixOf "incomplete in both directions")
       holed    `shouldSatisfy` any (isInfixOf "incomplete in both directions")
@@ -144,11 +144,11 @@ spec = do
       -- QUIETLY is not: a list missing letters is wrong, not short.
       k <- aKey
       let one = [view (mh "m") (Just k) (Left NotForUs)]
-          cut = fmap shown (inboxNotes (InboxRead one [] True 42 mempty))
+          cut = fmap shown (inboxNotes False (InboxRead one [] True 42 mempty))
       cut `shouldSatisfy` any (isInfixOf "42 more letter(s)")
       cut `shouldSatisfy` any (isInfixOf "incomplete")
       -- ...and not said when nothing was left out
-      fmap shown (inboxNotes (InboxRead one [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead one [] True 0 mempty))
         `shouldSatisfy` not . any (isInfixOf "were not opened")
       -- The remedy is the same as for a hole in the tree -- do not treat this as
       -- the mailbox -- so it is the same code.
@@ -164,14 +164,14 @@ spec = do
       k <- aKey
       let mine  = [view (mh "a") (Just k) (Left NotForUs)]
           mixed = mine <> [view (mh "b") (Just k) (Left NotFetched)]
-      fmap shown (inboxNotes (InboxRead mine [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead mine [] True 0 mempty))
         `shouldSatisfy` any (isInfixOf "hbs2-keyman list")
       -- Only when EVERY letter says it: that is the shape a broken keyman makes,
       -- and a mailbox where some letters are ours does not.
-      fmap shown (inboxNotes (InboxRead mixed [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead mixed [] True 0 mempty))
         `shouldSatisfy` not . any (isInfixOf "hbs2-keyman list")
       -- and never on an empty queue, which says nothing about the keyman at all
-      fmap shown (inboxNotes (InboxRead [] [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead [] [] True 0 mempty))
         `shouldSatisfy` not . any (isInfixOf "hbs2-keyman list")
 
     it "bounds the list of unreadable blocks it prints" $ do
@@ -179,7 +179,7 @@ spec = do
       -- verify` got its cap after a measured 369 MB of stdout; this printed one
       -- unbounded line of 45-character hashes.
       let many' = [ mh (fromString (show i)) | i <- [1 :: Int .. maxMissingLines * 3] ]
-          note = concatMap shown (inboxNotes (InboxRead [] many' True 0 mempty))
+          note = concatMap shown (inboxNotes False (InboxRead [] many' True 0 mempty))
       -- The COUNT of what was left out, not just the word "more", which the
       -- still-arriving note also contains and which a cap of any size satisfies.
       note `shouldSatisfy` isInfixOf ("and " <> show (maxMissingLines * 2) <> " more")
@@ -188,7 +188,7 @@ spec = do
     it "prints a missing block hash that is not a hash by its size, too" $ do
       -- These come out of a mailbox entry, which is a stranger's bytes like
       -- everything else in the tree.
-      let note = concatMap shown (inboxNotes (InboxRead [] [fatRef 40000] True 0 mempty))
+      let note = concatMap shown (inboxNotes False (InboxRead [] [fatRef 40000] True 0 mempty))
       note `shouldSatisfy` isInfixOf "not a hash"
 
     it "warns that a queue line is not permission" $ do
@@ -199,10 +199,21 @@ spec = do
       let ac = AOpen k HubIssue "t" [] Nothing Nothing Nothing 1
           folds = [view (mh "m") (Just k) (Right (k, ac, FoldsToCanon))]
           other = [view (mh "m") (Just k) (Right (k, ac, RequestOnly))]
-      fmap shown (inboxNotes (InboxRead folds [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead folds [] True 0 mempty))
         `shouldSatisfy` any (isInfixOf "no deny-list was applied")
       -- ...and not when there is nothing for it to be about
-      fmap shown (inboxNotes (InboxRead other [] True 0 mempty)) `shouldBe` []
+      fmap shown (inboxNotes False (InboxRead other [] True 0 mempty)) `shouldBe` []
+
+    -- And it stops as soon as a list HAS been applied: a warning that never
+    -- goes away is one a reader learns to skip, and this one is the difference
+    -- between "the rules would take it" and "its author is allowed to send".
+    it "stops warning about the deny-list once one has been applied" $ do
+      k <- aKey
+      let ac = AOpen k HubIssue "t" [] Nothing Nothing Nothing 1
+          one = [view (mh "m") (Just k) (Right (k, ac, FoldsToCanon))]
+          notes listed = concatMap shown (inboxNotes listed (InboxRead one [] True 0 mempty))
+      notes False `shouldSatisfy` isInfixOf "no deny-list"
+      notes True `shouldSatisfy` (not . isInfixOf "no deny-list")
 
   describe "PEP-22 hub inbox: the exit code" $ do
 
@@ -289,3 +300,4 @@ onStderr act = bracket (hDuplicate stderr)
                  (\o -> hDuplicateTo o stderr >> hClose o)
                  (\_ -> withFile "/dev/null" WriteMode $ \n ->
                           hDuplicateTo n stderr >> act)
+

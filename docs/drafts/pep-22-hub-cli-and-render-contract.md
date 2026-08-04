@@ -36,7 +36,7 @@ Three layers and how data flows
 ```
 compose (Tier B)          read (any clone)          maintain / moderate (Tier A)
   hub issue new             hub issue|pr list/show     hub inbox / accept / merge
-  hub pr new/revise    -->  hub log / verify      <--  hub issue close/label/assign
+  hub pr new/revise    -->  hub log / verify      <--  hub issue close/label/redact
         |                        ^                          hub policy / block / ban
         v                        |                          hub maintainer / compact
    PEP-18 letter            render contract                     |
@@ -116,12 +116,12 @@ and a tree full of forged events were the same event.
 | 18   | the peer is running and stopped answering (`hub inbox`, `hub issue new`) |
 | 19   | no signing key here for the author (`hub issue new`)     |
 | 20   | the peer answered and would not store the message (`hub issue new`) |
-| 21   | no signing key here for the canon identity (`hub inbox accept`) |
+| 21   | no signing key here for the canon identity (`hub inbox accept`, `hub issue close`) |
 | 22   | the letter named is not one this node can read                |
-| 23   | the bridge would not bless it: triage refused, canon untouched |
+| 23   | the bridge would not bless it: triage refused, canon untouched (also an owner verb signed by a key the repository does not authorize) |
 | 24   | canon could not be written                                    |
 | 25   | the event rendered to a file this build could not read back    |
-| 26   | canon holds no such thread (`hub issue show`, `hub pr show`)    |
+| 26   | canon holds no such thread (`hub issue show`, `hub pr show`, `hub issue close`) |
 | 27   | git would not build the bundle or would not answer (`hub pr new`) |
 | 28   | the objects a pull request proposes are not usable             |
 | 29   | canon holds no such pull request (`hub pr merge`)               |
@@ -306,7 +306,8 @@ Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 ```
 hub issue new  --target <repo> --title ... [--label ...] [< body]
 hub issue comment <thread-id> [< body]
-hub issue close|reopen|label <thread-id> ...   ; a REQUEST (owner decides, PEP-19)
+hub issue close|reopen|label <thread-id> ...   ; NOT BUILT: the request letter (PEP-18
+                                               ;   carries the ops; no verb composes one)
 hub pr new     --target <repo> --onto master --from <ref>   ; builds a bundle (PEP-20)
 hub pr revise  <thread-id> --from <ref>                     ; author-of-record (PEP-20)
 hub pr comment <thread-id> [< body]
@@ -325,7 +326,8 @@ reads that mailbox and correlates each ack to the thread it sent.
 Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 
 ```
-hub inbox [--mailbox <key>]        ; decrypted triage queue (Tier B), verified
+hub inbox [--mailbox <key>] [--repo <key>]   ; decrypted triage queue (Tier B), verified;
+                                   ;   --repo applies that repository deny-list
 hub inbox show <msg>               ; one submission, inner author + payload + attachments
 hub inbox accept <msg>             ; fold into canon (assigns number). NOT a delete:
                                    ;   fold-then-delete needs a DeleteMessages path
@@ -333,9 +335,28 @@ hub inbox accept <msg>             ; fold into canon (assigns number). NOT a del
                                    ;   in the mailbox and a second accept is refused
 hub inbox reject <msg>             ; refuse it here; NO canon event, and no courtesy
                                    ;   note either -- the ack path is unbuilt (PEP-18)
-hub issue close|reopen|label|assign <n> ...   ; owner-signed set events on a folded thread
+hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]
+                                   ; owner-signed status event on a folded thread; the
+                                   ;   status follows from the op, so no separate set
+hub issue label --repo <key> --number <n> --label <l>... | --clear
+                                   ; owner-signed set; REPLACES the labels, and the
+                                   ;   empty set has to be said (--clear), not implied
+hub redact --repo <key> --event <event-id>
+                                   ; display-level hide (PEP-19): canon keeps the bytes
 hub pr   merge <n> [--strategy ...]           ; verify, integrate, merge event (PEP-20)
 ```
+
+`assign` was listed here and is not built: it would be an owner-signed set of an
+`assignee` attribute, which the fold already carries as an ordinary attribute,
+and nothing but the verb is missing.
+
+Every value is behind a flag because a repository key, a delegate key and an
+event-id are all thirty-two bytes of base58, so position cannot tell them apart
+and a swap would be signed. `--as <key>` names a delegate (PEP-21) and defaults
+to the repository key; `--number` is what `hub issue list` prints, resolved to a
+thread through the same fold every reader runs, so a number canon does not hold
+is a refusal here rather than an event minted against a thread that does not
+exist.
 
 `hub inbox` takes no mailbox key in the ordinary case: it reads the repository
 you are standing in and resolves the ingress mailbox from its manifest (PEP-18
@@ -356,6 +377,15 @@ nothing built on it may treat "it was in the queue" as "it may be folded". The
 accept path applies the deny-list itself, which is where that guarantee
 actually lives.
 
+THE QUEUE APPLIES IT TOO, given `hub inbox --repo <key>`. The list is keyed by
+repository and the queue reads a mailbox, so without a repository there is no
+list to apply -- but a banned author's letters then sit in the queue looking
+like work, and a maintainer reads a list they were told was filtered. So the
+repository is a flag on the queue as well, and when it is absent `hub inbox`
+says in its footer that no deny-list was applied, rather than showing a filtered
+queue and an unfiltered one that look alike. Accept still applies the list
+itself: the queue is a view, and a view is not an authorization.
+
 Either way the mailbox has to be one the local peer holds. A peer only asks the
 network about mailboxes in its own database, so a key it does not have reads as
 an empty inbox on this run and on every future one; a reader that cannot tell
@@ -369,12 +399,22 @@ no canon event. It was specified as a `DeleteMessages` plus an optional courtesy
 note to the sender's `reply-mailbox`, and it is neither yet: both need paths
 this build does not have (retention on one side, the ack on the other), so what
 it does today is refuse the letter here and say so. Closing an already-folded thread is
-the separate `hub issue close <n>`, an owner-signed `set status closed` on an
-existing canon thread. And `hub issue close|reopen|label` appears in both the
-contribute and maintain groups: the resolution rule is capability-based, if
-the caller holds an authorized canon key the verb emits an owner-signed event,
-otherwise it emits a request letter. A maintainer who wants to only ask (not
-act) passes `--request` to force the letter form.
+the separate `hub issue close --number <n>`, an owner-signed close event on an
+existing canon thread.
+
+WHICH FORM A VERB TAKES IS THE VERB, NOT THE CALLER. This section used to
+specify capability-based dispatch: one `hub issue close` that emitted an
+owner-signed event if the caller held an authorized canon key and a request
+letter otherwise, with `--request` to force the letter. That is not what is
+built, and it should not be: a verb whose meaning depends on which keys happen
+to be in the local keyman is a verb nobody can read from a script, and the two
+outcomes -- an event in append-only canon, and a letter in somebody else's
+mailbox -- are too far apart to pick by inference. So `hub issue close|reopen|
+label` are owner-signed only: no signing key for the identity is exit 21, and a
+key the repository does not authorize is exit 23, in both cases with canon
+untouched. The letter form is still what PEP-18 carries (`close`, `reopen` and
+`set` are letter ops the bridge honours through `hub inbox accept`), but this
+build has no verb that composes one; a contributor asks in a comment.
 
 Moderate (PEP-21; owner or delegated where noted):
 

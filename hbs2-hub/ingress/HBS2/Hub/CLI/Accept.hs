@@ -53,7 +53,7 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, codeMailboxUnknown, codePeerSilent, PeerSilent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
-import HBS2.Hub.CLI.Ban (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal

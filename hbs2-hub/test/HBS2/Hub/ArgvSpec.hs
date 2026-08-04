@@ -171,6 +171,7 @@ spec = do
         kept s
 
   argvFlags
+  argvSwitches
 
   describe "PEP-22 argv: which words are the verb" $ do
 
@@ -284,3 +285,39 @@ argvFlags =
         `shouldBe` Just Nothing
       fmap (\kvs -> flagOnce kvs "--a" >>= flagWord) (flags ["--a","-5"])
         `shouldBe` Just Nothing
+
+-- The other arity a flag can have. A switch is not a flag whose value is
+-- ignored: the difference is whether the word after it is still a word.
+argvSwitches :: Spec
+argvSwitches =
+  describe "PEP-22 argv: a flag that takes no value" $ do
+
+    let sw  = flagsAndSwitches ["--a"] ["--x"] . fmap argvAtom
+        got = fmap (\kvs -> flagSwitch kvs "--x")
+        no  = not . isJust
+
+    it "is present or absent, and nothing else" $ do
+      got (sw []) `shouldBe` Just (Just False)
+      got (sw ["--x"]) `shouldBe` Just (Just True)
+      got (sw ["--a","1","--x"]) `shouldBe` Just (Just True)
+      got (sw ["--x","--a","1"]) `shouldBe` Just (Just True)
+
+    -- The reason it cannot be a flag whose value is ignored: with a pair rule
+    -- the word after it is eaten, so `--x --a 1` binds "--a" as the value of
+    -- --x and the line then has no --a at all.
+    it "leaves the word after it alone" $ do
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (sw ["--x","--a","1"])
+        `shouldBe` Just (Just "1")
+
+    -- Not swallowed as a value, and not dropped: a stray word is what every
+    -- other unclaimed word is.
+    it "refuses a value, in both spellings" $ do
+      no (sw ["--x","yes"]) `shouldBe` True
+      no (sw ["--x=yes"]) `shouldBe` True
+
+    it "refuses a repeat, like a flag that may appear once" $ do
+      got (sw ["--x","--x"]) `shouldBe` Just Nothing
+
+    it "is still refused when this verb does not know it" $ do
+      no (flagsAndSwitches ["--a"] [] (fmap argvAtom ["--a","1","--x"]))
+        `shouldBe` True

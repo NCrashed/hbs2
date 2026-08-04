@@ -27,6 +27,7 @@ module HBS2.Hub.CLI.Inbox
   , render
   , inboxDoc
   , inboxNotes
+  , inboxArgs
   , inboxCode
   , inboxUsage
   , refuse
@@ -42,6 +43,8 @@ module HBS2.Hub.CLI.Inbox
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress
+import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -61,6 +64,7 @@ import Data.Text qualified as Text
 
 import Data.Coerce (coerce)
 import Data.List qualified as List
+import Data.Maybe (isJust)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Time.Format (defaultTimeLocale,formatTime)
 import Data.Word (Word64)
@@ -77,7 +81,7 @@ inboxEntries :: forall c m . ( IsContext c
 inboxEntries = do
 
   brief "list the letters waiting in a hub's ingress mailbox"
-    $ args [arg "string" "[--mailbox] mailbox-key"]
+    $ args [arg "string" "[--mailbox] mailbox-key", arg "string" "--repo repo-key"]
     $ desc ( "Read-only. Waits for the peer's copy of the mailbox to settle,"
              <> line <> "opens every message this node holds a key for, and reports"
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
@@ -95,16 +99,19 @@ inboxEntries = do
              <> line
              <> line <> "Takes the mailbox key directly, which is the form PEP-22"
              <> line <> "spells --mailbox. The form that reads the key from the repo"
-             <> line <> "manifest needs a manifest reader, which does not exist yet,"
-             <> line <> "and that manifest is also what would supply the PEP-21"
-             <> line <> "deny-list this form has no source for: a queue read this"
-             <> line <> "way shows letters from banned authors." )
+             <> line <> "manifest needs a manifest reader, which does not exist yet."
+             <> line
+             <> line <> "--repo names whose deny-list to apply (hub ban), which is"
+             <> line <> "this node's own state keyed by repository and not anything"
+             <> line <> "the mailbox knows. Without it the queue is unfiltered and"
+             <> line <> "says so: a banned author's letter is in the list with the"
+             <> line <> "same \"(folds)\" as anyone else's." )
     -- Both spellings, because PEP-22 specifies the flag: the bare key is what
     -- the spec calls `--mailbox <key>`, and a form the spec names has to be
     -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
-        [ SignPubKeyLike mbox ]                          -> lift (listInbox mbox)
-        [ StringLike "--mailbox", SignPubKeyLike mbox ]   -> lift (listInbox mbox)
+        [ SignPubKeyLike mbox ] -> lift (listInbox mbox Nothing)
+        (inboxArgs -> Just (mbox, mrepo)) -> lift (listInbox mbox mrepo)
         -- Its own message, not a BadFormException. Two things were wrong with
         -- that: it names an internal Haskell type and a spelling the caller did
         -- not type, which is the defect `hub verify` was already fixed for; and
@@ -115,9 +122,26 @@ inboxEntries = do
         _ -> liftIO (die (show (inboxUsage :: Doc ())))
 
   where
-    listInbox mbox = do
+    listInbox mbox mrepo = do
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
+
+      -- THE DENY-LIST, when the caller says which repository's. It is this
+      -- node's own state keyed by repo (PEP-21 "Two enforcement layers"), not
+      -- anything the mailbox knows, so a queue read by mailbox key alone has no
+      -- source for it and says so below. Applied HERE and not only at accept,
+      -- because triage is a queue a human reads and a banned author's letter
+      -- should not be in front of them at all.
+      allowed <- case mrepo of
+        Nothing -> pure (const True)
+        Just repo -> loadBans repo >>= \case
+          Right bans -> pure (allowedBy bans)
+          -- The same refusal `hub inbox accept` makes: a deny-list that reads
+          -- as empty when it is damaged stops working silently, which is the
+          -- failure this layer exists to prevent.
+          Left e -> liftIO (refuse (show ("the deny-list will not read:"
+                                            <+> pretty (safeText e)))
+                                   codeNoBanList)
 
       -- Each with its own exit code. PEP-22 gives 1 to "a bad argument, an
       -- unknown verb", and neither of these is one: the key was well formed both
@@ -127,7 +151,7 @@ inboxEntries = do
       -- Chained, so the second handler covers the first as well as the body.
       -- That is harmless here: 'refuse' leaves through 'exitWith', whose
       -- exception is an ExitCode and is caught by neither.
-      r <- readInbox (overRpc sto api) mbox
+      r <- readInbox ((overRpc sto api) { igAllowed = allowed }) mbox
              `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
              `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
@@ -151,7 +175,7 @@ inboxEntries = do
       -- unguarded write then leaves through the RTS with 1 -- the code PEP-22
       -- gives to usage errors, which is exactly the confusion 17 and 18 were
       -- added to end.
-      liftIO $ for_ (inboxNotes r) (saying . (<> line))
+      liftIO $ for_ (inboxNotes (isJust mrepo) r) (saying . (<> line))
 
       liftIO $ case inboxCode r of
         0 -> pure ()
@@ -234,8 +258,8 @@ inboxDoc = fmap render . irLetters
 --
 -- A list rather than an action, so that a test can ask what this run would say
 -- without capturing a handle.
-inboxNotes :: InboxRead -> [Doc ann]
-inboxNotes r = settledNote <> missingNote <> omittedNote <> keymanNote <> policyNote
+inboxNotes :: Bool -> InboxRead -> [Doc ann]
+inboxNotes listed r = settledNote <> missingNote <> omittedNote <> keymanNote <> policyNote
   where
     -- Truncation, said with a number. A mailbox is public, so how many letters
     -- are in it is a stranger's choice; this reader opens at most
@@ -318,11 +342,12 @@ inboxNotes r = settledNote <> missingNote <> omittedNote <> keymanNote <> policy
     -- list with the same marker as anyone else's. Once, and only when there is
     -- something for it to be about.
     policyNote
+      | listed = []
       | any folds (irLetters r) =
           [ "hub: no deny-list was applied (this form takes a mailbox key, and"
-              <+> "PEP-21 policy lives in the repo manifest), so \"(folds)\""
-              <+> "means the admission rules would take it, not that its author"
-              <+> "is allowed to send." ]
+              <+> "the list is kept per repository), so \"(folds)\" means the"
+              <+> "admission rules would take it, not that its author is allowed"
+              <+> "to send. Name the repository with --repo to apply it." ]
       | otherwise = []
 
     folds lv = case lvLetter lv of
@@ -499,3 +524,20 @@ overRpc sto api = Ingress
 -- A call that answered nothing in the time allowed is not an answer.
 silent :: MonadUnliftIO m' => String -> Maybe a -> m' a
 silent what = maybe (throwIO (PeerSilent what)) pure
+
+-- | @--mailbox <key> [--repo <key>]@.
+--
+-- The repository is optional and is not about which mailbox to read: it names
+-- whose deny-list to apply, which is this node's own state keyed by repo
+-- (PEP-21). Without it the queue is honest but unfiltered, and 'inboxNotes'
+-- says so rather than leaving "(folds)" to be read as permission.
+--
+-- Exported and pure, like every other argument reader here.
+inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Maybe HubKey)
+inboxArgs syn = do
+  kvs  <- flagsOf ["--mailbox","--repo"] syn
+  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  repo <- flagMaybe kvs "--repo" asKey
+  pure (mbox, repo)
+  where
+    asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

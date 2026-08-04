@@ -113,6 +113,7 @@ library hub-ingress
                     , suckless-conf
                     , directory
     exposed-modules:
+      HBS2.Hub.Deny
       HBS2.Hub.Ingress
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.GitBundle
@@ -123,6 +124,7 @@ library hub-ingress
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
       HBS2.Hub.CLI.Maintainer
+      HBS2.Hub.CLI.Own
       HBS2.Hub.CLI.Policy
       HBS2.Hub.CLI.Pr
       HBS2.Hub.CLI.Read
@@ -200,6 +202,7 @@ test-suite spec
       HBS2.Hub.BridgeSpec
       HBS2.Hub.CanonSpec
       HBS2.Hub.MaintainerSpec
+      HBS2.Hub.OwnSpec
       HBS2.Hub.PolicySpec
       HBS2.Hub.PrSpec
       HBS2.Hub.PropertySpec

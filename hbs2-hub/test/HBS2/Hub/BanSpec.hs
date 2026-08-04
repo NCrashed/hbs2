@@ -8,6 +8,7 @@ module HBS2.Hub.BanSpec (spec) where
 
 import HBS2.Hub.Types (HubKey)
 import HBS2.Hub.CLI.Ban
+import HBS2.Hub.Deny
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Net.Auth.Credentials

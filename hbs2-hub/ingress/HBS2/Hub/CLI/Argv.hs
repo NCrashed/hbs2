@@ -9,6 +9,8 @@ module HBS2.Hub.CLI.Argv
   ( argvAtom
   , verbOf
   , flagsOf
+  , flagsAndSwitches
+  , flagSwitch
   , flagOnce
   , flagEvery
   , flagMaybe
@@ -195,16 +197,39 @@ verbOf bound argv = case argv of
 -- affordable. The value it yields is a STRING, so a reader that wants a number
 -- has to accept one spelled as text; 'flagOnce' callers do.
 flagsOf :: forall c . IsContext c => [String] -> [Syntax c] -> Maybe [(String, Syntax c)]
-flagsOf known syn = do
+flagsOf known = flagsAndSwitches known []
+
+-- | 'flagsOf', plus flags that take no value.
+--
+-- A switch is consumed ALONE, and the word after it stays a word, which is the
+-- whole reason it cannot be a flag whose value happens to be ignored: with a
+-- pair rule, @hub issue label --clear --repo K@ binds the repository key as the
+-- value of @--clear@ and then refuses the line for having no repository, and
+-- @--clear yes@ silently eats a word. Here the leftover word is a stray
+-- positional and the line does not parse, which is the same answer every other
+-- word nobody claimed gets.
+--
+-- @--switch=x@ is refused for the same reason: it is a value handed to
+-- something that has no value to give.
+--
+-- The two lists are both @[String]@ and swapping them would be quiet, so there
+-- is exactly one caller of this form; everything else goes through 'flagsOf'.
+flagsAndSwitches :: forall c . IsContext c
+                 => [String] -> [String] -> [Syntax c] -> Maybe [(String, Syntax c)]
+flagsAndSwitches known switches syn = do
   kvs <- pairs syn
-  guard (all ((`elem` known) . fst) kvs)
+  guard (all ((`elem` (known <> switches)) . fst) kvs)
   pure kvs
   where
     pairs = \case
       [] -> Just []
+      (StringLike k : rest)
+        | k `elem` switches -> ((k, mkStr @c k) :) <$> pairs rest
       -- Split on the FIRST '=' only, so a value may contain one.
       (StringLike k : rest)
-        | Just (k', v) <- splitFlag k -> ((k', mkStr @c v) :) <$> pairs rest
+        | Just (k', v) <- splitFlag k ->
+            if k' `elem` switches then Nothing
+                                  else ((k', mkStr @c v) :) <$> pairs rest
       (StringLike k : v : rest)
         | "--" `List.isPrefixOf` k, not (flagLike v) -> ((k,v) :) <$> pairs rest
       _ -> Nothing
@@ -225,6 +250,16 @@ flagsOf known syn = do
 flagOnce :: [(String, Syntax c)] -> String -> Maybe (Syntax c)
 flagOnce kvs k = case flagEvery kvs k of
   [v] -> Just v
+  _   -> Nothing
+
+-- | Whether a valueless flag was given.
+--
+-- Refuses a repeat, like 'flagOnce': a switch typed twice is a command line
+-- somebody edited without reading, and these verbs sign.
+flagSwitch :: [(String, Syntax c)] -> String -> Maybe Bool
+flagSwitch kvs k = case flagEvery kvs k of
+  []  -> Just False
+  [_] -> Just True
   _   -> Nothing
 
 -- | Every value of a flag that may repeat, in the order they were typed.
