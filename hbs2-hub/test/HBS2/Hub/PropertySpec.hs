@@ -394,10 +394,15 @@ runSteps steps = do
       st  = foldl' (\s sp -> step cast s { stStep = stStep s + 1 } sp) st0 steps
       fr  = foldEvents repo (stEvents st)
       -- Everything a fold produces, so that a field added later is covered
-      -- without anyone remembering to add it here.
+      -- without anyone remembering to add it here. That sentence was already
+      -- untrue when it was written: frHonoured was missing, and it is not a
+      -- decorative field -- the bridge feeds it straight into cvHonoured, which
+      -- is the gate that stops one request being carried out twice. The one
+      -- field deciding that was outside the only order-independence check the
+      -- suite has, under a comment claiming the opposite.
       whole f = ( frThreads f, frDropped f, frAnomalies f, frRedacted f, frParts f
                 , frMaxSeq f, frMaxNumber f, frLastFolded f, frOrigins f
-                , frMaintainers f, frAdmitted f, frLog f )
+                , frMaintainers f, frAdmitted f, frLog f, frHonoured f, frOwner f )
       same f = whole f == whole (foldEvents repo (rotate (stEvents st)))
       rotate [] = []
       rotate (x:xs) = xs <> [x]

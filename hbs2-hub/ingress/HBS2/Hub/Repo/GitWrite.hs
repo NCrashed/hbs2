@@ -138,10 +138,25 @@ sink cwd indexFile = CanonSink
       -- accepts racing therefore leave one refusal and one commit, rather than
       -- one of them silently winning with an event minted against a canon that
       -- had already moved.
-      _ <- ExceptT (run whenMs "update-ref"
-                        [ "update-ref", Text.unpack metaRef, Text.unpack commit
-                        , maybe "" Text.unpack (cnParent cw) ]
-                        mempty)
+      -- A REFUSAL HERE IS REPORTED AS WHAT IT IS. The compare-and-swap failing
+      -- means somebody else published between the check above and this line,
+      -- which is the case this argument exists for -- and it came back as a
+      -- quoted git error, the same shape as "git is not installed". A caller
+      -- cannot tell "retry against the canon that is there now" from "this
+      -- machine is broken" out of that. So the ref is re-read and, if it has
+      -- moved, the answer is the same 'RefMoved' the pre-check gives; anything
+      -- else keeps git's own words, because then it is not a move.
+      moved <- lift (run whenMs "update-ref"
+                         [ "update-ref", Text.unpack metaRef, Text.unpack commit
+                         , maybe "" Text.unpack (cnParent cw) ]
+                         mempty)
+      case moved of
+        Right _ -> pure ()
+        Left e  -> do
+          now' <- lift parentOf
+          case now' of
+            Right n | n /= cnParent cw -> throwError (RefMoved (cnParent cw) n)
+            _                          -> throwError e
 
       pure commit
   }

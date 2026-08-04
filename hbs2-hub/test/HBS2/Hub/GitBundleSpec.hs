@@ -144,22 +144,58 @@ spec1 = do
         -- and the objects really are here now
         void $ git theirs ["cat-file", "-e", Text.unpack tip]
 
-    it "refuses a bundle whose bytes were tampered with" $ do
-      bytes <- withWork $ \dir base _ -> bnBytes <$> (ok =<< bundleRange (Just dir) base "feature")
-      withSystemTempDirectory "hub-maint" $ \dir -> do
-        void $ git dir ["init", "-q", "."]
-        -- Flip a byte in the middle, past the header, which is where the pack
-        -- is. git's own object hashing is what catches this; the point of the
-        -- test is that the refusal arrives as one rather than as a fetch that
-        -- half worked.
+    -- AGAINST A MAINTAINER WHO HOLDS THE BASE, which is the whole test.
+    --
+    -- It used to run against a fresh `git init`, and there it proved nothing:
+    -- that repository does not have the prerequisite commit, so `git bundle
+    -- verify` refuses before the pack is ever read, and the same refusal, the
+    -- same constructor, comes back for a PRISTINE bundle. The assertion held
+    -- with `bytes` in place of `broken`. What it claims to be about -- git's own
+    -- object hashing catching a flipped byte -- was never reached.
+    it "refuses a bundle whose bytes were tampered with" $
+      withSystemTempDirectory "hub-pair" $ \root -> do
+        let ours = root <> "/contributor"
+            theirs = root <> "/maintainer"
+
+        void $ git root ["init", "-q", ours]
+        writeFile (ours <> "/a.txt") "one\n"
+        void $ git ours ["add", "a.txt"]
+        void $ git ours ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        -- TWO maintainers, both cloned before the branch exists, so each holds
+        -- the prerequisite and neither holds the tip. One takes the good
+        -- bundle and one is offered the broken one; sharing a clone between
+        -- them would mean the second fetch found the objects already there,
+        -- which is a way to pass this test without checking anything.
+        void $ git root ["clone", "-q", ours, theirs]
+        let other = root <> "/maintainer2"
+        void $ git root ["clone", "-q", ours, other]
+
+        void $ git ours ["checkout", "-q", "-b", "feature"]
+        writeFile (ours <> "/b.txt") "two\n"
+        void $ git ours ["add", "b.txt"]
+        void $ git ours ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+
+        bytes <- bnBytes <$> (ok =<< bundleRange (Just ours) base "feature")
+
+        -- The control: this bundle is good, and the maintainer takes it. If
+        -- this line ever fails the negative below has stopped meaning anything,
+        -- which is exactly how the old version of this test died.
+        (ok =<< acceptBundle (Just theirs) bytes "feature" tip) >>= (`shouldBe` tip)
+
         let n = BS.length bytes `div` 2
             broken = BS.concat [ BS.take n bytes
                                , BS.singleton (BS.index bytes n + 1)
                                , BS.drop (n + 1) bytes ]
-        r <- acceptBundle (Just dir) broken "feature" (Text.replicate 40 "a")
+        r <- acceptBundle (Just other) broken "feature" tip
         case r of
           Left BundleRefused{} -> pure ()
           other -> expectationFailure ("expected a refusal, got " <> show other)
+        -- and nothing of it landed: the tip is not in the maintainer's objects
+        (code, _, _) <- readProcess . setStdin closed
+          =<< pure (setWorkingDir other (proc "git" ["cat-file", "-e", Text.unpack tip]))
+        code `shouldSatisfy` (/= ExitSuccess)
 
   describe "PEP-20 delta path: verifying and staging" $ do
 

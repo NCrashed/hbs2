@@ -33,6 +33,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import System.Environment qualified as Env
+import System.Directory (createDirectoryIfMissing,getPermissions,setPermissions,setOwnerExecutable,removeFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
 import Data.Time.Clock (getCurrentTime,diffUTCTime)
@@ -279,3 +280,41 @@ spec = do
       -- Well inside the thirty seconds the child asked for: the bound plus the
       -- teardown's own escalation, and nothing waiting on the child itself.
       diffUTCTime t1 t0 `shouldSatisfy` (< 15)
+
+    -- THE PUBLISH REFUSING, which nothing exercised. The test above is caught
+    -- by the pre-check -- a stale parent, refused before anything is written --
+    -- and the module's own comment says the check that "actually holds when two
+    -- accepts race" is the third argument to update-ref. That one is reachable
+    -- only by moving the ref BETWEEN the two, which a single-threaded test
+    -- cannot do; what it can do is make the publish itself fail and pin what
+    -- the writer says about it. It used to say what git said, in the same shape
+    -- as "git is not installed", so a caller could not tell "somebody else got
+    -- there first" from "this machine is broken".
+    it "reports a publish that did not happen, and leaves canon alone" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        (_, cw1) <- anOpen alice owner 1 "first"
+        first' <- commitOk dir Nothing cw1 1000
+
+        -- A hook that aborts every ref transaction: the objects are written and
+        -- the ref move is refused, which is the shape of a lost race without
+        -- the race.
+        let hooks = dir <> "/.git/hooks"
+        createDirectoryIfMissing True hooks
+        writeFile (hooks <> "/reference-transaction") "#!/bin/sh\nexit 1\n"
+        p <- getPermissions (hooks <> "/reference-transaction")
+        setPermissions (hooks <> "/reference-transaction") (setOwnerExecutable True p)
+
+        (_, cw2) <- anOpen alice owner 2 "second"
+        r <- withGitSinkIn (Just dir) $ \sk ->
+               skCommit sk (CanonWrite (Just first') (cwFiles cw2) "canon" 2000)
+        case r of
+          Left _ -> pure ()
+          Right c -> expectationFailure ("the publish was refused and reported success: " <> show c)
+
+        -- And canon is where it was: everything before the publish writes
+        -- objects git will collect, and nothing anybody fetches has changed.
+        removeFile (hooks <> "/reference-transaction")
+        head' <- Text.pack <$> git dir ["rev-parse", Text.unpack metaRef]
+        head' `shouldBe` first'

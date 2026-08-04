@@ -2,7 +2,7 @@ module HBS2.Hub.IngressSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Ingress
-import HBS2.Hub.Letter (LetterError(..))
+import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel)
 
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject,Hash,HbSync)
@@ -12,7 +12,9 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.EncryptedBox
 import HBS2.Data.Types.SignedBox
 import HBS2.Data.Types.SmallEncryptedBlock
-import HBS2.Net.Auth.GroupKeySymm (GroupKey,generateGroupKey)
+import HBS2.Net.Auth.GroupKeySymm (GroupKey,GroupSecret,generateGroupKey,encryptBlock)
+import HBS2.Storage (AnyStorage)
+import Crypto.Saltine.Core.SecretBox qualified as Encrypt
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Prelude.Plated (Pretty(..))
@@ -80,7 +82,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
@@ -439,3 +441,96 @@ bomb depth = foldl add (leafH, [(HashRef leafH, leafB)]) [1..depth]
     add (h, bs) (_ :: Int) =
       let b = serialise (newMNode 1 [h, h] :: MTree [HashRef])
       in (hashObject b, (HashRef (hashObject b), b) : bs)
+
+-- | A message this node can really open.
+--
+-- Every openMessage assertion in this module used to end in a Left: the fixture
+-- carried "not a secretbox" as its payload, so openWith, openLetterAs, classify
+-- and the deny-list were reached by nothing. What decides whether a stranger's
+-- letter becomes an event was the untested half of the module whose whole job
+-- is deciding that.
+--
+-- Encrypted through the REAL primitive rather than by assembling a secretbox
+-- here, because a fixture that encrypts the way the test thinks the code does
+-- is a test of that opinion. The storage argument is never forced: with the
+-- group key passed by hash ('Left'), encryptBlock's only use of it is the
+-- branch that writes an inline key, which this does not take.
+opened :: PeerCredentials 'HBS2Basic -> ByteString -> IO (Message 'HBS2Basic, GroupSecret)
+opened creds payload = do
+  gks <- Encrypt.newKey
+  gk  <- generateGroupKey @'HBS2Basic (Just gks) []
+  seb <- encryptBlock (error "the group key is passed by hash, so storage is unused"
+                          :: AnyStorage)
+                      gks
+                      (Left (mh "gk") :: Either HashRef (GroupKey 'Symm 'HBS2Basic))
+                      Nothing payload
+  let content = MessageContent (MessageFlags1 (MessageTimestamp 0) Nothing Nothing Nothing)
+                  mempty (Right gk) mempty seb
+  pure ( MessageBasic (makeSignedBox @'HBS2Basic (_peerSignPk creds) (_peerSignSk creds) content)
+       , gks )
+
+-- An ingress that serves one message and holds the key to it.
+holding :: Message 'HBS2Basic -> GroupSecret -> Ingress IO -> Ingress IO
+holding msg gks ig = ig
+  { igBlock  = const (pure (Just (serialise msg)))
+  , igSecret = ReadMessageServices (const (pure (Just gks)))
+  }
+
+-- Opening a letter is the half of this module that decides whether a
+-- stranger's words become an event, and it was the half no test reached.
+spec3 :: Spec
+spec3 =
+  describe "PEP-18 mailbox ingress: a letter this node can open" $ do
+
+    it "opens a real letter and reports what it turned out to be" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      let ac = AOpen owner HubIssue "a real issue" ["bug"] (Just "the body") Nothing Nothing 7
+      (msg, gks) <- opened alice (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice) ac noReplyChannel))
+      lv <- openMessage (holding msg gks stub) (mh "m")
+      case lvLetter lv of
+        Left e -> expectationFailure ("expected a letter, got " <> show e)
+        Right (who, content, _) -> do
+          -- The envelope key and the inner author are the same person here, and
+          -- both are reported: the inner one is the authorship claim canon
+          -- publishes, the envelope one is the key a maintainer blocks by.
+          lvEnvelope lv `shouldBe` Just (_peerSignPk alice)
+          who `shouldBe` _peerSignPk alice
+          content `shouldBe` ac
+
+    -- The deny-list is applied where the queue is BUILT, not only at accept, so
+    -- that a banned author's letter is not in front of a human at all. Nothing
+    -- reached it: igAllowed is a field of the record and every fixture left it
+    -- const True while every letter failed earlier.
+    it "drops a letter from a denied author, however the envelope was signed" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      let ac = AOpen owner HubIssue "t" [] Nothing Nothing Nothing 1
+      (msg, gks) <- opened alice (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice) ac noReplyChannel))
+      let denied = (holding msg gks stub) { igAllowed = const False }
+      lv <- openMessage denied (mh "m")
+      case lvLetter lv of
+        Left (BadLetterHere _) -> pure ()
+        other -> expectationFailure ("expected a refusal by the deny-list, got " <> show other)
+      -- and with the same bytes and the list empty it opens, so the refusal
+      -- above is the LIST and not the letter
+      lv2 <- openMessage (holding msg gks stub) (mh "m")
+      lvLetter lv2 `shouldSatisfy` either (const False) (const True)
+
+    -- rawMessage is what the ACCEPT path reads: the same bytes as the queue,
+    -- and it hands the bridge the message secret and the part list. It had no
+    -- test at all, and "a letter the queue can show and this cannot is a bug,
+    -- not a state" was a claim nothing checked.
+    it "reads the same letter for the accept path, with its parts and secret" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      let ac = AOpen owner HubIssue "t" [] (Just "body") Nothing Nothing 1
+      (msg, gks) <- opened alice (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice) ac noReplyChannel))
+      r <- rawMessage (holding msg gks stub) (mh "m")
+      case r of
+        Left e -> expectationFailure ("expected a letter, got " <> show e)
+        Right raw -> do
+          lrEnvelope raw `shouldBe` _peerSignPk alice
+          -- No attachments on this one, and that is the answer rather than an
+          -- absence: the accept path measures every part this list names.
+          lrParts raw `shouldBe` []

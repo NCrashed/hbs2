@@ -192,10 +192,15 @@ spec = do
                    (canon repo 4 Nothing)
           eRed = mkEvent owner owner (ARedact repo (eventId eCmt) 5) (canon repo 5 Nothing)
           evs = [eDel, eOpen, eCmt, eBad, eRed]
+          -- frHonoured and frOwner belong here as much as the rest: the first
+          -- is what the bridge reads to refuse a request carried out twice,
+          -- and a whole-result comparison that leaves out the field deciding
+          -- that is a comparison of the convenient corner this test exists to
+          -- stop being.
           full fr = ( summary fr, frDropped fr, frAnomalies fr
                     , frRedacted fr, frParts fr, frMaxSeq fr, frMaxNumber fr
                     , frLastFolded fr, frOrigins fr, frMaintainers fr
-                    , frAdmitted fr, frLog fr )
+                    , frAdmitted fr, frLog fr, frHonoured fr, frOwner fr )
       full (foldEvents repo evs) `shouldBe` full (foldEvents repo (reverse evs))
       full (foldEvents repo evs) `shouldBe` full (foldEvents repo (rotate evs))
       -- ...and the log is actually exercising all of it
