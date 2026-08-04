@@ -7,7 +7,7 @@
 --
 -- The difficulty here is deliberately tiny. What is under test is which inputs
 -- the work is bound to, and one bit binds to exactly what twenty do.
-module MailboxPoW (mailboxPoWTests) where
+module MailboxPoW (mailboxPoWTests, mailboxConfigTests) where
 
 import HBS2.Prelude.Plated
 import HBS2.Data.Types.Refs (HashRef(..))
@@ -15,6 +15,12 @@ import HBS2.Hash (HbSync,hashObject)
 import HBS2.Net.Auth.Credentials (peerSignPk)
 import HBS2.Peer.Proto.Mailbox.PoW
 import HBS2.Peer.Proto.Mailbox.Types
+import HBS2.Base58 (AsBase58(..))
+
+import MailboxConfig
+
+import Data.Config.Suckless
+import Data.HashSet qualified as HS
 
 import MailboxFixture
 
@@ -160,3 +166,47 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
       -- count is the whole length rather than an error or a wrap.
       leadingZeroBits (B8.pack "\x00\x00") @?= 16
   ]
+
+-- | What the peer's own config means, without a peer to read it.
+--
+-- Both of these decide how much a stranger can make this peer spend, and
+-- neither had a test: 'poWFloorFrom' carried a haddock saying it was pure so it
+-- could be tested without a peer, and 'replicateFromIn' is what stands between
+-- an open inbox and a status tree somebody invented.
+mailboxConfigTests :: TestTree
+mailboxConfigTests = testGroup "PEP-21: the mailbox options a peer reads"
+  [ testCase "no floor is a floor of zero, which forwards everything" $ do
+      poWFloorFrom (conf "") @?= 0
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 12)") @?= 12
+
+  , testCase "the last clause wins, and one out of range is not a clamp" $ do
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 4)\n(hbs2:mailbox:pow-min 20)") @?= 20
+      -- 4096 clamped would be a floor nobody asked for, so it is ignored...
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 4096)") @?= 0
+      -- ...and ignoring it leaves whatever a readable clause said, which is
+      -- worth pinning because "the last clause wins" and "this clause is not a
+      -- clause" have to compose in exactly this order.
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 7)\n(hbs2:mailbox:pow-min 4096)") @?= 7
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min -1)") @?= 0
+
+  , testCase "no replication peers is nobody, not everybody" $
+      -- The default that closes the hole: a mailbox charging work takes no
+      -- replicated message until an operator names who it replicates with.
+      HS.null (replicateFromIn @S (conf "")) @?= True
+
+  , testCase "every named peer counts, and an unreadable one does not" $ do
+      (alice, _) <- aPeer
+      (bob, _)   <- aPeer
+      let k c = show (pretty (AsBase58 (view peerSignPk c)))
+          txt = "(hbs2:mailbox:replicate-from " <> k alice <> ")\n"
+             <> "(hbs2:mailbox:replicate-from " <> k bob <> ")\n"
+             <> "(hbs2:mailbox:replicate-from \"not a key\")\n"
+          hosts = replicateFromIn @S (conf txt)
+      -- A set and not a setting: the last clause does not win here, they all do.
+      HS.size hosts @?= 2
+      HS.member (view peerSignPk alice) hosts @?= True
+      HS.member (view peerSignPk bob) hosts @?= True
+  ]
+  where
+    conf :: String -> [Syntax C]
+    conf = either (error . show) id . parseTop

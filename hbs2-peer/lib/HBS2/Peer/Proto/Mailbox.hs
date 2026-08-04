@@ -35,6 +35,7 @@ import HBS2.System.Logger.Simple
 import Codec.Serialise()
 import Control.Monad.Trans.Cont
 import Control.Monad.Trans.Maybe
+import Data.HashSet (HashSet)
 import Data.Maybe
 import Data.Word
 import Lens.Micro.Platform
@@ -80,6 +81,20 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- same terms as a plain one.
   mailboxPoWFloor       :: forall m . MonadIO m => a -> m PoWDifficulty
   mailboxPoWFloor _ = pure 0
+
+  -- | Peers this one takes replication from, for a mailbox that charges work.
+  --
+  -- A message pulled out of somebody's status tree arrives as 'Replicated' and
+  -- carries no stamp: the tree holds messages, not the work that bought them.
+  -- So a charging mailbox either refuses replication or trusts the peer that
+  -- announced it, and this is where that trust is named. Empty by default,
+  -- which is a peer that takes none.
+  --
+  -- Not in the mailbox's policy, and that is the point: it is a decision about
+  -- disk this peer spends, and @(peer allow|deny)@ cannot make it, being the
+  -- clause an open inbox has to leave open for gossip to reach it at all.
+  mailboxReplicateFrom  :: forall m . MonadIO m => a -> m (HashSet (PubKey 'Sign s))
+  mailboxReplicateFrom _ = pure mempty
 
   mailboxAcceptMessage  :: forall m . (ForMailbox s, MonadIO m)
                         => a
@@ -178,6 +193,7 @@ instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxCheckNonce (AnyMailboxAdapter a) = mailboxCheckNonce @s a
   mailboxGetStorage (AnyMailboxAdapter a) = mailboxGetStorage @s a
   mailboxPoWFloor (AnyMailboxAdapter a) = mailboxPoWFloor @s a
+  mailboxReplicateFrom (AnyMailboxAdapter a) = mailboxReplicateFrom @s a
   mailboxAcceptMessage (AnyMailboxAdapter a) = mailboxAcceptMessage @s a
   mailboxAcceptDelete (AnyMailboxAdapter a) = mailboxAcceptDelete @s a
 
@@ -220,7 +236,7 @@ mailboxProto inner adapter mess = deferred @p do
     -- расходятся только в том, чем сообщение опознаётся для дедупа и что перед
     -- этим проверяется, а всё дальнейшее -- рассылка, маркер, очередь -- у них
     -- общее и обязано остаться общим.
-    let takeMessage origin msg content h = do
+    let takeMessageWith relay origin msg content h = do
 
           let routed = serialise (RoutedEntry h)
           let routedHash = hashObject routed
@@ -246,7 +262,22 @@ mailboxProto inner adapter mess = deferred @p do
           -- там теперь есть дешёвый ранний выход для сообщения, которое в этом
           -- ящике уже лежит. Так что повтор обходится дёшево, а отказ перестал
           -- быть вечным.
-          unless seen $ lift do
+          -- ПЕРЕСЫЛКА -- ОТДЕЛЬНОЕ РЕШЕНИЕ ОТ ПРИЁМА, и раньше их было одно.
+          --
+          -- Порог этого пира (mailboxPoWFloor) отвечает на вопрос «сколько
+          -- работы я готов усиливать», и только на него: сколько требует ЯЩИК,
+          -- знает лишь его подписанная policy, которой у реле нет. Проверка
+          -- стояла через `exit ()`, то есть роняла сообщение целиком, и это
+          -- значит, что оператор, поставивший себе порог 16, тихо терял письма
+          -- к ящику, который просит 12 -- отправитель честно заплатил, обе
+          -- стороны настроены верно, письмо не доходит и никто не узнаёт.
+          -- Хуже того, порог применялся и к ящикам, которые этот же пир хостит:
+          -- «не буду пересылать» превращалось в «не положу к себе».
+          --
+          -- Теперь слабый штамп означает ровно «дальше не понесу»: письмо
+          -- доходит до очереди, и решает его судьбу policy ящика, у которой
+          -- есть настоящее D.
+          unless (seen || not relay) $ lift do
             gossip mess
 
             -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
@@ -282,7 +313,8 @@ mailboxProto inner adapter mess = deferred @p do
         --   $workflow: backlog
         (_, content) <- unboxMessage msg
 
-        takeMessage (Submitted Nothing) msg content (hashObject @HbSync (serialise mess) & HashRef)
+        takeMessageWith True (Submitted Nothing) msg content
+          (hashObject @HbSync (serialise mess) & HashRef)
 
       -- То же сообщение, но с доказательством работы (PEP-21).
       --
@@ -300,18 +332,22 @@ mailboxProto inner adapter mess = deferred @p do
         let bits = stampBits msg stamp
 
         -- Ящик, названный в штампе, должен быть среди получателей: работа,
-        -- решённая для чужого ящика, -- это работа за чужую доставку.
-        unless (stampNames content stamp) do
+        -- решённая для чужого ящика, -- это работа за чужую доставку. И это
+        -- тоже вопрос про УСИЛЕНИЕ, а не про приём: негодный штамп -- это
+        -- отсутствие штампа, а сообщение без штампа этот пир принимает и кладёт
+        -- в очередь, где его судьбу решает policy ящика.
+        let named = stampNames content stamp
+
+        unless named do
           debug $ red "mailbox: stamp names a mailbox this message is not addressed to"
                     <+> pretty (AsBase58 (msMailbox stamp))
-          exit ()
 
         unless (bits >= fromIntegral floorD) do
           debug $ red "mailbox: stamp too weak to forward"
                     <+> pretty bits <> ", wanted" <+> pretty floorD
-          exit ()
 
-        takeMessage (Submitted (Just stamp)) msg content (stampMarker stamp msg)
+        takeMessageWith (named && bits >= fromIntegral floorD)
+                        (Submitted (Just stamp)) msg content (stampMarker stamp msg)
 
       -- NOTE: CheckMailbox-auth
       --   поскольку пир не владеет приватными ключами,

@@ -209,6 +209,7 @@ test-suite test
         MailboxPolicy
         MailboxEntry
         MailboxPoW
+        MailboxConfig
         MessageParts
         HttpListen
         -- from app/: HttpListen exercises the config resolution the peer
@@ -305,6 +306,7 @@ executable hbs2-peer
                     , RefChan
                     , RefChanNotifyLog
                     , LWWRef
+                    , MailboxConfig
                     , MailboxProtoWorker
                     , Multicast
                     , CheckMetrics

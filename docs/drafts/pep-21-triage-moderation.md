@@ -152,8 +152,15 @@ only choice left is how wide the break is.
   - Binding. The work targets
 
     ```
-    H(mailboxKey || hashObject (serialise (msg :: Message s)) || nonce)
+    H(serialise (mailboxKey, hashObject (serialise (msg :: Message s)), nonce))
     ```
+
+    A CBOR TRIPLE and not a concatenation, which is what this said until the
+    code was written: three byte strings run together have no field
+    boundaries, so a mailbox key ending in the bytes a message hash begins
+    with is a second reading of the same preimage. The encoding is the one
+    thing a second implementation cannot guess, so it is the encoding that is
+    written down here.
 
     having at least D leading zero bits. Binding to `mailboxKey` prevents
     reusing one solution across mailboxes. Binding to the hash of `Message`
@@ -169,14 +176,21 @@ only choice left is how wide the break is.
     also what keeps the grind hash-only: the message is signed once, before
     solving, and the solver never touches ed25519.
   - Dedup of a restamp. The `RoutedEntry` marker for a stamped message is
-    computed over `serialise msg`, not over `serialise mess`, so re-sending
-    one message under a fresh nonce is recognized as the same message.
-    Without that rule a spammer buys a second flood for each fresh solution;
-    with it, a restamp is `seen` and goes nowhere. Storage dedup already
-    collapses the duplicate either way; this is about gossip amplification.
-    That marker and the binding above are the same hash, which is not a
-    coincidence: one identity names the message for the work, for the dedup
-    and for the block it becomes.
+    `H(serialise (mailboxKey, msg))`, not the hash of the whole `MailBoxProto`
+    value, so re-sending one message under a fresh nonce is recognized as the
+    same message. Without that rule a spammer buys a second flood for each
+    fresh solution; with it, a restamp is `seen` and goes nowhere. Storage
+    dedup already collapses the duplicate either way; this is about gossip
+    amplification.
+
+    Three hashes, not one. This section claimed the marker and the binding
+    above were the same value, and they are deliberately not: the binding is
+    the triple with the nonce in it, the marker is the pair without it (a
+    marker that moved with the nonce would gate nothing), and the block the
+    message becomes is `hashObject (serialise m)` over the message alone. The
+    mailbox key is in the marker so that a stamped message cannot have its
+    stamp stripped and be re-sent plain to suppress the honest copy, which a
+    marker shared with the plain path would allow.
   - Where it is checked, which is two places, because the flood and the disk
     are different surfaces. The protocol handler gossips before any policy is
     consulted (`Proto/Mailbox.hs:255`, with `policyAcceptMessage` running
@@ -195,6 +209,18 @@ only choice left is how wide the break is.
         a second dedup identity: one message stamped for each of its N
         recipients is N markers and N floods, and at difficulty zero that is
         free.
+
+        A WEAK STAMP MEANS "I WILL NOT FORWARD THIS", and nothing else. The
+        first implementation dropped the message instead, which made the floor
+        a setting that silently loses mail: a peer with a floor of 16 relaying
+        for a mailbox that charges 12 black-holed a letter both ends had paid
+        for correctly, and applied to a mailbox the same peer HOSTS it turned
+        "I will not amplify" into "I will not store". The floor cannot be
+        calibrated against `(pow D)` in any case, since the relay has not read
+        the mailbox's policy and usually cannot. So a stamp below the floor,
+        or one naming a mailbox the message is not addressed to, stops the
+        gossip and lets the message through to the queue, where the mailbox's
+        own policy decides with the real D in hand.
       - the per-mailbox `(pow D)` from the signed policy, checked in the queue
         drain. It bounds what this peer stores.
 
@@ -214,16 +240,42 @@ only choice left is how wide the break is.
     there would mean a mailbox that charges anything cannot replicate between
     its own hosts -- it would refuse everything its co-hosts hand it. So the
     accept path takes a `MessageOrigin`: `Submitted` (over gossip, pays) or
-    `Replicated` (out of a tree, does not). What bounds the replication path
-    instead is `policyAcceptPeer`: a status is downloaded only for a mailbox
-    this peer hosts and only from a peer the policy accepts, so the message
-    admitted work-free is one a trusted co-host already holds.
+    `Replicated` (out of a tree, does not).
+
+    WHAT BOUNDS THE REPLICATION PATH IS NOT `policyAcceptPeer`, though this
+    section said it was, on the grounds that "the message admitted work-free
+    is one a trusted co-host already holds". It is not, and the reason is
+    structural: one clause is answering two different questions. `(peer ...)`
+    gates the RELAYING neighbour, so an open inbox has to say `(peer allow
+    all)` or a stranger's letter never reaches it over gossip at all; and the
+    same clause then lets any handshaked peer announce a `MailboxStatus`
+    naming a tree it invented, whose every message is admitted with the work
+    check skipped. On the one configuration `(pow D)` exists for, it bounded
+    nothing.
+
+    The second question is therefore asked separately, and locally:
+    `(hbs2:mailbox:replicate-from <peer-key>)` in the hosting peer's own
+    config, repeatable, naming the peers it replicates a charging mailbox
+    with. A mailbox with `(pow D)` takes a `Replicated` message only from
+    those; a mailbox that charges nothing is unaffected and behaves exactly as
+    before. Absent means nobody, so the default fails closed: a charging
+    mailbox that has named no co-hosts simply does not take replication, which
+    is a single-host inbox and the ordinary case.
+
+    Local and not in the signed policy on purpose. Replication is disk the
+    HOSTING peer spends, and which co-hosts it will fill that disk for is not
+    a question a stranger's policy should be able to answer for it. The cost
+    is that the answer does not travel with the mailbox: every host of a
+    charging mailbox names its co-hosts itself.
   - What it bounds. Each distinct message costs fresh work, so PoW bounds the
     rate of distinct messages a spammer can create. Replay of one solved
-    message is bounded by dedup, not by work: `hasBlock` on the `RoutedEntry`
-    hash skips both gossip and accept for a message already seen, so a replay
-    adds nothing to storage and does not re-amplify. PoW plus dedup together
-    bound growth.
+    message is bounded by dedup, not by work: the `RoutedEntry` marker stops a
+    replay being GOSSIPED again, and the merged marker in the queue drain
+    stops it being stored twice. What a replay still costs is one slot in the
+    peer's bounded input queue, because accept was deliberately moved out from
+    under the marker (a message refused by a policy that had not been written
+    yet was otherwise lost for good). PoW plus dedup bound growth; they do not
+    bound that queue, and it is sized rather than priced.
   - Difficulty in policy. D is declared in the signed policy (`(pow D)`),
     versioned like the rest, so the owner tunes it. There is no per-tier PoW
     clause: a tier is already its own mailbox with its own policy (Trust

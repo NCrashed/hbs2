@@ -10,11 +10,10 @@ module MailboxProtoWorker ( mailboxProtoWorker
                           , IsMailboxProtoAdapter
                           , MailboxProtoException(..)
                           , hbs2MailboxDirOpt
-                          , hbs2MailboxPoWMinOpt
-                          , poWFloorFrom
                           ) where
 
 import HBS2.Prelude.Plated
+import MailboxConfig
 import HBS2.OrDie
 import HBS2.Actors.Peer
 import HBS2.Data.Types.Refs
@@ -95,31 +94,8 @@ instance Exception MailboxProtoException
 hbs2MailboxDirOpt :: String
 hbs2MailboxDirOpt = "hbs2:mailbox:dir"
 
--- | @(hbs2:mailbox:pow-min D)@: the least proof-of-work this peer forwards.
---
--- A peer-wide floor, and it has to be peer-wide rather than per-mailbox: it is
--- consulted before gossip, where the peer does not yet know which mailbox a
--- message is for and usually hosts none of them. What a mailbox charges is
--- @(pow D)@ in its own signed policy, and that one bounds storage.
---
--- Absent means zero, which forwards a stamped message on the same terms as a
--- plain one.
-hbs2MailboxPoWMinOpt :: String
-hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
-
--- | The floor as the config states it, or zero if it does not.
---
--- A pure function over the parsed config so it can be tested without a peer.
--- The last clause wins, which is how the other options here read; a value that
--- does not fit is ignored rather than clamped, because a clamped 4096 would
--- silently become a floor nobody asked for.
-poWFloorFrom :: [Syntax C] -> PoWDifficulty
-poWFloorFrom conf =
-  fromMaybe 0 $ lastMay [ fromIntegral d
-                        | ListVal [StringLike o, LitIntVal d] <- conf
-                        , o == hbs2MailboxPoWMinOpt
-                        , d >= 0 && d <= 255
-                        ]
+-- The mailbox options this worker reads live in "MailboxConfig", where a test
+-- can ask what a config means without building a worker.
 
 {- HLINT ignore "Functor law" -}
 
@@ -171,6 +147,9 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- 'hbs2MailboxPoWMinOpt'. A TVar because it is read from the config after
     -- the worker exists, the way the database and the probe are.
   , mpwPoWFloor           :: TVar PoWDifficulty
+    -- | Peers this one takes replication from for a charging mailbox, from
+    -- 'hbs2MailboxReplicateFromOpt'. Read from the config like the floor above.
+  , mpwReplicateFrom      :: TVar (HashSet (PubKey 'Sign s))
   , inMessageQueue        :: TBQueue ( Maybe (PubKey 'Sign s)
                                      , MessageOrigin s
                                      , Message s
@@ -247,6 +226,8 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
     acceptCheckNonce mpwCheckNonces mbox nonce
 
   mailboxPoWFloor MailboxProtoWorker{..} = readTVarIO mpwPoWFloor
+
+  mailboxReplicateFrom MailboxProtoWorker{..} = readTVarIO mpwReplicateFrom
 
   mailboxAcceptMessage MailboxProtoWorker{..} peer origin m c = do
     took <- atomically do
@@ -814,6 +795,7 @@ createMailboxProtoWorker pc pe sto = do
     <$> newTVarIO mempty
     <*> newCheckNonces
     <*> newTVarIO 0
+    <*> newTVarIO mempty
     <*> newTBQueueIO 8000
     <*> newTVarIO mempty
     <*> newTVarIO mempty
@@ -857,6 +839,16 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       when (floorD > 0) do
         debug $ "mailbox: will not forward messages under"
                   <+> pretty floorD <+> "bits of work"
+
+      hosts <- readConf <&> replicateFromIn @s
+      atomically $ writeTVar mpwReplicateFrom hosts
+      -- Said out loud on both sides, because the silent half is the one that
+      -- surprises: a mailbox that charges work and names no co-hosts simply
+      -- stops taking replication, which looks like a mailbox that will not sync.
+      if HS.null hosts
+        then debug "mailbox: no replication peers configured; a mailbox with (pow D) will take none"
+        else debug $ "mailbox: replicating a charging mailbox with"
+                       <+> pretty (HS.size hosts) <+> "peer(s)"
 
     dpipe <- ContT $ withAsync (runPipe dbe)
 
@@ -983,6 +975,31 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             powD <- policyPoW @s po
 
             case origin of
+              -- РЕПЛИКАЦИЯ ПЛАТИТ ДОВЕРИЕМ, раз не может заплатить работой.
+              --
+              -- Штампа в дереве нет, значит со-хосту его взять неоткуда, и
+              -- требовать работу тут -- это ящик с (pow D), который перестал
+              -- реплицироваться. Раньше отсюда следовало «не проверять вовсе», а
+              -- границей назначался policyAcceptPeer. Границей он быть не может:
+              -- та же клауза отвечает на вопрос «кто ретранслирует», и открытый
+              -- inbox обязан сказать в ней allow all, иначе письмо незнакомца до
+              -- него не дойдёт. После чего любой пир объявляет статус с деревом,
+              -- которое сам и придумал, и всё его содержимое ложится на диск с
+              -- пропущенной проверкой работы -- ровно на той конфигурации, ради
+              -- которой (pow D) и вводился.
+              --
+              -- Так что вопрос задан отдельно и локально: чей диск, тот и решает,
+              -- с кем реплицируется. Пусто по умолчанию, то есть платящий ящик не
+              -- берёт репликацию, пока оператор не назовёт со-хостов; ящик,
+              -- который ничего не просит, живёт как жил.
+              Replicated | powD > 0 -> do
+                hosts <- mailboxReplicateFrom @s me
+                let ok = maybe False (`HS.member` hosts) peer
+                unless ok do
+                  warn $ red "message dropped: replication from a peer this one does not replicate with"
+                          <+> pretty theMailbox
+                          <+> parens (pretty (fmap AsBase58 peer))
+                  mzero
               Replicated      -> pure ()
               Submitted stamp -> when (powD > 0) do
                 let ok = maybe False (stampOk powD rcpt m) stamp
