@@ -192,6 +192,23 @@ spec1 = do
       staged <- git dir ["rev-parse", Text.unpack (pullRef 7)]
       staged `shouldBe` Text.unpack base
 
+    -- Which is what a revise needs, and what it could not get: the accept path
+    -- passed Nothing, i.e. "this ref must not exist", for a ref that exists by
+    -- definition on the second proposal under one number.
+    it "says what a pull ref holds, and that it holds nothing yet" $
+      withWork $ \dir _ tip -> do
+        (ok =<< pullTip (Just dir) 7) >>= (`shouldBe` Nothing)
+        ok =<< stagePull (Just dir) 7 tip Nothing
+        (ok =<< pullTip (Just dir) 7) >>= (`shouldBe` Just tip)
+
+    it "moves a staged ref to a new tip through what it currently holds" $
+      withWork $ \dir base tip -> do
+        ok =<< stagePull (Just dir) 7 tip Nothing
+        old <- ok =<< pullTip (Just dir) 7
+        ok =<< stagePull (Just dir) 7 base old
+        staged <- git dir ["rev-parse", Text.unpack (pullRef 7)]
+        staged `shouldBe` Text.unpack base
+
   describe "PEP-20: what may reach a git command line" $ do
 
     it "takes the shape a branch name has" $ do

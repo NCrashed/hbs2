@@ -26,6 +26,7 @@ module HBS2.Hub.Repo.GitBundle
   , isAncestor
   , mergeBase
   , stagePull
+  , pullTip
   , pullRef
   , Bundled(..)
   , BundleError(..)
@@ -236,11 +237,38 @@ isAncestor cwd a b = runExceptT do
     (ExitFailure 1, _, _)   -> pure False
     (ExitFailure c, _, e0) -> throwError (refusal "merge-base" c e0)
 
+-- | What @refs\/hbs2\/pulls\/\<n\>\/head@ points at, or nothing if it is not
+-- there.
+--
+-- The old side of 'stagePull's compare-and-swap, for the case that HAS one. An
+-- @open@ stages a ref that must not exist yet and passes 'Nothing'; a @revise@
+-- MOVES a ref that does, and 'Nothing' there is git's "must not exist", so the
+-- revise could not have staged whatever else was right.
+--
+-- Absent is an ANSWER and not a failure: it is the ordinary state before a
+-- first stage, and it is what @--quiet@ is for.
+pullTip :: MonadUnliftIO m
+        => Maybe FilePath -> Word64 -> m (Either BundleError (Maybe Text))
+pullTip cwd n =
+  run cwd smallSeconds "rev-parse"
+      [ "rev-parse", "--verify", "--quiet"
+      , Text.unpack (pullRef n) <> "^{commit}" ] <&> \case
+    Left e -> Left e
+    Right (ExitSuccess, out, _) ->
+      Right (nonEmpty (Text.strip (Text.decodeUtf8Lenient out)))
+    Right (ExitFailure 1, _, _)  -> Right Nothing
+    Right (ExitFailure c, _, e0) -> Left (refusal "rev-parse" c e0)
+  where
+    nonEmpty t = if Text.null t then Nothing else Just t
+
 -- | Stage a proposed tip where PEP-19 puts it.
 --
 -- Compare-and-swap, like the canon ref and for the same reason: a pull ref
 -- that moved under us means somebody else staged this number, and overwriting
 -- it would replace one contributor's proposal with another's under one number.
+--
+-- @old@ is what the ref is expected to hold: 'Nothing' means it must not exist
+-- (a first stage), and 'Just' is a move (see 'pullTip').
 stagePull :: MonadUnliftIO m
           => Maybe FilePath -> Word64 -> Text -> Maybe Text
           -> m (Either BundleError ())
