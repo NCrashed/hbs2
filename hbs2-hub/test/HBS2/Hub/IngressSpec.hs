@@ -5,7 +5,9 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.Letter (LetterError(..))
 
 import HBS2.Data.Types.Refs (HashRef(..))
-import HBS2.Hash (hashObject)
+import HBS2.Hash (hashObject,Hash,HbSync)
+import HBS2.Merkle ( MTree(..), MTreeAnn(..), AnnMetaData(..)
+                   , MTreeEncryption(..), newMNode )
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.EncryptedBox
 import HBS2.Data.Types.SignedBox
@@ -23,6 +25,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
 import Crypto.Saltine.Core.SecretBox qualified as SK
 import Data.IORef
+import System.Timeout (timeout)
 import Test.Hspec
 
 -- Distinct message hashes, cheaply.
@@ -298,3 +301,60 @@ spec2 =
       case r of
         Left (PartNotATree _) -> pure ()
         other -> expectationFailure ("expected PartNotATree, got " <> show other)
+
+    -- A part whose every node names its one child TWICE. Well formed, about a
+    -- kilobyte, and 2^depth to walk: HBS2.Merkle measures the same shape at nine
+    -- seconds for twenty-three blocks and does not finish at forty-one. It
+    -- arrives as a hash in the messageParts of any letter, and it is measured on
+    -- the accept path, where somebody is waiting.
+    it "refuses a tree that costs more reads than it will spend" $ do
+      reads' <- newIORef (0 :: Int)
+      let (top, chain) = bomb 40
+          root = MTreeAnn NoMetaData
+                   (EncryptGroupNaClSymm1 (hashObject ("gk" :: LBS.ByteString))
+                                          (B8.replicate 24 'n'))
+                   (newMNode 1 [top, top])
+          rootB = serialise (root :: MTreeAnn [HashRef])
+          store = (HashRef (hashObject rootB), rootB) : chain
+          ig = stub { igBlock = \h -> do
+                        modifyIORef' reads' succ
+                        pure (lookup h store)
+                    , igSize = const (pure (Just 1))
+                    }
+      -- Bounded rather than merely finished: without a bound this call does not
+      -- return at all, and a test that hangs is a test nobody runs twice.
+      r <- timeout (30 * 1000000) (measurePart ig (HashRef (hashObject rootB)))
+      r `shouldBe` Just (Left (PartTooManyBlocks maxPartBlocks))
+      n <- readIORef reads'
+      n `shouldSatisfy` (<= succ maxPartBlocks)
+
+    -- The regression guard for the OTHER way to bound the walk. Entering each
+    -- node once bounds it too, and is what the mailbox reader next door does,
+    -- and here it would be wrong: this measures content, a file of repeated
+    -- bytes really does list one block many times, and a part measured smaller
+    -- than it reads is a hole in the gate this feeds.
+    it "counts a block the tree lists twice as twice the bytes" $ do
+      let leafB = serialise (MLeaf [mh "d"] :: MTree [HashRef])
+          leafH = hashObject leafB
+          root = MTreeAnn NoMetaData
+                   (EncryptGroupNaClSymm1 (hashObject ("gk" :: LBS.ByteString))
+                                          (B8.replicate 24 'n'))
+                   (newMNode 1 [leafH, leafH])
+          rootB = serialise (root :: MTreeAnn [HashRef])
+          store = [ (HashRef (hashObject rootB), rootB), (HashRef leafH, leafB) ]
+          ig = stub { igBlock = \h -> pure (lookup h store)
+                    , igSize  = const (pure (Just 100))
+                    }
+      r <- measurePart ig (HashRef (hashObject rootB))
+      r `shouldBe` Right (PartFacts 200 True)
+
+-- A chain of @depth@ node blocks, each naming the next one twice, over a leaf
+-- that carries nothing. Answers the top hash and every block by hash.
+bomb :: Int -> (Hash HbSync, [(HashRef, LBS.ByteString)])
+bomb depth = foldl add (leafH, [(HashRef leafH, leafB)]) [1..depth]
+  where
+    leafB = serialise (MLeaf [] :: MTree [HashRef])
+    leafH = hashObject leafB
+    add (h, bs) (_ :: Int) =
+      let b = serialise (newMNode 1 [h, h] :: MTree [HashRef])
+      in (hashObject b, (HashRef (hashObject b), b) : bs)

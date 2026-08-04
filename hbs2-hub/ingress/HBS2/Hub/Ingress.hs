@@ -40,6 +40,7 @@ module HBS2.Hub.Ingress
   , PartFacts(..)
   , PartTrouble(..)
   , measurePart
+  , maxPartBlocks
   ) where
 
 import HBS2.Hub.Types
@@ -665,6 +666,7 @@ data PartTrouble =
     PartNotFetchedYet     -- ^ its root block is not here, so nothing is known
   | PartNotATree Text     -- ^ the root is here and is not an encrypted tree
   | PartUnreadable Text   -- ^ it is a tree and this could not follow it
+  | PartTooManyBlocks Int -- ^ it is a tree and measuring it costs more than this
   deriving stock (Eq,Show)
 
 instance Pretty PartTrouble where
@@ -672,6 +674,36 @@ instance Pretty PartTrouble where
     PartNotFetchedYet -> "the part has not been fetched yet"
     PartNotATree e    -> "not an encrypted tree:" <+> pretty (safeText e)
     PartUnreadable e  -> "cannot read the part's tree:" <+> pretty (safeText e)
+    PartTooManyBlocks n ->
+      "the part's tree asks for more than" <+> pretty n <+> "reads to measure"
+
+-- | The most reads one part measurement will spend.
+--
+-- A bound on the WALK, and it needs one for the reason 'readInbox' next door
+-- carries 'walkMerkleUnique': the tree is a stranger's, a node lists its
+-- children with nothing stopping two of them being equal, and following every
+-- edge costs 2^depth for depth+1 blocks. About a kilobyte of well-formed blocks
+-- is 2^40 visits and does not finish. Reached from a letter naming the tree as
+-- a part, measured on the accept path, which is where the operator is waiting.
+--
+-- NOT solved the way the mailbox tree solves it, and that is the whole reason
+-- this constant exists. 'walkMerkleUnique' enters each node once, which is the
+-- right answer to "which blocks does this graph mention" and the wrong one
+-- here: this walk measures CONTENT, and a file of repeated bytes genuinely does
+-- list one leaf block many times over. HBS2.Merkle's own note declines to
+-- deduplicate for exactly that reason. Entering a repeated node once would
+-- report a part smaller than the one 'igOpenPart' then reads, which is a hole
+-- in the gate this function exists to feed. So every edge is still followed and
+-- what is bounded is the spend.
+--
+-- The number counts CALLS, not bytes, because calls are what a stranger makes
+-- this pay: one read per tree node, and one 'igSize' per leaf entry below. A
+-- part at 'maxPartBytes' is 64 MiB and a block is 'defBlockSize' = 256 KiB, so
+-- the largest part this hub carries measures in 256 entries plus a handful of
+-- nodes. This is a hundred times that, which leaves room for a tree written
+-- with much smaller blocks and is still nothing next to what a bomb needs.
+maxPartBlocks :: Int
+maxPartBlocks = 32768
 
 -- | Measure a part by walking its tree, without pulling the payload.
 --
@@ -685,6 +717,10 @@ instance Pretty PartTrouble where
 -- small and a size is not a fetch, so this costs one call per block and no
 -- payload: a part naming a hundred gigabytes is refused having transferred
 -- none of them, which is what the gate is for.
+--
+-- Bounded by 'maxPartBlocks', which is what keeps "one call per block" a
+-- statement about this reader rather than about the tree: how many blocks a
+-- stranger's tree mentions is a number the stranger chooses.
 measurePart :: MonadUnliftIO m => Ingress m -> HashRef -> m (Either PartTrouble PartFacts)
 measurePart ig h = do
   root <- igBlock ig h
@@ -696,12 +732,27 @@ measurePart ig h = do
       _ -> pure (Left (PartNotATree "the root block is not a merkle tree"))
   where
     walk ann = do
+      -- ONE budget for the whole measurement, spent by the node reads inside
+      -- the walk and by the 'igSize' calls the leaves below turn into. Charged
+      -- for a leaf's entries when the leaf is entered, so a single node naming
+      -- a hundred thousand blocks is refused before its list is held, not after.
+      left <- newTVarIO maxPartBlocks
+      let spend n = atomically do
+            k <- readTVar left
+            if k < n then pure False else True <$ writeTVar left (k - n)
+          charge n = lift (lift (spend n))
+                       >>= \ok -> unless ok (lift (throwError (PartTooManyBlocks maxPartBlocks)))
+      -- The walk's error is a PartTrouble and not a Text, so that the budget's
+      -- refusal arrives as ITSELF. Told "cannot read the part's tree", an
+      -- operator goes looking for a peer that is still downloading, and a tree
+      -- this reader declined to walk is the opposite of that.
       leaves <- runExceptT $ S.toList_ $
-        walkMerkleTree (_mtaTree ann) (lift . lift . igBlock ig . HashRef) $ \case
-          Left miss -> lift (throwError (Text.pack (show (pretty miss))))
-          Right hs  -> S.each (hs :: [HashRef])
+        walkMerkleTree (_mtaTree ann)
+          (\hx -> charge 1 >> lift (lift (igBlock ig (HashRef hx)))) $ \case
+          Left miss -> lift (throwError (PartUnreadable (Text.pack (show (pretty miss)))))
+          Right hs  -> charge (length hs) >> S.each (hs :: [HashRef])
       case leaves of
-        Left e   -> pure (Left (PartUnreadable e))
+        Left e   -> pure (Left e)
         Right hs -> do
           sizes <- traverse (igSize ig) hs
           pure $ Right PartFacts
