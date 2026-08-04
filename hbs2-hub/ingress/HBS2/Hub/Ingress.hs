@@ -49,7 +49,7 @@ import HBS2.Hub.Letter
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,MTreeAnn(..)
+import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,walkMerkle,MTreeAnn(..)
                    , pattern EncryptGroupNaClSymm )
 import HBS2.Data.Detect (tryDetect,BlobType(..))
 import HBS2.Net.Auth.Credentials
@@ -277,6 +277,18 @@ data InboxRead = InboxRead
     -- and a few hundred megabytes. The canon reader next door carries three
     -- bounds and its own refusal for each; this had none.
   , irOmitted :: Int
+    -- | Every live message the tree holds, opened or not.
+    --
+    -- The queue above is bounded and this is not, and the difference is what a
+    -- caller is asking about. "Show me a page of this mailbox" is bounded by
+    -- what a person can read; "is this letter in this mailbox" is a question
+    -- about the mailbox, and answering it out of the bounded prefix made the
+    -- answer a function of how many letters a stranger had sent.
+    --
+    -- It costs nothing to carry: the walk materializes this set to compute the
+    -- prefix in the first place, so what was bounded was never the set, only
+    -- the bodies opened out of it.
+  , irLive :: HashSet HashRef
   }
   deriving stock (Eq,Show)
 
@@ -427,7 +439,7 @@ readInbox :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
 readInbox ig mbox = do
   (root, settled) <- awaitMailbox ig mbox
   case root of
-    Nothing   -> pure (InboxRead [] [] settled 0)
+    Nothing   -> pure (InboxRead [] [] settled 0 mempty)
     Just tree -> do
       (entries, misses) <- readEntries tree
       -- Sorted explicitly. This used to be HS.toList with a comment claiming it
@@ -439,10 +451,11 @@ readInbox ig mbox = do
       -- function of the mailbox and not of the order the walk happened to
       -- return: a truncated queue that reshuffles between runs would be worse
       -- than a truncated one.
-      let live = sort (HS.toList (liveMessages entries))
+      let alive = liveMessages entries
+          live = sort (HS.toList alive)
           (taken, left) = List.splitAt maxInboxLetters live
       lvs <- mapM (openMessage ig) taken
-      pure (InboxRead lvs misses settled (length left))
+      pure (InboxRead lvs misses settled (length left) alive)
 
   where
     readEntries tree = do
@@ -661,6 +674,16 @@ data PartFacts = PartFacts
   }
   deriving stock (Eq,Show)
 
+-- | Two halves of one attachment: what it costs is both of them.
+--
+-- Sizes add and presence is a conjunction, because a part whose data is here
+-- and whose key is not cannot be opened, which is what 'pfHere' is asked.
+instance Semigroup PartFacts where
+  a <> b = PartFacts (pfSize a + pfSize b) (pfHere a && pfHere b)
+
+instance Monoid PartFacts where
+  mempty = PartFacts 0 True
+
 -- | Why a part could not even be measured.
 data PartTrouble =
     PartNotFetchedYet     -- ^ its root block is not here, so nothing is known
@@ -727,11 +750,11 @@ measurePart ig h = do
   case root of
     Nothing -> pure (Left PartNotFetchedYet)
     Just bs -> case tryDetect (coerce h) bs of
-      MerkleAnn ann@MTreeAnn{ _mtaCrypt = EncryptGroupNaClSymm{} } -> walk ann
+      MerkleAnn ann@MTreeAnn{ _mtaCrypt = EncryptGroupNaClSymm gkh _ } -> walk ann gkh
       MerkleAnn MTreeAnn{} -> pure (Left (PartNotATree "the tree is not encrypted"))
       _ -> pure (Left (PartNotATree "the root block is not a merkle tree"))
   where
-    walk ann = do
+    walk ann gkh = do
       -- ONE budget for the whole measurement, spent by the node reads inside
       -- the walk and by the 'igSize' calls the leaves below turn into. Charged
       -- for a leaf's entries when the leaf is entered, so a single node naming
@@ -740,19 +763,53 @@ measurePart ig h = do
       let spend n = atomically do
             k <- readTVar left
             if k < n then pure False else True <$ writeTVar left (k - n)
-          charge n = lift (lift (spend n))
+      -- BOTH TREES, and the second one is the reason this takes two walks.
+      --
+      -- An encrypted tree names two things: its data and, in '_mtaCrypt', the
+      -- GROUP KEY that opens it. The gate measured the first and 'igOpenPart'
+      -- then read both, so a part could be one hundred-byte leaf, sail through
+      -- 'maxPartBytes' as cheap, and name a key tree of any size at all --
+      -- which the reader concatenates into memory, with the same duplicated-edge
+      -- blow-up the data walk is bounded against. A bound that covers the half a
+      -- caller has already decided to pay for is not a bound.
+      dat <- measureTree spend (Right (_mtaTree ann))
+      key <- measureTree spend (Left gkh) <&> \case
+        -- A key block that is not here is the peer still downloading, and
+        -- 'pfHere' is the field that says so. Only the DATA tree calls a missing
+        -- block a failure to measure, because a size it cannot see is a size
+        -- the gate cannot use; what the gate wants from the key is that it be
+        -- bounded, and an absent one is bounded by definition.
+        Left (PartUnreadable _) -> Right (PartFacts 0 False)
+        other                   -> other
+      pure ((<>) <$> dat <*> key)
+
+    -- The walk's error is a PartTrouble and not a Text, so that the budget's
+    -- refusal arrives as ITSELF. Told "cannot read the part's tree", an
+    -- operator goes looking for a peer that is still downloading, and a tree
+    -- this reader declined to walk is the opposite of that.
+    --
+    -- From a parsed tree or from a hash, because the two references are spelled
+    -- differently: the data tree is already decoded inside the annotation, and
+    -- the key is a hash of a block that has to be read to find out what it is.
+    measureTree spend from = do
+      let charge n = lift (lift (spend n))
                        >>= \ok -> unless ok (lift (throwError (PartTooManyBlocks maxPartBlocks)))
-      -- The walk's error is a PartTrouble and not a Text, so that the budget's
-      -- refusal arrives as ITSELF. Told "cannot read the part's tree", an
-      -- operator goes looking for a peer that is still downloading, and a tree
-      -- this reader declined to walk is the opposite of that.
-      leaves <- runExceptT $ S.toList_ $
-        walkMerkleTree (_mtaTree ann)
-          (\hx -> charge 1 >> lift (lift (igBlock ig (HashRef hx)))) $ \case
-          Left miss -> lift (throwError (PartUnreadable (Text.pack (show (pretty miss)))))
-          Right hs  -> charge (length hs) >> S.each (hs :: [HashRef])
+          look hx = charge 1 >> lift (lift (igBlock ig (HashRef hx)))
+          sink = \case
+            Left miss -> lift (throwError (PartUnreadable (Text.pack (show (pretty miss)))))
+            Right hs  -> charge (length hs) >> S.each (hs :: [HashRef])
+      leaves <- runExceptT $ S.toList_ $ case from of
+        Right t -> walkMerkleTree t look sink
+        -- A group key is written like any other blob, so it is a tree of the
+        -- same shape; a walk that finds none is a block that is not one, and
+        -- that is the annotation naming something that cannot be a key. Its own
+        -- size still counts, since it is a block this node holds either way.
+        Left  k -> walkMerkle @[HashRef] k look sink
       case leaves of
         Left e   -> pure (Left e)
+        Right [] | Left k <- from -> do
+          s <- igSize ig (HashRef k)
+          pure (Right (PartFacts (maybe 0 fromIntegral s) (isJust s)))
         Right hs -> do
           sizes <- traverse (igSize ig) hs
           pure $ Right PartFacts

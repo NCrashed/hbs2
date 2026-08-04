@@ -67,6 +67,7 @@ import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Storage
 
 import Data.ByteString.Lazy qualified as LBS
+import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,listToMaybe)
@@ -229,7 +230,16 @@ acceptEntries = do
                  `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
                  `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
-      unless (msg `elem` fmap lvMessage (irLetters inbox)) $
+      -- Against everything the mailbox HOLDS, not against the page of it the
+      -- queue opened. `readInbox` sorts the live set by hash and opens the first
+      -- thousand, so asking the opened prefix made membership a function of how
+      -- many letters a stranger had sent: a thousand messages ground to hashes
+      -- below the honest one (a few thousand signatures, minutes of CPU) sorted
+      -- every real letter past the cut, and this verb then answered "is not in
+      -- mailbox" about a letter that is, with no flag to raise the bound and no
+      -- DeleteMessages path in this build to clear the junk with. Permanent, for
+      -- the price of an afternoon.
+      unless (HS.member msg (irLive inbox)) $
         liftIO $ refuse (show ( pretty msg <+> "is not in mailbox"
                                   <+> pretty (AsBase58 mbox)
                                   <> (if irSettled inbox

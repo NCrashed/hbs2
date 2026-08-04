@@ -218,7 +218,12 @@ stampsFor ob msg = do
                             <+> pretty e <> line
                             <> "  sending without proof-of-work" <> line )
         pure Nothing
-      Right (_, p) -> do
+      -- A mailbox with no policy at all charges nothing, and it is not the same
+      -- reading as the deny/deny fallback: the fallback is what the peer admits
+      -- a message under, and its pow is zero either way, so the answer here is
+      -- the same and the reason for it is not.
+      Right Nothing -> pure Nothing
+      Right (Just (_, p)) -> do
         d <- policyPoW @HBS2Basic p
         if d == 0 then pure Nothing else do
           liftIO $ saying ( "hbs2-hub: solving" <+> pretty d <+> "bits of work for"

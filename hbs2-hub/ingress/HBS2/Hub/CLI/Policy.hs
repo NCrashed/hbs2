@@ -142,13 +142,14 @@ policyGoneCode = \case
 -- verbs above: the send path asks this about a mailbox it is writing TO, and a
 -- peer that does not hold it is the normal state of affairs there.
 --
--- A mailbox held with no policy set answers @(0, defaultBasicPolicy)@ and not a
--- failure: version zero and deny-all is what the peer itself falls back to.
+-- A mailbox held with no policy set answers @Nothing@ and not a failure, and
+-- not the deny/deny fallback either: see 'readPolicyWith' for what telling those
+-- two apart is worth.
 readPolicy :: forall m . ( MonadUnliftIO m
                          , HasStorage m
                          , HasClientAPI MailboxAPI UNIX m
                          )
-           => HubKey -> m (Either PolicyGone (PolicyVersion, BasicPolicy HBS2Basic))
+           => HubKey -> m (Either PolicyGone (Maybe (PolicyVersion, BasicPolicy HBS2Basic)))
 readPolicy mbox = do
   sto <- getStorage
   api <- getClientAPI @MailboxAPI @UNIX
@@ -161,7 +162,7 @@ readPolicyWith :: forall m . MonadUnliftIO m
                => AnyStorage
                -> ServiceCaller MailboxAPI UNIX
                -> HubKey
-               -> m (Either PolicyGone (PolicyVersion, BasicPolicy HBS2Basic))
+               -> m (Either PolicyGone (Maybe (PolicyVersion, BasicPolicy HBS2Basic)))
 readPolicyWith sto api mbox = runExceptT do
 
   st <- lift (callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api mbox)
@@ -170,9 +171,22 @@ readPolicyWith sto api mbox = runExceptT do
           >>= maybe (throwError (PolicyNotHere mbox)) pure
 
   case mbsMailboxPolicy st >>= unboxSignedBox0 of
-    -- No policy is not an empty policy: an unset mailbox is deny-all, so
-    -- reporting nothing would read as "everything is allowed".
-    Nothing -> pure (0 :: PolicyVersion, defaultBasicPolicy @HBS2Basic)
+    -- NOT SET is its own answer, and it used to be @(0, defaultBasicPolicy)@.
+    -- That reads as deny/deny, which is what the peer falls back to when it
+    -- ADMITS a message, and it is the opposite of what the peer does with the
+    -- same state everywhere else: a mailbox with no policy row answers every
+    -- peer's CheckMailbox and accepts a status from any of them
+    -- (mailboxGetPolicyMay, deliberately, or a mailbox would never sync before
+    -- its owner got round to writing one).
+    --
+    -- Two states told apart by nothing was not a reporting problem. `hub block`
+    -- read this value, added one clause and published it, so blocking one
+    -- spammer on a mailbox nobody had written a policy for MATERIALISED
+    -- deny/deny: from that moment the peer answered no CheckMailbox and took no
+    -- status, and the mailbox stopped syncing. `hub unblock` does not undo it
+    -- (the row still exists) and this CLI has no verb that writes `peer allow
+    -- all` back.
+    Nothing -> pure Nothing
     Just (_, spp) -> do
       lbs <- lift (bounded rpcTimeout "the policy file"
                      (liftIO (runExceptT (readFromMerkle sto (SimpleKey (coerce (sppPolicyRef spp)))))))
@@ -180,7 +194,7 @@ readPolicyWith sto api mbox = runExceptT do
       p <- lift (parseBasicPolicy @HBS2Basic (either (const mempty) id
                                                 (parseTop (LBS.unpack lbs))))
              >>= maybe (throwError PolicyUnparsed) pure
-      pure (sppPolicyVersion spp, p)
+      pure (Just (sppPolicyVersion spp, p))
 
 policyEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
@@ -200,11 +214,20 @@ policyEntries = do
              <> line <> "is reported as such rather than as an empty policy." )
     $ entry $ bindMatch "hub:policy:show" $ nil_ \case
         [ StringLike "--mailbox", SignPubKeyLike mbox ] -> lift do
-          (v, p) <- currentPolicy mbox
-          liftIO $ print $ vcat
-            [ "version" <+> pretty v
-            , pretty (safeText (policyText p))
-            ]
+          currentPolicy mbox >>= \case
+            -- Said as the state it is, rather than as the deny/deny this used
+            -- to print. Both halves matter to an operator deciding what to do
+            -- next, and they point in opposite directions.
+            Nothing -> liftIO $ print $ vcat
+              [ "no policy set"
+              , "  messages are denied (the peer falls back to deny/deny to admit one)"
+              , "  and every peer is answered (a mailbox with no policy row syncs with all)"
+              , "  write one with: hbs2-peer mailbox set-policy <key> 1 <file>"
+              ]
+            Just (v, p) -> liftIO $ print $ vcat
+              [ "version" <+> pretty v
+              , pretty (safeText (policyText p))
+              ]
         _ -> liftIO (die (show policyUsage))
 
   denyVerb "hub:block" True "refuse a sender at the peer layer"
@@ -240,7 +263,28 @@ policyEntries = do
                                  pure
 
     setDeny deny pa who = do
+      -- REFUSED rather than created. A policy this verb invented would be the
+      -- deny/deny fallback plus one clause, and publishing that turns a mailbox
+      -- that syncs with everybody into one that syncs with nobody, in a verb
+      -- whose whole job is to refuse ONE key. There is no way back from here
+      -- either: `hub unblock` removes the clause and leaves the row, and nothing
+      -- in this CLI writes `peer allow all`.
       (v, p) <- currentPolicy (paMailbox pa)
+                  >>= maybe (liftIO (refuse (show ( "this mailbox has no policy, and blocking"
+                                                      <+> "one key is not a reason to write one"
+                                                      <> line
+                                                      <> "  a policy written from here would be"
+                                                      <+> "deny/deny plus your clause, which stops"
+                                                      <> line
+                                                      <> "  the mailbox syncing with every peer"
+                                                      <+> "at once"
+                                                      <> line
+                                                      <> "  write the policy you mean first:"
+                                                      <+> "hbs2-peer mailbox set-policy"
+                                                      <+> pretty (AsBase58 (paMailbox pa))
+                                                      <+> "1 <file>" ))
+                                            codeNoPolicy))
+                            pure
 
       let p' = denying deny who p
 

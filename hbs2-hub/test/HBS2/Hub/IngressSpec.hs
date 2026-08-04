@@ -213,6 +213,36 @@ spec1 = do
       irMissing r `shouldBe` [mh "tree"]
       irLetters r `shouldBe` []
 
+    -- The queue is bounded and the mailbox is not, and this is where the two
+    -- part company. `hub inbox accept` asked the opened prefix whether a letter
+    -- was in the mailbox, so a thousand messages ground to low hashes (a few
+    -- thousand signatures) sorted every honest letter past the cut and made it
+    -- permanently unacceptable: no flag raises the bound and this build has no
+    -- DeleteMessages to clear the junk with.
+    it "holds every live message, not only the page it opened" $ do
+      k <- aKey
+      let n = maxInboxLetters + 5
+          msgs = [ mh (B8.pack ("m" <> show i)) | i <- [1 .. n] ]
+          entries = [ (m, serialise (Exists mempty m)) | m <- msgs ]
+          treeB = serialise (MLeaf (fmap fst entries) :: MTree [HashRef])
+          treeH = HashRef (hashObject treeB)
+          store = (treeH, treeB) : entries
+          ig = stub { igRoot = const (pure (Just treeH))
+                    , igBlock = \h -> pure (lookup h store)
+                    }
+      r <- readInbox ig k
+      -- Bounded where it costs: a body opened per letter.
+      length (irLetters r) `shouldBe` maxInboxLetters
+      irOmitted r `shouldBe` 5
+      -- Whole where it is a fact about the mailbox.
+      HS.size (irLive r) `shouldBe` n
+      -- And specifically: the ones past the cut are in it. That is the property
+      -- the accept path reads, and asking irLetters for it was the bug.
+      let opened = HS.fromList (fmap lvMessage (irLetters r))
+          missed = [ m | m <- msgs, not (HS.member m opened) ]
+      length missed `shouldBe` 5
+      all (`HS.member` irLive r) missed `shouldBe` True
+
     it "tells a block that has not arrived from one that is not a message" $ do
       -- These were one answer. "not fetched yet" is a WAIT, and it was what a
       -- block the peer holds and cannot decode also said -- a wait for something
@@ -336,17 +366,68 @@ spec2 =
     it "counts a block the tree lists twice as twice the bytes" $ do
       let leafB = serialise (MLeaf [mh "d"] :: MTree [HashRef])
           leafH = hashObject leafB
+          gkB   = "a group key, not a tree" :: LBS.ByteString
+          gkH   = hashObject gkB
           root = MTreeAnn NoMetaData
-                   (EncryptGroupNaClSymm1 (hashObject ("gk" :: LBS.ByteString))
-                                          (B8.replicate 24 'n'))
+                   (EncryptGroupNaClSymm1 gkH (B8.replicate 24 'n'))
                    (newMNode 1 [leafH, leafH])
           rootB = serialise (root :: MTreeAnn [HashRef])
-          store = [ (HashRef (hashObject rootB), rootB), (HashRef leafH, leafB) ]
+          store = [ (HashRef (hashObject rootB), rootB)
+                  , (HashRef leafH, leafB)
+                  , (HashRef gkH, gkB) ]
           ig = stub { igBlock = \h -> pure (lookup h store)
                     , igSize  = const (pure (Just 100))
                     }
       r <- measurePart ig (HashRef (hashObject rootB))
-      r `shouldBe` Right (PartFacts 200 True)
+      -- 200 for the leaf the node lists twice, which is the regression guard: a
+      -- walk that entered it once would say 100. Plus 100 for the key block,
+      -- which is the other half of what opening this part costs.
+      r `shouldBe` Right (PartFacts 300 True)
+
+    -- The half the gate never looked at. An encrypted tree names its data AND
+    -- the group key that opens it, 'igOpenPart' reads both, and the measurement
+    -- covered the first: a part could be one small leaf, pass maxPartBytes as
+    -- cheap, and name a key of any size or shape at all.
+    it "measures the key that opens the part, not only its data" $ do
+      reads' <- newIORef (0 :: Int)
+      let (top, chain) = bomb 40
+          leafB = serialise (MLeaf [mh "d"] :: MTree [HashRef])
+          leafH = hashObject leafB
+          -- A tiny part whose KEY is the duplicated-edge chain.
+          root = MTreeAnn NoMetaData
+                   (EncryptGroupNaClSymm1 (hashObject (serialise (newMNode 1 [top,top] :: MTree [HashRef])))
+                                          (B8.replicate 24 'n'))
+                   (MLeaf [mh "d"])
+          keyB  = serialise (newMNode 1 [top, top] :: MTree [HashRef])
+          rootB = serialise (root :: MTreeAnn [HashRef])
+          store = (HashRef (hashObject rootB), rootB)
+                : (HashRef (hashObject keyB), keyB)
+                : (HashRef leafH, leafB)
+                : chain
+          ig = stub { igBlock = \h -> do
+                        modifyIORef' reads' succ
+                        pure (lookup h store)
+                    , igSize = const (pure (Just 1))
+                    }
+      r <- timeout (30 * 1000000) (measurePart ig (HashRef (hashObject rootB)))
+      r `shouldBe` Just (Left (PartTooManyBlocks maxPartBlocks))
+
+    it "says a part whose key is not here is not here, rather than unreadable" $ do
+      let leafB = serialise (MLeaf [mh "d"] :: MTree [HashRef])
+          leafH = hashObject leafB
+          root = MTreeAnn NoMetaData
+                   (EncryptGroupNaClSymm1 (hashObject ("absent" :: LBS.ByteString))
+                                          (B8.replicate 24 'n'))
+                   (newMNode 1 [leafH])
+          rootB = serialise (root :: MTreeAnn [HashRef])
+          store = [ (HashRef (hashObject rootB), rootB), (HashRef leafH, leafB) ]
+          ig = stub { igBlock = \h -> pure (lookup h store)
+                    , igSize  = \h -> pure (if h == HashRef leafH then Just 100 else Just 100)
+                    }
+      -- Still downloading is a reason to come back, not a refusal that will
+      -- never change, and the two travel as different answers.
+      r <- measurePart ig (HashRef (hashObject rootB))
+      fmap pfHere r `shouldBe` Right False
 
 -- A chain of @depth@ node blocks, each naming the next one twice, over a leaf
 -- that carries nothing. Answers the top hash and every block by hash.
