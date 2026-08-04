@@ -8,12 +8,22 @@
 module HBS2.Hub.CLI.Argv
   ( argvAtom
   , verbOf
+  , flagsOf
+  , flagOnce
+  , flagEvery
+  , flagMaybe
+  , flagText
+  , flagWord
   ) where
 
 import HBS2.CLI.Prelude
 
 import Control.Applicative ((<|>))
+import Control.Monad (guard)
 import Data.List (intercalate)
+import Data.List qualified as List
+import Data.Word (Word64)
+import Text.Read (readMaybe)
 
 -- | One shell word, as one atom.
 --
@@ -152,3 +162,121 @@ verbOf bound argv = case argv of
     name ws = "hub:" <> intercalate ":" ws
     plain (c:_) = c `notElem` ("-(\"'[" :: String)
     plain []    = False
+
+-- | A line of @--flag value@ pairs, or nothing at all.
+--
+-- ONE implementation, and that is the point of it being here. Six verbs had
+-- their own copy of a two-line scan that paired each word with the word after
+-- it, and five of those copies were missing both of the checks below. What they
+-- guard is not a formatting question: these verbs sign things, and canon is
+-- append-only.
+--
+-- What it refuses, and why each one is a refusal rather than a default:
+--
+--   * A FLAG WHERE A VALUE BELONGS, which is a missing value and not a value.
+--     Without this, @hub pr new ... --title --onto refs/heads/master@ parses
+--     cleanly, binds the title @--onto@, and puts it in the author box and
+--     therefore in the event-id, which is the hash of that box. The named form
+--     of @hub issue new@ was introduced for exactly this hazard and was the only
+--     reader that had the guard.
+--
+--   * A FLAG THIS VERB DOES NOT KNOW. Without this, @hub pr merge --repo K
+--     --number 7 --commit abc --into master --dry-run@ drops the @--dry-run@ on
+--     the floor and records the merge in canon. A typo does the same thing more
+--     quietly. Nothing here can tell an operator's mistake from an intention, so
+--     the only safe answer to a word nobody claimed is to stop.
+--
+--   * ANY WORD THAT IS NOT PART OF A PAIR. These verbs are all-named by design
+--     (a key, a sigil and a hash are the same thirty-two bytes of base58, so
+--     nothing can be told apart by position), and a stray positional is either a
+--     value that lost its flag or a flag that lost its dashes.
+--
+-- @--flag=value@ is accepted as well, which is the spelling that lets a value
+-- legitimately begin with a dash, and is what makes refusing the bare form
+-- affordable. The value it yields is a STRING, so a reader that wants a number
+-- has to accept one spelled as text; 'flagOnce' callers do.
+flagsOf :: forall c . IsContext c => [String] -> [Syntax c] -> Maybe [(String, Syntax c)]
+flagsOf known syn = do
+  kvs <- pairs syn
+  guard (all ((`elem` known) . fst) kvs)
+  pure kvs
+  where
+    pairs = \case
+      [] -> Just []
+      -- Split on the FIRST '=' only, so a value may contain one.
+      (StringLike k : rest)
+        | Just (k', v) <- splitFlag k -> ((k', mkStr @c v) :) <$> pairs rest
+      (StringLike k : v : rest)
+        | "--" `List.isPrefixOf` k, not (flagLike v) -> ((k,v) :) <$> pairs rest
+      _ -> Nothing
+
+    flagLike = \case
+      StringLike s -> "--" `List.isPrefixOf` s
+      _            -> False
+
+    splitFlag s = case List.break (== '=') s of
+      (k, '=' : v) | "--" `List.isPrefixOf` k, length k > 2 -> Just (k, v)
+      _                                                     -> Nothing
+
+-- | The value of a flag that may appear exactly once.
+--
+-- Exactly one, so that @--repo a --repo b@ is a refusal rather than a silent
+-- choice between them: first-wins and last-wins are both a guess about which of
+-- two repositories the caller meant, and one of them gets published.
+flagOnce :: [(String, Syntax c)] -> String -> Maybe (Syntax c)
+flagOnce kvs k = case flagEvery kvs k of
+  [v] -> Just v
+  _   -> Nothing
+
+-- | Every value of a flag that may repeat, in the order they were typed.
+flagEvery :: [(String, Syntax c)] -> String -> [Syntax c]
+flagEvery kvs k = [ v | (k',v) <- kvs, k' == k ]
+
+-- | A flag that may be left out, and that is refused when it is there and its
+-- value will not read.
+--
+-- The distinction the plain lookup could not make: @flagOnce ... >>= asKey@
+-- answers 'Nothing' both for "not given" and for "given, and not a key", so
+-- @hub inbox accept --as \<not a key\>@ fell back to the default canon key and
+-- signed with a key the caller did not name. An optional flag is optional to
+-- SUPPLY, not optional to mean something.
+flagMaybe :: [(String, Syntax c)] -> String -> (Syntax c -> Maybe v) -> Maybe (Maybe v)
+flagMaybe kvs k f = case flagEvery kvs k of
+  []  -> Just Nothing
+  [v] -> Just <$> f v
+  _   -> Nothing
+
+-- | A flag's value as text, including a value that spells a number.
+--
+-- 'argvAtom' keeps a word that spells a number AS a number, deliberately, and
+-- every 'StringLike' pattern then fails to match it. So @--title 2026@ died with
+-- a usage message that said nothing about why, and so did a branch called
+-- @2026@ and an abbreviated sha that happens to be all digits, which is about
+-- one in twenty-seven of the seven-character ones.
+--
+-- Rendering the atom back is lossless by construction: 'argvAtom' kept it as a
+-- number only BECAUSE rendering it gives back the characters that were typed.
+flagText :: Syntax c -> Maybe String
+flagText = \case
+  StringLike t           -> Just t
+  x@(LitIntVal _)        -> Just (show (pretty x))
+  x@(LitScientificVal _) -> Just (show (pretty x))
+  x@(LitBoolVal _)       -> Just (show (pretty x))
+  _                      -> Nothing
+
+-- | A flag's value as a number that fits, refusing one that does not.
+--
+-- Through 'flagText', so that @--number=7@ reads the same as @--number 7@: the
+-- @=@ spelling yields a string and the bare one yields an integer.
+--
+-- The bound is the whole reason this is not @fromIntegral@ at the call site. A
+-- 'LitIntVal' carries an Integer, so the guard against a negative left the upper
+-- end open, and @--number 18446744073709551617@ wrapped to 1: the verb then
+-- looked up pull request #1, refused it against an ancestry check that was never
+-- about it, and named a number nobody typed in the message it wrote.
+flagWord :: Syntax c -> Maybe Word64
+flagWord x = do
+  s <- flagText x
+  n <- readMaybe s
+  guard (n >= 0 && n <= toInteger (maxBound :: Word64))
+  pure (fromIntegral n)

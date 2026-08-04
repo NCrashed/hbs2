@@ -170,6 +170,8 @@ spec = do
         cover 5 (' ' `elem` s) "holds a space" $
         kept s
 
+  argvFlags
+
   describe "PEP-22 argv: which words are the verb" $ do
 
     -- "hub:issue" is in the list on purpose, and it is the only reason the test
@@ -210,3 +212,75 @@ spec = do
       case verbOf bound ["display","x"] of
         Just (ListVal (SymbolVal k : _)) -> k `shouldBe` Id "display"
         other -> expectationFailure ("expected display, got " <> show (fmap (const ()) other))
+
+-- The flag reader every writing verb shares. It was six copies of a two-line
+-- scan, five of which had neither guard below, in the verbs that publish.
+argvFlags :: Spec
+argvFlags =
+  describe "PEP-22 argv: a line of flags and values" $ do
+
+    let flags = flagsOf ["--a","--b"] . fmap argvAtom
+        -- The whole line refused. Spelled out rather than compared, because
+        -- Syntax has no Show, which is also why every assertion below asks what
+        -- a value READS as rather than what it is.
+        gone = not . isJust
+
+    it "reads a pair per flag, in any order" $ do
+      fmap (fmap fst) (flags ["--a","1","--b","two"]) `shouldBe` Just ["--a","--b"]
+      fmap (fmap fst) (flags ["--b","two","--a","1"]) `shouldBe` Just ["--b","--a"]
+
+    -- The one that signs a title nobody typed. `hub pr new ... --title --onto
+    -- refs/heads/master` bound the title `--onto`, and a title is inside the
+    -- author box and therefore inside the event-id, which canon cannot correct.
+    it "refuses a flag standing where a value belongs" $
+      gone (flags ["--a","--b","two"]) `shouldBe` True
+
+    it "refuses a value with no flag, at either end" $ do
+      gone (flags ["stray","--a","1"]) `shouldBe` True
+      gone (flags ["--a","1","stray"]) `shouldBe` True
+
+    -- `pr merge --repo K --number 7 --commit abc --into master --dry-run`
+    -- recorded the merge and dropped the --dry-run on the floor.
+    it "refuses a flag the verb does not know" $ do
+      gone (flags ["--a","1","--dry-run"]) `shouldBe` True
+      gone (flags ["--a","1","--c","3"]) `shouldBe` True
+
+    -- The spelling that lets a value begin with a dash, which is what makes the
+    -- refusal above affordable. It reads as text, so a reader that wants a
+    -- number has to take one spelled as text, and 'flagWord' does.
+    it "takes --flag=value, and keeps a value that holds an =" $ do
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (flags ["--a=--draft"])
+        `shouldBe` Just (Just "--draft")
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (flags ["--a=x=y"])
+        `shouldBe` Just (Just "x=y")
+
+    it "refuses a repeated flag rather than choosing one of the two" $
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (flags ["--a","1","--a","2"])
+        `shouldBe` Just Nothing
+
+    it "tells a flag left out from one whose value will not read" $ do
+      let asInt' = \case { LitIntVal n -> Just n ; _ -> Nothing }
+      fmap (\kvs -> flagMaybe kvs "--b" asInt') (flags ["--a","1"])
+        `shouldBe` Just (Just Nothing)
+      fmap (\kvs -> flagMaybe kvs "--b" asInt') (flags ["--a","1","--b","nope"])
+        `shouldBe` Just Nothing
+
+    -- A number is what argvAtom keeps a numeric word as, and every StringLike
+    -- pattern misses it: a title, a branch or an all-digit abbreviated sha died
+    -- as a usage error.
+    it "reads a value that spells a number as the word that was typed" $ do
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (flags ["--a","2026"])
+        `shouldBe` Just (Just "2026")
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagText) (flags ["--a","007"])
+        `shouldBe` Just (Just "007")
+
+    -- The guard against a negative was there and the one against wrapping was
+    -- not: this used to come back as 1.
+    it "refuses a number too big to be the one that was typed" $ do
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagWord) (flags ["--a","7"])
+        `shouldBe` Just (Just 7)
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagWord)
+           (flags ["--a","18446744073709551617"])
+        `shouldBe` Just Nothing
+      fmap (\kvs -> flagOnce kvs "--a" >>= flagWord) (flags ["--a","-5"])
+        `shouldBe` Just Nothing

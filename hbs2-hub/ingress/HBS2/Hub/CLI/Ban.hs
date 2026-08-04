@@ -32,6 +32,7 @@ module HBS2.Hub.CLI.Ban
   ) where
 
 import HBS2.Hub.Types (HubKey,safeText)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Inbox (refuse)
 
 import HBS2.CLI.Prelude
@@ -181,15 +182,14 @@ banEntries = do
           ]
 
 -- Both behind flags, and both are keys of one type.
-banArgs :: forall c . [Syntax c] -> Maybe BanArgs
+banArgs :: forall c . IsContext c => [Syntax c] -> Maybe BanArgs
 banArgs syn = do
-  repo <- flagged "--repo"
-  pure (BanArgs repo (flagged "--key"))
+  kvs  <- flagsOf ["--repo","--key"] syn
+  repo <- flagOnce kvs "--repo" >>= asKey
+  k    <- flagMaybe kvs "--key" asKey
+  pure (BanArgs repo k)
   where
-    flagged n = case [ v | (StringLike n', SignPubKeyLike v) <- zip syn (drop 1 syn)
-                         , n' == n ] of
-                  [v] -> Just v
-                  _   -> Nothing
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
 
 -- | This node's deny-list for a repository, or why it could not be read.
 --

@@ -35,6 +35,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -176,13 +177,11 @@ maintainerEntries = do
 -- key and a maintainer key are the same thirty-two bytes of base58, and the
 -- swap delegates the repository to itself while claiming the maintainer is a
 -- repository nobody has.
-maintainerArgs :: forall c . [Syntax c] -> Maybe Maintainer
+maintainerArgs :: forall c . IsContext c => [Syntax c] -> Maybe Maintainer
 maintainerArgs syn = do
-  repo <- flagged "--repo"
-  k    <- flagged "--key"
+  kvs  <- flagsOf ["--repo","--key"] syn
+  repo <- flagOnce kvs "--repo" >>= asKey
+  k    <- flagOnce kvs "--key"  >>= asKey
   pure (Maintainer repo k)
   where
-    flagged n = case [ v | (StringLike n', SignPubKeyLike v) <- zip syn (drop 1 syn)
-                         , n' == n ] of
-                  [v] -> Just v
-                  _   -> Nothing
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

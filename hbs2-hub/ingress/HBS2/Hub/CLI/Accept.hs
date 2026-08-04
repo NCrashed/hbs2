@@ -48,9 +48,10 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
-import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullRef)
+import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, codeMailboxUnknown, codePeerSilent, PeerSilent)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Ban (loadBans,allowedBy,codeNoBanList)
 
@@ -68,7 +69,7 @@ import HBS2.Storage
 import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,listToMaybe)
 import System.Exit (die)
 
 -- | And what a machine with no key for the canon identity exits with.
@@ -338,16 +339,44 @@ acceptEntries = do
       -- folded PR with no staged tip, which is a repeatable step rather than
       -- a lost one: the coordinates are in canon and the bundle's objects are
       -- already in this repository.
-      staged <- case (acNumber acc, bundleOf (acContent acc)) of
-        (Just n, Just (_, _, tip, _)) ->
-          stagePull Nothing n tip Nothing >>= \case
-            Right () -> pure (Just (pullRef n))
-            Left e -> do
-              liftIO $ hPutDoc stderr
-                ( "hbs2-hub: the event is in canon and the tip is not staged:"
-                    <+> pretty e <> line
-                    <> "  re-run once the ref is free; nothing else is pending." <> line )
-              pure Nothing
+      -- The number to stage under, and it is NOT 'acNumber': a number is minted
+      -- by an open and by nothing else, so a revise carried one through here as
+      -- Nothing and fell out of the case below. The bundle was fetched, fsck'd
+      -- and checked against the signed tip, canon was told the proposed tip had
+      -- moved, and refs/hbs2/pulls/<n>/head went on pointing at the tip the
+      -- maintainer had already asked the contributor to change. PEP-20 says
+      -- plainly that a revise re-stages. The thread's number comes out of the
+      -- fold this accept read, which is where every other reader gets it.
+      let numbered t = [ n | (n, t') <- numberIndexOf fr, t' == t ]
+          stageAt = case (acNumber acc, acScope acc) of
+            (Just n, _)            -> Just n
+            (Nothing, ThreadScope t) -> listToMaybe (numbered t)
+            _                      -> Nothing
+
+      staged <- case (stageAt, bundleOf (acContent acc)) of
+        (Just n, Just (_, _, tip, _)) -> do
+          let notStaged e = do
+                liftIO $ hPutDoc stderr
+                  ( "hbs2-hub: the event is in canon and the tip is not staged:"
+                      <+> pretty e <> line
+                      -- NOT "re-run": the same letter mints the same author box
+                      -- id, so a second accept is refused as AlreadyInCanon and
+                      -- never reaches this line. What is left is the one command
+                      -- this would have run, and nothing else is pending.
+                      <> "  nothing else is pending. To stage it by hand:" <> line
+                      <> "    git update-ref " <> pretty (pullRef n)
+                      <+> pretty tip <> line )
+                pure Nothing
+          -- The old side of the swap read from the ref itself rather than from
+          -- canon: canon says what was proposed, and this is asking what is
+          -- staged, which are different questions whenever a previous stage
+          -- failed.
+          pullTip Nothing n >>= \case
+            Left e -> notStaged e
+            Right old ->
+              stagePull Nothing n tip old >>= \case
+                Right () -> pure (Just (pullRef n))
+                Left e   -> notStaged e
         _ -> pure Nothing
 
       liftIO $ print $ vcat
@@ -381,12 +410,18 @@ acceptEntries = do
 -- Named flags for the two keys rather than positions, for the reason the
 -- compose verb gives about its own: a repo key and a mailbox key are the same
 -- type, so a swap is a well-typed accept against the wrong repository.
-acceptArgs :: forall c . [Syntax c] -> Maybe (HubKey, RepoRef, HashRef, Maybe HubKey)
+acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, RepoRef, HashRef, Maybe HubKey)
 acceptArgs syn = do
-  mbox <- flagged "--mailbox" asKey
-  repo <- flagged "--repo" asKey
-  h    <- flagged "--message" asHash
-  pure (mbox, repo, h, flagged "--as" asKey)
+  kvs  <- flagsOf ["--mailbox","--repo","--message","--as"] syn
+  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  repo <- flagOnce kvs "--repo"    >>= asKey
+  h    <- flagOnce kvs "--message" >>= asHash
+  -- 'flagMaybe' and not a lookup that swallows a bad value: --as names the key
+  -- this event is BLESSED with, and answering "not given" for "given, and not a
+  -- key" fell back to the repo key and signed canon under a key the caller did
+  -- not name.
+  as   <- flagMaybe kvs "--as" asKey
+  pure (mbox, repo, h, as)
   where
     -- EVERY value is behind a flag, including the message, and nothing is
     -- positional. Not a style choice: a sign key and a hash are both thirty-two
@@ -398,16 +433,10 @@ acceptArgs syn = do
     --
     -- What is left is a caller typing the wrong value after the right flag,
     -- which no parser can catch and a human reading the line can.
-    flagged :: forall v . String -> (Syntax c -> Maybe v) -> Maybe v
-    flagged n f = case [ v | (StringLike n', f -> Just v) <- zip syn (drop 1 syn)
-                           , n' == n ] of
-                    [v] -> Just v
-                    -- A repeated flag is refused rather than resolved. Neither
-                    -- rule is safe when the value decides what gets published:
-                    -- first-wins and last-wins are both a guess about which of
-                    -- two repositories the caller meant.
-                    _   -> Nothing
-
+    --
+    -- The pairing itself, the repeated-flag refusal and the unknown-flag
+    -- refusal are 'flagsOf' in HBS2.Hub.CLI.Argv, shared with every other verb
+    -- that writes.
     asKey = \case
       SignPubKeyLike k -> Just k
       _                -> Nothing

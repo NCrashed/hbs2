@@ -36,6 +36,7 @@ module HBS2.Hub.CLI.Policy
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..),bounded)
 
 import HBS2.CLI.Prelude
@@ -279,12 +280,11 @@ policyEntries = do
         ]
 
 -- Both values behind flags, and both are keys of one type.
-policyArgs :: forall c . [Syntax c] -> Maybe PolicyArgs
+policyArgs :: forall c . IsContext c => [Syntax c] -> Maybe PolicyArgs
 policyArgs syn = do
-  mbox <- flagged "--mailbox"
-  pure (PolicyArgs mbox (flagged "--key"))
+  kvs  <- flagsOf ["--mailbox","--key"] syn
+  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  k    <- flagMaybe kvs "--key" asKey
+  pure (PolicyArgs mbox k)
   where
-    flagged n = case [ v | (StringLike n', SignPubKeyLike v) <- zip syn (drop 1 syn)
-                         , n' == n ] of
-                  [v] -> Just v
-                  _   -> Nothing
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

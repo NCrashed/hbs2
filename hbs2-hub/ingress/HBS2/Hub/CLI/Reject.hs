@@ -38,6 +38,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress (rpcTimeout)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..))
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -173,17 +174,13 @@ rejectEntries = do
         ]
 
 -- Every value behind a flag, and the two keys are one type again.
-rejectArgs :: forall c . [Syntax c] -> Maybe Reject
+rejectArgs :: forall c . IsContext c => [Syntax c] -> Maybe Reject
 rejectArgs syn = do
-  mbox <- flagged "--mailbox" asKey
-  h    <- flagged "--message" asHash
-  pure (Reject mbox h (flagged "--repo" asKey))
+  kvs  <- flagsOf ["--mailbox","--message","--repo"] syn
+  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  h    <- flagOnce kvs "--message" >>= asHash
+  repo <- flagMaybe kvs "--repo" asKey
+  pure (Reject mbox h repo)
   where
-    flagged :: forall v . String -> (Syntax c -> Maybe v) -> Maybe v
-    flagged n f = case [ v | (StringLike n', f -> Just v) <- zip syn (drop 1 syn)
-                           , n' == n ] of
-                    [v] -> Just v
-                    _   -> Nothing
-
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike x -> Just x ; _ -> Nothing }

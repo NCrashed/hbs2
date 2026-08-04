@@ -105,6 +105,40 @@ spec1 = do
       prNewArgs (argv swapped) `shouldSatisfy` (/= Nothing)
       prNewArgs (argv (full repo sender rcpt author)) `shouldSatisfy` (/= Nothing)
 
+    -- The test above drops a flag AND its value, which keeps the line aligned
+    -- and can only ever say "flag absent". What it could not say is "value
+    -- absent", and that is the case that signs: `--title --onto
+    -- refs/heads/master` parsed cleanly, bound the title `--onto`, and put it in
+    -- the author box and therefore in the event-id.
+    it "refuses a flag standing where a value belongs" $ do
+      repo <- aKey ; author <- aKey
+      let sender = aHash "sender" ; rcpt = aHash "rcpt"
+          line' = [ "--target", b58 repo, "--sender", show (pretty sender)
+                  , "--recipient", show (pretty rcpt), "--author", b58 author
+                  , "--title", "--onto", "refs/heads/master"
+                  , "--from", "refs/heads/feature" ]
+      prNewArgs (argv line') `shouldBe` Nothing
+
+    it "refuses a flag it does not know instead of dropping it" $ do
+      repo <- aKey ; author <- aKey
+      let sender = aHash "sender" ; rcpt = aHash "rcpt"
+      prNewArgs (argv (full repo sender rcpt author <> ["--draft"]))
+        `shouldBe` Nothing
+      prNewArgs (argv (full repo sender rcpt author <> ["--titel","x"]))
+        `shouldBe` Nothing
+
+    -- argvAtom keeps a word that spells a number AS a number, deliberately, and
+    -- every StringLike pattern misses it. A branch may be called 2026.
+    it "takes a title and a branch that spell a number" $ do
+      repo <- aKey ; author <- aKey
+      let sender = aHash "sender" ; rcpt = aHash "rcpt"
+          line' = [ "--target", b58 repo, "--sender", show (pretty sender)
+                  , "--recipient", show (pretty rcpt), "--author", b58 author
+                  , "--title", "2026", "--onto", "refs/heads/master"
+                  , "--from", "2026" ]
+      fmap (\p -> (pnTitle p, pnFrom p)) (prNewArgs (argv line'))
+        `shouldBe` Just ("2026", "2026")
+
   where
     pairsOf xs = concat (reverse (chunk2 xs))
     chunk2 (a:b:rest) = [a,b] : chunk2 rest
@@ -147,6 +181,36 @@ spec2 =
                                      , "--commit", "abc", "--into", "master" ])
       with "-1" `shouldBe` Nothing
       with "seven" `shouldBe` Nothing
+      -- And the other end, which the guard against a negative left open: this
+      -- wrapped to 1, so the verb looked up pull request #1 and named a number
+      -- nobody typed in the commit message it wrote.
+      with "18446744073709551617" `shouldBe` Nothing
+
+    -- `--dry-run` is not a flag this verb has, and it was dropped on the floor:
+    -- the merge was minted, signed and committed onto append-only canon by a
+    -- command whose author believed it would not be.
+    it "refuses a flag it does not know instead of recording the merge" $ do
+      repo <- aKey
+      prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
+                        , "--commit", "abc", "--into", "master", "--dry-run" ])
+        `shouldBe` Nothing
+
+    -- About one in twenty-seven seven-character abbreviated shas is all digits.
+    it "takes a commit that spells a number" $ do
+      repo <- aKey
+      fmap pmCommit (prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
+                                       , "--commit", "1234567", "--into", "master" ]))
+        `shouldBe` Just "1234567"
+
+    -- --as names the key canon is BLESSED with. Answering "not given" for
+    -- "given, and not a key" fell back to the repo key and signed under a key
+    -- the caller did not name.
+    it "refuses an --as that is not a key rather than defaulting" $ do
+      repo <- aKey
+      prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
+                        , "--commit", "abc", "--into", "master"
+                        , "--as", "not-a-key" ])
+        `shouldBe` Nothing
 
     it "refuses a repeated flag rather than resolving it" $ do
       repo <- aKey

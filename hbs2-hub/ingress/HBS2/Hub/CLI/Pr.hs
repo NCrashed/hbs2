@@ -40,6 +40,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey
@@ -300,26 +301,31 @@ prEntries = do
 -- Every value behind a flag, for the reason `hub inbox accept` has none
 -- positional: a repo key, a sigil hash and an author key are all thirty-two
 -- bytes of base58, so nothing here can be told apart by position.
-prNewArgs :: forall c . [Syntax c] -> Maybe PrNew
+prNewArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrNew
 prNewArgs syn = do
-  repo   <- flagged "--target" asKey
-  sender <- flagged "--sender" asHash
-  rcpt   <- flagged "--recipient" asHash
-  author <- flagged "--author" asKey
-  title  <- flagged "--title" asText
-  onto   <- flagged "--onto" asText
-  from   <- flagged "--from" asText
-  pure (PrNew repo sender rcpt author title onto from (flagged "--base" asText))
+  kvs    <- flagsOf knownFlags syn
+  repo   <- flagOnce kvs "--target"    >>= asKey
+  sender <- flagOnce kvs "--sender"    >>= asHash
+  rcpt   <- flagOnce kvs "--recipient" >>= asHash
+  author <- flagOnce kvs "--author"    >>= asKey
+  title  <- flagOnce kvs "--title"     >>= asText
+  onto   <- flagOnce kvs "--onto"      >>= asText
+  from   <- flagOnce kvs "--from"      >>= asText
+  base   <- flagMaybe kvs "--base" asText
+  pure (PrNew repo sender rcpt author title onto from base)
   where
-    flagged :: forall v . String -> (Syntax c -> Maybe v) -> Maybe v
-    flagged n f = case [ v | (StringLike n', f -> Just v) <- zip syn (drop 1 syn)
-                           , n' == n ] of
-                    [v] -> Just v
-                    _   -> Nothing
+    -- The list is the point: this reader used to pair each word with the next
+    -- and ask no more, so `--title --onto refs/heads/master` bound the title
+    -- `--onto` and signed it into the event-id, and `--dry-run` was dropped on
+    -- the floor. Both guards live in 'flagsOf' now.
+    knownFlags = [ "--target","--sender","--recipient","--author"
+                 , "--title","--onto","--from","--base" ]
 
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
-    asText = \case { StringLike s -> Just (Text.pack s) ; _ -> Nothing }
+    -- Through 'flagText', so a branch or a title that spells a number is one:
+    -- `--from 2026` is a branch name, and this refused it as a usage error.
+    asText = fmap Text.pack . flagText
 
 -- | What @hub pr merge@ was asked to record.
 data PrMerge = PrMerge
@@ -346,24 +352,20 @@ codeNoSuchPr = 29
 codeNotMerged :: Int
 codeNotMerged = 30
 
-prMergeArgs :: forall c . [Syntax c] -> Maybe PrMerge
+prMergeArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrMerge
 prMergeArgs syn = do
-  repo <- flagged "--repo" asKey
-  n    <- flagged "--number" asNum
-  sha  <- flagged "--commit" asText
-  into <- flagged "--into" asText
-  pure (PrMerge repo n sha into (fromMaybe repo (flagged "--as" asKey)))
+  kvs  <- flagsOf ["--repo","--number","--commit","--into","--as"] syn
+  repo <- flagOnce kvs "--repo"   >>= asKey
+  -- A number, non-negative AND small enough to be the one that was typed:
+  -- 'flagWord' owns both ends. `--number 18446744073709551617` used to wrap to
+  -- 1 and record a merge against a pull request nobody named.
+  n    <- flagOnce kvs "--number" >>= flagWord
+  sha  <- flagOnce kvs "--commit" >>= asText
+  into <- flagOnce kvs "--into"   >>= asText
+  as   <- flagMaybe kvs "--as" asKey
+  pure (PrMerge repo n sha into (fromMaybe repo as))
   where
-    flagged :: forall v . String -> (Syntax c -> Maybe v) -> Maybe v
-    flagged k f = case [ v | (StringLike k', f -> Just v) <- zip syn (drop 1 syn)
-                           , k' == k ] of
-                    [v] -> Just v
-                    _   -> Nothing
-
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
-    asText = \case { StringLike s -> Just (Text.pack s) ; _ -> Nothing }
-    -- A number, and a non-negative one. An issue number is a Word64 in canon,
-    -- and a negative literal would wrap into one nobody minted.
-    asNum  = \case
-      LitIntVal i | i >= 0 -> Just (fromIntegral i :: Word64)
-      _ -> Nothing
+    -- Through 'flagText': an abbreviated sha can be all digits, and one in
+    -- twenty-seven of the seven-character ones is.
+    asText = fmap Text.pack . flagText

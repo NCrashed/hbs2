@@ -28,6 +28,7 @@ module HBS2.Hub.CLI.Compose
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent,saying)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
@@ -453,61 +454,24 @@ issueArgs = \case
       x@(LitScientificVal _) -> Just (show (pretty x))
       x@(LitBoolVal _)       -> Just (show (pretty x))
       _                      -> Nothing
+    -- 'flagsOf' does the pairing, the missing-value guard and the unknown-flag
+    -- guard; it lives in HBS2.Hub.CLI.Argv because five other verbs had the
+    -- same scan without either guard. What stays here is which flags this verb
+    -- has and what each value must be.
     named ss = do
-      kvs <- pairs ss
-      -- Every flag known, so a typo is a refusal rather than a default. Without
-      -- this, `--titel X` would be dropped on the floor and the letter would go
-      -- out under whatever the other flags said.
-      guard (all ((`elem` knownFlags) . fst) kvs)
-      repo   <- one kvs "--target"    >>= signKey
-      sender <- one kvs "--sender"    >>= hashOf
-      rcpt   <- one kvs "--recipient" >>= hashOf
-      author <- one kvs "--author"    >>= signKey
-      title  <- one kvs "--title"     >>= titleOf
-      -- Repeatable, unlike every other flag here, and so read with 'every'
-      -- rather than 'one'. Bounds are not applied at this layer: 'oversizedField'
-      -- owns them, and it is the same check the fold will make.
-      labels <- traverse titleOf (every kvs "--label")
+      kvs    <- flagsOf knownFlags ss
+      repo   <- flagOnce kvs "--target"    >>= signKey
+      sender <- flagOnce kvs "--sender"    >>= hashOf
+      rcpt   <- flagOnce kvs "--recipient" >>= hashOf
+      author <- flagOnce kvs "--author"    >>= signKey
+      title  <- flagOnce kvs "--title"     >>= titleOf
+      -- Repeatable, unlike every other flag here, and so read with 'flagEvery'
+      -- rather than 'flagOnce'. Bounds are not applied at this layer:
+      -- 'oversizedField' owns them, and it is the same check the fold will make.
+      labels <- traverse titleOf (flagEvery kvs "--label")
       pure (repo, sender, rcpt, author, title, labels)
 
     knownFlags = ["--target","--sender","--recipient","--author","--title","--label"]
-
-    -- Exactly one, so that `--title a --title b` is a refusal rather than a
-    -- silent choice between them.
-    one kvs k = case every kvs k of
-      [v] -> Just v
-      _   -> Nothing
-
-    every kvs k = [ v | (k',v) <- kvs, k' == k ]
-
-    pairs :: [Syntax c] -> Maybe [(String, Syntax c)]
-    pairs = \case
-      [] -> Just []
-      -- `--flag=value`, which was accepted nowhere and named in no usage text:
-      -- `--title=t` fell through to the case below, paired `--title=t` with the
-      -- NEXT word, and printed a usage message that did not say what was wrong.
-      -- It is also the spelling that lets a value legitimately begin with a
-      -- dash, which is what makes the refusal below affordable.
-      (StringLike k : rest)
-        | Just (k', v) <- splitFlag k -> ((k', mkStr @c v) :) <$> pairs rest
-      (StringLike k : v : rest)
-        | "--" `List.isPrefixOf` k, not (flagLike v) -> ((k,v) :) <$> pairs rest
-      _ -> Nothing
-
-    -- A flag where a value belongs is a MISSING value, not a value. Without
-    -- this, `hub issue new ... --title --draft` parsed cleanly and signed the
-    -- string `--draft` as the title -- into the author box and therefore into
-    -- the event-id, which is the hash of that box, so it cannot be corrected
-    -- afterwards: canon is append-only. That is the same hazard the named form
-    -- was introduced for, reached by a different route.
-    flagLike = \case
-      StringLike s -> "--" `List.isPrefixOf` s
-      _            -> False
-
-    -- Split on the FIRST '=' only, so a value may contain one.
-    splitFlag s = case List.break (== '=') s of
-      (k, '=' : v) | "--" `List.isPrefixOf` k, length k > 2 -> Just (k, v)
-      _                                                     -> Nothing
 
     signKey = \case
       SignPubKeyLike x -> Just x
