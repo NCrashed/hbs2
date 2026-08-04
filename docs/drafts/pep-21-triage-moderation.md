@@ -176,12 +176,25 @@ only choice left is how wide the break is.
     also what keeps the grind hash-only: the message is signed once, before
     solving, and the solver never touches ed25519.
   - Dedup of a restamp. The `RoutedEntry` marker for a stamped message is
-    `H(serialise (mailboxKey, msg))`, not the hash of the whole `MailBoxProto`
-    value, so re-sending one message under a fresh nonce is recognized as the
-    same message. Without that rule a spammer buys a second flood for each
-    fresh solution; with it, a restamp is `seen` and goes nowhere. Storage
-    dedup already collapses the duplicate either way; this is about gossip
-    amplification.
+    `H(serialise (mailboxKey, bits, msg))`, not the hash of the whole
+    `MailBoxProto` value, so re-sending one message under a fresh nonce of the
+    same strength is recognized as the same message. Without that rule a
+    spammer buys a second flood for each fresh solution; with it, a restamp is
+    `seen` and goes nowhere. Storage dedup already collapses the duplicate
+    either way; this is about gossip amplification.
+
+    THE WORK IS IN THE MARKER, and leaving it out was a way to stop somebody
+    else's mail. With only `(mailboxKey, msg)`, anybody who had seen a message
+    could mint `MessageStamp1 mbox 0` -- free, and forwarded wherever the peer's
+    floor is zero, which is the default -- and race it ahead of the honest copy.
+    Both carry the same marker, so the honest D-bit copy is `seen` and dies at
+    its sender's first hop, while the attacker's copy is refused for want of
+    work at the host: the letter arrives nowhere, the sender paid D bits for it,
+    and by this document's own admission there is no rejection signal to notice
+    with. With the bits in it, suppressing a copy worth D bits costs D bits.
+    What an attacker can still buy is a second flood per DIFFICULTY rather than
+    a suppression, and each additional one doubles in price, which is a bounded
+    and priced amplification instead of an unbounded denial.
 
     Three hashes, not one. This section claimed the marker and the binding
     above were the same value, and they are deliberately not: the binding is
@@ -270,12 +283,24 @@ only choice left is how wide the break is.
   - What it bounds. Each distinct message costs fresh work, so PoW bounds the
     rate of distinct messages a spammer can create. Replay of one solved
     message is bounded by dedup, not by work: the `RoutedEntry` marker stops a
-    replay being GOSSIPED again, and the merged marker in the queue drain
-    stops it being stored twice. What a replay still costs is one slot in the
-    peer's bounded input queue, because accept was deliberately moved out from
-    under the marker (a message refused by a policy that had not been written
-    yet was otherwise lost for good). PoW plus dedup bound growth; they do not
-    bound that queue, and it is sized rather than priced.
+    replay being GOSSIPED again, the merged marker in the queue drain stops it
+    being stored twice, and an in-flight set on the input queue stops N copies
+    of one message taking N slots in it.
+
+    That last one is a bound on the QUEUE and not on the work, and it is there
+    because accept was deliberately moved out from under the gossip marker: a
+    message refused by a policy that had not been written yet was otherwise lost
+    for good, since nothing stored it and every later copy was suppressed as
+    seen. The cost of that freedom was a slot per copy, in a queue 8000 deep
+    drained every ten seconds, so replaying one packet at link rate filled it
+    and the honest submissions behind it were dropped -- permanently, since only
+    the replication path retries. The set holds what is in flight and nothing
+    else; the drain clears it as it takes the batch, so a message refused this
+    round is queued again on the next copy.
+
+    What is still sized rather than priced is a flood of DISTINCT messages
+    below a mailbox's `(pow D)`: each costs a slot until the drain reads it and
+    the policy refuses it. Rate limiting is the answer this document defers.
   - Difficulty in policy. D is declared in the signed policy (`(pow D)`),
     versioned like the rest, so the owner tunes it. There is no per-tier PoW
     clause: a tier is already its own mailbox with its own policy (Trust

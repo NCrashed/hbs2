@@ -26,6 +26,7 @@ import MailboxFixture
 
 import Codec.Serialise (serialise)
 import Data.ByteString.Char8 qualified as B8
+import Data.Word (Word64)
 import Lens.Micro.Platform (view)
 
 import Test.Tasty
@@ -134,8 +135,29 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- depend on the nonce: if it did, re-solving one message would look
         -- like a new message to every peer, and each fresh solution would buy
         -- another flood -- which is the amplification the work was supposed to
-        -- price.
-        stampMarker (MessageStamp1 bob 1) msg @?= stampMarker (MessageStamp1 bob 2) msg
+        -- price. Two nonces OF THE SAME STRENGTH, because the marker carries
+        -- the work: a restamp is one message to gossip, and buying a second
+        -- flood means buying a bit, which doubles the price.
+        let bitsOf n = stampBits msg (MessageStamp1 bob n)
+            sameAs b = [ n | n <- [1 .. 4096 :: Word64], bitsOf n == b ]
+        case take 2 (sameAs (bitsOf 1)) of
+          [n1, n2] -> stampMarker (MessageStamp1 bob n1) msg
+                        @?= stampMarker (MessageStamp1 bob n2) msg
+          _ -> assertFailure "no two nonces of equal strength in four thousand"
+
+        -- AND A CHEAP STAMP DOES NOT SPEAK FOR AN EXPENSIVE ONE, which is what
+        -- leaving the work out of the marker allowed. Anybody who saw a message
+        -- could mint MessageStamp1 mbox 0 -- free, and forwarded wherever the
+        -- peer's floor is zero, which is the default -- and race it ahead of the
+        -- honest copy. Same marker, so the honest twenty-bit copy was `seen` and
+        -- died at its sender's first hop, while the junk copy was refused for
+        -- want of work at the host: the letter nowhere, twenty bits paid for it,
+        -- and no rejection signal to notice with.
+        let weak = head [ MessageStamp1 bob n | n <- [0 ..], bitsOf n == 0 ]
+            strong = solveStamp 8 bob msg
+        assertBool "the solved stamp carries at least what was asked" (stampBits msg strong >= 8)
+        assertBool "a free stamp does not suppress a solved one"
+          (stampMarker weak msg /= stampMarker strong msg)
 
         -- And it does depend on the mailbox, because two mailboxes are two
         -- deliveries: a copy stamped for one must still reach the other.

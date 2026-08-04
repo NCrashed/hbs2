@@ -150,6 +150,10 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- | Peers this one takes replication from for a charging mailbox, from
     -- 'hbs2MailboxReplicateFromOpt'. Read from the config like the floor above.
   , mpwReplicateFrom      :: TVar (HashSet (PubKey 'Sign s))
+    -- | What is in the queue right now, by message hash. Not a dedup of
+    -- everything ever seen: see 'mailboxAcceptMessage' for why it is exactly
+    -- as long-lived as one batch.
+  , inMessageQueueSeen    :: TVar (HashSet HashRef)
   , inMessageQueue        :: TBQueue ( Maybe (PubKey 'Sign s)
                                      , MessageOrigin s
                                      , Message s
@@ -230,15 +234,35 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
   mailboxReplicateFrom MailboxProtoWorker{..} = readTVarIO mpwReplicateFrom
 
   mailboxAcceptMessage MailboxProtoWorker{..} peer origin m c = do
+    -- ONE SLOT PER DISTINCT MESSAGE, however many copies arrive.
+    --
+    -- Accept was deliberately taken out from under the gossip marker (see
+    -- takeMessage in HBS2.Peer.Proto.Mailbox): a message refused by a policy
+    -- that had not been written yet was otherwise lost for good, since nothing
+    -- stored it and every later copy was suppressed as `seen`. The cost of that
+    -- was a queue slot per COPY, and the queue is 8000 deep and drained every
+    -- ten seconds, so replaying one packet at link rate filled it and the
+    -- honest Submitted messages behind it were dropped -- permanently, since
+    -- only the replication path retries.
+    --
+    -- The set is what makes a replay free again without putting the marker back
+    -- in front of accept. It holds what is IN FLIGHT and nothing else: the
+    -- drain clears it as it takes the batch, so a message refused this round is
+    -- queued again on the next copy, which is the property the marker was
+    -- removed to get.
+    let h = HashRef (hashObject (serialise m))
     took <- atomically do
-      full <- isFullTBQueue inMessageQueue
-      if full then do
-        modifyTVar inMessageQueueDropped succ
-        pure False
-      else do
-        writeTBQueue inMessageQueue (peer, origin, m, c)
-        modifyTVar   inMessageQueueInNum succ
-        pure True
+      inflight <- readTVar inMessageQueueSeen
+      if HS.member h inflight then pure True else do
+        full <- isFullTBQueue inMessageQueue
+        if full then do
+          modifyTVar inMessageQueueDropped succ
+          pure False
+        else do
+          writeTBQueue inMessageQueue (peer, origin, m, c)
+          modifyTVar   inMessageQueueInNum succ
+          writeTVar    inMessageQueueSeen (HS.insert h inflight)
+          pure True
 
     -- Said out loud. The counter above is published on the probe now, but a
     -- drop is a message that will not arrive, and a peer's log is where somebody
@@ -796,6 +820,7 @@ createMailboxProtoWorker pc pe sto = do
     <*> newCheckNonces
     <*> newTVarIO 0
     <*> newTVarIO mempty
+    <*> newTVarIO mempty
     <*> newTBQueueIO 8000
     <*> newTVarIO mempty
     <*> newTVarIO mempty
@@ -903,7 +928,13 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       let sto = mpwStorage
       forever do
         pause @'Seconds 10
-        mess <- atomically $ STM.flushTBQueue inMessageQueue
+        mess <- atomically do
+          -- Cleared WITH the batch, in one transaction: a message that arrives
+          -- between the flush and the clear would otherwise be forgotten by the
+          -- set and still be in nobody's queue.
+          xs <- STM.flushTBQueue inMessageQueue
+          writeTVar inMessageQueueSeen mempty
+          pure xs
         for_ mess $ \(peer, origin, m, s) -> do
           atomically $ modifyTVar inMessageQueueInNum pred
 

@@ -87,7 +87,7 @@ stampOk d mbox msg st = msMailbox st == mbox && stampBits msg st >= fromIntegral
 
 -- | The gossip dedup identity of a stamped message.
 --
--- The nonce is NOT in it, and that is the whole reason this is a function
+-- The NONCE is not in it, and that is the whole reason this is a function
 -- rather than the hash of the wire value. The peer's marker for a plain message
 -- covers the whole 'MailBoxProto', so re-sending one message under a fresh
 -- nonce would look like a new message and buy a second flood for each solution.
@@ -96,8 +96,25 @@ stampOk d mbox msg st = msMailbox st == mbox && stampBits msg st >= fromIntegral
 -- stamped message strip the stamp, re-send it plain for free, and have the
 -- honest stamped copy suppressed as already seen everywhere it had not yet
 -- reached.
+--
+-- THE WORK IS IN IT, and that is what stops the marker being used as a weapon.
+-- With the bits left out, anybody who saw a message could mint
+-- @MessageStamp1 mbox 0@ -- free, and accepted for gossip wherever the peer's
+-- floor is zero, which is the default -- and race it ahead of the honest copy.
+-- Both have the same marker, so the honest twenty-bit copy is @seen@ and dies
+-- at its sender's first hop, while the attacker's junk copy is refused for want
+-- of work at the host. The letter is nowhere, the sender paid twenty bits for
+-- it, and PEP-21 admits there is no rejection signal to notice with.
+--
+-- With the bits in it, a restamp at the SAME difficulty is still one message to
+-- gossip (the marker does not move with the nonce), and suppressing a copy
+-- worth D bits costs D bits of work, which is what the honest sender paid. What
+-- it buys an attacker is a second flood per difficulty rather than a
+-- suppression: a bounded, exponentially-priced amplification instead of an
+-- unbounded denial, and the peer's floor cuts the cheap end of it off.
 stampMarker :: forall s . ForMailbox s => MessageStamp s -> Message s -> HashRef
-stampMarker MessageStamp1{..} msg = HashRef (hashObject @HbSync (serialise (msMailbox, msg)))
+stampMarker st@MessageStamp1{..} msg =
+  HashRef (hashObject @HbSync (serialise (msMailbox, stampBits @s msg st, msg)))
 
 -- | Grind until the stamp meets the difficulty.
 --
