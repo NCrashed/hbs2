@@ -10,6 +10,8 @@ module MailboxProtoWorker ( mailboxProtoWorker
                           , IsMailboxProtoAdapter
                           , MailboxProtoException(..)
                           , hbs2MailboxDirOpt
+                          , hbs2MailboxPoWMinOpt
+                          , poWFloorFrom
                           ) where
 
 import HBS2.Prelude.Plated
@@ -34,6 +36,7 @@ import HBS2.Peer.Proto.Mailbox.Merge
 import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
+import HBS2.Peer.Proto.Mailbox.PoW
 import HBS2.Net.Messaging.Unix
 import HBS2.Net.Auth.Credentials
 
@@ -92,6 +95,32 @@ instance Exception MailboxProtoException
 hbs2MailboxDirOpt :: String
 hbs2MailboxDirOpt = "hbs2:mailbox:dir"
 
+-- | @(hbs2:mailbox:pow-min D)@: the least proof-of-work this peer forwards.
+--
+-- A peer-wide floor, and it has to be peer-wide rather than per-mailbox: it is
+-- consulted before gossip, where the peer does not yet know which mailbox a
+-- message is for and usually hosts none of them. What a mailbox charges is
+-- @(pow D)@ in its own signed policy, and that one bounds storage.
+--
+-- Absent means zero, which forwards a stamped message on the same terms as a
+-- plain one.
+hbs2MailboxPoWMinOpt :: String
+hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
+
+-- | The floor as the config states it, or zero if it does not.
+--
+-- A pure function over the parsed config so it can be tested without a peer.
+-- The last clause wins, which is how the other options here read; a value that
+-- does not fit is ignored rather than clamped, because a clamped 4096 would
+-- silently become a floor nobody asked for.
+poWFloorFrom :: [Syntax C] -> PoWDifficulty
+poWFloorFrom conf =
+  fromMaybe 0 $ lastMay [ fromIntegral d
+                        | ListVal [StringLike o, LitIntVal d] <- conf
+                        , o == hbs2MailboxPoWMinOpt
+                        , d >= 0 && d <= 255
+                        ]
+
 {- HLINT ignore "Functor law" -}
 
 data PolicyDownload s =
@@ -138,7 +167,14 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- 'MailboxStatus' is an answer to one of ours or it is somebody talking
     -- unprompted; see "HBS2.Peer.Proto.Mailbox.Nonce".
   , mpwCheckNonces        :: CheckNonces (MailboxRefKey s)
-  , inMessageQueue        :: TBQueue (Maybe (PubKey 'Sign s), Message s, MessageContent s)
+    -- | Least proof-of-work this peer will forward, from
+    -- 'hbs2MailboxPoWMinOpt'. A TVar because it is read from the config after
+    -- the worker exists, the way the database and the probe are.
+  , mpwPoWFloor           :: TVar PoWDifficulty
+  , inMessageQueue        :: TBQueue ( Maybe (PubKey 'Sign s)
+                                     , MessageOrigin s
+                                     , Message s
+                                     , MessageContent s )
   , inMessageMergeQueue   :: TVar (HashMap (MailboxRefKey s) (HashSet HashRef))
   , inPolicyDownloadQ     :: TVar (HashMap HashRef (PolicyDownload s))
   , inMailboxDownloadQ    :: TVar (HashMap HashRef (MailboxDownload s))
@@ -210,14 +246,16 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
   mailboxCheckNonce MailboxProtoWorker{..} mbox nonce =
     acceptCheckNonce mpwCheckNonces mbox nonce
 
-  mailboxAcceptMessage MailboxProtoWorker{..} peer m c = do
+  mailboxPoWFloor MailboxProtoWorker{..} = readTVarIO mpwPoWFloor
+
+  mailboxAcceptMessage MailboxProtoWorker{..} peer origin m c = do
     took <- atomically do
       full <- isFullTBQueue inMessageQueue
       if full then do
         modifyTVar inMessageQueueDropped succ
         pure False
       else do
-        writeTBQueue inMessageQueue (peer, m,c)
+        writeTBQueue inMessageQueue (peer, origin, m, c)
         modifyTVar   inMessageQueueInNum succ
         pure True
 
@@ -503,13 +541,15 @@ instance ( s ~ Encryption e, e ~ L4Proto
         Left (MailboxOperationError (show $ "no mailox" <+> pretty (AsBase58 k)))
 
 
-  mailboxSendMessage w@MailboxProtoWorker{..} mess = do
+  mailboxSendMessage w@MailboxProtoWorker{..} stamp mess = do
     -- we do not check message signature here
     -- because it will be checked in the protocol handler anyway
     liftIO $ withPeerM mpwPeerEnv do
       me <- ownPeer @e
       runResponseM me $ do
-        mailboxProto @e True w (MailBoxProtoV1 (SendMessage mess))
+        mailboxProto @e True w (MailBoxProtoV1 (maybe (SendMessage mess)
+                                                      (SendMessageStamped mess)
+                                                      stamp))
 
     pure $ Right ()
 
@@ -773,6 +813,7 @@ createMailboxProtoWorker pc pe sto = do
   MailboxProtoWorker pe sto pc
     <$> newTVarIO mempty
     <*> newCheckNonces
+    <*> newTVarIO 0
     <*> newTBQueueIO 8000
     <*> newTVarIO mempty
     <*> newTVarIO mempty
@@ -808,6 +849,14 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
   flip runContT pure do
 
     dbe <- lift $ mailboxStateEvolve readConf me
+
+    -- Порог берётся один раз, на старте, как и всё остальное из конфига здесь.
+    lift do
+      floorD <- readConf <&> poWFloorFrom
+      atomically $ writeTVar mpwPoWFloor floorD
+      when (floorD > 0) do
+        debug $ "mailbox: will not forward messages under"
+                  <+> pretty floorD <+> "bits of work"
 
     dpipe <- ContT $ withAsync (runPipe dbe)
 
@@ -863,7 +912,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       forever do
         pause @'Seconds 10
         mess <- atomically $ STM.flushTBQueue inMessageQueue
-        for_ mess $ \(peer, m, s) -> do
+        for_ mess $ \(peer, origin, m, s) -> do
           atomically $ modifyTVar inMessageQueueInNum pred
 
           -- TODO: process-with-policy
@@ -917,6 +966,32 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             unless accept do
               warn $ red "message dropped by policy for" <+> pretty theMailbox
               mzero
+
+            -- Доказательство работы, и это тот слой, который ограничивает ДИСК.
+            --
+            -- Пир в обработчике протокола проверил только свой собственный
+            -- порог -- сколько работы он готов пересылать; сколько её требует
+            -- ЭТОТ ящик, знает только его подписанная policy, а она читается
+            -- здесь. Ноль -- это ящик, который ничего не требует, то есть всё,
+            -- что было до PEP-21, и тогда штамп просто не нужен.
+            --
+            -- Проверяется против rcpt, а не против ящика из штампа: работа,
+            -- решённая для другого ящика, к этому отношения не имеет.
+            --
+            -- И только для того, что пришло госсипом: у сообщения, вынутого из
+            -- чужого дерева, штампа нет и быть не может (см. 'MessageOrigin').
+            powD <- policyPoW @s po
+
+            case origin of
+              Replicated      -> pure ()
+              Submitted stamp -> when (powD > 0) do
+                let ok = maybe False (stampOk powD rcpt m) stamp
+                unless ok do
+                  warn $ red "message dropped for want of proof-of-work"
+                          <+> pretty theMailbox
+                          <+> parens ("wanted" <+> pretty powD <+> "bits, got"
+                                        <+> pretty (maybe 0 (stampBits m) stamp))
+                  mzero
 
             -- TODO: ASAP-block-accounting
             ha' <- putBlock sto (serialise m) <&> fmap HashRef
@@ -1259,7 +1334,15 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                                 -- serve its messages inside a status tree
                                 -- instead of sending them, and every one of them
                                 -- was admitted with the peer check skipped.
-                                took <- mailboxAcceptMessage me (Just mailboxDownPeer) normal content
+                                --
+                                -- 'Replicated', и это не «штампа нет», а «не
+                                -- за что платить»: штамп в дереве не лежит,
+                                -- значит у со-хоста его и нет. Ящик с (pow D)
+                                -- иначе отверг бы всё, что ему передают
+                                -- собственные хосты, то есть перестал бы
+                                -- реплицироваться. Границей тут служит
+                                -- policyAcceptPeer -- см. 'MessageOrigin'.
+                                took <- mailboxAcceptMessage me (Just mailboxDownPeer) Replicated normal content
                                 unless took do
                                   atomically $ modifyTVar fails succ
 

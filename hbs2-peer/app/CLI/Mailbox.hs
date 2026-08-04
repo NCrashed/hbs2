@@ -148,7 +148,11 @@ runMailboxCLI rpc s = do
               mess <- deserialiseOrFail @(Message HBS2Basic) blob
                         & either (const $ error "malformed message") pure
 
-              callRpcWaitMay @RpcMailboxSend t api mess
+              -- Без штампа, и это плумбинг, а не упущение: сюда приходит уже
+              -- сериализованное сообщение, а решать за него работу можно только
+              -- зная, какому ящику она нужна и сколько. Это знание есть у hub,
+              -- который читает policy перед отправкой; здесь -- нет.
+              callRpcWaitMay @RpcMailboxSend t api (Nothing, mess)
                 >>= orThrowUser "rpc call timeout"
                 >>= orThrowPassIO
 

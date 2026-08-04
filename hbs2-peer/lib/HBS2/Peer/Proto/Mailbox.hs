@@ -26,6 +26,7 @@ import HBS2.Peer.Proto.Mailbox.Message
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Policy
+import HBS2.Peer.Proto.Mailbox.PoW
 import HBS2.Peer.Proto.Mailbox.Ref
 
 import HBS2.Misc.PrettyStuff
@@ -68,9 +69,22 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
                         -> Word64 -- ^ nonce as it came back in the status
                         -> m Bool
 
+  -- | The least proof-of-work this peer will amplify, in leading zero bits.
+  --
+  -- Not the mailbox's @(pow D)@, and it cannot be: this is consulted before
+  -- gossip, where the peer does not yet know which mailbox the message is for
+  -- and may host none of them. It bounds what this peer FORWARDS. What it
+  -- stores is bounded by the mailbox's own policy, later, in the queue.
+  --
+  -- Zero by default, which is a peer that forwards a stamped message on the
+  -- same terms as a plain one.
+  mailboxPoWFloor       :: forall m . MonadIO m => a -> m PoWDifficulty
+  mailboxPoWFloor _ = pure 0
+
   mailboxAcceptMessage  :: forall m . (ForMailbox s, MonadIO m)
                         => a
                         -> Maybe (PubKey 'Sign s) -- ^ peer
+                        -> MessageOrigin s        -- ^ which path it arrived on
                         -> Message s
                         -> MessageContent s
                         -- ^ True when the message was taken. It answered @()@,
@@ -109,6 +123,7 @@ class ForMailbox s => IsMailboxService s a where
 
   mailboxSendMessage :: forall m . MonadIO m
                      => a
+                     -> Maybe (MessageStamp s) -- ^ proof of work, when the mailbox charges for one
                      -> Message s
                      -> m (Either MailboxServiceError ())
 
@@ -162,6 +177,7 @@ instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxGetPolicyMay (AnyMailboxAdapter a) = mailboxGetPolicyMay @s a
   mailboxCheckNonce (AnyMailboxAdapter a) = mailboxCheckNonce @s a
   mailboxGetStorage (AnyMailboxAdapter a) = mailboxGetStorage @s a
+  mailboxPoWFloor (AnyMailboxAdapter a) = mailboxPoWFloor @s a
   mailboxAcceptMessage (AnyMailboxAdapter a) = mailboxAcceptMessage @s a
   mailboxAcceptDelete (AnyMailboxAdapter a) = mailboxAcceptDelete @s a
 
@@ -200,65 +216,102 @@ mailboxProto inner adapter mess = deferred @p do
               se <- ContT $ maybe1 se' none
               pure $ view peerSignKey se
 
+    -- Приём сообщения, со штампом или без. Одно тело на две ветки: они
+    -- расходятся только в том, чем сообщение опознаётся для дедупа и что перед
+    -- этим проверяется, а всё дальнейшее -- рассылка, маркер, очередь -- у них
+    -- общее и обязано остаться общим.
+    let takeMessage origin msg content h = do
+
+          let routed = serialise (RoutedEntry h)
+          let routedHash = hashObject routed
+
+          seen <- hasBlock sto routedHash <&> isJust
+
+          -- Маркер гейтит ТОЛЬКО пересылку, и это исправление.
+          --
+          -- Раньше он гейтил и приём тоже, а приём -- это очередь, за которой
+          -- через десять секунд идёт policy. Порядок был такой: пишем маркер,
+          -- потом решаем. Сообщение, отвергнутое политикой, нигде не сохранялось,
+          -- очередь уже была слита, а любая повторная рассылка того же сообщения
+          -- гасилась как `seen`. То есть отказ был окончательным.
+          --
+          -- А политика по умолчанию -- `defaultBasicPolicy`, то есть Deny/Deny, и
+          -- она берётся всякий раз, когда для ящика не выставлено ничего. Значит:
+          -- создать ящик, не успеть выставить политику -- и каждое письмо,
+          -- пришедшее в этот промежуток, потеряно навсегда, даже после того, как
+          -- политику поправят.
+          --
+          -- Приём стоит одну запись в ограниченную очередь; дорогое (проверка
+          -- подписи на получателя, чтение и разбор policy) живёт в mailboxInQ, и
+          -- там теперь есть дешёвый ранний выход для сообщения, которое в этом
+          -- ящике уже лежит. Так что повтор обходится дёшево, а отказ перестал
+          -- быть вечным.
+          unless seen $ lift do
+            gossip mess
+
+            -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
+            --   сейчас policy проверяется для почтового ящика,
+            --   а тут мы еще не знаем, какой почтовый ящик и есть
+            --   ли он вообще. надо бы не рассылать, если пира
+            --   не поддерживаем.
+            --
+            --   с другой стороны -- мы не поддерживаем, а другие,
+            --   может, поддерживают.
+            --
+            -- ЧАСТИЧНО ЗАКРЫТО для сообщений со штампом: у них есть, что
+            -- проверить до рассылки, не зная ящика, и это mailboxPoWFloor.
+
+            -- TODO: expire-block-and-collect-garbage
+            --   $class: leak
+            void $ putBlock sto routed
+
+          lift do
+            let whoever = if inner then Nothing else Just pip
+            void $ mailboxAcceptMessage adapter whoever origin msg content
+
+    -- Подпись дешевле диска, поэтому она первой в обеих ветках.
+    let unboxMessage msg = ContT $ maybe1 (unboxSignedBox0 @(MessageContent s) (messageContent msg)) none
+
     case mailBoxProtoPayload mess of
       SendMessage msg -> do
 
         debug $ red "AAAAAA!" <+> pretty now
 
-        -- проверить подпись быстрее, чем читать диск
-        let unboxed' = unboxSignedBox0 @(MessageContent s) (messageContent msg)
-
         -- ок, сообщение нормальное, шлём госсип, пишем, что обработали
         -- TODO: increment-malformed-messages-statistics
         --   $workflow: backlog
-        (_, content) <- ContT $ maybe1 unboxed' none
+        (_, content) <- unboxMessage msg
 
+        takeMessage (Submitted Nothing) msg content (hashObject @HbSync (serialise mess) & HashRef)
 
-        let h = hashObject @HbSync (serialise mess) & HashRef
+      -- То же сообщение, но с доказательством работы (PEP-21).
+      --
+      -- Проверка СТОИТ ДО РАССЫЛКИ И ДО МАРКЕРА, и оба порядка существенны.
+      -- До рассылки -- потому что иначе штамп ограничивает только диск, а
+      -- флуд уже ушёл ко всем известным пирам. До маркера -- потому что
+      -- маркер, записанный для сообщения с негодным штампом, погасил бы
+      -- годную копию того же сообщения везде, куда она ещё не дошла.
+      SendMessageStamped msg stamp -> do
 
-        let routed = serialise (RoutedEntry h)
-        let routedHash = hashObject routed
+        (_, content) <- unboxMessage msg
 
-        seen <- hasBlock sto routedHash <&> isJust
+        floorD <- lift $ mailboxPoWFloor @s adapter
 
-        -- Маркер гейтит ТОЛЬКО пересылку, и это исправление.
-        --
-        -- Раньше он гейтил и приём тоже, а приём -- это очередь, за которой
-        -- через десять секунд идёт policy. Порядок был такой: пишем маркер,
-        -- потом решаем. Сообщение, отвергнутое политикой, нигде не сохранялось,
-        -- очередь уже была слита, а любая повторная рассылка того же сообщения
-        -- гасилась как `seen`. То есть отказ был окончательным.
-        --
-        -- А политика по умолчанию -- `defaultBasicPolicy`, то есть Deny/Deny, и
-        -- она берётся всякий раз, когда для ящика не выставлено ничего. Значит:
-        -- создать ящик, не успеть выставить политику -- и каждое письмо,
-        -- пришедшее в этот промежуток, потеряно навсегда, даже после того, как
-        -- политику поправят.
-        --
-        -- Приём стоит одну запись в ограниченную очередь; дорогое (проверка
-        -- подписи на получателя, чтение и разбор policy) живёт в mailboxInQ, и
-        -- там теперь есть дешёвый ранний выход для сообщения, которое в этом
-        -- ящике уже лежит. Так что повтор обходится дёшево, а отказ перестал
-        -- быть вечным.
-        unless seen $ lift do
-          gossip mess
+        let bits = stampBits msg stamp
 
-          -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
-          --   сейчас policy проверяется для почтового ящика,
-          --   а тут мы еще не знаем, какой почтовый ящик и есть
-          --   ли он вообще. надо бы не рассылать, если пира
-          --   не поддерживаем.
-          --
-          --   с другой стороны -- мы не поддерживаем, а другие,
-          --   может, поддерживают.
+        -- Ящик, названный в штампе, должен быть среди получателей: работа,
+        -- решённая для чужого ящика, -- это работа за чужую доставку.
+        unless (stampNames content stamp) do
+          debug $ red "mailbox: stamp names a mailbox this message is not addressed to"
+                    <+> pretty (AsBase58 (msMailbox stamp))
+          exit ()
 
-          -- TODO: expire-block-and-collect-garbage
-          --   $class: leak
-          void $ putBlock sto routed
+        unless (bits >= fromIntegral floorD) do
+          debug $ red "mailbox: stamp too weak to forward"
+                    <+> pretty bits <> ", wanted" <+> pretty floorD
+          exit ()
 
-        lift do
-          let whoever = if inner then Nothing else Just pip
-          void $ mailboxAcceptMessage adapter whoever msg content
+        takeMessage (Submitted (Just stamp)) msg content (stampMarker stamp msg)
 
       -- NOTE: CheckMailbox-auth
       --   поскольку пир не владеет приватными ключами,

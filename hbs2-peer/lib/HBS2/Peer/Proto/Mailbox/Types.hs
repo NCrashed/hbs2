@@ -18,8 +18,11 @@ module HBS2.Peer.Proto.Mailbox.Types
   , MessageContent(..)
   , MessageCompression(..)
   , MessageFlags(..)
+  , MessageOrigin(..)
+  , MessageStamp(..)
   , MessageTimestamp(..)
   , MessageTTL(..)
+  , PoWDifficulty
   , DeleteMessagesPayload(..)
   , SetPolicyPayload(..)
   , clockSkew
@@ -73,6 +76,12 @@ type Sender s = PubKey 'Sign s
 type Recipient s = PubKey 'Sign s
 
 type PolicyVersion = Word32
+
+-- | Proof-of-work difficulty, in leading zero bits of the stamp hash.
+--
+-- Zero means none is required, which is what every mailbox says until its
+-- owner writes @(pow D)@ into the policy. See "HBS2.Peer.Proto.Mailbox.PoW".
+type PoWDifficulty = Word8
 
 type ForMailbox s = ( ForGroupKeySymm s
                     , Ord (PubKey 'Sign s)
@@ -175,6 +184,26 @@ data MailBoxProtoMessage s e =
   | CheckMailbox     (Maybe Word64) (MailboxKey s)
   | MailboxStatus    (SignedBox (MailBoxStatusPayload s) s) -- signed by peer
   | DeleteMessages   (SignedBox (DeleteMessagesPayload s ) s)
+  -- | The same message, carrying a proof-of-work witness (PEP-21).
+  --
+  -- APPENDED LAST, AND IT HAS TO STAY LAST. The derived 'Serialise' tags
+  -- constructors by position, so inserting anything above this line renumbers
+  -- 'DeleteMessages' and every deployed peer starts mis-reading a message that
+  -- has nothing to do with proof-of-work.
+  --
+  -- A constructor rather than a field on 'Message', for two reasons. A field
+  -- changes that record's arity, and an old peer would then fail to decode ALL
+  -- mailbox traffic instead of only the stamped part of it. And the peer stores
+  -- @serialise (msg :: Message s)@, so keeping the witness out of 'Message'
+  -- keeps the stored bytes and their hash identical whether the message arrived
+  -- stamped or plain; the witness gates submission and is not part of what
+  -- replicates between a mailbox's hosts.
+  --
+  -- What it costs, and it is not small: relaying re-encodes the decoded value,
+  -- so a peer that cannot parse this constructor does not forward it either. A
+  -- stamped message travels only over a path of upgraded peers, and an old one
+  -- in the path drops it in silence.
+  | SendMessageStamped (Message s) (MessageStamp s)
   deriving stock (Generic)
 
 data MailBoxProto s e =
@@ -232,8 +261,50 @@ data Message s =
   }
   deriving stock Generic
 
+-- | The proof-of-work witness for one message and one mailbox (PEP-21).
+--
+-- Unsigned, and it needs no authenticity of its own: it is self-verifying
+-- against the message it names, and a stamp that does not verify is simply not
+-- a stamp.
+--
+-- It names the mailbox because a message names several recipients and the work
+-- is bound to one of them; a verifier cannot tell which without being told, and
+-- the peer that checks the difficulty floor before gossiping has no policy for
+-- any of them. One stamp is work for one mailbox: a sender who needs two
+-- mailboxes that both charge has to solve twice.
+--
+-- It does NOT carry the difficulty it claims. The verifier counts the zero bits
+-- itself, so a claim would be a field it never reads and a sender can lie in.
+data MessageStamp s =
+  MessageStamp1
+  { msMailbox :: MailboxKey s
+  , msNonce   :: Word64
+  }
+  deriving stock (Generic)
+
+-- | How a message reached this peer, which is what decides whether it owes work.
+--
+-- NOT a wire type, and it cannot become one: it is what the peer knows about a
+-- message from the path it arrived on, not something a sender gets to declare.
+--
+-- It exists because there are two such paths and only one of them can carry a
+-- stamp. A stamp is not stored in the mailbox tree (see 'MessageStamp'), so a
+-- host replicating a tree has none to offer for messages it did not receive
+-- itself, and a mailbox charging @(pow D)@ would refuse everything its own
+-- co-hosts hand it -- which is to say it would stop replicating.
+data MessageOrigin s =
+    -- | Submitted over gossip, with whatever work came with it. The path a
+    -- stranger uses, and the one @(pow D)@ is charged on.
+    Submitted (Maybe (MessageStamp s))
+    -- | Taken out of another host's mailbox tree, where no stamp lives. Bounded
+    -- instead by @(peer allow|deny)@: a status is only downloaded for a mailbox
+    -- this peer hosts and only from a peer that policy accepts, so what this
+    -- skips the work check for is a message a trusted co-host already holds.
+  | Replicated
+
 deriving stock instance ForMailbox s => Eq (MessageContent s)
 deriving stock instance ForMailbox s => Eq (Message s)
+deriving stock instance ForMailbox s => Eq (MessageStamp s)
 
 instance Serialise MessageTimestamp
 instance Serialise MessageTTL
@@ -241,6 +312,7 @@ instance Serialise MessageCompression
 instance Serialise MessageFlags
 instance ForMailbox s => Serialise (MessageContent s)
 instance ForMailbox s => Serialise (Message s)
+instance ForMailbox s => Serialise (MessageStamp s)
 
 
 data MailboxServiceError =

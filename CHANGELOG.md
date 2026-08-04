@@ -779,6 +779,48 @@
     an attacker shortens by writing something odd into it, and the
     accept it silently permits is the thing the list existed to stop.
 
+  - **`hbs2-peer`, `hbs2-hub`: a mailbox can charge proof-of-work for a
+    letter.** PEP-21's peer layer for the open inbox, which is the one
+    tier where `(sender allow all)` means anybody may grow the tree.
+    `(pow D)` in a mailbox's signed policy asks for D leading zero bits
+    over `(mailbox key, message hash, nonce)`, and `hub` reads that
+    policy before sending and solves what it finds. Absent or zero is
+    every mailbox that exists today, unchanged and needing no stamp.
+
+    The work binds to the hash of the message AS STORED and to one
+    mailbox key. To the stored bytes, so it is paid for exactly what will
+    occupy disk, and because that hash is fixed before the search starts
+    the grind is hashing and nothing else -- the letter is signed once,
+    before the stamp exists. To one mailbox, so a solution cannot be
+    moved to another inbox; a letter to two mailboxes that both charge is
+    solved and sent twice, with the same bytes each time.
+
+    Checked in two places, because the flood and the disk are different
+    surfaces. `(hbs2:mailbox:pow-min D)` in the peer's config is a floor
+    checked before the message is forwarded, where the peer does not yet
+    know which mailbox it is for; the mailbox's own `(pow D)` is checked
+    where the message is stored, which is the only place its policy has
+    been read. Replication between a mailbox's own hosts pays nothing: a
+    stamp is not kept in the tree, so a co-host has none to offer, and
+    what bounds that path is `(peer allow|deny)` as before.
+
+    THE COST IS A WIRE BREAK, taken deliberately. A stamped letter
+    travels as a new protocol constructor, relaying re-encodes what it
+    decoded, and a peer that cannot parse it forwards nothing -- so a
+    stamped letter only crosses upgraded peers, and an old one in the
+    path is silence. Nothing else changes: an unstamped letter is the
+    message it always was, and the constructor is appended last so every
+    existing encoding is untouched. A sender gets no rejection signal
+    either, and reading the policy first only works for a mailbox the
+    local peer holds. Both are written up in PEP-21 rather than papered
+    over.
+
+    `MailboxAPIProto` is bumped again, and this time the REQUEST changed:
+    `RpcMailboxSend` carries the stamp beside the message. An old client
+    calling a new peer would send bytes it cannot decode, and a new
+    client calling an old peer would have its letter sent without the
+    work the mailbox asked for. The id makes both refuse to connect.
+
 ## Fixed
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its

@@ -30,6 +30,7 @@ module HBS2.Hub.CLI.Inbox
   , inboxCode
   , inboxUsage
   , refuse
+  , saying
   , bounded
   , PeerSilent(..)
   , codeMailboxUnknown

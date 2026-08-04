@@ -172,6 +172,7 @@ library
       HBS2.Peer.Proto.Mailbox.Ref
       HBS2.Peer.Proto.Mailbox.Policy
       HBS2.Peer.Proto.Mailbox.Policy.Basic
+      HBS2.Peer.Proto.Mailbox.PoW
       HBS2.Peer.Proto.BrowserPlugin
 
       HBS2.Peer.RPC.Client
@@ -202,10 +203,12 @@ test-suite test
     default-language: Haskell2010
 
     other-modules:
+        MailboxFixture
         MailboxMerge
         MailboxStatus
         MailboxPolicy
         MailboxEntry
+        MailboxPoW
         MessageParts
         HttpListen
         -- from app/: HttpListen exercises the config resolution the peer

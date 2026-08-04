@@ -34,6 +34,7 @@ data BasicPolicy s =
   , bpDefaultSenderAction  :: BasicPolicyAction
   , bpPeers                :: HashMap (PubKey 'Sign s) BasicPolicyAction
   , bpSenders              :: HashMap (Sender s) BasicPolicyAction
+  , bpPoW                  :: PoWDifficulty -- ^ @(pow D)@, zero when unset
   }
   deriving stock (Generic,Typeable)
 
@@ -53,13 +54,22 @@ instance ForMailbox s => IsAcceptPolicy s (BasicPolicy s) where
   policyAcceptMessage BasicPolicy{..} s m = do
     pure $ Allow == fromMaybe bpDefaultSenderAction (HM.lookup s bpSenders)
 
+  policyPoW BasicPolicy{..} = pure bpPoW
+
 getAsSyntax :: forall c s . (ForMailbox s, IsContext c)
             => BasicPolicy s -> [Syntax c]
 getAsSyntax BasicPolicy{..} =
   [ defPeerAction
   , defSenderAction
-  ] <> peerActions <> senderActions
+  ] <> pow <> peerActions <> senderActions
   where
+    -- Emitted only when it is charged, so a policy written before
+    -- proof-of-work existed renders to exactly the bytes it always did. This
+    -- text is hashed and versioned: a clause that appeared on every rewrite
+    -- would bump the version of every mailbox on the first upgrade.
+    pow | bpPoW > 0 = [ mkList [mkSym "pow", mkInt bpPoW] ]
+        | otherwise = []
+
     defPeerAction   = mkList [mkSym "peer", action bpDefaultPeerAction, mkSym "all"]
     defSenderAction = mkList [mkSym "sender", action bpDefaultSenderAction, mkSym "all"]
 
@@ -75,7 +85,7 @@ getAsSyntax BasicPolicy{..} =
       Deny  -> mkSym "deny"
 
 defaultBasicPolicy :: forall s . (ForMailbox s) => BasicPolicy s
-defaultBasicPolicy = BasicPolicy Deny Deny mempty mempty
+defaultBasicPolicy = BasicPolicy Deny Deny mempty mempty 0
 
 parseBasicPolicy :: forall s c m . (IsContext c, s ~ HBS2Basic, ForMailbox s, MonadUnliftIO m)
                  => [Syntax c]
@@ -87,6 +97,7 @@ parseBasicPolicy syn = do
   tsAction <- newTVarIO Deny
   tpeers   <- newTVarIO mempty
   tsenders <- newTVarIO mempty
+  tpow     <- newTVarIO 0
 
   -- Клаузу, которую эта сборка не понимает, теперь нельзя пропустить молча.
   -- Раньше в catch-all стояло `pure ()`, и функция всё равно возвращала Just:
@@ -136,15 +147,23 @@ parseBasicPolicy syn = do
     ListVal [SymbolVal "sender", SymbolVal "deny", SignPubKeyLike who]  -> do
       atomically $ modifyTVar tsenders (HM.insert who Deny)
 
+    -- Bounded at the parser, not at the check. A difficulty nobody can reach
+    -- is a mailbox nobody can write to, and the difference between that and a
+    -- deny-all is that a deny-all says so. Anything a stamp hash cannot carry
+    -- is a typo or a mistake, and this file refuses both.
+    ListVal [SymbolVal "pow", LitIntVal d] | d >= 0 && d <= 255 -> do
+      atomically $ writeTVar tpow (fromIntegral d)
+
     _ -> atomically $ modifyTVar tbad succ
 
   a <- readTVarIO tpAction
   b <- readTVarIO tsAction
   c <- readTVarIO tpeers
   d <- readTVarIO tsenders
+  p <- readTVarIO tpow
 
   bad <- readTVarIO tbad
 
-  pure $ if bad > 0 then Nothing else Just (BasicPolicy @s a b c d)
+  pure $ if bad > 0 then Nothing else Just (BasicPolicy @s a b c d p)
 
 

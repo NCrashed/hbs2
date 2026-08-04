@@ -19,21 +19,27 @@ module HBS2.Hub.CLI.Compose
   , issueUsage
   , issueArgs
   , codeNoKey
+  , NotStored(..)
   , codeNotStored
+  , PoWTooHard(..)
+  , codeNoWork
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
-import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
+import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent,saying)
+import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Types.SignedBox (SignedBox)
+import HBS2.Data.Types.SignedBox (SignedBox,unboxSignedBox0)
 import HBS2.Net.Auth.Credentials
 import HBS2.Peer.Proto.Mailbox
+import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
+import HBS2.Peer.Proto.Mailbox.PoW (solveStamp)
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -44,6 +50,8 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEnt
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
 import Data.List qualified as List
+import Data.Maybe (catMaybes)
+import Data.Set qualified as Set
 import Data.Text qualified as Text
 import System.Exit (die)
 
@@ -122,6 +130,15 @@ sendLetterWith ob sender rcpts parts box reply = do
   h <- putBlock (obStorage ob) (serialise msg)
          >>= maybe (throwIO (NotStored "the peer would not store the message")) pure
 
+  -- One send per stamp, and a plain one when nothing is charged.
+  --
+  -- A letter names several recipients and a stamp is work for ONE mailbox
+  -- (PEP-21), so a mailbox that charges can only be paid by a copy that names
+  -- it. The copies are the same bytes -- the stamp rides beside the message,
+  -- not inside it -- so what multiplies is the gossip, not the storage, and a
+  -- mailbox that has already taken one copy drops the rest as merged.
+  stamps <- stampsFor ob msg
+
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
   -- discarding that printed a message hash and left with a zero exit having sent
   -- nothing at all. The read side spent a whole round being taught not to report
@@ -144,13 +161,80 @@ sendLetterWith ob sender rcpts parts box reply = do
   -- mailbox" arrived as one number -- the exact confusion codes 17 and 18 were
   -- added to end on the read side, and worse here, because the caller stops
   -- watching for a letter that was never sent.
-  callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) msg
-    >>= maybe (throwIO (PeerSilent "the mailbox send")) pure
-    >>= either (throwIO . NotStored . show
-                  . ("the peer refused the message:" <+>) . viaShow)
-               pure
+  for_ (case stamps of { [] -> [Nothing] ; ss -> fmap Just ss }) $ \stamp ->
+    callRpcWaitMay @RpcMailboxSend (obTimeout ob) (obMailbox ob) (stamp, msg)
+      >>= maybe (throwIO (PeerSilent "the mailbox send")) pure
+      >>= either (throwIO . NotStored . show
+                    . ("the peer refused the message:" <+>) . viaShow)
+                 pure
 
   pure (HashRef h)
+
+-- | Solve what the recipients charge, for the recipients that charge.
+--
+-- WHAT IT CAN AND CANNOT SEE. The difficulty lives in the mailbox's own signed
+-- policy, and this peer has that policy only for mailboxes it holds. Writing to
+-- somebody else's hub is exactly the case where it holds none, and then this
+-- answers "nothing is charged" -- which is right in the only sense available
+-- (it has no evidence of a charge) and wrong in the one that matters (the hub
+-- may drop the letter for want of work, in silence). Sending to a mailbox that
+-- charges therefore wants the peer to hold it first, and PEP-21 says plainly
+-- that the sender gets no signal either way.
+--
+-- A policy that will not read is NOT the same as one that charges nothing, and
+-- it says so on stderr: the letter still goes, because refusing to send over a
+-- broken policy file on somebody else's peer would be a worse failure than
+-- sending work-free into a mailbox that may want work.
+stampsFor :: MonadUnliftIO m => Outbound -> Message HubScheme -> m [MessageStamp HubScheme]
+stampsFor ob msg = do
+
+  -- From the message rather than from the sigils it was built out of: a stamp
+  -- is checked against `messageRecipients`, so what it must name is what ended
+  -- up in there.
+  let rcpts = maybe mempty (messageRecipients . snd)
+                (unboxSignedBox0 (messageContent msg))
+
+  fmap catMaybes $ for (Set.toList rcpts) $ \mbox ->
+    readPolicyWith (obStorage ob) (obMailbox ob) mbox >>= \case
+      Left (PolicyNotHere _) -> pure Nothing
+      Left e -> do
+        liftIO $ saying ( "hbs2-hub: cannot tell what"
+                            <+> pretty (AsBase58 mbox) <+> "charges:"
+                            <+> pretty e <> line
+                            <> "  sending without proof-of-work" <> line )
+        pure Nothing
+      Right (_, p) -> do
+        d <- policyPoW @HBS2Basic p
+        if d == 0 then pure Nothing else do
+          liftIO $ saying ( "hbs2-hub: solving" <+> pretty d <+> "bits of work for"
+                              <+> pretty (AsBase58 mbox) <> line )
+          Just <$> solveWithin powBudget d mbox msg
+
+-- | How long a grind is allowed to take before it is called impossible.
+--
+-- A bound and not a difficulty limit, because what a difficulty costs is not
+-- knowable from the number alone: it is the sender's machine, and the search is
+-- probabilistic, so the same D takes a different time twice. Time is the thing
+-- the person waiting actually has an opinion about.
+powBudget :: Timeout 'Seconds
+powBudget = 300
+
+-- | Grind, or give up saying so.
+--
+-- 'solveStamp' is pure and unbounded by design (it cannot know what the caller
+-- will sit through), so the bound belongs here. Forcing to WHNF is the whole
+-- search: the constructor does not exist until a nonce has been found.
+solveWithin :: MonadUnliftIO m
+            => Timeout 'Seconds
+            -> PoWDifficulty
+            -> HubKey
+            -> Message HubScheme
+            -> m (MessageStamp HubScheme)
+solveWithin t d mbox msg =
+  race (pause t) (liftIO (evaluate (solveStamp d mbox msg)))
+    >>= either (\() -> throwIO (PoWTooHard (show ( pretty d <+> "bits for"
+                                                     <+> pretty (AsBase58 mbox)))))
+               pure
 
 -- Where the message builder gets its keys. One definition, because the two
 -- halves of sending must resolve the same credentials: the parts key and the
@@ -185,6 +269,25 @@ codeNoKey = 19
 -- | And what a peer that would not store the message exits with.
 codeNotStored :: Int
 codeNotStored = 20
+
+-- | The mailbox charges more work than this run would spend.
+--
+-- Its own exception rather than a 'NotStored', because no peer was involved:
+-- nothing was sent, nothing was refused, and "check the peer's log" would send
+-- somebody to read about an event that never reached a peer. The remedy is on
+-- this side -- wait longer, or write to a mailbox that charges less.
+newtype PoWTooHard = PoWTooHard String
+
+instance Show PoWTooHard where
+  show (PoWTooHard what) =
+    "the proof-of-work this mailbox charges did not come out in the time"
+      <> " allowed (" <> what <> "). Nothing was sent."
+
+instance Exception PoWTooHard
+
+-- | And what giving up on the work exits with.
+codeNoWork :: Int
+codeNoWork = 37
 
 -- | @hub issue new@ and the other compose verbs.
 composeEntries :: forall c m . ( IsContext c
@@ -264,6 +367,7 @@ composeEntries = do
           h <- sendLetter ob senderSigil [rcptSigil] box noReplyChannel
                  `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
                  `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
+                 `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
 
           -- Both hashes, because they answer different questions and only one
           -- of them is guessable from the other. The message hash is how the

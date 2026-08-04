@@ -26,6 +26,10 @@ module HBS2.Hub.CLI.Policy
   , PolicyArgs(..)
   , denying
   , policyText
+  , readPolicy
+  , readPolicyWith
+  , PolicyGone(..)
+  , policyGoneCode
   , codeNoPolicy
   , codeNotSet
   ) where
@@ -56,7 +60,7 @@ import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort)
 import Data.Text qualified as Text
-import Control.Monad.Except (runExceptT)
+import Control.Monad.Except (runExceptT,throwError)
 import Data.Coerce (coerce)
 import HBS2.Storage.Operations.ByteString ()
 import System.Exit (die,exitSuccess)
@@ -103,6 +107,79 @@ denying deny who p
 policyText :: BasicPolicy HBS2Basic -> Text
 policyText p = Text.unlines (sort [ Text.pack (show (pretty c))
                                   | c <- getAsSyntax @C p ])
+
+-- | Why this peer could not say what a mailbox's policy is.
+--
+-- Told apart rather than collapsed into Nothing, because the send path treats
+-- them differently from the policy verbs: not holding a mailbox is the ORDINARY
+-- case for a letter addressed elsewhere, while a policy that will not parse is
+-- a peer holding something broken and worth saying so about.
+data PolicyGone =
+    PolicyPeerSilent          -- ^ nothing came back in the time allowed
+  | PolicyPeerRefused String  -- ^ the peer answered, with an error
+  | PolicyNotHere HubKey      -- ^ this peer does not hold that mailbox
+  | PolicyUnreadable String   -- ^ the policy file would not read
+  | PolicyUnparsed            -- ^ ...or would not parse
+
+instance Pretty PolicyGone where
+  pretty = \case
+    PolicyPeerSilent     -> pretty (show (PeerSilent "the mailbox service"))
+    PolicyPeerRefused e  -> "the peer refused:" <+> pretty e
+    PolicyNotHere mbox   -> "this peer does not hold mailbox" <+> pretty (AsBase58 mbox)
+    PolicyUnreadable e   -> "the policy will not read:" <+> pretty e
+    PolicyUnparsed       -> "the policy file will not parse"
+
+-- | And what a verb that has nowhere else to go should exit with.
+policyGoneCode :: PolicyGone -> Int
+policyGoneCode = \case
+  PolicyPeerSilent -> codePeerSilent
+  _                -> codeNoPolicy
+
+-- | The policy this peer holds for a mailbox, or why it does not.
+--
+-- Answers rather than exits, which is the whole reason it is separate from the
+-- verbs above: the send path asks this about a mailbox it is writing TO, and a
+-- peer that does not hold it is the normal state of affairs there.
+--
+-- A mailbox held with no policy set answers @(0, defaultBasicPolicy)@ and not a
+-- failure: version zero and deny-all is what the peer itself falls back to.
+readPolicy :: forall m . ( MonadUnliftIO m
+                         , HasStorage m
+                         , HasClientAPI MailboxAPI UNIX m
+                         )
+           => HubKey -> m (Either PolicyGone (PolicyVersion, BasicPolicy HBS2Basic))
+readPolicy mbox = do
+  sto <- getStorage
+  api <- getClientAPI @MailboxAPI @UNIX
+  readPolicyWith sto api mbox
+
+-- | The same, for a caller that carries its peer around rather than reaching
+-- for it: 'HBS2.Hub.CLI.Compose.Outbound' holds both of these already, and its
+-- send path has no @HasStorage@ to reach through.
+readPolicyWith :: forall m . MonadUnliftIO m
+               => AnyStorage
+               -> ServiceCaller MailboxAPI UNIX
+               -> HubKey
+               -> m (Either PolicyGone (PolicyVersion, BasicPolicy HBS2Basic))
+readPolicyWith sto api mbox = runExceptT do
+
+  st <- lift (callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api mbox)
+          >>= maybe (throwError PolicyPeerSilent) pure
+          >>= either (throwError . PolicyPeerRefused . show . viaShow) pure
+          >>= maybe (throwError (PolicyNotHere mbox)) pure
+
+  case mbsMailboxPolicy st >>= unboxSignedBox0 of
+    -- No policy is not an empty policy: an unset mailbox is deny-all, so
+    -- reporting nothing would read as "everything is allowed".
+    Nothing -> pure (0 :: PolicyVersion, defaultBasicPolicy @HBS2Basic)
+    Just (_, spp) -> do
+      lbs <- lift (bounded rpcTimeout "the policy file"
+                     (liftIO (runExceptT (readFromMerkle sto (SimpleKey (coerce (sppPolicyRef spp)))))))
+               >>= either (throwError . PolicyUnreadable . show . viaShow) pure
+      p <- lift (parseBasicPolicy @HBS2Basic (either (const mempty) id
+                                                (parseTop (LBS.unpack lbs))))
+             >>= maybe (throwError PolicyUnparsed) pure
+      pure (sppPolicyVersion spp, p)
 
 policyEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
@@ -153,39 +230,13 @@ policyEntries = do
             (policyArgs -> Just pa) | Just who <- paKey pa -> lift (setDeny deny pa who)
             _ -> liftIO (die (show policyUsage))
 
-    -- The policy as it stands, and the version it stands at.
-    currentPolicy mbox = do
-      sto <- getStorage
-      api <- getClientAPI @MailboxAPI @UNIX
-
-      st <- callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api mbox
-              >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox service"))
-                                        codePeerSilent))
-                        pure
-              >>= either (\e -> liftIO (refuse (show ("the peer refused:" <+> viaShow e))
-                                               codeNoPolicy))
-                         pure
-              >>= maybe (liftIO (refuse (show ("this peer does not hold mailbox"
-                                                 <+> pretty (AsBase58 mbox)))
-                                        codeNoPolicy))
-                        pure
-
-      case mbsMailboxPolicy st >>= unboxSignedBox0 of
-        -- No policy is not an empty policy: an unset mailbox is deny-all, so
-        -- reporting nothing would read as "everything is allowed".
-        Nothing -> pure (0 :: PolicyVersion, defaultBasicPolicy @HBS2Basic)
-        Just (_, spp) -> do
-          lbs <- bounded rpcTimeout "the policy file"
-                   (liftIO (runExceptT (readFromMerkle sto (SimpleKey (coerce (sppPolicyRef spp))))))
-                   >>= either (\e -> liftIO (refuse (show ("the policy will not read:"
-                                                             <+> viaShow e))
-                                                    codeNoPolicy))
-                              pure
-          p <- parseBasicPolicy @HBS2Basic (either (const mempty) id
-                                              (parseTop (LBS.unpack lbs)))
-                 >>= maybe (liftIO (refuse "the policy file will not parse" codeNoPolicy))
-                           pure
-          pure (sppPolicyVersion spp, p)
+    -- The policy as it stands, and the version it stands at. These verbs exist
+    -- to talk about one mailbox's policy, so every way of not having one is
+    -- fatal here; 'readPolicy' is where the same reading is done for a caller
+    -- that has somewhere else to go.
+    currentPolicy mbox =
+      readPolicy mbox >>= either (\e -> liftIO (refuse (show (pretty e)) (policyGoneCode e)))
+                                 pure
 
     setDeny deny pa who = do
       (v, p) <- currentPolicy (paMailbox pa)

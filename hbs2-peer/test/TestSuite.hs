@@ -13,6 +13,7 @@ import MailboxMerge (mailboxMergeTests)
 import MailboxStatus (mailboxStatusTests)
 import MailboxPolicy (mailboxPolicyTests)
 import MailboxEntry (mailboxEntryTests)
+import MailboxPoW (mailboxPoWTests)
 import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 
@@ -152,6 +153,7 @@ main = do
       , mailboxEntryTests
       , httpListenTests
       , messagePartsTests
+      , mailboxPoWTests
       ]
 
 

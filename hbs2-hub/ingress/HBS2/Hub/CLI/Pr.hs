@@ -42,7 +42,8 @@ import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
-import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey)
+import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey
+                            ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -271,8 +272,14 @@ prEntries = do
 
       let box = signAuthor (pnAuthor pn) (_peerSignSk creds) content
 
+      -- Every way sending can fail, and two of these were leaking out through
+      -- the RTS as exit 1 -- the code PEP-22 gives to a mistyped flag. A hook
+      -- that cannot tell "your arguments are wrong" from "the letter is in no
+      -- mailbox" retries the wrong one of them.
       h <- sendLetterWith ob (pnSender pn) [pnRcpt pn] [part] box noReplyChannel
              `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
+             `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
+             `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
 
       liftIO $ print $ vcat
         [ "queued" <+> pretty h

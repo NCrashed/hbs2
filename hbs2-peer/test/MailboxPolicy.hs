@@ -23,6 +23,7 @@ import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Net.Auth.Schema (CryptoScheme(..))
 
 import Data.Config.Suckless
+import Data.List (isInfixOf)
 import Prettyprinter (pretty)
 
 import Test.Tasty
@@ -46,7 +47,7 @@ mailboxPolicyTests :: TestTree
 mailboxPolicyTests = testGroup "mailbox policy: a file it cannot read is not a policy"
   [ testCase "reads the clauses it knows" $ do
       p <- parsed "(peer allow all)\n(sender deny all)\n"
-      p @?= rendered (BasicPolicy Allow Deny mempty mempty)
+      p @?= rendered (BasicPolicy Allow Deny mempty mempty 0)
 
   , testCase "refuses a clause it does not know instead of dropping it" $ do
       -- THE ONE THAT MATTERS. One letter, and the whole rule used to vanish
@@ -71,5 +72,28 @@ mailboxPolicyTests = testGroup "mailbox policy: a file it cannot read is not a p
       one   <- parsed "(peer allow all) (sender deny all)"
       many' <- parsed "(peer allow all)\n(sender deny all)\n"
       one @?= many'
-      one @?= rendered (BasicPolicy Allow Deny mempty mempty)
+      one @?= rendered (BasicPolicy Allow Deny mempty mempty 0)
+
+  , testCase "(pow D) is read, and written only when it charges" $ do
+      parsed "(peer allow all)\n(sender deny all)\n(pow 20)\n"
+        >>= (@?= rendered (BasicPolicy Allow Deny mempty mempty 20))
+
+      -- What it renders to matters as much as what it reads. This text is
+      -- hashed and versioned, so a clause emitted for a policy that charges
+      -- nothing would rewrite every existing policy file on the first upgrade
+      -- and bump the version of every mailbox that has one.
+      assertBool "a policy that charges says how much"
+        ("(pow 20)" `isInfixOf` shown (BasicPolicy Allow Deny mempty mempty 20))
+      assertBool "a policy that charges nothing says nothing"
+        (not ("pow" `isInfixOf` shown (BasicPolicy Allow Deny mempty mempty 0)))
+
+  , testCase "a difficulty a stamp cannot carry is refused, not clamped" $ do
+      -- Refused rather than clamped, because a clamped 4096 is a mailbox
+      -- charging a difficulty nobody typed. Unreachable is a typo either way.
+      parsed "(pow 256)\n" >>= (@?= Nothing)
+      parsed "(pow -1)\n"  >>= (@?= Nothing)
+      parsed "(pow)\n"     >>= (@?= Nothing)
   ]
+  where
+    shown :: BasicPolicy S -> String
+    shown = show . pretty

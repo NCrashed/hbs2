@@ -59,9 +59,16 @@ Its reach and limits, as the code stands:
   - `policyAcceptMessage` exists but currently ignores message content and
     reuses the sender decision, so there is no message-level gate yet. It is
     the hook every message-level control below plugs into.
-  - The policy S-expr parser silently ignores unrecognized clauses, so the
-    new policy clauses this PEP proposes (`pow`, `rate`, `quota`) are
-    backward-compatible: an old peer ignores them and simply enforces less.
+  - A policy clause this build does not know REFUSES THE WHOLE FILE, and the
+    caller falls back to `defaultBasicPolicy`, which is deny-all. This was
+    written here the other way round, as silent-ignore, and that was true of
+    every released peer up to 0.25.5.0; it stopped being true in the tree
+    afterwards. So the new clauses this PEP proposes (`pow`, `rate`, `quota`)
+    are backward-compatible only towards a RELEASED peer, which ignores them
+    and enforces less. A peer built from a revision that has the strict parser
+    and not the clause reads such a policy as no policy at all and denies
+    everything -- an unreleased window, but the one an operator upgrading a
+    hub piecemeal is standing in.
     This applies only to the policy clauses; the PoW witness itself is a
     wire-format change of a much harder kind, and an old peer does not
     ignore it but drops the whole message (see Proof-of-work).
@@ -77,9 +84,13 @@ Proof-of-work: bounding distinct-message creation
 
 The open-inbox storage-DoS risk (PEP-17/PEP-18 "bounded mailbox growth") is
 that `(sender allow all)` lets anyone grow the tree. The peer-layer answer is
-proof-of-work, checkable on the envelope before accept. It is not implemented
-today (only a code comment and the design paper anticipate it), so this pins
-the shape.
+proof-of-work, checkable on the envelope before accept.
+
+BUILT, in `HBS2.Peer.Proto.Mailbox.PoW` and the two check sites below. What
+follows is the shape and the reasoning behind it; where the code settled
+somewhere other than where this section first pointed, the paragraph says so
+rather than being quietly rewritten, because the reason for the move is worth
+as much as the destination.
 
 What the wire allows. Three facts about the mailbox protocol decide every
 choice below, and all three are read off the code rather than assumed:
@@ -126,8 +137,11 @@ only choice left is how wide the break is.
     not stored in the tree: it gates submission over gossip, not tree
     replication between a mailbox's own hosts.
 
-    The stamp carries the nonce, the difficulty it claims, and the mailbox
-    key it was solved for. The key has to be in there: a message names
+    The stamp carries the nonce and the mailbox key it was solved for. NOT
+    the difficulty it claims, which this said first and the code does not do:
+    the verifier counts the zero bits itself and compares them against what it
+    wants, so a claimed difficulty is a field nothing reads and a sender can
+    lie in. The key has to be in there: a message names
     several recipients, the work is bound to one of them, and a verifier
     cannot tell which without being told. It also lets the pre-gossip check
     below run on a peer that does not host the mailbox and has no policy for
@@ -170,19 +184,40 @@ only choice left is how wide the break is.
     time the handler does not yet know which mailbox the message is for, so
     it cannot read `(pow D)`. Hence:
 
-      - a peer-global minimum difficulty, declared in the peer's own config,
-        checked in the `SendMessageStamped` branch before `gossip`. It bounds
-        what this peer will amplify. Zero by default, so a peer that has not
-        been told otherwise behaves as today.
-      - the per-mailbox `(pow D)` from the signed policy, checked in
-        `policyAcceptMessage`. It bounds what this peer stores.
+      - a peer-global minimum difficulty, `(hbs2:mailbox:pow-min D)` in the
+        peer's own config, checked in the `SendMessageStamped` branch before
+        `gossip`. Zero by default, so a peer that has not been told otherwise
+        behaves as today. What it bounds is narrower than "what this peer
+        amplifies", and the difference is worth writing down: a PLAIN
+        `SendMessage` is still forwarded before any policy is consulted, as it
+        always was, so the floor prices the stamped path and not flooding in
+        general. The stamped path needs a price of its own because it carries
+        a second dedup identity: one message stamped for each of its N
+        recipients is N markers and N floods, and at difficulty zero that is
+        free.
+      - the per-mailbox `(pow D)` from the signed policy, checked in the queue
+        drain. It bounds what this peer stores.
 
-    `policyAcceptMessage` currently takes the policy, the sender key and
-    `MessageContent`, so it cannot see the stamp. It gains a parameter
-    carrying it. That is an internal change in five places (the class in
-    `Proto/Mailbox/Policy.hs:24`, the `AnyPolicy` forwarder just below, the
-    `BasicPolicy` instance, the `pure True` stub in `MailboxProtoWorker.hs`,
-    and the one call site) and touches no wire format.
+    The policy DECLARES the difficulty and does not check it: `policyPoW`
+    answers a number and the caller does the verifying. This section first
+    said the opposite -- that `policyAcceptMessage` would gain a parameter
+    carrying the stamp -- and the code went the other way, because verifying a
+    stamp needs the mailbox key and the message bytes and neither is the
+    policy's business. A policy says what it wants; the peer holding the
+    message finds out whether it got it. Rate limits and quotas land the same
+    way for the same reason: the state they count lives in the peer, not in a
+    file the mailbox owner signs.
+
+  - What is NOT charged, which is the half this section originally missed. A
+    stamp is not stored in the mailbox tree, so a peer replicating another
+    host's tree has none to offer for the messages in it. Charging `(pow D)`
+    there would mean a mailbox that charges anything cannot replicate between
+    its own hosts -- it would refuse everything its co-hosts hand it. So the
+    accept path takes a `MessageOrigin`: `Submitted` (over gossip, pays) or
+    `Replicated` (out of a tree, does not). What bounds the replication path
+    instead is `policyAcceptPeer`: a status is downloaded only for a mailbox
+    this peer hosts and only from a peer the policy accepts, so the message
+    admitted work-free is one a trusted co-host already holds.
   - What it bounds. Each distinct message costs fresh work, so PoW bounds the
     rate of distinct messages a spammer can create. Replay of one solved
     message is bounded by dedup, not by work: `hasBlock` on the `RoutedEntry`
@@ -234,19 +269,28 @@ known-contributor tier carries no `(pow D)` and keeps using plain
 `SendMessage`, so contributor traffic is unaffected. The open tier is where
 strangers submit, and a stranger whose submission does not arrive is the
 failure mode PoW exists to produce, only for the wrong reason. The mitigation
-is on the client: `hub` reads the target mailbox's policy before composing,
-so it knows whether the mailbox wants a stamp, and it can say so instead of
-sending into silence.
+is on the client: `hub` reads the target mailbox's policy before sending, and
+solves what that policy charges.
+
+WITH A REACH THIS SECTION FIRST OVERSTATED. The policy comes from the local
+peer's status for that mailbox, and a peer has that only for mailboxes it
+HOLDS. Writing to somebody else's hub is exactly the case where it holds
+none, and there the client reads no charge and sends plain. It is right in
+the only sense available -- it has no evidence of a charge -- and wrong in
+the sense that matters, because the hub may drop the letter. Sending to a
+mailbox that charges therefore wants the peer to hold it first, the same
+`mailbox create` and fetch a contributor already does to read the replies.
+
+Since one stamp is work for one mailbox, a letter addressed to several
+mailboxes that charge is sent once per stamp. The bytes are identical -- the
+stamp rides beside the message -- so what multiplies is gossip and not
+storage, and the second copy to reach a mailbox that already took the first
+is dropped as merged.
 
 There is no rejection signal at all, which is the one genuinely unpleasant
 part: a stamp that is too weak, a stamp that is stale, and an old peer
 somewhere in the path are indistinguishable to the sender. All three look
 like nothing happening.
-
-Must be built: the `SendMessageStamped` constructor and the `MessageStamp`
-type, the peer-global floor check before `gossip`, the `policyAcceptMessage`
-signature change and its check against `(pow D)`, the `RoutedEntry` rule for
-restamps, and the `hub` client-side solver.
 
 
 Rate limiting and quotas
@@ -586,17 +630,18 @@ Exists today:
   - `BasicPolicy` (peer/sender allow-deny, deny default), signed versioned
     policy pointer, and the `IsAcceptPolicy` hooks including the unused
     `policyAcceptMessage`.
+  - Proof-of-work end to end: `SendMessageStamped` and `MessageStamp`, the
+    `(pow D)` policy clause, `(hbs2:mailbox:pow-min D)` on the peer, both
+    check sites, the restamp dedup rule, the `Replicated` exemption, and the
+    solver in `hub`.
   - `DeleteMessages` with proof verification and the single-hash predicate;
     the And/Or predicate structure (rejected at runtime today).
   - The mailbox merkle tree and the fold/decrypt path triage builds on.
 
 Must be built:
 
-  - Peer layer: the `SendMessageStamped` constructor and `MessageStamp`, the
-    peer-global difficulty floor checked before `gossip`, the
-    `policyAcceptMessage` signature change and its check against `(pow D)`,
-    rate/quota state and checks, the `(pow|rate|quota ...)` policy clauses,
-    and gossip-after-policy (closing the gossip-before-policy gap) scoped
+  - Peer layer: rate/quota state and checks, the `(rate|quota ...)` policy
+    clauses, and gossip-after-policy (closing the gossip-before-policy gap) scoped
     correctly: policy gates storage and gossip only for mailboxes the peer
     hosts. A peer that does not host the mailbox has no policy for it (the
     default is deny-all) and must keep relaying as before, or transit nodes
@@ -646,14 +691,20 @@ revisited if the gap hurts.
 Open questions
 ============
 
-- Which hash the PoW target uses (the peer's `HbSync` hash or a function
-  chosen for grinding), and whether difficulty adapts automatically or only
-  by policy version. The difficulty encoding is settled: D leading zero bits.
-- Where the freshness window for PoW is enforced and how much clock skew to
-  tolerate.
+- Whether difficulty adapts automatically or only by policy version. The
+  rest of this question is settled: D leading zero bits, over the peer's own
+  `HbSync` hash of `(mailboxKey, messageHash, nonce)`, where `messageHash`
+  names exactly the bytes the peer stores.
+- Freshness is NOT implemented. `messageCreated` is not read on the accept
+  path at all, so a solution keeps forever and nothing charges for its age.
+  Left out deliberately rather than forgotten: the window is bounded by what
+  a sender declares about its own clock, so it prevents accumulation of old
+  solutions and nothing else, and the real bound is the work per message.
+  Still open: where it is enforced and how much skew to tolerate.
 - Whether a sender should get any signal for a refused submission. Today a
-  weak stamp, a stale stamp and an old peer in the path are all silence, and
-  the client can only guess by reading the mailbox policy beforehand.
+  weak stamp, a stale stamp and an old peer in the path are all silence. The
+  client reads the mailbox policy beforehand where it can, which is only for
+  mailboxes its own peer holds.
 - Whether the triage inner-author deny-list should be public canon (auditable,
   but names the banned) or private hub state.
 - Rate/quota state durability across peer restarts, and whether it is

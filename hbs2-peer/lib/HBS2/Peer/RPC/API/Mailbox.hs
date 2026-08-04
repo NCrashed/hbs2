@@ -43,7 +43,12 @@ type MailboxAPI = '[ RpcMailboxPoke
 -- report a failure for something that happened. A new id makes the mismatch
 -- refuse to connect instead, which is the failure worth having between binaries
 -- that ship in one release.
-type MailboxAPIProto =  0x056091510d3b2eca
+--
+-- Bumped again for the proof-of-work stamp on 'RpcMailboxSend', where the
+-- REQUEST changed: an old client's message would arrive as an undecodable
+-- input, and a new client's call would reach an old peer that has no idea a
+-- stamp exists and would send the letter without one.
+type MailboxAPIProto =  0x056091510d3b2ecb
 
 
 instance HasProtocol UNIX  (ServiceProto MailboxAPI UNIX) where
@@ -81,7 +86,10 @@ type instance Output RpcMailboxFetch = Either MailboxServiceError ()
 type instance Input RpcMailboxList   = ()
 type instance Output RpcMailboxList  = Either MailboxServiceError [(MailboxRefKey 'HBS2Basic, MailboxType)]
 
-type instance Input RpcMailboxSend  = (Message HBS2Basic)
+-- The stamp rides beside the message rather than inside it, for the reason
+-- 'SendMessageStamped' exists: the peer stores the message by value, and a
+-- witness inside it would change the bytes it is named by.
+type instance Input RpcMailboxSend  = (Maybe (MessageStamp HBS2Basic), Message HBS2Basic)
 type instance Output RpcMailboxSend = Either MailboxServiceError ()
 
 type instance Input RpcMailboxDeleteMessages  = (SignedBox (DeleteMessagesPayload HBS2Basic) HBS2Basic)

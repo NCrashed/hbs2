@@ -12,80 +12,17 @@
 module MessageParts (messagePartsTests) where
 
 import HBS2.Prelude.Plated
-import HBS2.OrDie
-import HBS2.Net.Auth.Credentials
-import HBS2.Net.Auth.Credentials.Sigil
-import HBS2.Net.Auth.GroupKeySymm (lookupGroupKey)
-import HBS2.Net.Auth.Schema()
-import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox.Message
 import HBS2.Peer.Proto.Mailbox.Types
-import HBS2.Hash (HbSync)
-import HBS2.Storage
-import HBS2.Storage.Simple
 
-import Control.Concurrent.Async (async,cancel)
-import Control.Monad (replicateM)
+import MailboxFixture
+
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Set qualified as Set
-import Lens.Micro.Platform (view)
-import System.FilePath ((</>))
-import System.IO.Temp (withSystemTempDirectory)
-import UnliftIO (bracket)
 
 import Test.Tasty
 import Test.Tasty.HUnit
-
-type S = 'HBS2Basic
-
--- A storage on disk, because the parts are merkle trees and there is nowhere
--- else in this project to build one.
-withStore :: (AnyStorage -> IO a) -> IO a
-withStore act =
-  withSystemTempDirectory "hbs2-msg-parts" $ \dir -> do
-    sto <- simpleStorageInit @HbSync [StoragePrefix (dir </> ".storage")]
-    bracket (replicateM 4 (async (simpleStorageWorker sto)))
-            (mapM_ cancel)
-            (const (act (AnyStorage sto)))
-
--- Credentials with one encryption key, and the sigil that publishes it.
---
--- Built in memory and handed straight to the services record, so this needs
--- neither keyman nor a sigil in storage: what is under test is the ORDER the
--- two calls happen in, not how a key is found.
-aPeer :: IO (PeerCredentials S, Sigil S)
-aPeer = do
-  cred <- newCredentialsEnc @S 1
-  let ke = view krPk (head (view peerKeyring cred))
-  si <- makeSigilFromCredentials @S cred ke Nothing Nothing
-          & orThrowUser "no sigil"
-  pure (cred, si)
-
-services :: AnyStorage -> [PeerCredentials S] -> CreateMessageServices S
-services sto creds = CreateMessageServices
-  { cmStorage = sto
-  , cmLoadCredentials = \pk ->
-      pure (first_ [ c | c <- creds, view peerSignPk c == pk ])
-  , cmLoadKeyringEntry = \pk ->
-      pure (first_ [ k | c <- creds, k <- view peerKeyring c, view krPk k == pk ])
-  }
-
--- What a recipient uses to open one: their own keyring against the message's
--- group key, which is what keyman does in production.
-reader :: PeerCredentials S -> ReadMessageServices S
-reader cred = ReadMessageServices
-  { rmsFindGKS = \gk ->
-      pure (first_ [ s | k <- view peerKeyring cred
-                       , Just s <- [lookupGroupKey (view krSk k) (view krPk k) gk] ])
-  }
-
-first_ :: [a] -> Maybe a
-first_ = \case { (x:_) -> Just x ; [] -> Nothing }
-
-contentOf :: Message S -> IO (MessageContent S)
-contentOf msg =
-  unboxSignedBox0 (messageContent msg) & orThrowUser "message box will not open" <&> snd
 
 messagePartsTests :: TestTree
 messagePartsTests = testGroup "message parts"
