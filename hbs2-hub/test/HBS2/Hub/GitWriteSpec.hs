@@ -35,6 +35,7 @@ import Data.Word (Word64)
 import System.Environment qualified as Env
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
+import Data.Time.Clock (getCurrentTime,diffUTCTime)
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
@@ -253,3 +254,28 @@ spec = do
           unlines (fmap show (listDoc [t])) `shouldSatisfy` ("a real issue" `isInfixOf`)
           unlines (fmap show (showDoc t)) `shouldSatisfy` ("body" `isInfixOf`)
         other -> expectationFailure ("expected one issue, got " <> show (length other))
+
+    -- The bound this whole module's callers pass in, against a git that will
+    -- not finish. It bounded nothing: `timeout (readProcess ...)` cannot fire,
+    -- because readProcess is a bracket whose release closes the handles that
+    -- byteStringOutput's never-cancelled readers are sitting on, so the call
+    -- returned when GIT decided to. Measured at 12.02 s against a 2 s bound.
+    --
+    -- And then it lied about it. The release's own waitForProcess threw on the
+    -- way out, tryAny caught it, and the answer was GitUnstartable -- "git
+    -- could not be started, worth retrying" -- about a git that had just run to
+    -- completion. An index-pack that outran bundleSeconds told the operator to
+    -- install git.
+    it "gives up on a git that will not finish, and says that is what happened" $ do
+      let waits = ["-c", "alias.z=!sleep 30", "z"]
+      t0 <- getCurrentTime
+      r <- gitRun Nothing [] 2 "slow" waits mempty
+      t1 <- getCurrentTime
+      case r of
+        Left (GitStalled said) ->
+          Text.unpack said `shouldSatisfy` ("did not finish" `isInfixOf`)
+        other ->
+          expectationFailure ("expected GitStalled, got " <> show other)
+      -- Well inside the thirty seconds the child asked for: the bound plus the
+      -- teardown's own escalation, and nothing waiting on the child itself.
+      diffUTCTime t1 t0 `shouldSatisfy` (< 15)

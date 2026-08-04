@@ -898,49 +898,10 @@ gitCanonWith bounds cwd = do
     -- answer SIGKILL either, and there is nothing further anybody can do to it.
     withGit :: forall a . ProcessConfig () Handle Handle
             -> (Process () Handle Handle -> m a) -> m a
-    withGit cfg = bracket (startProcess cfg) teardown
+    withGit = withGitProc (gbTeardownSeconds bounds)
 
     teardown :: forall i . Process i Handle Handle -> m ()
-    teardown p = do
-      -- Our ends of the pipes, first: a child blocked writing into a pipe nobody
-      -- reads dies of EPIPE without needing a signal at all.
-      for_ [getStdout p, getStderr p] $ \h ->
-        tryAny (liftIO (hClose h))
-      done <- settle
-      unless done do
-        tryAny (liftIO (terminateProcess (unsafeProcessHandle p)))
-        harder <- settle
-        unless harder do
-          -- getPid on the ProcessHandle (from `process`, there since 1.6.3), not
-          -- typed-process's getPid on a Process, which only exists in
-          -- typed-process 0.2.12 and later.
-          --
-          -- The split is CABAL against NIX, not dynamic against static: the freeze
-          -- file pins typed-process 0.2.13.0 and nixpkgs gives 0.2.11.1 to both
-          -- the dynamic and the static package sets, so `cabal build` and the
-          -- whole suite were green while every nix output failed to compile. It is
-          -- the only version skew in this package's dependencies, and the next use
-          -- of a post-0.2.11 API will land in it again.
-          pid <- liftIO (P.getPid (unsafeProcessHandle p))
-          for_ pid $ \pid' -> tryAny (liftIO (signalProcess sigKILL pid'))
-          void settle
-
-      where
-        -- Wait for the process to be gone, or give up. POLLED, and that is the
-        -- whole point: this runs as a bracket's RELEASE action, and unliftio runs
-        -- release under uninterruptibleMask, where the async exception `timeout`
-        -- throws is deferred and does nothing at all. Measured: a one-second
-        -- timeout around waitExitCode in here returned after thirty, when the
-        -- child happened to finish on its own, so a git ignoring SIGTERM took the
-        -- audit with it exactly as it had before the bound was written.
-        -- getExitCode does not block, so a poll gets out on its own.
-        settle = waitGone (max 1 (gbTeardownSeconds bounds * 1000000 `div` step))
-        step = 20000
-        waitGone :: Int -> m Bool
-        waitGone 0 = isJust <$> getExitCode p
-        waitGone n = getExitCode p >>= \case
-                   Just _  -> pure True
-                   Nothing -> liftIO (Conc.threadDelay step) >> waitGone (n - 1)
+    teardown = teardownGit (gbTeardownSeconds bounds)
 
     -- The listing, read to 'gbListingBytes' and no further; past that the process
     -- is dead by the time the answer is returned.
@@ -1082,17 +1043,7 @@ gitCanonWith bounds cwd = do
                     if seen' > n then pure (Right Nothing)
                                  else go started seen' (c' : chunks)
 
-    -- Read a handle to the END, keeping only the first n bytes. For a stream whose
-    -- content is a message rather than data: the bound is on what is remembered,
-    -- never on what is read, because not reading is what deadlocks the writer.
-    drain n h = go 0 []
-      where
-        go seen chunks = do
-          c <- liftIO (BS.hGetSome h 65536)
-          if BS.null c
-            then pure (BS.concat (List.reverse chunks))
-            else go (seen + BS.length c)
-                   (if seen < n then BS.take (n - seen) c : chunks else chunks)
+    drain = gitDrain
 
     -- Raw output. The listing is bytes: decoding it first merged two paths that
     -- differ only in an invalid byte, after which the same blob was read for both.
@@ -1466,8 +1417,26 @@ data GitTrouble =
 -- For callers whose input is their own: the writer's files and the bundle
 -- plumbing's arguments, all produced by this build. The audit reader next door
 -- does NOT use this, and should not: it reads a tree a stranger wrote and
--- needs the per-chunk bounds, the shared @cat-file --batch@ and the teardown
--- escalation that this does not have.
+-- needs the per-chunk bounds and the shared @cat-file --batch@ that this does
+-- not have. The teardown escalation it DOES have, now, and by sharing the same
+-- code rather than by resembling it.
+--
+-- WHY THIS IS NOT @timeout (readProcess ...)@, which is what it was. That
+-- construction does not bound anything. 'readProcess' is a bracket whose
+-- release closes the reader handles, and 'byteStringOutput' reads them on bare
+-- asyncs that nothing cancels: the async exception arrives, the release blocks
+-- in hClose behind a reader sitting in hGetSome, and the call returns when GIT
+-- decides to. Measured against this function, with a two second bound and a git
+-- that takes twelve: it returned at 12.02 s. It is the same trap the reader
+-- half of this module documents at length and defends against; this half was
+-- written as if the bound were the defence.
+--
+-- The second half of the same defect was the ANSWER. When the call finally
+-- returned, the release's own @waitForProcess@ threw (the child had already
+-- been reaped), 'tryAny' caught it, and the result was 'GitUnstartable' --
+-- "git could not be started, worth retrying" -- about a git that had just run
+-- to completion. So an @index-pack@ that outran 'bundleSeconds' told the
+-- operator to install git.
 --
 -- @extra@ goes to 'gitIn'. @what@ names the command in a message; the args
 -- carry it too, and quoting them whole would put a caller's path in a report.
@@ -1482,8 +1451,26 @@ gitRun :: MonadUnliftIO m
 gitRun cwd extra secs what args input = do
   cfg <- gitIn cwd extra (proc "git" args)
   let piped = setStdin (byteStringInput input)
-                (setStdout byteStringOutput (setStderr byteStringOutput cfg))
-  r <- tryAny (timeout (secs * 1000000) (readProcess piped))
+                (setStdout createPipe (setStderr createPipe cfg))
+  r <- tryAny do
+         withGitProc gitTeardownSeconds piped $ \p ->
+           -- withAsync for both, so that reaching the bound cancels the readers
+           -- BEFORE the teardown closes the handles they are sitting on. A bare
+           -- async here is the deadlock described above.
+           --
+           -- Both drained to EOF and nothing dropped: stdout of `bundle create -`
+           -- IS the bundle, so a keep-bound here would be a truncated artifact
+           -- rather than a bounded message. What bounds this call is the clock
+           -- and the teardown; bounding what git may say is a separate question
+           -- from bounding how long it may take, and only the second one was
+           -- ever claimed here.
+           withAsync (gitDrain maxBound (getStdout p)) $ \out ->
+           withAsync (gitDrain maxBound (getStderr p)) $ \errA ->
+             timeout (secs * 1000000) do
+               o <- wait out
+               code <- waitExitCode p
+               e <- wait errA
+               pure (code, o, e)
   pure case r of
     -- The runtime's words are kept as evidence, for the reason the reader
     -- states at length: they are the only thing that tells a git that is not
@@ -1493,5 +1480,93 @@ gitRun cwd extra secs what args input = do
     Right Nothing ->
       Left (GitStalled ( "git " <> what <> " did not finish in "
                            <> Text.pack (show secs) <> "s" ))
-    Right (Just (code, out, err)) ->
-      Right (code, LBS.toStrict out, LBS.toStrict err)
+    Right (Just (code, out, err)) -> Right (code, out, err)
+
+-- | How long a git that will not go is given, in this half of the module.
+--
+-- The reader's 'gbTeardownSeconds' by value and not by reference, because these
+-- callers carry no 'GitBounds': the writer and the bundle plumbing take one
+-- number, which is how long the COMMAND may take. This is the other one, and it
+-- is not the caller's to choose: it bounds close, TERM, KILL on a child that is
+-- already past its deadline.
+gitTeardownSeconds :: Int
+gitTeardownSeconds = 2
+
+-- | A git process, torn down WITHIN A BOUND on the way out.
+--
+-- Not 'withProcessTerm', whose cleanup is SIGTERM and then an unbounded
+-- 'waitForProcess': a git ignoring SIGTERM, or sitting in uninterruptible sleep
+-- on a dead mount, takes the caller with it after every bound has fired.
+--
+-- Top level, and shared by the audit reader and by 'gitRun'. It was the
+-- reader's alone, in a where-clause, and 'gitRun' had nothing: a bracket whose
+-- release cannot be reached is not a weaker version of this, it is the absence
+-- of one.
+withGitProc :: MonadUnliftIO m
+            => Int                          -- ^ seconds allowed for the teardown
+            -> ProcessConfig () Handle Handle
+            -> (Process () Handle Handle -> m a) -> m a
+withGitProc secs cfg = bracket (startProcess cfg) (teardownGit secs)
+
+-- | Close, TERM, KILL, and then give up on it.
+--
+-- Each step bounded. Giving up is not tidy and it is the only honest end: a
+-- process in D state does not answer SIGKILL either, and there is nothing
+-- further anybody can do to it.
+teardownGit :: forall m i . MonadUnliftIO m => Int -> Process i Handle Handle -> m ()
+teardownGit secs p = do
+  -- Our ends of the pipes, first: a child blocked writing into a pipe nobody
+  -- reads dies of EPIPE without needing a signal at all.
+  for_ [getStdout p, getStderr p] $ \h ->
+    tryAny (liftIO (hClose h))
+  done <- settle
+  unless done do
+    tryAny (liftIO (terminateProcess (unsafeProcessHandle p)))
+    harder <- settle
+    unless harder do
+      -- getPid on the ProcessHandle (from `process`, there since 1.6.3), not
+      -- typed-process's getPid on a Process, which only exists in
+      -- typed-process 0.2.12 and later.
+      --
+      -- The split is CABAL against NIX, not dynamic against static: the freeze
+      -- file pins typed-process 0.2.13.0 and nixpkgs gives 0.2.11.1 to both
+      -- the dynamic and the static package sets, so `cabal build` and the
+      -- whole suite were green while every nix output failed to compile. It is
+      -- the only version skew in this package's dependencies, and the next use
+      -- of a post-0.2.11 API will land in it again.
+      pid <- liftIO (P.getPid (unsafeProcessHandle p))
+      for_ pid $ \pid' -> tryAny (liftIO (signalProcess sigKILL pid'))
+      void settle
+
+  where
+    -- Wait for the process to be gone, or give up. POLLED, and that is the
+    -- whole point: this runs as a bracket's RELEASE action, and unliftio runs
+    -- release under uninterruptibleMask, where the async exception `timeout`
+    -- throws is deferred and does nothing at all. Measured: a one-second
+    -- timeout around waitExitCode in here returned after thirty, when the
+    -- child happened to finish on its own, so a git ignoring SIGTERM took the
+    -- audit with it exactly as it had before the bound was written.
+    -- getExitCode does not block, so a poll gets out on its own.
+    settle = waitGone (max 1 (secs * 1000000 `div` step))
+    step = 20000
+    waitGone :: Int -> m Bool
+    waitGone 0 = isJust <$> getExitCode p
+    waitGone n = getExitCode p >>= \case
+               Just _  -> pure True
+               Nothing -> liftIO (Conc.threadDelay step) >> waitGone (n - 1)
+
+-- | Read a handle to the END, keeping only the first n bytes.
+--
+-- The bound is on what is REMEMBERED, never on what is read, because not
+-- reading is what deadlocks the writer. @maxBound@ is therefore a legitimate
+-- argument and not a missing bound: it says the stream is data rather than a
+-- message.
+gitDrain :: MonadIO m => Int -> Handle -> m ByteString
+gitDrain n h = go 0 []
+  where
+    go seen chunks = do
+      c <- liftIO (BS.hGetSome h 65536)
+      if BS.null c
+        then pure (BS.concat (List.reverse chunks))
+        else go (seen + BS.length c)
+               (if seen < n then BS.take (n - seen) c : chunks else chunks)

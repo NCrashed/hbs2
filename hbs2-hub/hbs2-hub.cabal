@@ -178,6 +178,7 @@ test-suite spec
                  , directory
                  , filepath
                  , temporary
+                 , time
                  , typed-process
                  , prettyprinter
                  , unix
