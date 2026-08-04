@@ -58,7 +58,7 @@ spec1 = do
       repo <- aKey ; author <- aKey
       let sender = aHash "sender" ; rcpt = aHash "rcpt"
           want = Just (PrNew repo sender rcpt author "make it work"
-                             "refs/heads/master" "refs/heads/feature" Nothing)
+                             "refs/heads/master" "refs/heads/feature" Nothing Nothing)
       prNewArgs (argv (full repo sender rcpt author)) `shouldBe` want
       -- The same call with the flag PAIRS in the opposite order, which is what
       -- "in any order" means: a flag and its value stay adjacent.

@@ -125,12 +125,28 @@ sigils syn = concatMap one syn
 sigilsFor :: HubKey -> [Syntax c] -> [HashRef]
 sigilsFor k = map msSigil . filter ((== k) . msMailbox) . sigils
 
--- | Emit @(mailbox <key> <role> [<tier>])@.
-mailboxClause :: HubMailbox -> Syntax C
-mailboxClause (HubMailbox k role tier) =
-  mkForm "mailbox" $
-    [ mkSym (show (pretty (AsBase58 k))), atom role ]
-    <> maybe [] (\t -> [atom t]) tier
+-- | Emit @(mailbox <key> <role> [<tier>])@, or nothing when it would not read
+-- back.
+--
+-- THE EMPTY STRING IS NOT A VALUE THIS FORMAT HAS. A string literal is built
+-- out of a run of characters, so an empty one produces no token at all and the
+-- clause loses a field: @(mailbox KEY hub "")@ parses as a mailbox with NO
+-- tier, and @(mailbox KEY "")@ as a clause with no role, which is not a mailbox
+-- clause and vanishes. Verified against the pinned parser.
+--
+-- That is a hole in the round trip this module's contract is, and it is not one
+-- a writer can escape its way out of: there is no spelling to emit. So the
+-- writer refuses instead, and says which field it was. An empty tier is anyway
+-- a tag that tags nothing, and 'mailboxByTier' already has a value for "no
+-- tier": absent.
+mailboxClause :: HubMailbox -> Either Text (Syntax C)
+mailboxClause (HubMailbox k role tier)
+  | Text.null role = Left "the role is empty, and this format has no empty string"
+  | any Text.null tier = Left "the tier is empty, and this format has no empty string"
+  | otherwise =
+      Right $ mkForm "mailbox" $
+        [ mkSym (show (pretty (AsBase58 k))), atom role ]
+        <> maybe [] (\t -> [atom t]) tier
 
 -- | A symbol where one reads back as itself, a string otherwise.
 --

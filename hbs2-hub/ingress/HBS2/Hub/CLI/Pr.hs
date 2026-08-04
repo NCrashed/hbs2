@@ -43,7 +43,7 @@ import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
-import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey
+import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
 import HBS2.CLI.Prelude
@@ -86,6 +86,7 @@ data PrNew = PrNew
   , pnOnto   :: Text          -- ^ the branch being proposed into
   , pnFrom   :: Text          -- ^ the branch being proposed
   , pnBase   :: Maybe Text    -- ^ override for the fork point
+  , pnBody   :: Maybe Text    -- ^ --body, where "-" means stdin
   }
   deriving stock (Eq,Show)
 
@@ -122,7 +123,10 @@ prEntries = do
              <> line <> "The bundle itself is not signed and does not need to be:"
              <> line <> "git's hashing binds its contents to the tip."
              <> line
-             <> line <> "The body is read from stdin when stdin is a pipe or a file."
+             <> line <> "The body comes from --body, and --body - reads it from"
+             <> line <> "stdin. Nothing is read from stdin otherwise: git hands a"
+             <> line <> "hook <old> <new> <ref-name> there, and a body goes inside"
+             <> line <> "the signature and the event-id, where canon cannot fix it."
              <> line
              <> line <> "Prints the message hash and the thread-id, which the"
              <> line <> "sender can compute before any maintainer has looked." )
@@ -225,9 +229,7 @@ prEntries = do
 
     prNew pn = do
 
-      body <- liftIO $ hIsTerminalDevice stdin >>= \case
-                True  -> pure ""
-                False -> getContents
+      body <- liftIO (readBody (fmap Text.unpack (pnBody pn)))
 
       creds <- runKeymanClientRO (loadCredentials (pnAuthor pn))
                  >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -312,14 +314,17 @@ prNewArgs syn = do
   onto   <- flagOnce kvs "--onto"      >>= asText
   from   <- flagOnce kvs "--from"      >>= asText
   base   <- flagMaybe kvs "--base" asText
-  pure (PrNew repo sender rcpt author title onto from base)
+  -- Named, not taken off stdin: see 'readBody'. A hook that opens a pull
+  -- request is exactly the caller that has git's own bytes on its stdin.
+  body   <- flagMaybe kvs "--body" asText
+  pure (PrNew repo sender rcpt author title onto from base body)
   where
     -- The list is the point: this reader used to pair each word with the next
     -- and ask no more, so `--title --onto refs/heads/master` bound the title
     -- `--onto` and signed it into the event-id, and `--dry-run` was dropped on
     -- the floor. Both guards live in 'flagsOf' now.
     knownFlags = [ "--target","--sender","--recipient","--author"
-                 , "--title","--onto","--from","--base" ]
+                 , "--title","--onto","--from","--base","--body" ]
 
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }

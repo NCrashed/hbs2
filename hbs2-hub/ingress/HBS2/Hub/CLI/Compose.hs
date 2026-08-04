@@ -18,6 +18,7 @@ module HBS2.Hub.CLI.Compose
   , attachToLetter
   , issueUsage
   , issueArgs
+  , readBody
   , codeNoKey
   , NotStored(..)
   , codeNotStored
@@ -28,7 +29,7 @@ module HBS2.Hub.CLI.Compose
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent,saying)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
@@ -333,23 +334,20 @@ composeEntries = do
              <> line <> "recipient-sigil, which is also what says which mailbox"
              <> line <> "it lands in."
              <> line
-             <> line <> "The body is read from stdin when stdin is a pipe or a"
-             <> line <> "file, and left empty when it is a terminal: PEP-22 writes"
-             <> line <> "it as optional, and a verb that blocked on an unprompted"
-             <> line <> "read would look like a hang."
+             <> line <> "The body comes from --body, and --body - reads it from"
+             <> line <> "stdin. Nothing is read from stdin otherwise, and that is"
+             <> line <> "not tidiness: git hands a hook <old> <new> <ref-name> on"
+             <> line <> "stdin, so a hook filing an issue used to sign those bytes"
+             <> line <> "as the body, inside the event-id, where canon is"
+             <> line <> "append-only and nothing can repair it."
              <> line
              <> line <> "Prints the message hash, which is the letter's identity"
              <> line <> "everywhere else (the inbox lists it, a folded event carries"
              <> line <> "it as its origin), and the event-id the thread will have." )
     $ entry $ bindMatch "hub:issue:new" \case
-        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title, labels)) -> lift do
+        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title, labels, mbody)) -> lift do
 
-          -- Only when there is something to read. On a terminal this used to
-          -- block with no prompt, which reads as a hang rather than as a
-          -- request for input.
-          body <- liftIO $ hIsTerminalDevice stdin >>= \case
-                    True  -> pure ""
-                    False -> getContents
+          body <- liftIO (readBody mbody)
 
           creds <- runKeymanClientRO (loadCredentials author)
                      >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -449,13 +447,14 @@ composeEntries = do
 -- Total, and exported so that a test can ask what a command line means without
 -- a peer, a keyman or a dictionary.
 issueArgs :: forall c . IsContext c
-          => [Syntax c] -> Maybe (RepoRef, HashRef, HashRef, HubKey, String, [String])
+          => [Syntax c]
+          -> Maybe (RepoRef, HashRef, HashRef, HubKey, String, [String], Maybe String)
 issueArgs = \case
   [ SignPubKeyLike repo, HashLike sender, HashLike rcpt
     , SignPubKeyLike author, (titleOf -> Just title) ] ->
       -- No labels positionally: a repeatable value has no position, and the
       -- positional form stays only because it is what exists.
-      Just (repo, sender, rcpt, author, title, [])
+      Just (repo, sender, rcpt, author, title, [], Nothing)
   ss -> named ss
   where
     -- A title is TEXT, and a person is allowed to call an issue "2026".
@@ -488,9 +487,23 @@ issueArgs = \case
       -- rather than 'flagOnce'. Bounds are not applied at this layer:
       -- 'oversizedField' owns them, and it is the same check the fold will make.
       labels <- traverse titleOf (flagEvery kvs "--label")
-      pure (repo, sender, rcpt, author, title, labels)
+      -- The BODY IS NAMED, and it used to be whatever was on stdin.
+      --
+      -- Reading stdin because it is not a terminal is the ordinary convenience,
+      -- and it is the wrong one for a verb that signs. git hands a hook
+      -- `<old> <new> <ref-name>` on stdin, so a hook that files an issue signed
+      -- those bytes as the body, into the author box and therefore into the
+      -- event-id, where canon is append-only and nothing can repair it. The same
+      -- module removed the same shape of hazard from the interpreter path
+      -- (app/Main.hs) and left it here.
+      --
+      -- So: no --body, no body. `--body -` is the pipeline spelling and says out
+      -- loud that stdin is the source.
+      body   <- flagMaybe kvs "--body" titleOf
+      pure (repo, sender, rcpt, author, title, labels, body)
 
-    knownFlags = ["--target","--sender","--recipient","--author","--title","--label"]
+    knownFlags = [ "--target","--sender","--recipient","--author","--title"
+                 , "--label","--body" ]
 
     signKey = \case
       SignPubKeyLike x -> Just x
@@ -525,9 +538,25 @@ issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
           <> line <> "  to another's hub is signed, delivered and then dropped at"
           <> line <> "  fold time as WrongTarget, with no reply path to tell you."
           <> line
-          <> line <> "  The body is read from stdin when stdin is not a terminal."
+          <> line <> "  --body <text>, or --body - to read it from stdin."
           <> line <> "  Prefer the named form: the two keys and the two sigils are"
           <> line <> "  interchangeable positionally, and a swap sends a correctly"
           <> line <> "  signed letter claiming the wrong author, which cannot be"
           <> line <> "  taken back."
           <> line <> "  `hub help issue new` says more."
+
+-- | Where a letter's body comes from, and it is never a surprise.
+--
+-- 'Nothing' is no @--body@ at all, which is an empty body and an untouched
+-- stdin. @-@ is the pipeline spelling. Anything else is the text itself.
+--
+-- Reading stdin merely because it is not a terminal is the ordinary
+-- convenience and the wrong one for a verb that signs: git hands a hook
+-- @\<old\> \<new\> \<ref-name\>@ on stdin, so a hook that files an issue signed
+-- those bytes as its body, inside the author box and therefore inside the
+-- event-id, which canon cannot correct.
+readBody :: Maybe String -> IO String
+readBody = \case
+  Nothing  -> pure ""
+  Just "-" -> getContents
+  Just t   -> pure t

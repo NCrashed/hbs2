@@ -1224,7 +1224,18 @@ honourOpened path canonKp@(pk,sk) repo view folded origin askedBox asked content
   -- refusal is wrapped: the same words mean opposite things depending on which
   -- side they were raised against, and a loop that folds then deletes would
   -- otherwise delete a good submission over a bug in a maintainer's tooling.
-  composed $ do
+  --
+  -- ON THE VERBATIM PATH THERE IS NO CALLER CONTENT, and wrapping there said
+  -- the opposite of the truth. 'honourRequest' passes the letter's own content
+  -- as both arguments, so these three checks were reading a stranger's bytes and
+  -- reporting them as the maintainer's wiring bug -- whose outcome is Abort, a
+  -- stop. Anybody could then halt a triage loop with one letter: an AClose
+  -- naming a fifty-kilobyte hash is refused by requireRefs, and the loop was
+  -- told to leave the letter alone and go fix its own code.
+  let judged = case path of
+        Verbatim -> id
+        Reviewed -> composed
+  judged $ do
     -- The owner signs this, so the same size gate applies as on any other
     -- owner-authored event: 'ownerEvent' checks it, and there is no reason for
     -- the two owner paths to disagree.

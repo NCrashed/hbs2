@@ -45,7 +45,7 @@ spec = do
           r = href "rcpt"
           argv = [ keyWord repo, word (pretty s), word (pretty r), keyWord author
                  , mkStr @C "a title" ]
-      issueArgs argv `shouldBe` Just (repo, s, r, author, "a title", [])
+      issueArgs argv `shouldBe` Just (repo, s, r, author, "a title", [], Nothing)
 
     it "reads them by name, in any order" $ do
       -- The reason the named form exists: FOUR base58 blobs in a row, and two
@@ -68,7 +68,7 @@ spec = do
                      , mkStr @C "--recipient", word (pretty r)
                      , mkStr @C "--sender", word (pretty s)
                      , mkStr @C "--target", keyWord repo ]
-      issueArgs named `shouldBe` Just (repo, s, r, author, "a title", [])
+      issueArgs named `shouldBe` Just (repo, s, r, author, "a title", [], Nothing)
       -- The property, rather than two examples of it: order carries no meaning
       -- in the named form, which is the whole point of having it.
       issueArgs shuffled `shouldBe` issueArgs named
@@ -103,7 +103,7 @@ spec = do
                         , mkStr @C "--author", keyWord author
                         , mkStr @C "--title", mkStr @C "t" ]
                         <> concat [ [mkStr @C "--label", mkStr @C l] | l <- ls ]
-          labelsOf = fmap (\(_,_,_,_,_,ls) -> ls) . issueArgs
+          labelsOf = fmap (\(_,_,_,_,_,ls,_) -> ls) . issueArgs
       labelsOf (labelled [])             `shouldBe` Just []
       labelsOf (labelled ["bug"])        `shouldBe` Just ["bug"]
       -- Repeatable, and in the order given: unlike every other flag here, a
@@ -139,11 +139,11 @@ spec = do
                      , mkStr @C ("--title=" <> t)
                      , mkStr @C "--label=bug" ]
       issueArgs (argvEq "a title")
-        `shouldBe` Just (repo, href "s", href "r", author, "a title", ["bug"])
+        `shouldBe` Just (repo, href "s", href "r", author, "a title", ["bug"], Nothing)
       -- A value may hold an '=' of its own: the split is on the first one only.
-      fmap (\(_,_,_,_,t,_) -> t) (issueArgs (argvEq "a=b")) `shouldBe` Just "a=b"
+      fmap (\(_,_,_,_,t,_,_) -> t) (issueArgs (argvEq "a=b")) `shouldBe` Just "a=b"
       -- And the dash case the refusal above makes necessary.
-      fmap (\(_,_,_,_,t,_) -> t) (issueArgs (argvEq "--draft")) `shouldBe` Just "--draft"
+      fmap (\(_,_,_,_,t,_,_) -> t) (issueArgs (argvEq "--draft")) `shouldBe` Just "--draft"
 
     it "refuses a flag given twice instead of choosing" $ do
       repo <- aKey
@@ -189,7 +189,7 @@ spec = do
                      , mkStr @C "--recipient", word (pretty (href "r"))
                      , mkStr @C "--author", keyWord author
                      , mkStr @C "--title", t ]
-          titleOf = fmap (\(_,_,_,_,t,_) -> t) . issueArgs
+          titleOf = fmap (\(_,_,_,_,t,_,_) -> t) . issueArgs
       titleOf (titled (mkInt @C (2026 :: Int))) `shouldBe` Just "2026"
       titleOf (titled (mkStr @C "2026"))        `shouldBe` Just "2026"
       -- ...and a list is still not a title
@@ -200,3 +200,23 @@ spec = do
       -- The consequence, not a fragment of the sentence carrying it: the whole
       -- reason to prefer the flags is that a positional swap is signed and gone.
       shown issueUsage `shouldSatisfy` isInfixOf "claiming the wrong author"
+
+    -- git hands a hook `<old> <new> <ref-name>` on stdin, and a body goes into
+    -- the author box and therefore into the event-id, where canon is
+    -- append-only. So the body is NAMED now: no --body, no body, and stdin is
+    -- untouched. `--body -` is the pipeline spelling and says so out loud.
+    it "takes the body from a flag, and stdin only when asked" $ do
+      repo <- aKey
+      author <- aKey
+      let with b = [ mkStr @C "--target", keyWord repo
+                   , mkStr @C "--sender", word (pretty (href "s"))
+                   , mkStr @C "--recipient", word (pretty (href "r"))
+                   , mkStr @C "--author", keyWord author
+                   , mkStr @C "--title", mkStr @C "t" ] <> b
+          bodyOf' = fmap (\(_,_,_,_,_,_,b) -> b) . issueArgs
+      bodyOf' (with []) `shouldBe` Just Nothing
+      bodyOf' (with [mkStr @C "--body", mkStr @C "the body"])
+        `shouldBe` Just (Just "the body")
+      bodyOf' (with [mkStr @C "--body", mkStr @C "-"]) `shouldBe` Just (Just "-")
+      -- And it is a value like any other: a flag where it belongs is missing.
+      issueArgs (with [mkStr @C "--body", mkStr @C "--label"]) `shouldBe` Nothing

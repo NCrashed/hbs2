@@ -13,6 +13,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise (serialise)
 import Data.HashMap.Strict qualified as HM
 import Data.List (isInfixOf)
+import Data.Char qualified as Char
 import Data.String (fromString)
 import Data.Text qualified as Text
 import Data.Maybe (fromMaybe)
@@ -956,6 +957,31 @@ spec = do
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2
            (AClose tid (Just "agreed") 2) req)
       pure ()
+
+    -- AND THE MIRROR, which the wrapping above used to swallow. honourRequest
+    -- signs the letter verbatim, so it passes the letter's own content as the
+    -- caller's too, and every check below that line then read a stranger's bytes
+    -- and reported them as the maintainer's wiring bug -- whose outcome is a
+    -- stop. One AClose naming a fifty-kilobyte hash, and the triage loop is told
+    -- to leave the letter alone and go fix its own code.
+    it "does not blame triage for what the letter composed" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      origin2 <- someHash
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          opening = makeLetter (fst alice) (snd alice)
+                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts opening)
+      let wide = HashRef (fromString (replicate 40000 (Char.chr 122)))
+          bad = makeLetter (fst alice) (snd alice) (AClose wide Nothing 2) noReplyChannel
+          r = honourRequest (ctxOf owner) env (acView aOpen) 2 origin2 bad
+      expectErr (MalformedRef "thread") r
+      -- Discard: the letter is at fault and no later state of this node changes
+      -- what it says. Abort would hand one stranger the whole queue.
+      either outcome (const Decide) r `shouldBe` Discard
 
     it "never stamps a folded-ts below the last one in canon" $ do
       alice <- kp

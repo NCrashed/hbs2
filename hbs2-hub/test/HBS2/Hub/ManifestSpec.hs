@@ -7,11 +7,19 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Prelude.Plated (pretty)
 
 import Data.Config.Suckless
+import Data.Either (isLeft)
+import Data.Text qualified as Text
 import Data.List (isInfixOf)
 import Test.Hspec
 
 kp :: IO HubKey
 kp = _peerSignPk <$> newCredentials @'HBS2Basic
+
+-- Every fixture here builds a clause that CAN be written; the one that cannot
+-- is its own test at the end. Unwrapping in the fixtures keeps them about what
+-- they are about.
+clauseOf :: HubMailbox -> Syntax C
+clauseOf = either (error . Text.unpack) id . mailboxClause
 
 spec :: Spec
 spec = do
@@ -20,12 +28,12 @@ spec = do
 
     it "reads a single hub mailbox" $ do
       k <- kp
-      let syn = [mailboxClause (HubMailbox k hubRole Nothing)]
+      let syn = [clauseOf (HubMailbox k hubRole Nothing)]
       hubMailboxes syn `shouldBe` [HubMailbox k hubRole Nothing]
 
     it "survives a text round-trip" $ do
       k <- kp
-      let emitted = show (pretty (mailboxClause (HubMailbox k hubRole Nothing)))
+      let emitted = show (pretty (clauseOf (HubMailbox k hubRole Nothing)))
       case parseTop emitted of
         Left e    -> expectationFailure (show e)
         Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole Nothing]
@@ -33,8 +41,8 @@ spec = do
     it "keeps tiers apart and defaults to the untiered inbox" $ do
       open   <- kp
       known  <- kp
-      let syn = [ mailboxClause (HubMailbox open hubRole Nothing)
-                , mailboxClause (HubMailbox known hubRole (Just "known"))
+      let syn = [ clauseOf (HubMailbox open hubRole Nothing)
+                , clauseOf (HubMailbox known hubRole (Just "known"))
                 ]
       map mbKey (hubMailboxes syn) `shouldBe` [open, known]
       fmap mbKey (mailboxByTier Nothing syn) `shouldBe` Just open
@@ -44,8 +52,8 @@ spec = do
     it "falls back to the public tier when no untiered inbox exists" $ do
       known  <- kp
       public <- kp
-      let syn = [ mailboxClause (HubMailbox known hubRole (Just "known"))
-                , mailboxClause (HubMailbox public hubRole (Just publicTier))
+      let syn = [ clauseOf (HubMailbox known hubRole (Just "known"))
+                , clauseOf (HubMailbox public hubRole (Just publicTier))
                 ]
       -- A stranger naming no tier must still find somewhere to submit.
       fmap mbKey (mailboxByTier Nothing syn) `shouldBe` Just public
@@ -53,8 +61,8 @@ spec = do
     it "falls back to the first hub mailbox when there is no public tier" $ do
       a <- kp
       b <- kp
-      let syn = [ mailboxClause (HubMailbox a hubRole (Just "known"))
-                , mailboxClause (HubMailbox b hubRole (Just "trusted"))
+      let syn = [ clauseOf (HubMailbox a hubRole (Just "known"))
+                , clauseOf (HubMailbox b hubRole (Just "trusted"))
                 ]
       -- Neither untiered nor public: a default submitter still needs an
       -- address, so the first declared inbox is it.
@@ -64,15 +72,15 @@ spec = do
       -- PEP-18 shows (mailbox KEY hub known); the parser takes a string too,
       -- but an emitter that always quoted would not match its own examples.
       k <- kp
-      let emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "known"))))
+      let emitted = show (pretty (clauseOf (HubMailbox k hubRole (Just "known"))))
       emitted `shouldSatisfy` isInfixOf "hub known"
       -- ...and a value that could not be read back as a symbol is quoted.
-      let quoted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "2 tiers"))))
+      let quoted = show (pretty (clauseOf (HubMailbox k hubRole (Just "2 tiers"))))
       quoted `shouldSatisfy` isInfixOf "\"2 tiers\""
 
     it "keeps a tier containing a space intact" $ do
       k <- kp
-      let emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just "known good"))))
+      let emitted = show (pretty (clauseOf (HubMailbox k hubRole (Just "known good"))))
       case parseTop emitted of
         Left e    -> expectationFailure (show e)
         Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole (Just "known good")]
@@ -85,7 +93,7 @@ spec = do
       -- manifest would read back as whatever it looked like, including the
       -- mailbox clauses that say where submissions go.
       let nasty = "a\"b\\c\nd"
-          emitted = show (pretty (mailboxClause (HubMailbox k hubRole (Just nasty))))
+          emitted = show (pretty (clauseOf (HubMailbox k hubRole (Just nasty))))
       case parseTop emitted of
         Left e    -> expectationFailure (show e)
         Right syn -> do
@@ -103,8 +111,8 @@ spec = do
     it "ignores mailboxes with another role" $ do
       hub   <- kp
       other <- kp
-      let syn = [ mailboxClause (HubMailbox hub hubRole Nothing)
-                , mailboxClause (HubMailbox other "backup" Nothing)
+      let syn = [ clauseOf (HubMailbox hub hubRole Nothing)
+                , clauseOf (HubMailbox other "backup" Nothing)
                 ]
       map mbKey (mailboxes syn) `shouldBe` [hub, other]
       map mbKey (hubMailboxes syn) `shouldBe` [hub]
@@ -134,8 +142,22 @@ spec = do
     it "ignores unrelated clauses" $ do
       k <- kp
       case parseTop ("(hbs2-git 3)\n(seed 42)\n(public)\n"
-                      <> show (pretty (mailboxClause (HubMailbox k hubRole Nothing)))) of
+                      <> show (pretty (clauseOf (HubMailbox k hubRole Nothing)))) of
         Left e    -> expectationFailure (show e)
         Right syn -> do
           map mbKey (hubMailboxes syn) `shouldBe` [k]
           sigils syn `shouldBe` []
+
+    -- The one value this format cannot carry. A string literal is a run of
+    -- characters, so an empty one produces no token: (mailbox KEY hub "")
+    -- parses as a mailbox with NO tier, and (mailbox KEY "") as a clause that
+    -- is not a mailbox clause at all and simply vanishes. There is no spelling
+    -- to escape into, so the writer refuses rather than emitting something that
+    -- reads back as a different manifest.
+    it "will not write a field the format cannot read back" $ do
+      k <- kp
+      isLeft (mailboxClause (HubMailbox k hubRole (Just ""))) `shouldBe` True
+      isLeft (mailboxClause (HubMailbox k "" Nothing)) `shouldBe` True
+      -- And the round trip it protects: what a writer emits, a reader reads.
+      let one = clauseOf (HubMailbox k hubRole (Just "known"))
+      hubMailboxes [one] `shouldBe` [HubMailbox k hubRole (Just "known")]
