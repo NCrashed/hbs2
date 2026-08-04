@@ -116,6 +116,23 @@ and a tree full of forged events were the same event.
 | 18   | the peer is running and stopped answering (`hub inbox`, `hub issue new`) |
 | 19   | no signing key here for the author (`hub issue new`)     |
 | 20   | the peer answered and would not store the message (`hub issue new`) |
+| 21   | no signing key here for the canon identity (`hub inbox accept`) |
+| 22   | the letter named is not one this node can read                |
+| 23   | the bridge would not bless it: triage refused, canon untouched |
+| 24   | canon could not be written                                    |
+| 25   | the event rendered to a file this build could not read back    |
+| 26   | canon holds no such thread (`hub issue show`, `hub pr show`)    |
+| 27   | git would not build the bundle or would not answer (`hub pr new`) |
+| 28   | the objects a pull request proposes are not usable             |
+| 29   | canon holds no such pull request (`hub pr merge`)               |
+| 30   | the merge was not recorded, and canon is unchanged             |
+| 31   | the delegation was not written, and canon is unchanged         |
+| 32   | already folded into canon (`hub inbox reject`)                  |
+| 33   | nothing was deleted (`hub inbox reject`)                        |
+| 34   | the mailbox has no policy, or it will not read                 |
+| 35   | the policy was not changed (`hub block`, `hub unblock`)          |
+| 36   | the deny-list will not read (`hub ban`)                         |
+| 37   | the proof-of-work a mailbox charges could not be solved in time |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
@@ -310,20 +327,34 @@ Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 ```
 hub inbox [--mailbox <key>]        ; decrypted triage queue (Tier B), verified
 hub inbox show <msg>               ; one submission, inner author + payload + attachments
-hub inbox accept <msg>             ; fold into canon (assigns number), then delete (PEP-21)
-hub inbox reject <msg> [< note]    ; delete the letter + optional courtesy note; NO canon event
+hub inbox accept <msg>             ; fold into canon (assigns number). NOT a delete:
+                                   ;   fold-then-delete needs a DeleteMessages path
+                                   ;   this build does not have, so the letter stays
+                                   ;   in the mailbox and a second accept is refused
+hub inbox reject <msg>             ; refuse it here; NO canon event, and no courtesy
+                                   ;   note either -- the ack path is unbuilt (PEP-18)
 hub issue close|reopen|label|assign <n> ...   ; owner-signed set events on a folded thread
 hub pr   merge <n> [--strategy ...]           ; verify, integrate, merge event (PEP-20)
 ```
 
 `hub inbox` takes no mailbox key in the ordinary case: it reads the repository
-you are standing in, resolves the ingress mailbox from its manifest (PEP-18
-`mailboxByTier`), and that same manifest is where the PEP-21 deny-list comes
-from. `--mailbox <key>` names one directly and skips both, which makes it the
-form that is available before a manifest reader exists and the form that has no
-deny-list to apply. It is therefore not a shorthand: a queue read that way shows
-letters from banned authors, and anything built on it must not treat "it was in
-the queue" as "it may be folded".
+you are standing in and resolves the ingress mailbox from its manifest (PEP-18
+`mailboxByTier`). `--mailbox <key>` names one directly and skips that, which
+makes it the form available before a manifest reader exists.
+
+THE DENY-LIST IS NOT IN THE MANIFEST, and this section used to say it was,
+which contradicts PEP-21 and the implementation both. It is hub state, local to
+the node doing the triage: a file under the XDG data directory keyed by
+repository, written by `hub ban` and read by `hub inbox accept`. That is
+deliberate rather than pending -- a triage ban is one maintainer's decision
+about what THEY will fold, not a fact about the repository that every clone
+should inherit -- and PEP-21 says so under "Two enforcement layers".
+
+What is true of `--mailbox`, and worth keeping: a queue read before a manifest
+reader exists is a queue read without whatever the manifest would have said, so
+nothing built on it may treat "it was in the queue" as "it may be folded". The
+accept path applies the deny-list itself, which is where that guarantee
+actually lives.
 
 Either way the mailbox has to be one the local peer holds. A peer only asks the
 network about mailboxes in its own database, so a key it does not have reads as
@@ -333,9 +364,11 @@ those two apart is reporting silence as an answer. The distinction is available
 has to be used.
 
 Two distinctions matter here. `hub inbox reject` acts on an unfolded Tier B
-submission: there is no canon thread to close (the fold never ran), so it is
-just a `DeleteMessages` plus an optional courtesy note to the sender's
-`reply-mailbox`, emitting no canon event. Closing an already-folded thread is
+submission: there is no canon thread to close (the fold never ran), so it emits
+no canon event. It was specified as a `DeleteMessages` plus an optional courtesy
+note to the sender's `reply-mailbox`, and it is neither yet: both need paths
+this build does not have (retention on one side, the ack on the other), so what
+it does today is refuse the letter here and say so. Closing an already-folded thread is
 the separate `hub issue close <n>`, an owner-signed `set status closed` on an
 existing canon thread. And `hub issue close|reopen|label` appears in both the
 contribute and maintain groups: the resolution rule is capability-based, if

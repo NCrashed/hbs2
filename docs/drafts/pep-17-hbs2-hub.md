@@ -145,12 +145,14 @@ Issue letter:
 ```
 (hub-msg 1)
 (kind issue)
-(op open)                     ; open | comment | revise | close | reopen | label
+(op open)                     ; open | comment | revise | set | close | reopen
+                              ;   PEP-18 is authoritative: the op that applies a
+                              ;   label is `set`, and it is owner-signed
 (target <repo-lwwref-b58>)
 (thread <thread-id>)          ; absent on open; on reply, the canonical thread
                               ;   id (sender-computable, see PEP-18/PEP-19)
 (title "...")
-(labels bug ui)
+(labels "bug" "ui")           ; strings, not symbols: a label may hold a space
 (reply-to <event-id>)         ; threading
 ;; body in messageData, or as a part
 ;; reply-mailbox/reply-sigil ride the transport envelope, not this signed body
@@ -236,10 +238,13 @@ Lifecycle / triage
 5. Retention: `DeleteMessages` (a signed predicate) and per-message TTL
    prune accepted or spam letters from the mailbox tree.
 
-Notifications are symmetric and serverless: the letter's `reply-mailbox`
-clause names the contributor's own mailbox, and status updates
-(acknowledgement with the assigned thread id and number, merge/close
-results) are messages sent back to it.
+Notifications are symmetric and serverless: the letter carries a
+`reply-mailbox` naming the contributor's own mailbox, and status updates
+(acknowledgement with the assigned thread id and number, merge/close results)
+are messages sent back to it. NOT a clause of the signed body, which the
+correction above says and this paragraph used to contradict: it rides the
+transport envelope, so that a contributor's personal mailbox key does not end
+up in every clone forever.
 
 
 Manifest wiring

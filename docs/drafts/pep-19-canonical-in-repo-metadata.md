@@ -208,7 +208,33 @@ and there is no repair afterwards, because an event-id hashes the bytes.
 The author payload is a sum, encoded with its constructor's position as the tag,
 in this order: `open`, `comment`, `revise`, `set`, `close`, `reopen`, `merge`,
 `redact`, `delegate`, `revoke`. New ops are appended and none is ever reordered
-or removed. The fields of each are in the order the schema below lists them, and
+or removed.
+
+THE FIELD ORDER IS THIS LIST AND NOT THE PROJECTION'S. This paragraph used to
+say the fields of each op are "in the order the schema below lists them", and
+that is not true and cannot be: the projection is a set of readable clauses
+grouped for a person, and the wire is a product whose positions are frozen. On
+an `open` the two disagree twice over. Written out, since it is the one thing a
+second implementation cannot recover from anything else here:
+
+```
+open     target, kind, title, labels, body?, body-part?, coords?, created
+comment  thread, reply-to?, body?, body-part?, created
+revise   thread, coords, created
+set      thread, attr, value, created
+close    thread, note?, created
+reopen   thread, note?, created
+merge    thread, merge-commit, merged-into, created
+redact   target, redacts, created
+delegate target, key, created
+revoke   target, key, created
+```
+
+`created` is last on every one of them, and the projection prints it in the
+middle. `open` begins with its target and then its kind, and the projection
+prints the kind first. Neither difference is visible to anybody reading the
+readable form, which is exactly why it is written here.
+
 `redact`, `delegate` and `revoke` begin with their target repository like an
 `open` does. A `redact` needs it for a reason the others do not: every remaining
 op names a thread, a thread is an `open`, and an `open` names its repository, so
@@ -271,6 +297,37 @@ content hash of the serialized author box bytes. The S-expression in the
 event file is a readable projection of the decoded boxes; it is regenerated,
 never trusted over the boxes, and if a projected clause disagrees with the
 box the box wins.
+
+What that box IS, since the event-id is its hash and this document pinned
+everything inside it and not the wrapper around it:
+
+```
+SignedBox p s = SignedBox (PubKey 'Sign s) ByteString (Signature s)
+```
+
+encoded by the generic CBOR instance, which for a single-constructor record
+is an array of the constructor tag and the fields:
+
+```
+84 00 <pk> <payload> <sig>          -- 4-element array, tag 0
+```
+
+The payload is the middle field, an opaque byte string holding
+`serialise (Domained <domain> content)` (see below). The key and the signature
+carry the scheme's own encodings, which for HBS2Basic are two-element arrays
+of a tag and the raw bytes: `82 00 58 20 <32 bytes>` for a key and
+`82 00 58 40 <64 bytes>` for a signature. Measured against this build.
+
+So an event-id is
+
+```
+H( CBOR[ 0, pk, CBOR[ 0, domain, content ], sig ] )
+```
+
+and an implementation that computed it from the content alone, or from a box
+laid out differently, would agree with this one about every rule in this
+document and about no identity in it. PEP-18's sender-computable thread-id
+rests on this being written down.
 
 Domain separation. Every signed payload carries the domain it was signed for
 as the first field inside the signed bytes. Ed25519 signs bytes and says
@@ -425,13 +482,26 @@ quote does not spoil a display line, it ends the string early and everything
 after it is re-read as whatever it happens to look like, in a file that has two
 valid signatures in it and can never be rewritten.
 
-Every other control character is written `\xNN` followed by the empty escape
+Every other INVISIBLE character is written `\xNN..` followed by the empty escape
 `\&`. That one is not about parsing, it is about the terminal: a canon file is
 read with `git show` and `cat` far more often than with a parser, and a raw ESC
 in a body is a terminal escape sequence, so a title could reposition the cursor
 and rewrite what a maintainer sees while they decide whether to sign it. The
 trailing `\&` is load-bearing: a numeric escape swallows any hex digit that
 follows it, so ESC followed by `5` would otherwise read back as one character.
+
+Invisible is a QUESTION ABOUT THE CHARACTER, not a list, and this document used
+to say "control character", which is narrower than what a writer emits and
+therefore a rule two implementations could follow and still disagree. It is:
+any control character; any of the Unicode general categories Format,
+LineSeparator, ParagraphSeparator, Surrogate and PrivateUse; any Space category
+character other than U+0020 itself; and the default-ignorable code points. A
+zero-width joiner and a right-to-left override are none of them controls and
+every one of them rewrites a line on a terminal, which is the whole point.
+
+The number of digits is the code point's, not two: a character above U+00FF is
+written with as many hex digits as it takes. `\xNN` with exactly two would be a
+rule a writer cannot keep.
 
 A reader un-escapes those and no others, which is the half of the rule a writer
 cannot state alone: escaping is only a round trip if both sides agree on the
@@ -761,6 +831,16 @@ coordinates were missing, unreachable, or on a thread that is not a PR at all,
 and an operator whose counter has stalled needs to know WHICH counter. So they
 are separate reasons, and adding or merging one is a `hub-meta` bump like any
 other admission change.
+
+The four "the stamp is unusable" refusals, written out because being consensus
+means a second implementation has to make exactly these and no others. An event
+is dropped when its canon box carries a `number` and its author box is not an
+`open`; when its `seq` is `maxBound`; when its `number` is `maxBound`; or when
+its `folded-ts` is above the ceiling. The first of those is easy to miss, since
+this document elsewhere says only, in passing, that `number` is not an op but a
+canon-box field on the `open`: that sentence is a remark, and this is the rule.
+Admitting a numbered comment would materialize a thread state a conforming
+reader drops, and the two clones would disagree with no error anywhere.
 
 Admission. An event enters the fold only if all of the following hold; any
 failure drops the event and is surfaced as a warning, never silently
@@ -1523,9 +1603,11 @@ Exists today (from the git3 model):
 
 Must be built:
 
-  - The hub-meta library: event box encode/decode, the two-layer
-    sign/verify, the deterministic fold, and the SQLite cache with
-    incremental re-fold.
+  - The hub-meta library: event box encode/decode, the two-layer sign/verify,
+    and the deterministic fold. NOT the SQLite cache, which this list asked
+    for and the section "What is reused from fixme-new" then decided against:
+    the fold is in memory and hbs2-hub has no SQLite dependency. A list that
+    still asked for it was a list contradicting its own document.
   - The fold/triage bridge that maps accepted PEP-18 letters to canon events
     (shared with PEP-20 for PRs, PEP-22 for the CLI). Identifiers need no
     mapping: letters already carry canonical event-ids (see Thread identity).

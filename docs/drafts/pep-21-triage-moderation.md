@@ -725,8 +725,11 @@ Must be built:
     would stop forwarding submissions and delivery to the hosting peer via
     intermediate hops would break.
   - Retention: compound delete predicates, TTL expiry, and the purge/GC pass.
-  - Triage layer: the inner-author deny-list, fold-then-delete, and recording
-    triage bans as canon.
+  - Triage layer: fold-then-delete, and recording triage bans as canon. The
+    inner-author deny-list is BUILT (`hub ban`, `hub unban`, `hub ban list`,
+    applied by `hub inbox accept` before anything is minted); it lives in this
+    node's own state rather than in the manifest, for the reason the two
+    enforcement layers above give.
   - Canon: `delegate`/`revoke` events and the seq-ordered canon-key check in
     the fold (superseding PEP-19's placeholder), and the compaction runner.
 

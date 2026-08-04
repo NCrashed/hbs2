@@ -79,12 +79,33 @@ an `Ack` (a courtesy notification, below, with no inner box). This is a
 type-level decision an implementer makes on day one:
 
 ```
-data MessageData = Letter (SignedBox HubLetter) ReplyChannel   -- issue/pr/comment/revise
+data MessageBody = Letter (SignedBox HubLetter) ReplyChannel   -- issue/pr/comment/revise
                  | Ack    AckRecord                            -- owner -> contributor
-inner        = makeSignedBox senderSignPk senderSignSk (serialise letter)  -- SignedBox HubLetter s
-replyChannel = ReplyChannel { reply-mailbox, reply-sigil }                  -- transport only, optional
-plaintext(messageData) = serialise (Letter inner replyChannel)   -- the Letter case
+inner        = makeSignedBox senderSignPk senderSignSk
+                             (serialise (Domained 0x48423241 letter))
+replyChannel = ReplyChannel { reply-mailbox, reply-sigil }      -- transport only, optional
+
+-- the plaintext is TWO layers, see below
+plaintext(messageData) = serialise (Envelope 1 (serialise (Letter inner replyChannel)))
 ```
+
+TWO THINGS IN THAT FORMULA ARE EASY TO MISS, and an implementation that
+misses either produces bytes this one refuses.
+
+The plaintext is an `Envelope`: a version word and the body as an OPAQUE BYTE
+STRING, decoded in a second step. Encoding the body inline would make the
+version useless in exactly the case it exists for, because a single decode
+fails on an unknown body constructor before it ever reads the version, and
+the reader then reports "malformed" where it should report "newer schema".
+The version is `(hub-msg N)` in the projection, and it is 1.
+
+The inner box is signed over a DOMAINED payload: `serialise (Domained
+0x48423241 letter)`, not over `serialise letter`. The domain constant is
+PEP-19's, and the rule belongs to both documents because the box does: one
+key signs an author box, a canon box, a git3 LWWRef and a sigil, and any two
+of those sharing a CBOR shape would make a signature for one a valid
+signature for the other. It is inside the signed bytes, so it is inside every
+event-id, and it can never be added or removed later.
 
   - The inner `SignedBox HubLetter` authenticates exactly the public content
     the sender authored. It is directly verifiable against the sender's sign
