@@ -48,6 +48,8 @@ import HBS2.Storage
 
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEntry)
 
+import Crypto.Saltine.Class qualified as Saltine
+
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
 import Data.List qualified as List
@@ -95,16 +97,28 @@ sendLetter ob sender rcpts = sendLetterWith ob sender rcpts []
 -- hash inside the signed inner box (@body-part@, @bundle-part@), so the tree
 -- exists before the box that names it is signed.
 --
--- The answer is in the order the parts were given.
+-- The answer is in the order the parts were given, and each part comes back
+-- WITH ITS PROOF: naming a part is claiming it, and a claim a maintainer will
+-- act on by publishing the group secret has to be one only its owner can make
+-- (PEP-18 'PartRef'). The proof is over the author key, so it is made here,
+-- where the key that will sign the box is known, rather than left to a caller
+-- to remember.
 attachToLetter
   :: MonadUnliftIO m
   => Outbound
+  -> HubKey                   -- ^ the key that will sign the letter
   -> HashRef                  -- ^ sender sigil
   -> [HashRef]                -- ^ recipient sigils
   -> [([(Text, Text)], m LBS.ByteString)]
-  -> m [HashRef]
-attachToLetter ob sender rcpts parts =
-  createAttachments (services ob) (Left sender) (fmap Left rcpts) parts
+  -> m [PartRef]
+attachToLetter ob author sender rcpts parts = do
+  (hs, sec) <- createAttachments (services ob) (Left sender) (fmap Left rcpts) parts
+  -- A generated key is the right length or libsodium is broken, and the
+  -- alternative to checking is signing a proof over a truncated secret that
+  -- nothing on the reading side can ever match.
+  psec <- mkPartSecret (Saltine.encode sec)
+            & maybe (liftIO (die "the attachment key is not a key")) pure
+  pure [ PartRef h (partProofFor h psec author) | h <- hs ]
 
 -- | Seal a letter around parts that already exist, and hand it to the peer.
 sendLetterWith

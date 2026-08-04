@@ -36,6 +36,7 @@ module HBS2.Hub.Fold
   , reachableCoords
   , Anomaly(..)
   , eventParts
+  , eventPartRefs
   , referencesPart
   ) where
 
@@ -105,6 +106,14 @@ data DropReason =
   | SeqAtTopOfRange       -- ^ the next mint would wrap to zero
   | NumberAtTopOfRange
   | FoldedTsAboveCeiling  -- ^ past 'maxFoldedTs'
+    -- | The canon box publishes a part-secret the author never proved they
+    -- knew (PEP-18 'PartRef'). A drop and not an anomaly: an event whose
+    -- attachment is somebody else's is not this thread's event, and admitting
+    -- it would show a thief's issue in every clone's tracker beside the secret
+    -- it was sent to publish. The bytes are in the tree either way, which is
+    -- why the check that matters is the one the bridge makes before minting;
+    -- this is the half every clone can make for itself.
+  | PartNotProven
   deriving stock (Eq,Ord,Show)
 
 -- | Something admitted canon should not contain.
@@ -448,6 +457,7 @@ instance Pretty DropReason where
     SeqAtTopOfRange       -> "seq at the top of its range"
     NumberAtTopOfRange    -> "number at the top of its range"
     FoldedTsAboveCeiling  -> "folded-ts above the ceiling canon admits"
+    PartNotProven         -> "a part-secret its author never proved they knew"
     where
       why = \case
         Undecodable  -> "this build cannot decode"
@@ -679,9 +689,20 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       | ccSeq cc == maxBound  = Just SeqAtTopOfRange
       | numberIsMax           = Just NumberAtTopOfRange
       | not foldedOK          = Just FoldedTsAboveCeiling
+      | not partsProven       = Just PartNotProven
       | otherwise             = Nothing
       where
         cc = rCanon r
+        -- Only when a secret was actually published: an event that names a part
+        -- and carries no key for it publishes nothing, and says so as
+        -- 'PartWithoutSecret'. An UNUSABLE secret keeps its own anomaly and its
+        -- admission too, because a key of the wrong length opens nothing and
+        -- dropping the event for it would hide an intact event over a broken
+        -- field.
+        partsProven = case ccPartSecret cc of
+          Just sec | usablePartSecret sec ->
+            all (\p -> provesPart p sec (rAuthorKey r)) (eventPartRefs (rContent r))
+          _ -> True
         numberOK = case (rContent r, ccNumber cc) of
           (AOpen{}, _)      -> True
           (_, Nothing)      -> True
@@ -820,14 +841,14 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
                                  else Nothing
                       , tsLabelsRequested = labels
                       , tsBody = body
-                      , tsBodyPart = bodypart
+                      , tsBodyPart = fmap ptPart bodypart
                       , tsPartSecret = ccPartSecret (rCanon r)
                       , tsOrigin = ccOrigin (rCanon r)
                       }
             in keep (Just (rId r)) r s { sThreads = HM.insert (rId r) t (sThreads s) }
 
       AComment thr replyto body bodypart ts -> onThread r thr s $ \t ->
-        touch r t { tsComments = mkComment r replyto ts body bodypart : tsComments t }
+        touch r t { tsComments = mkComment r replyto ts body (fmap ptPart bodypart) : tsComments t }
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
         if tsKind t /= HubPR then Left PROnlyOnIssue
@@ -1015,7 +1036,15 @@ markRedacted red t = t
 -- vouch for, and retention must keep the trees canon points at. One list, so
 -- the two cannot drift.
 eventParts :: AuthorContent -> [HashRef]
-eventParts = \case
+eventParts = fmap ptPart . eventPartRefs
+
+-- | The same, with the proof each part carries.
+--
+-- Two functions rather than one, because most callers are asking which trees
+-- the event points at (retention, the size gate) and exactly one is asking
+-- whether the sender may publish them.
+eventPartRefs :: AuthorContent -> [PartRef]
+eventPartRefs = \case
   AOpen _ _ _ _ _ part coords _ -> maybe [] pure part <> maybe [] bundle coords
   AComment _ _ _ part _         -> maybe [] pure part
   ARevise _ coords _            -> bundle coords

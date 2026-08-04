@@ -247,8 +247,8 @@ prEntries = do
       api <- getClientAPI @MailboxAPI @UNIX
       let ob = Outbound sto api rpcTimeout
 
-      -- ONE: the attachment, so it has a name.
-      parts <- attachToLetter ob (pnSender pn) [pnRcpt pn]
+      -- ONE: the attachment, so it has a name and a proof that it is ours.
+      parts <- attachToLetter ob (pnAuthor pn) (pnSender pn) [pnRcpt pn]
                  [ ( [ ("file-name", "pr.bundle")
                      , ("mime-type", "application/x-git-bundle") ]
                    , pure (LBS.fromStrict (bnBytes b)) ) ]
@@ -277,7 +277,7 @@ prEntries = do
       -- the RTS as exit 1 -- the code PEP-22 gives to a mistyped flag. A hook
       -- that cannot tell "your arguments are wrong" from "the letter is in no
       -- mailbox" retries the wrong one of them.
-      h <- sendLetterWith ob (pnSender pn) [pnRcpt pn] [part] box noReplyChannel
+      h <- sendLetterWith ob (pnSender pn) [pnRcpt pn] [ptPart part] box noReplyChannel
              `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
              `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
              `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
@@ -286,7 +286,7 @@ prEntries = do
         [ "queued" <+> pretty h
         , "thread" <+> pretty (authorBoxId box)
         , "tip" <+> pretty (bnTip b) <+> "base" <+> pretty base
-        , "bundle" <+> pretty part
+        , "bundle" <+> hashDoc (ptPart part)
             <+> parens (pretty (BS.length (bnBytes b)) <+> "bytes before encryption")
         ]
 

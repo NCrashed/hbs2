@@ -90,6 +90,21 @@ noParts = noMessageParts msgSecret
 -- letter goes on to publish. There is no way to say "opened" without saying how
 -- big and with what, which are the two things the gate reads and the two a
 -- caller cannot have without having looked.
+-- A part reference whose proof really holds, for the fixtures whose subject is
+-- something else. PEP-18 binds a part to its author, so a valid proof is as
+-- much a part of a well-formed letter now as a valid signature is; the tests
+-- that are ABOUT the proof build a wrong one on purpose.
+-- And one whose proof is merely a hash, for the fixtures that refuse before
+-- the proof is ever looked at.
+unproven :: HashRef -> PartRef
+unproven h = PartRef h (PartProof h)
+
+proven :: HubKey -> HashRef -> PartRef
+proven = provenWith secret32
+
+provenWith :: PartSecret -> HubKey -> HashRef -> PartRef
+provenWith sec who h = PartRef h (partProofFor h sec who)
+
 here :: HashRef -> (HashRef, PartEvidence)
 here h = (h, PartOpened 1024 secret32)
 
@@ -630,12 +645,51 @@ spec = do
           plain = makeLetter (fst alice) (snd alice)
                     (AOpen repo HubIssue "t" [] (Just "inline") Nothing Nothing 1) noReplyChannel
           withPart = makeLetter (fst alice) (snd alice)
-                       (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
+                       (AOpen repo HubIssue "t" [] Nothing (Just (proven (fst alice) part)) Nothing 1) noReplyChannel
       a1 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments msgSecret []) plain)
       a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin (attachments msgSecret [here part]) withPart)
       -- No attachment, no secret in canon: publishing one would be noise.
       tsPartSecret (threadOf (foldEvents repo [acEvent a1]) (scopeOf a1)) `shouldBe` Nothing
       tsPartSecret (threadOf (foldEvents repo [acEvent a2]) (scopeOf a2)) `shouldBe` Just secret32
+
+    -- THE THEFT THIS GATE EXISTS FOR. MessageContent is signed and not
+    -- encrypted, so every part hash in a mailbox is public; the maintainer's
+    -- node opens whatever a letter names, because the tree is wrapped for the
+    -- recipient key it holds; and folding publishes the secret. So a letter
+    -- naming somebody else's part hash published a stranger's attachment, and
+    -- every other attachment on that letter with it, in public append-only
+    -- canon. Nothing in the evidence can tell the two letters apart: the part
+    -- opens either way. What tells them apart is the proof.
+    it "refuses a letter claiming a part its author cannot prove is theirs" $ do
+      alice <- kp
+      mallory <- kp
+      owner <- kp
+      origin <- someHash
+      part <- someHash
+      let repo = fst owner
+          -- Alice's letter, and Mallory's, over the same part hash. Mallory's
+          -- carries the proof he could lift out of hers, which is the best he
+          -- can do without the secret.
+          hers = AOpen repo HubIssue "mine" [] Nothing (Just (proven (fst alice) part)) Nothing 1
+          stolen = AOpen repo HubIssue "yours now" [] Nothing
+                     (Just (proven (fst alice) part)) Nothing 1
+          accept who c = acceptLetter (ctxOf owner) (EnvelopeSigner (fst who))
+                           (emptyView repo) 1 origin
+                           (attachments msgSecret [here part])
+                           (makeLetter (fst who) (snd who) c noReplyChannel)
+      _ <- expectRight (accept alice hers)
+      expectErr (PartUnproven part) (accept mallory stolen)
+      -- And re-proving it under his own key is what he cannot do: the proof is
+      -- over the secret, and any value he can compute without it is this one.
+      expectErr (PartUnproven part)
+        (accept mallory (AOpen repo HubIssue "yours now" [] Nothing
+                           (Just (unproven part)) Nothing 1))
+      -- A letter of his own, over a part he really did create, is ordinary.
+      _ <- expectRight
+        (accept mallory (AOpen repo HubIssue "mine too" [] Nothing
+                           (Just (proven (fst mallory) part)) Nothing 1))
+      -- Discard, not Park: no later state of this node changes what he signed.
+      either outcome (const Decide) (accept mallory stolen) `shouldBe` Discard
 
     it "refuses to publish an encrypted part with no key to it" $ do
       alice <- kp
@@ -645,7 +699,7 @@ spec = do
       let repo = fst owner
           env = EnvelopeSigner (fst alice)
           withPart = makeLetter (fst alice) (snd alice)
-                       (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
+                       (AOpen repo HubIssue "t" [] Nothing (Just (proven (fst alice) part)) Nothing 1) noReplyChannel
       -- The alternative is canon holding a signed reference to bytes nobody
       -- can ever read: the part cannot be re-encrypted without breaking the
       -- signature, and the secret is gone once the message is deleted.
@@ -668,7 +722,7 @@ spec = do
       -- it, so 'noOwnAttachments' is the only value that says nothing at all.
       expectOwn NoAttachmentsSupplied
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
-           (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1))
+           (AOpen repo HubIssue "t" [] Nothing (Just (proven (fst owner) part)) Nothing 1))
       outcome (Composed NoAttachmentsSupplied) `shouldBe` Abort
       -- ...but once it HAS supplied evidence, a part that evidence does not
       -- list is the letter's doing, and anyone can send such a letter. Abort
@@ -706,7 +760,7 @@ spec = do
       _ <- expectRight (accept (attachments msgSecret [here part]))
       _ <- expectRight
         (ownerEvent (ctxOf owner) (emptyView repo) 1 (ownAttachments [here part])
-           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
+           (AOpen repo HubIssue "mine" [] Nothing (Just (proven (fst owner) part)) Nothing 1))
       pure ()
       _ <- expectRight (accept (attachments msgSecret [here part]))
       -- On the owner path the mistake this type exists for cannot be made at
@@ -715,7 +769,7 @@ spec = do
       -- nothing.
       expectOwn NoAttachmentsSupplied
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
-           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 1))
+           (AOpen repo HubIssue "mine" [] Nothing (Just (proven (fst owner) part)) Nothing 1))
 
     it "publishes the secret a part was opened with, not one handed in beside it" $ do
       alice <- kp
@@ -732,7 +786,7 @@ spec = do
       -- act of opening a named part, and now that is the only way to supply one.
       let repo = fst owner
           env = EnvelopeSigner (fst alice)
-          content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing 1
+          content = AOpen repo HubIssue "att" [] Nothing (Just (provenWith otherSecret (fst alice) part)) Nothing 1
           letter = makeLetter (fst alice) (snd alice) content noReplyChannel
           accept po = acceptLetter (ctxOf owner) env (emptyView repo) 1 origin po letter
           otherSecret = fromMaybe (error "bad fixture secret")
@@ -749,21 +803,26 @@ spec = do
         (accept (attachments msgSecret [(other, PartOpened 1024 secret32)]))
       -- two parts opened with two different keys cannot both be carried, since
       -- canon has one field for it, and the refusal names the one that differed
-      let two = AOpen repo HubPR "att" [] Nothing (Just part)
+      let two = AOpen repo HubPR "att" [] Nothing (Just (proven (fst alice) part))
                   (Just (PRCoords Nothing "refs/heads/f" "aa" "refs/heads/master" "bb"
-                           (Just other))) 1
+                           (Just (provenWith otherSecret (fst alice) other)))) 1
           twoLetter = makeLetter (fst alice) (snd alice) two noReplyChannel
       expectErr (PartSecretsDiffer other)
         (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin
            (attachments msgSecret [ (part, PartOpened 1024 secret32)
                                   , (other, PartOpened 1024 otherSecret) ])
            twoLetter)
-      -- and two parts opened with the same one are ordinary
+      -- and two parts opened with the same one are ordinary. Its own letter,
+      -- because a proof is over the secret: the letter above claims one part
+      -- under each secret, and claiming both under one is a different claim.
+      let same = AOpen repo HubPR "att" [] Nothing (Just (proven (fst alice) part))
+                   (Just (PRCoords Nothing "refs/heads/f" "aa" "refs/heads/master" "bb"
+                            (Just (proven (fst alice) other)))) 1
       _ <- expectRight
         (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin
            (attachments msgSecret [ (part, PartOpened 1024 secret32)
                                   , (other, PartOpened 1024 secret32) ])
-           twoLetter)
+           (makeLetter (fst alice) (snd alice) same noReplyChannel))
       pure ()
 
     it "checks wiring and dedup before it asks a human" $ do
@@ -998,10 +1057,10 @@ spec = do
           opened = ownAttachments [(part, PartOpened 1024 stunted)]
       expectOwn (BadPartSecret part)
         (ownerEvent (ctxOf owner) view 2 opened
-           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
+           (AOpen repo HubIssue "mine" [] Nothing (Just (proven (fst owner) part)) Nothing 2))
       either outcome (const Decide)
         (ownerEvent (ctxOf owner) view 2 opened
-           (AOpen repo HubIssue "mine" [] Nothing (Just part) Nothing 2))
+           (AOpen repo HubIssue "mine" [] Nothing (Just (proven (fst owner) part)) Nothing 2))
         `shouldBe` Abort
 
     it "refuses a letter whose schema it cannot read from a banned envelope" $ do
@@ -1137,7 +1196,7 @@ spec = do
       let repo = fst owner
           pr = makeLetter (fst alice) (snd alice)
                  (AOpen repo HubPR "pr" [] Nothing Nothing
-                    (Just coords { prBundle = Just bundle }) 1)
+                    (Just coords { prBundle = Just (proven (fst alice) bundle) }) 1)
                  noReplyChannel
       acc <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin (attachments msgSecret [here bundle]) pr)
@@ -1502,7 +1561,7 @@ spec = do
       -- author box and every clone that wants the thread keeps the tree.
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
-                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
+                     (AOpen repo HubIssue "t" [] Nothing (Just (proven (fst alice) part)) Nothing 1) noReplyChannel
           with n = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo)
                      1 origin (attachments msgSecret [(part, PartOpened n secret32)]) letter
       expectErr (PartTooLarge part) (with (maxPartBytes + 1))
@@ -1745,7 +1804,7 @@ spec = do
       expectErr (MalformedRef "body-part")
         (acceptLetter (ctxOf owner) env (acView acc) 2 origin2
            (attachments msgSecret [here huge])
-           (letter (AComment (scopeOf acc) Nothing Nothing (Just huge) 2)))
+           (letter (AComment (scopeOf acc) Nothing Nothing (Just (unproven huge)) 2)))
       expectOwn (MalformedRef "redacts")
         (ownerEvent (ctxOf owner) (acView acc) 2 noOwnAttachments (ARedact repo huge 2))
       expectOwn (MalformedRef "thread")
@@ -1770,7 +1829,7 @@ spec = do
       -- spends, not only what canon keeps.
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
-                     (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1) noReplyChannel
+                     (AOpen repo HubIssue "t" [] Nothing (Just (proven (fst alice) part)) Nothing 1) noReplyChannel
           pending n = acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice))
                         (emptyView repo) 1 origin
                         (attachments msgSecret [(part, PartPending n)]) letter
@@ -1928,7 +1987,7 @@ spec = do
       a2 <- expectRight (acceptLetter (ctxAs bob repo) (EnvelopeSigner env) (acView a1) 2 origin noParts
                            (letter (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords) 2)))
       a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 origin2 (attachments msgSecret [here part])
-                           (letter (AComment (scopeOf a2) Nothing Nothing (Just part) 3)))
+                           (letter (AComment (scopeOf a2) Nothing Nothing (Just (proven (fst alice) part)) 3)))
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
                            (ASet (scopeOf a2) "labels" "bug" 4))
       a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 noOwnAttachments

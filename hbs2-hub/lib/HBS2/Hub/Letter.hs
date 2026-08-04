@@ -195,8 +195,12 @@ maxLabels = 32
 -- the key, the signature, the domain tag, the hashes and the CBOR framing.
 -- Being generous costs a reader nothing and being exact would have to be
 -- recomputed every time a constructor changes.
+-- Eight refs and not six: PEP-18's 'PartRef' puts a proof beside each of the
+-- two parts an open can name, and a bound that counted the parts and not their
+-- proofs would be a reader refusing what its own writer produced, which is the
+-- failure this constant exists to record.
 maxBoxBytes :: Int
-maxBoxBytes = maxTitle + maxLabels * maxLabel + maxInlineBody + 6 * maxRef
+maxBoxBytes = maxTitle + maxLabels * maxLabel + maxInlineBody + 8 * maxRef
             + maxAttrName + maxAttrValue
             + 4096
 
@@ -303,7 +307,7 @@ malformedRef = \case
                                <|> named "body-part" part
                                <|> (coordsRefs =<< coords)
   AComment thr replyto _ part _ -> bad "thread" thr
-                               <|> named "reply-to" replyto
+                               <|> (bad "reply-to" =<< replyto)
                                <|> named "body-part" part
   ARevise thr coords _          -> bad "thread" thr <|> coordsRefs coords
   ASet thr _ _ _                -> bad "thread" thr
@@ -318,7 +322,15 @@ malformedRef = \case
                | otherwise     = Just name
     bad name h | validHashRef h = Nothing
                | otherwise      = Just name
-    named name = (>>= bad name)
+    -- BOTH halves of a part reference. The proof is a hash off the same wire as
+    -- the part, so it takes any width too, and it is compared against a computed
+    -- value rather than against something that exists: a wrong-length one would
+    -- simply never match, which is a refusal made in the wrong place and after
+    -- the expensive part.
+    part name p = bad name (ptPart p)
+                    <|> bad (name <> "-proof") (proofRef (ptProof p))
+    named name = (>>= part name)
+    proofRef (PartProof h) = h
     coordsRefs c = named "bundle-part" (prBundle c)
 
 -- | Where the owner should send acknowledgements and status updates.
@@ -787,8 +799,17 @@ contentSyntax = body
     bodyOf :: Maybe Text -> [Syntax C]
     bodyOf mb = [ mkForm "body" [txt t] | Just t <- [mb] ]
 
-    partOf :: Maybe HashRef -> [Syntax C]
-    partOf mp = [ mkForm "body-part" [href h] | Just h <- [mp] ]
+    -- The proof as a second atom, because the projection is what a person
+    -- reads canon with and a field inside the signed box that the readable form
+    -- omits is a field nobody ever looks at. It is not what the check runs on:
+    -- the box is.
+    partOf :: Maybe PartRef -> [Syntax C]
+    partOf mp = [ mkForm "body-part" (partAtoms p) | Just p <- [mp] ]
+
+    partAtoms :: PartRef -> [Syntax C]
+    partAtoms p = [ href (ptPart p), href (proofHash (ptProof p)) ]
+
+    proofHash (PartProof h) = h
 
     coordsOf :: PRCoords -> [Syntax C]
     coordsOf c =
@@ -798,7 +819,7 @@ contentSyntax = body
          , mkForm "onto"       [txt (prOnto c)]
          , mkForm "base"       [txt (prBase c)]
          ]
-      <> [ mkForm "bundle-part" [href h] | Just h <- [prBundle c] ]
+      <> [ mkForm "bundle-part" (partAtoms p) | Just p <- [prBundle c] ]
 
     body :: AuthorContent -> [Syntax C]
     body = \case

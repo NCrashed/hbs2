@@ -152,6 +152,15 @@ ghostEvent alice (cpk,csk) mkCanon =
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
 -- only that; telling the parts secret from the message secret is what the
 -- bridge's 'poMessage' is for.
+-- A part reference whose proof really holds. PEP-18 binds a part to its author,
+-- so a valid proof is part of a well-formed event now; the fixtures that never
+-- reach the check use 'unproven'.
+proven :: (HubKey, PrivKey 'Sign HubScheme) -> HashRef -> PartRef
+proven who h = PartRef h (partProofFor h secret32 (fst who))
+
+unproven :: HashRef -> PartRef
+unproven h = PartRef h (PartProof h)
+
 secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
@@ -174,7 +183,7 @@ spec = do
       let repo = fst owner
           eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice owner
-                    (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 2)
+                    (AOpen repo HubIssue "t" [] Nothing (Just (proven alice part)) Nothing 2)
                     (\e -> CanonContent repo e 2 (Just 1) (Just origin) Nothing 2 (Just secret32))
           tid = eventId eOpen
           eCmt = mkEvent alice bob (AComment tid Nothing (Just "hi") Nothing 3)
@@ -308,7 +317,7 @@ spec = do
           o2 = mkEvent alice owner (AOpen repo HubIssue "b" [] Nothing Nothing Nothing 2)
                  (\e -> CanonContent repo e 2 (Just 3) (Just origin) Nothing 4000 Nothing)
           -- ...and this one names an encrypted part with no key to it
-          o3 = mkEvent alice owner (AOpen repo HubIssue "c" [] Nothing (Just part) Nothing 3)
+          o3 = mkEvent alice owner (AOpen repo HubIssue "c" [] Nothing (Just (unproven part)) Nothing 3)
                  (\e -> CanonContent repo e 3 (Just 9) Nothing Nothing 6000 Nothing)
           -- an unnormalized multi-valued attribute: the same two labels in
           -- another order are other bytes and so another event-id
@@ -346,10 +355,10 @@ spec = do
       -- and they are otherwise scattered across three fields of two records.
       let repo = fst owner
           ePR = mkEvent alice owner
-                  (AOpen repo HubPR "pr" [] Nothing (Just body)
-                     (Just coords { prBundle = Just bundle }) 1)
+                  (AOpen repo HubPR "pr" [] Nothing (Just (proven alice body))
+                     (Just coords { prBundle = Just (proven alice bundle) }) 1)
                   (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
-          eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just cmt) 2)
+          eC = mkEvent alice owner (AComment (eventId ePR) Nothing Nothing (Just (proven alice cmt)) 2)
                  (\e -> CanonContent repo e 2 Nothing Nothing Nothing 2 (Just secret32))
           fr = foldEvents repo [ePR, eC]
       frDropped fr `shouldBe` []
@@ -417,7 +426,7 @@ spec = do
           key = fromMaybe (error "fixture key")
                   (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
           prc = PRCoords (Just "hbs23://f") "refs/heads/f" "aaaa"
-                         "refs/heads/master" "bbbb" (Just h)
+                         "refs/heads/master" "bbbb" (Just (unproven h))
       -- The fixture hash itself, so a change in the hashing is caught here
       -- rather than as an unexplained diff in the bytes below.
       show (pretty h) `shouldBe` "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
@@ -431,8 +440,8 @@ spec = do
         "83001a4842324389008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266038109818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266800b80"
       -- A fully populated open with full coordinates: the two records most
       -- likely to gain a field, and the one place PRCoords is pinned at all.
-      hx (Domained author (AOpen key HubPR "title" ["bug","ui"] (Just "body") (Just h) (Just prc) 42))
-        `shouldBe` "83001a4842324189008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8101657469746c659f63627567627569ff8164626f6479818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818700816968627332333a2f2f666c726566732f68656164732f66646161616171726566732f68656164732f6d61737465726462626262818200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266182a"
+      hx (Domained author (AOpen key HubPR "title" ["bug","ui"] (Just "body") (Just (unproven h)) (Just prc) 42))
+        `shouldBe` "83001a4842324189008200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8101657469746c659f63627567627569ff8164626f64798183008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a795726682008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266818700816968627332333a2f2f666c726566732f68656164732f66646161616171726566732f68656164732f6d617374657264626262628183008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a795726682008200820058201c72c1b65434e182da5ebcf1af45322b2afd989579158a86a54c2409a7957266182a"
       -- ...and the two tags at the end of the sum, where a reordering would
       -- otherwise be invisible.
       hx (Domained author (ADelegate key key 3)) `shouldBe`
@@ -869,11 +878,35 @@ spec = do
           stunted = fromMaybe (error "no decode")
                       (decodeStrict (LBS.toStrict (serialise ("abc" :: ByteString))))
           ev = mkEvent alice owner
-                 (AOpen repo HubIssue "t" [] Nothing (Just part) Nothing 1)
+                 (AOpen repo HubIssue "t" [] Nothing (Just (unproven part)) Nothing 1)
                  (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just stunted))
           fr = foldEvents repo [ev]
       frDropped fr `shouldBe` []
       map anWhat (frAnomalies fr) `shouldBe` [UnusablePartSecret]
+
+    -- The audit half of PEP-18's part proof. The check that stops the theft is
+    -- the bridge's, before anything is minted; this is the one every clone can
+    -- make for itself out of the two boxes alone, so a maintainer who published
+    -- a secret nobody proved cannot have it counted as canon anywhere.
+    it "drops an event whose part-secret its author never proved" $ do
+      owner <- kp
+      alice <- kp
+      mallory <- kp
+      part <- someHash
+      let repo = fst owner
+          -- Same part, same published secret, two authors: only the one the
+          -- proof is bound to survives.
+          ev who = mkEvent who owner
+                     (AOpen repo HubIssue "t" [] Nothing (Just (proven alice part)) Nothing 1)
+                     (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
+      frDropped (foldEvents repo [ev alice]) `shouldBe` []
+      map drWhy (frDropped (foldEvents repo [ev mallory])) `shouldBe` [PartNotProven]
+      -- Nothing is published, so there is nothing to prove and the event stands
+      -- (it says so as an anomaly instead).
+      let noKey = mkEvent mallory owner
+                    (AOpen repo HubIssue "t" [] Nothing (Just (proven alice part)) Nothing 1)
+                    (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 Nothing)
+      frDropped (foldEvents repo [noKey]) `shouldBe` []
 
     it "refuses a signature made for another kind of record" $ do
       owner <- kp
@@ -970,7 +1003,7 @@ spec = do
       -- after a merge, and a redact of the opening event.
       let repo = fst owner
           ePR = mkEvent alice owner
-                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords { prBundle = Just bundle }) 1)
+                  (AOpen repo HubPR "pr" [] Nothing Nothing (Just coords { prBundle = Just (proven alice bundle) }) 1)
                   (\e -> CanonContent repo e 1 (Just 1) Nothing Nothing 1 (Just secret32))
           tid = eventId ePR
           eMerge = mkEvent owner owner (AMerge tid "cafe" "refs/heads/master" 2) (canon repo 2 Nothing)

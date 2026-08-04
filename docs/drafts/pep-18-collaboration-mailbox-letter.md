@@ -155,7 +155,8 @@ either: PEP-19 versions canon at the event-file and tree level.
 (labels   "bug" "ui")              ; requested labels (advisory; owner decides).
                                    ;   Strings, not symbols: a label may hold
                                    ;   a space.
-;; body: inline text in the record's body field, or (body-part <hashref>)
+;; body: inline text in the record's body field, or
+;;       (body-part <hashref> <proof>), see "A part is claimed, not merely named"
 ```
 
 Pull-request letters add the source coordinates (kind = pr):
@@ -166,8 +167,9 @@ Pull-request letters add the source coordinates (kind = pr):
 (source-tip <git-sha1>)               ; commit being proposed
 (onto       refs/heads/master)
 (base       <git-sha1>)               ; merge-base the branch forked from
-(bundle-part <hashref>)                ; delta artifact (git bundle base..tip) as an
-                                      ;   attachment; the default PR path, see PEP-20
+(bundle-part <hashref> <proof>)        ; delta artifact (git bundle base..tip) as an
+                                      ;   attachment; the default PR path, see PEP-20.
+                                      ;   The proof is the sender's claim to it.
 ```
 
 Body size. `messageData` is a single `SmallEncryptedBlock`: one secretbox
@@ -369,6 +371,43 @@ The fix: at fold, the owner publishes the PARTS group secret alongside the
 event (PEP-19 carries it in the owner-signed canon box). This reveals nothing
 that is not already being made public, because that secret encrypts only the
 attachments the fold is publishing anyway.
+
+A part is claimed, not merely named
+==================================
+
+The paragraph above holds only if the attachments the event names are the
+sender's own, and nothing about a hash says whose it is. `MessageContent` is
+signed and NOT encrypted, so the part hashes of every letter in a mailbox are
+public; the maintainer's node opens whatever a letter names, because the tree
+is wrapped for the recipient key it holds; and folding then publishes the
+secret. Without a further check, anybody could send an ordinary-looking issue
+naming somebody else's part hash, and an unsuspecting maintainer accepting it
+would publish the key to a stranger's private attachment, in public
+append-only canon, forever, along with every other attachment on that letter,
+since one message's parts share one group key.
+
+So each reference is a pair: the part, and a proof that the sender knew its
+secret before this node decrypted anything.
+
+```
+part-ref  = (hashref, part-proof)
+part-proof = H(serialise (Domained 0x48423250 (part, secret, author-key)))
+```
+
+`part` is the part's hashref, `secret` the raw bytes of the parts group
+secret, and `author-key` the signing key of the inner box the reference sits
+in. The author key is the half that does the work: a thief signs his own box
+with his own key, so the proof he would need is one he cannot compute without
+the secret he does not have, and the proof he can copy out of the letter he
+stole the hash from is bound to somebody else. The part is in it so that a
+letter with two attachments carries one proof per part rather than one value
+repeated.
+
+Both places a part is referenced carry the pair: `(body-part <hashref>
+<proof>)` and `(bundle-part <hashref> <proof>)`. A hub refuses to fold a
+letter whose proof does not hold, and PEP-19's fold drops an admitted event
+that publishes a part-secret against a proof that does not verify, so the
+check is one every clone can make for itself out of the two boxes alone.
 
 It is emphatically not the secret over `messageData`. That one also opens the
 back-channel clauses, which are outside the signed letter precisely so that a

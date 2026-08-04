@@ -82,6 +82,14 @@ secret32 :: PartSecret
 secret32 = secretOf 0x41
 
 -- Two distinct secrets, for the case where each message has its own.
+-- A part whose proof holds for this author and secret (PEP-18 'PartRef'),
+-- and one that never gets that far.
+proven :: PartSecret -> (HubKey, PrivKey 'Sign HubScheme) -> HashRef -> PartRef
+proven sec who h = PartRef h (partProofFor h sec (fst who))
+
+unproven :: HashRef -> PartRef
+unproven h = PartRef h (PartProof h)
+
 secretA, secretB :: PartSecret
 secretA = secretOf 0x01
 secretB = secretOf 0x02
@@ -91,7 +99,10 @@ secretOf b = fromMaybe (error "bad fixture secret")
                (mkPartSecret (BS.replicate typicalKeyLength b))
 
 spec :: Spec
-spec = do
+spec = spec3 >> specMain
+
+specMain :: Spec
+specMain = do
 
   describe "PEP-18 letter payload" $ do
 
@@ -413,7 +424,7 @@ spec = do
       part  <- someHash
       origin <- someHash
       let ac = AOpen (fst owner) HubIssue "with attachments" ["bug","needs triage"]
-                     (Just "inline") (Just part) Nothing 7
+                     (Just "inline") (Just (proven secret32 alice part)) Nothing 7
           letter = makeLetter (fst alice) (snd alice) ac noReplyChannel
       (box, _, _, _) <- expectRight (openLetterNoPolicy letter)
       let cc eid = CanonContent (fst owner) eid 1 (Just 1) (Just origin) Nothing 100 (Just secret32)
@@ -435,8 +446,8 @@ spec = do
       owner <- kp
       b1 <- someHash
       b2 <- someHash
-      let coords1 = coords { prBundle = Just b1 }
-          coords2 = coords { prSourceTip = "cccc", prBundle = Just b2 }
+      let coords1 = coords { prBundle = Just (proven secretA alice b1) }
+          coords2 = coords { prSourceTip = "cccc", prBundle = Just (proven secretB alice b2) }
           acOpen = AOpen (fst owner) HubPR "pr" [] Nothing Nothing (Just coords1) 1
           acRev  = ARevise (expectJust (letterEventId
                      (makeLetter (fst alice) (snd alice) acOpen noReplyChannel))) coords2 2
@@ -451,7 +462,7 @@ spec = do
                           (CanonContent (fst owner) (authorBoxId box) sq Nothing Nothing Nothing sq (Just s)))
           fr = foldEvents (fst owner) [mk secretA 1 obox, mk secretB 2 rbox]
           t = threadOf fr (eventId (mk secretA 1 obox))
-      fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just b2)
+      fmap (prBundle . psCoords) (tsPR t) `shouldBe` Just (Just (proven secretB alice b2))
       fmap psPartSecret (tsPR t) `shouldBe` Just (Just secretB)
 
     it "drops a deny-listed inner author, however the envelope was signed" $ do
@@ -507,3 +518,35 @@ spec = do
       let fr = foldEvents (fst owner) [bless owner 1 (Just 1) obox, bless owner 2 Nothing rbox]
           t = threadOf fr tid
       map cAuthor (tsComments t) `shouldBe` [fst bob]
+
+-- The one property the whole part-proof rests on (PEP-18 'PartRef'). Everything
+-- else about it is plumbing: this is the reason a thief cannot lift a proof out
+-- of the letter he took the part hash from.
+spec3 :: Spec
+spec3 =
+  describe "PEP-18 attachments: what a part proof is bound to" $ do
+
+    it "is a different value for a different author" $ do
+      alice <- kp
+      mallory <- kp
+      part <- someHash
+      -- Same part, same secret, two keys. The proof Mallory needs is one he
+      -- cannot compute, and the one he can copy is not his.
+      partProofFor part secret32 (fst alice)
+        `shouldNotBe` partProofFor part secret32 (fst mallory)
+      provesPart (PartRef part (partProofFor part secret32 (fst alice)))
+                 secret32 (fst alice) `shouldBe` True
+      provesPart (PartRef part (partProofFor part secret32 (fst alice)))
+                 secret32 (fst mallory) `shouldBe` False
+
+    it "is a different value for a different secret, and for a different part" $ do
+      alice <- kp
+      p1 <- someHash
+      p2 <- someHash
+      partProofFor p1 secretA (fst alice) `shouldNotBe` partProofFor p1 secretB (fst alice)
+      partProofFor p1 secretA (fst alice) `shouldNotBe` partProofFor p2 secretA (fst alice)
+      -- The part is in the proof so that a letter carrying two attachments has
+      -- one proof per part rather than one value repeated, and nothing has to
+      -- decide which of two disagreeing copies is the real one.
+      provesPart (PartRef p2 (partProofFor p1 secretA (fst alice)))
+                 secretA (fst alice) `shouldBe` False

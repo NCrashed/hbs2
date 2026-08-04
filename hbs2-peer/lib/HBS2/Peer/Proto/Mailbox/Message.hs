@@ -91,7 +91,7 @@ createMessage :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
               -> ByteString                  -- ^ payload
               -> m (Message s)
 createMessage cms flags gks sender' rcpts' parts bs = do
-  trees <- createAttachments cms sender' rcpts' parts
+  (trees, _) <- createAttachments cms sender' rcpts' parts
   createMessageWith cms flags gks sender' rcpts' trees bs
 
 -- | Store a message's attachments, and say what they are called.
@@ -111,12 +111,21 @@ createMessage cms flags gks sender' rcpts' parts bs = do
 --
 -- The answer is in the order the parts were given, so a caller with two of
 -- them can tell which is which.
+--
+-- THE SECRET COMES BACK WITH THEM, and it is generated in here rather than
+-- passed in for the reason above. A sender cannot recover it afterwards from
+-- anything they keep: it is wrapped for the recipients' encryption keys, and
+-- theirs is one of them only because 'resolveKeys' puts the sender first in the
+-- list. hbs2-hub needs it at the moment it signs, to prove the parts it names
+-- are its own (PEP-18 'PartRef'), and a sender that had to look its own
+-- attachment up again to learn it would be a sender that could equally look up
+-- somebody else's.
 createAttachments :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
                   => CreateMessageServices s
                   -> Either HashRef (Sigil s)    -- ^ sender
                   -> [Either HashRef (Sigil s)]  -- ^ sigil keys (recipients)
                   -> [([(Text, Text)], m LBS.ByteString)]
-                  -> m [HashRef]
+                  -> m ([HashRef], GroupSecret)
 createMessageWith :: forall s m . (MonadUnliftIO m , s ~ HBS2Basic)
                   => CreateMessageServices s
                   -> MessageFlags
@@ -144,7 +153,7 @@ createAttachments cms@CreateMessageServices{..} sender' rcpts' parts = do
 
   -- Each tree carries its own group key, so a reader given a part hash
   -- resolves the key from the tree and never needs the message it arrived in.
-  for parts $ \(meta, lbsRead)-> do
+  trees <- for parts $ \(meta, lbsRead)-> do
 
     let mt = vcat [ pretty k <> ":" <+> dquotes (pretty v)
                   | (k,v) <- HM.toList (HM.fromList meta)
@@ -153,6 +162,8 @@ createAttachments cms@CreateMessageServices{..} sender' rcpts' parts = do
 
     lbs <- lbsRead
     createEncryptedTree cmStorage gksParts gkParts (DefSource mt lbs)
+
+  pure (trees, gksParts)
 
 createMessageWith cms@CreateMessageServices{..} flags gks sender' rcpts' trees bs = do
 

@@ -333,6 +333,12 @@ data TriageError =
     -- | The content names a part the message does not carry. Not repairable:
     -- a later message cannot add a part to an author box already signed.
   | PartNotInMessage HashRef
+    -- | The content names a part whose proof does not hold, so the sender
+    -- either did not know the secret or is not the author the proof is bound
+    -- to. Either way this is a letter asking for somebody else's attachment to
+    -- be published (PEP-18 'PartRef'), and the only unrepairable half of it is
+    -- that canon cannot take a publication back.
+  | PartUnproven HashRef
     -- | The caller passed the no-attachments value for content that names an
     -- attachment, so there is no evidence to judge against. A caller bug: the
     -- builders that carry evidence are the ones with a message behind them.
@@ -495,6 +501,8 @@ instance Pretty TriageError where
     ViewRepoMismatch      -> "the view describes another repository"
     MissingPartSecret h   -> "no key supplied for an attachment:" <+> pretty h
     PartNotInMessage h    -> "names a part the message does not carry:" <+> pretty h
+    PartUnproven h        -> "names a part its author has not proved is theirs:"
+                               <+> pretty h
     NoAttachmentsSupplied -> "no evidence supplied about the attachments"
     PartNotFetched h      -> "an attachment not fetched yet:" <+> pretty h
     PartTooLarge h        -> "an attachment over what this hub carries:" <+> pretty h
@@ -570,6 +578,10 @@ outcome = \case
   -- there is nothing for it to fix; stopping the loop instead would let one
   -- stranger wedge triage with a single letter.
   PartNotInMessage _   -> Discard
+  -- The same answer, and for a sharper reason: a letter claiming an attachment
+  -- it cannot prove is one nobody should keep triaging, and no later state of
+  -- this node changes what the sender signed.
+  PartUnproven _       -> Discard
   -- The sender chose an attribute name or value that is not in canonical form,
   -- so no owner can honour it as sent and no later pass changes that. Raised
   -- against what triage composes it is 'Composed' instead, which is a stop.
@@ -774,15 +786,15 @@ ownAttachments hs = OwnerParts (PartsOf Nothing (HM.fromList hs))
 -- from the evidence separately. Same reason 'stampFor' is one function: two
 -- expressions are two chances to check one value and publish another, and here
 -- the value is a key that cannot be corrected once it is in canon.
-requireParts :: PartsOf -> AuthorContent -> Either TriageError (Maybe PartSecret)
-requireParts po content
+requireParts :: HubKey -> PartsOf -> AuthorContent -> Either TriageError (Maybe PartSecret)
+requireParts who po content
   -- Told nothing at all about attachments, for content that names one. That
   -- is the caller reaching for the empty value rather than wiring the parts
   -- through, and it is the only shape in which a caller bug and a hostile
   -- letter are indistinguishable, so it is the only one that stops the loop.
   | referencesPart content, toldNothing = Left NoAttachmentsSupplied
   | otherwise = do
-      secrets <- traverse present (eventParts content)
+      secrets <- traverse present (eventPartRefs content)
       one secrets
   where
     -- Told nothing means exactly that: no parts AND no message behind them. A
@@ -800,7 +812,7 @@ requireParts po content
     -- Size first, and for every state: the answer to "too big" does not change
     -- once it is downloaded, so refusing it before is strictly better and is
     -- the only order in which the limit bounds anything but canon.
-    present h = case HM.lookup h (poCarried po) of
+    present p = case HM.lookup h (poCarried po) of
       Nothing -> Left (PartNotInMessage h)
       Just ev | evidenceSize ev > maxPartBytes -> Left (PartTooLarge h)
       Just (PartPending _) -> Left (PartNotFetched h)
@@ -812,7 +824,21 @@ requireParts po content
         -- unchecked so that canon somebody else wrote can be read, and
         -- compaction re-stamps events by reading the old canon boxes.
         | not (usablePartSecret sec) -> Left (BadPartSecret h)
+        -- THE CHECK THAT MAKES PUBLISHING THE SECRET SAFE, and the one this
+        -- gate did not have. Every test above is about the part being readable;
+        -- none of them was about it being the SENDER's. A part is named by the
+        -- hash of its encrypted tree and MessageContent is signed and public, so
+        -- the part hashes of every letter in a mailbox are there for anyone to
+        -- copy into a letter of their own. The maintainer's node opens whatever
+        -- is named (it holds the recipient key, which is what the tree is
+        -- wrapped for), and folding then published the group secret to a
+        -- stranger's attachment, in public append-only canon, forever, along
+        -- with every other attachment on that letter, since one message's parts
+        -- share one key.
+        | not (provesPart p sec who) -> Left (PartUnproven h)
         | otherwise                  -> Right (h, sec)
+      where
+        h = ptPart p
 
     -- Canon has one @part-secret@ field, so an event whose parts were opened
     -- with two different keys cannot be represented, whoever folds it. The
@@ -1088,7 +1114,7 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   -- Last, because this one is about what the caller supplied rather than about
   -- the letter: a shape error should be reported as such rather than as a
   -- missing key.
-  secret <- requireParts parts content
+  secret <- requireParts author parts content
 
   Right (accepted canonKp repo view folded (Just origin) Nothing secret content box author
            (ThreadScope thread) reply)
@@ -1365,7 +1391,7 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
                | not (coordsOK content)               -> Left BadContent
                | otherwise                            -> Right (ThreadScope thr)
 
-  secret <- requireParts parts content
+  secret <- requireParts pk parts content
 
   Right (accepted kp repo view folded Nothing Nothing secret content box pk scope NoReply)
   where

@@ -647,7 +647,7 @@ spec = do
               >>= either (fail . show) pure
       let header = head (fmap render (reportDoc st))
       header `shouldSatisfy` Text.isInfixOf "canon deadbeef"
-      header `shouldSatisfy` Text.isInfixOf "(hub-meta 1)"
+      header `shouldSatisfy` Text.isInfixOf (Text.strip renderMeta)
       header `shouldSatisfy`
         Text.isInfixOf (Text.pack (show (pretty (AsBase58 (fst owner)))))
 

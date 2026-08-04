@@ -34,8 +34,8 @@ messagePartsTests = testGroup "message parts"
         let cms = services sto [alice, bob]
 
         -- ONE: the attachment exists and has a name.
-        parts <- createAttachments cms (Right aliceS) [Right bobS]
-                   [([("file-name","pr.bundle")], pure (LBS8.pack "the bundle bytes"))]
+        (parts, _) <- createAttachments cms (Right aliceS) [Right bobS]
+                        [([("file-name","pr.bundle")], pure (LBS8.pack "the bundle bytes"))]
         part <- case parts of
                   [p] -> pure p
                   _   -> assertFailure "expected one part" >> fail "unreachable"

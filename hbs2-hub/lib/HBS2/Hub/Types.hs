@@ -23,6 +23,11 @@ module HBS2.Hub.Types
   , EventId
   , ThreadId
   , HubKind(..)
+  , PartRef(..)
+  , PartProof(..)
+  , partProofDomain
+  , partProofFor
+  , provesPart
   , PRCoords(..)
   , AuthorContent(..)
   , CanonContent(..)
@@ -122,6 +127,70 @@ data HubKind = HubIssue | HubPR
 
 instance Serialise HubKind
 
+-- | An encrypted part an event names, and the sender's proof that it is
+-- theirs to publish.
+--
+-- WHY THE PROOF EXISTS. Folding an event that carries an attachment publishes
+-- the part's group secret into canon ('ccPartSecret'), which is how a clone
+-- reads the attachment at all. A part is named by the hash of its encrypted
+-- tree, and a hash is not a claim of ownership: 'MessageContent' is signed and
+-- not encrypted, so the part hashes of every letter in a mailbox are public.
+-- Without a proof, anybody could send an ordinary-looking issue naming somebody
+-- else's part hash, and an unsuspecting maintainer accepting it would publish
+-- the secret to a stranger's private attachment -- and to every attachment on
+-- that letter, since one message's parts share one group key. Canon is
+-- append-only and public, so there is no taking it back.
+--
+-- The proof is what only the part's own sender can produce, because only they
+-- knew the secret before this node decrypted anything. PEP-18's argument that
+-- publishing the secret "reveals nothing that is not already being published"
+-- rests on the event's parts being the sender's own, and this is the check that
+-- was missing under it.
+--
+-- WIRE FORMAT, APPEND ONLY: reachable from 'AuthorContent'.
+data PartRef = PartRef
+  { ptPart  :: HashRef
+  , ptProof :: PartProof
+  }
+  deriving stock (Eq,Ord,Show,Generic)
+
+instance Serialise PartRef
+
+-- | Knowledge of a part's group secret, bound to the part and to its author.
+--
+-- A hash and not a signature: the sender already signs the box this sits in, so
+-- what is needed here is only a value nobody without the secret can compute.
+newtype PartProof = PartProof HashRef
+  deriving stock (Eq,Ord,Show,Generic)
+
+instance Serialise PartProof
+
+-- | WIRE FORMAT: assigned once, never reused or renumbered. It is inside the
+-- proof, and the proof is inside every event-id that names a part.
+partProofDomain :: Word32
+partProofDomain = 0x48423250  -- "HB2P"
+
+-- | The proof a sender must carry for one part.
+--
+-- Over the part, the secret and the AUTHOR KEY, and the author key is the half
+-- that does the work: it is what stops a thief lifting the proof out of the
+-- letter he stole the part hash from. His own letter is signed by his own key
+-- (the box will not verify otherwise), so the proof he would need is one he
+-- cannot compute without the secret he does not have.
+--
+-- The part is in it as well, so that a letter carrying two attachments has one
+-- proof per part rather than one value repeated, and nothing has to decide
+-- which of two disagreeing copies is the real one.
+partProofFor :: HashRef -> PartSecret -> HubKey -> PartProof
+partProofFor part sec who =
+  PartProof (HashRef (hashObject (serialise (Domained partProofDomain payload))))
+  where
+    payload = (part, partSecretBytes sec, who)
+
+-- | Is this the proof that part, that secret and that author give?
+provesPart :: PartRef -> PartSecret -> HubKey -> Bool
+provesPart p sec who = ptProof p == partProofFor (ptPart p) sec who
+
 -- | Pull-request coordinates (PEP-20). On the delta path 'prSource' is
 -- absent and 'prBundle' carries the git bundle; on the fork-pointer path
 -- the reverse. 'prSourceTip'/'prBase' are always present and signed.
@@ -135,7 +204,7 @@ data PRCoords = PRCoords
   , prSourceTip :: Text           -- ^ git sha1 being proposed
   , prOnto      :: Text
   , prBase      :: Text           -- ^ merge-base the branch forked from
-  , prBundle    :: Maybe HashRef  -- ^ bundle-part, delta path only
+  , prBundle    :: Maybe PartRef   -- ^ bundle-part, delta path only
   }
   deriving stock (Eq,Ord,Show,Generic)
 
@@ -158,9 +227,9 @@ data AuthorContent =
     -- does not apply them, because a stranger must not label their own
     -- submission (PEP-18). They travel in the signed content so triage can
     -- see the request and the owner can honour it with an owner-signed set.
-    AOpen RepoRef HubKind Text [Text] (Maybe Text) (Maybe HashRef) (Maybe PRCoords) Word64
+    AOpen RepoRef HubKind Text [Text] (Maybe Text) (Maybe PartRef) (Maybe PRCoords) Word64
     -- | thread, reply-to?, body?, body-part?, ts
-  | AComment ThreadId (Maybe EventId) (Maybe Text) (Maybe HashRef) Word64
+  | AComment ThreadId (Maybe EventId) (Maybe Text) (Maybe PartRef) Word64
     -- | thread, new coords, ts  (PR only, author-of-record)
   | ARevise ThreadId PRCoords Word64
     -- | thread, attr, value, ts  (owner)
@@ -730,12 +799,17 @@ usablePartSecret (PartSecret bs) = BS.length bs == (typicalKeyLength :: Int)
 -- A reader that meets a higher one reports it rather than folding. Any change
 -- to the admission rules, to the drop reasons, or to how state is derived from
 -- an admitted event bumps this.
+-- 2 since PEP-18's 'PartRef': the parts an event names carry a proof now, which
+-- is both a new drop reason ('PartNotProven') and a different encoding for
+-- @body-part@ and @bundle-part@. A reader of version 1 canon would admit an
+-- event this one drops and compute a different event-id for the same letter, so
+-- the two cannot be told apart by anything smaller than this number.
 hubMetaVersion :: Word32
-hubMetaVersion = 1
+hubMetaVersion = 2
 
 -- | The version of a single event file: the @(hub-event N)@ of PEP-19.
 hubEventVersion :: Word32
-hubEventVersion = 1
+hubEventVersion = 2
 
 -- | The highest @folded-ts@ canon admits: 2100-01-01T00:00:00Z in epoch
 -- milliseconds.

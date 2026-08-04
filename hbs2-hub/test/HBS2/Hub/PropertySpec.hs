@@ -80,8 +80,12 @@ data Step =
   deriving stock (Show)
 
 -- | What the caller can say about an attachment, and what it costs to be
--- wrong. Each of the four is a different answer, and only one mints.
-data Attach = Ready | NotFetched | NotCarried | NoKey | TooBig
+-- wrong. Each of them is a different answer, and only one mints.
+--
+-- Unproven is the letter rather than the caller: the evidence is perfect and
+-- the content claims a part with a proof that does not hold, which is a letter
+-- asking for somebody else's attachment to be published (PEP-18 'PartRef').
+data Attach = Ready | NotFetched | NotCarried | NoKey | TooBig | Unproven
   deriving stock (Eq,Show)
 
 instance Arbitrary Step where
@@ -102,7 +106,7 @@ instance Arbitrary Step where
     , (2, StepSetLabels <$> genIx <*> genTs <*> arbitrary)
     , (2, StepHonourWith <$> genIx <*> genTs)
     , (2, StepAttach <$> genIx <*> genTs
-            <*> elements [Ready,NotFetched,NotCarried,NoKey,TooBig])
+            <*> elements [Ready,NotFetched,NotCarried,NoKey,TooBig,Unproven])
     , (1, StepBigBody <$> genTs)
     , (2, StepRewrapped <$> genTs <*> elements [HubIssue,HubPR])
     , (1, StepFromDenied <$> genTs)
@@ -542,8 +546,9 @@ step cast st = \case
          Right acc -> keep THonourWith acc
          Left e    -> refuse e
 
-  -- Only Ready may mint. The other three are the ways a caller can be wrong
-  -- about an attachment, and every one of them would be permanent in canon.
+  -- Only Ready may mint. The others are the ways a caller can be wrong about an
+  -- attachment, plus the way a LETTER can be, and every one of them would be
+  -- permanent in canon.
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
@@ -553,7 +558,14 @@ step cast st = \case
                NoKey      -> attachments msgSecret [(part, PartLocked 1024)]
                TooBig     -> attachments msgSecret
                                [(part, PartOpened (maxPartBytes + 1) secret32)]
-        content = AOpen repo HubIssue "att" [] Nothing (Just part) Nothing ts
+               Unproven   -> attachments msgSecret [here part]
+        -- The proof is over the part, the secret and the AUTHOR: a letter that
+        -- names a part it did not create cannot produce one, however perfect
+        -- the evidence about the part is.
+        ref = case att of
+                Unproven -> PartRef part (PartProof part)
+                _        -> PartRef part (partProofFor part secret32 alicePk)
+        content = AOpen repo HubIssue "att" [] Nothing (Just ref) Nothing ts
     in case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
               (clockOf st) (originOf (stStep st)) po (letterOf content) of
          -- Only Ready may mint. Swallowing the refusal was how removing the

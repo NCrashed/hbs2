@@ -29,6 +29,11 @@ someHash = do
   (pk,sk) <- kp
   pure (authorBoxId (signAuthor pk sk (ARevoke pk pk 0)))
 
+-- A part reference for a fixture about rendering rather than about the proof
+-- (PEP-18 'PartRef'): nothing here folds, so nothing here checks it.
+unproven :: HashRef -> PartRef
+unproven h = PartRef h (PartProof h)
+
 secret32 :: PartSecret
 secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
@@ -65,7 +70,7 @@ spec = do
       -- and no second implementation can read it.
       let repo = fst owner
           ev = mkEvent alice owner
-                 (AOpen repo HubPR nasty ["bug"] (Just nasty) (Just part) (Just coords) 42)
+                 (AOpen repo HubPR nasty ["bug"] (Just nasty) (Just (unproven part)) (Just coords) 42)
                  (canon repo 7 (Just 3) (Just origin) (Just secret32))
       parseEvent (renderEvent ev) `shouldBe` Right (Just hubEventVersion, ev)
       -- One clause per line, one clause of each name. Two answers to the same
@@ -120,9 +125,9 @@ spec = do
           quoted n = Text.replicate n "\""
           full = AOpen repo HubPR (filled maxTitle)
                    (replicate maxLabels (filled maxLabel))
-                   (Just (filled maxInlineBody)) (Just part)
+                   (Just (filled maxInlineBody)) (Just (unproven part))
                    (Just (PRCoords (Just (filled maxRef)) (filled maxRef) (filled maxRef)
-                            (filled maxRef) (filled maxRef) (Just part)))
+                            (filled maxRef) (filled maxRef) (Just (unproven part))))
                    42
           biggest = mkEvent alice owner full (canon repo 7 (Just 3) Nothing (Just secret32))
           attrs = mkEvent owner owner
@@ -259,14 +264,17 @@ spec = do
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                  (canon repo 1 (Just 1) Nothing Nothing)
           file = renderEvent ev
-          bumped = Text.replace "(hub-event 1)" "(hub-event 4294967295)" file
+          -- The clause this build writes, so a version bump does not turn these
+          -- into a test of a replacement that matched nothing.
+          stamped = "(hub-event " <> Text.pack (show hubEventVersion) <> ")"
+          bumped = Text.replace stamped "(hub-event 4294967295)" file
       parseEvent bumped `shouldBe` Right (Just 4294967295, ev)
       -- ...nor when it is not a number at all. The clause is unsigned, so a
       -- veto there is a way to make a signed event go missing by editing one
       -- line of the file it sits in, and missing is harder to notice than wrong.
-      let garbled = Text.replace "(hub-event 1)" "(hub-event tomorrow)" file
+      let garbled = Text.replace stamped "(hub-event tomorrow)" file
       parseEvent garbled `shouldBe` Right (Nothing, ev)
-      let absent = Text.replace "(hub-event 1)\n" "" file
+      let absent = Text.replace (stamped <> "\n") "" file
       parseEvent absent `shouldBe` Right (Nothing, ev)
       -- what a newer schema can really do is put content in a box this build
       -- cannot decode, and the fold answers that itself, keeping the stamp
@@ -409,6 +417,6 @@ spec = do
           ev n = mkEvent alice owner
                    (AOpen repo HubIssue (Text.pack (show n)) [] Nothing Nothing Nothing n)
                    (canon repo n (Just n) Nothing Nothing)
-      parseEvent (renderEvent (ev 1)) `shouldBe` Right (Just 1, ev 1)
+      parseEvent (renderEvent (ev 1)) `shouldBe` Right (Just hubEventVersion, ev 1)
       parseEvent "(hub-event 1)\n(author-box zz)\n"
         `shouldBe` (Left (BadClause "author-box") :: Either CanonError (Maybe Word32, Event))

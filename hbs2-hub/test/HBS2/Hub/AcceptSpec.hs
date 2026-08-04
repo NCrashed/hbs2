@@ -122,6 +122,11 @@ spec1 = do
                        , "--repo", b58 other, "--message", show (pretty h) ])
         `shouldBe` Nothing
 
+-- A part reference for a fixture that never looks at the proof: what is under
+-- test here is which content carries a bundle at all.
+unproven :: HashRef -> PartRef
+unproven h = PartRef h (PartProof h)
+
 -- Whether an accept verifies anything at all. Three answers, and only one of
 -- them means "run the bundle checks": getting it wrong either skips
 -- verification on a real pull request or tries to verify an issue.
@@ -133,14 +138,14 @@ spec2 =
       repo <- aKey
       let part = aHash "the bundle"
           c = PRCoords Nothing "refs/heads/feature" "aa" "refs/heads/master" "bb"
-                       (Just part)
+                       (Just (unproven part))
       bundleOf (AOpen repo HubPR "t" [] Nothing Nothing (Just c) 1)
         `shouldBe` Just (part, "refs/heads/feature", "aa", "bb")
 
     it "finds it on a revise too, which proposes new coordinates" $ do
       let part = aHash "the second bundle"
           c = PRCoords Nothing "refs/heads/feature" "cc" "refs/heads/master" "bb"
-                       (Just part)
+                       (Just (unproven part))
       bundleOf (ARevise (aHash "thread") c 1)
         `shouldBe` Just (part, "refs/heads/feature", "cc", "bb")
 

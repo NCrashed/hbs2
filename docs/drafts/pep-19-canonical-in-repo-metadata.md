@@ -218,6 +218,9 @@ and have take effect in the other.
 
 PR coordinates are a product, in this order: `source`, `source-ref`,
 `source-tip`, `onto`, `base`, `bundle-part`, with the first and last optional.
+A part reference is itself a product of the part hashref and the sender's proof
+of it (PEP-18 "A part is claimed, not merely named"), and both halves are inside
+the event-id.
 
 The canon payload is frozen too, and it is the one it is easiest to forget,
 since no event-id covers it: every canon signature ever made does. Its fields
@@ -346,7 +349,9 @@ signed boxes; the remaining clauses are the readable projection.
 (title     "a title")              ; on open
 (created   <word64>)               ; the author's declared time, Unix epoch MILLISECONDS
 (labels    "bug" "ui")             ; on open: what the author ASKS for, never applied
-(body      "...")                  ; inline text, or (body-part <hashref>) for large/binary
+(body      "...")                  ; inline text, or (body-part <hashref> <proof>) for
+                                   ;   large/binary; the proof is the sender's claim
+                                   ;   to the part (PEP-18)
 (thread    <thread-id>)            ; replies only, absent on open; the canonical
                                    ;   thread id (an event-id), sender-computable
 (reply-to  <event-id>)             ; canonical id of the event replied to, replies only
@@ -355,7 +360,7 @@ signed boxes; the remaining clauses are the readable projection.
 (source-tip "<sha1>")
 (onto       "refs/heads/master")
 (base       "<sha1>")
-(bundle-part <hashref>)            ;   or the bundle, on the delta path
+(bundle-part <hashref> <proof>)    ;   or the bundle, on the delta path
 (set       "status" "closed")      ; on set: the assignment, name AND value quoted
 (merge-commit "<sha1>")            ; on merge
 (merged-into  "refs/heads/master")
@@ -604,7 +609,7 @@ The tree under a `refs/hbs2/meta` commit:
 
 ```
 /
-  version                      ; exactly "(hub-meta 1)\n", a clause like every
+  version                      ; exactly "(hub-meta 2)\n", a clause like every
                                ;   other one in this tree
   threads/
     <thread-id>/
@@ -676,12 +681,13 @@ there is nothing to decide between, but the decision has to be written down
 with the bump, not discovered afterwards, and per-version rules imply keeping
 the v1 fold rather than editing it in place.
 
-The second is that `hub-meta` is 1 while the rules are still moving. Changes
-that would normally require a bump (a new drop reason, a change to the signed
-encoding, a new admission rule) are being made at 1 on the grounds that no
-canon exists yet, which is true and has an expiry: the number is free only
-until something writes a tree somebody else might read. The first release that
-ships a writer bumps it, and every change after that pays the full price.
+The second is that `hub-meta` moves while the rules do. Changes that would
+normally require a bump (a new drop reason, a change to the signed encoding, a
+new admission rule) are cheap only because no canon exists yet, which is true
+and has an expiry: the number is free only until something writes a tree
+somebody else might read. It is 2 as of PEP-18's part proof, which was all
+three of those at once. The first release that ships a writer freezes it, and
+every change after that pays the full price.
 
 Ordering:
 
@@ -740,12 +746,12 @@ other inputs above. Both are caches over a pure function; neither is a second
 implementation of the rules, and nothing may become one.
 
 A note on the version, since this document says in several places that changing
-any of this bumps `hub-meta` and the number has stayed at 1 through every change
-so far. Both are true and they are not in tension: the rule is about canon that
-EXISTS. Nothing has published a tree, so there is no clone to disagree with and
-nothing to migrate, and the number will be 1 for the first one written. The
-first published tree is what closes the window; after it, every line here costs
-a bump and a fork in the fold.
+any of this bumps `hub-meta`. The rule is about canon that EXISTS. Nothing has
+published a tree, so there is no clone to disagree with and nothing to migrate,
+and the number is whatever the last change left it at: 2, after PEP-18's part
+proof changed the signed encoding, added an admission rule and added a drop
+reason. The first published tree is what closes the window; after it, every line
+here costs a bump and a fork in the fold.
 
 The set of refusals is consensus too, and finer than a reader might expect on
 purpose. "Kind and payload disagree" and "the stamp is unusable" are each four
@@ -788,6 +794,18 @@ altering state:
      on an issue thread. An event that breaks any of these is dropped rather
      than admitted, because canon would otherwise hold a proposal nobody can
      obtain, or a thread whose kind and payload disagree.
+  4b. If the canon box publishes a usable `part-secret`, then every part the
+     author box names carries a proof that verifies against that secret and the
+     AUTHOR box signer (PEP-18 "A part is claimed, not merely named"). An event
+     that fails this is dropped. What it stops is a letter naming somebody
+     else's attachment: the maintainer's node can open any part it holds a
+     recipient key for, so nothing before the fold distinguishes a sender
+     publishing their own attachment from a stranger publishing one they merely
+     saw the hash of, and canon cannot take a publication back. An event that
+     names a part and publishes NO secret is admitted (it publishes nothing);
+     one whose secret is not a usable key keeps its existing anomaly, since a
+     key of the wrong length opens nothing and the event is otherwise intact.
+
   5. For `delegate`/`revoke`, both the author box signer and `canon-by` must
      equal the LWWRef owner key exactly, not merely an authorized canon key.
      This is the root-of-trust rule: without it a delegate could sign its own
@@ -970,9 +988,10 @@ the normal reflog like any other history.
 Attachments in public canon
 =========================
 
-An event's body or diff may live in an attachment: a `(body-part <hashref>)`
-or PR `(bundle-part <hashref>)` clause inside the author box, pointing at an
-encrypted merkle tree (PEP-18 ships attachments as Mailbox parts). Those
+An event's body or diff may live in an attachment: a `(body-part <hashref>
+<proof>)` or PR `(bundle-part <hashref> <proof>)` clause inside the author box,
+pointing at an encrypted merkle tree (PEP-18 ships attachments as Mailbox
+parts). Those
 trees are encrypted with the letter's per-message group secret, wrapped only
 for the maintainers, and the hashref is inside the signed author box that
 canon publishes verbatim. A public clone would therefore see an event
@@ -1013,6 +1032,17 @@ is a thing a caller has without having looked. What remains unprovable is
 whether the named secret really was the one used, and nothing in a pure function
 can close that; what is closed is the gap between "a secret was supplied" and
 "a secret was supplied for this part".
+
+WHOSE PART IT IS is a separate question from whether it opens, and it was the
+one nothing asked. Every check above is about the secret being real; none of
+them is about the sender having any claim to the tree. `MessageContent` is
+signed and not encrypted, so the part hashes of every letter in a mailbox are
+public, and the maintainer's node opens whatever a letter names because the
+tree is wrapped for the recipient key it holds. A stranger's ordinary-looking
+issue naming somebody else's part hash therefore published that attachment's
+key, and every attachment on that letter with it. PEP-18's part proof is what
+tells the two letters apart, rule 4a-b above is where the fold applies it, and
+the bridge refuses to mint against a proof that does not hold.
 
 One event carries one `part-secret` while an `open` can reference two trees, a
 body-part and a PR bundle. That is sound only because both come from the same

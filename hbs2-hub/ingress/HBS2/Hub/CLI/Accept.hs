@@ -124,9 +124,11 @@ bundleOf = \case
   ARevise _ c _                -> fromCoords c
   _                            -> Nothing
   where
+    -- The hash alone: what the bundle path needs is the part to open, and the
+    -- proof beside it is the bridge's business (requireParts) and the fold's.
     fromCoords c = do
       part <- prBundle c
-      pure (part, prSourceRef c, prSourceTip c, prBase c)
+      pure (ptPart part, prSourceRef c, prSourceTip c, prBase c)
 
 acceptUsage :: Doc ()
 acceptUsage =
