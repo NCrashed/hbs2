@@ -9,6 +9,7 @@ import HBS2.Hub.Types (safeText)
 import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
+import HBS2.Hub.CLI.Comment
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
@@ -111,6 +112,7 @@ main = do
         internalEntries
         inboxEntries
         acceptEntries
+        commentEntries
         composeEntries
         verifyEntries
         readEntries

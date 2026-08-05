@@ -47,7 +47,7 @@ full repo sender rcpt author =
   ]
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
@@ -217,3 +217,48 @@ spec2 =
       prMergeArgs (argv [ "--repo", b58 repo, "--number", "7", "--number", "8"
                         , "--commit", "abc", "--into", "master" ])
         `shouldBe` Nothing
+
+
+spec3 :: Spec
+spec3 =
+  describe "PEP-20 hub pr revise: arguments" $ do
+
+    it "reads a complete call" $ do
+      author <- aKey
+      let s = aHash "sender" ; r = aHash "rcpt" ; t = aHash "thread"
+      prReviseArgs (argv [ "--sender", show (pretty s), "--recipient", show (pretty r)
+                         , "--author", b58 author, "--thread", show (pretty t)
+                         , "--onto", "master", "--from", "fix" ])
+        `shouldBe` Just (PrRevise s r author t "master" "fix" Nothing)
+
+    -- No --target and no --title, because ARevise carries neither: a revision
+    -- changes coordinates, and the thread it names already says which
+    -- repository it belongs to and what it is called.
+    it "refuses the flags a revision does not have" $ do
+      author <- aKey
+      let s = aHash "sender" ; r = aHash "rcpt" ; t = aHash "thread"
+          full = [ "--sender", show (pretty s), "--recipient", show (pretty r)
+                 , "--author", b58 author, "--thread", show (pretty t)
+                 , "--onto", "master", "--from", "fix" ]
+      prReviseArgs (argv (full <> ["--title", "new title"])) `shouldBe` Nothing
+      prReviseArgs (argv (full <> ["--target", b58 author])) `shouldBe` Nothing
+      prReviseArgs (argv (full <> ["--body", "why"])) `shouldBe` Nothing
+
+    it "refuses a call with no thread, which is the whole difference from pr new" $ do
+      author <- aKey
+      let s = aHash "sender" ; r = aHash "rcpt"
+      prReviseArgs (argv [ "--sender", show (pretty s), "--recipient", show (pretty r)
+                         , "--author", b58 author, "--onto", "master", "--from", "fix" ])
+        `shouldBe` Nothing
+
+    -- git names a branch whatever somebody typed, and one in a while that is
+    -- all digits: `--from 2026` is a branch and used to be a usage error.
+    it "takes a branch that spells a number, and an explicit base" $ do
+      author <- aKey
+      let s = aHash "sender" ; r = aHash "rcpt" ; t = aHash "thread"
+      fmap (\p -> (pvFrom p, pvBase p))
+           (prReviseArgs (argv [ "--sender", show (pretty s), "--recipient", show (pretty r)
+                               , "--author", b58 author, "--thread", show (pretty t)
+                               , "--onto", "master", "--from", "2026"
+                               , "--base", "1234567" ]))
+        `shouldBe` Just ("2026", Just "1234567")

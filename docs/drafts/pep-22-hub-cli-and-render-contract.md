@@ -304,21 +304,44 @@ silently dropped:
 Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
 
 ```
-hub issue new  --target <repo> --title ... [--label ...] [< body]
-hub issue comment <thread-id> [< body]
+hub issue new  --target <repo> --title ... [--label ...] [--body <text>|-]
+hub issue|pr comment --thread <thread-id> [--reply-to <event-id>] --body <text>|-
+                                               ; one verb under two names: the op
+                                               ;   carries no kind, and no --target
+                                               ;   because the thread names the repo
 hub issue close|reopen|label <thread-id> ...   ; NOT BUILT: the request letter (PEP-18
                                                ;   carries the ops; no verb composes one)
 hub pr new     --target <repo> --onto master --from <ref>   ; builds a bundle (PEP-20)
-hub pr revise  <thread-id> --from <ref>                     ; author-of-record (PEP-20)
-hub pr comment <thread-id> [< body]
-hub updates                        ; read own reply-mailbox; correlate acks with sent threads
-hub identity set-reply-mailbox <key> --sigil <hashref>      ; optional back-channel
+hub pr revise  --thread <thread-id> --onto <ref> --from <ref>
+                                               ; author-of-record (PEP-20): new
+                                               ;   coordinates, no title and no body
+hub updates                        ; NOT BUILT: needs the reply-mailbox back-channel
+hub identity set-reply-mailbox <key> --sigil <hashref>      ; NOT BUILT, same reason
 ```
+
+Every value is behind a flag and nothing is positional (except `hub issue new`'s
+inherited positional form), because a repo key, an author key, a sigil and a
+thread-id are all thirty-two bytes of base58: a swap is a correctly signed
+letter claiming the wrong author, or a reply in a stranger's thread, and a
+signed box cannot be taken back. A comment with no body is refused rather than
+sent: the body is the whole content of the op, so an empty one spends a seq to
+say nothing.
 
 `hub pr new`/`revise` default to the delta-artifact path: they build a git
 bundle `base..<ref>` and attach it (PEP-20), computing `base`/`source-tip`
-from the local repo and signing them into the letter. `--fork <fork-key>` uses
-the fork-pointer path instead. `hub updates` is how a contributor reads the
+from the local repo and signing them into the letter. They are one code path
+with two contents, which is what keeps a revision proposing the same shape of
+thing an open did. `--fork <fork-key>` uses the fork-pointer path instead, and
+is not built.
+
+A revision is refused unless the author of record signs it, and the bridge is
+deliberately stricter than the fold here: the fold also admits a maintainer's
+revision, but a maintainer revising through the LETTER path would be acting as
+somebody else. That refusal happens on the maintainer's machine, and with the
+ack path unbuilt there is nothing to tell the sender, so the verb says it up
+front instead.
+
+`hub updates` is how a contributor reads the
 back-channel: the owner's acknowledgements and status updates arrive as
 messages in the contributor's own `reply-mailbox` (PEP-18/20), and this verb
 reads that mailbox and correlates each ack to the thread it sent.

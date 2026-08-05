@@ -23,6 +23,9 @@ module HBS2.Hub.CLI.Pr
   , prNewUsage
   , prNewArgs
   , PrNew(..)
+  , prReviseUsage
+  , prReviseArgs
+  , PrRevise(..)
   , codeBundleFailed
   , codeNoSuchPr
   , codeNotMerged
@@ -43,7 +46,7 @@ import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
-import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody
+import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
 import HBS2.CLI.Prelude
@@ -132,6 +135,34 @@ prEntries = do
         (prNewArgs -> Just pn) -> lift (prNew pn)
           >> pure nil
         _ -> liftIO (die (show prNewUsage))
+
+  brief "propose new coordinates for a pull request you opened"
+    $ args [ arg "string" "--sender sender-sigil"
+           , arg "string" "--recipient recipient-sigil"
+           , arg "string" "--author author-key", arg "string" "--thread thread-id"
+           , arg "string" "--onto ref", arg "string" "--from ref" ]
+    $ desc ( "Builds a fresh bundle and signs coordinates that replace the"
+             <> line <> "ones canon holds for this thread (PEP-20). The thread"
+             <> line <> "keeps its number, its title and its comments; what"
+             <> line <> "changes is what is being proposed."
+             <> line
+             <> line <> "THE AUTHOR OF RECORD signs it: the key that opened the"
+             <> line <> "thread. A revision signed by anybody else is refused at"
+             <> line <> "triage, and the refusal happens on the maintainer's"
+             <> line <> "machine with no way to tell you, since the ack path is"
+             <> line <> "unbuilt (PEP-18). A maintainer wanting to change a"
+             <> line <> "proposal asks for it in a comment."
+             <> line
+             <> line <> "No title and no body: a revision carries coordinates and"
+             <> line <> "nothing else. Say what changed in a comment."
+             <> line
+             <> line <> "--base defaults to the merge-base of --onto and --from,"
+             <> line <> "which is what a contributor almost always means. After a"
+             <> line <> "rebase that is the answer that has moved, so it is worth"
+             <> line <> "reading the base this prints." )
+    $ entry $ bindMatch "hub:pr:revise" $ nil_ \case
+        (prReviseArgs -> Just pr) -> lift (prRevise pr)
+        _ -> liftIO (die (show prReviseUsage))
 
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
@@ -229,33 +260,10 @@ prEntries = do
 
       body <- liftIO (readBody (fmap Text.unpack (pnBody pn)))
 
-      creds <- runKeymanClientRO (loadCredentials (pnAuthor pn))
-                 >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                                   <+> pretty (AsBase58 (pnAuthor pn))))
-                                           codeNoKey))
-                           pure
+      creds <- signingKey (pnAuthor pn)
 
-      -- The fork point first, because the bundle is a range from it and
-      -- because it is what the maintainer will be told to check against.
-      base <- case pnBase pn of
-                Just b  -> pure b
-                Nothing -> gitOr =<< mergeBase Nothing (pnOnto pn) (pnFrom pn)
-
-      b <- gitOr =<< bundleRange Nothing base (pnFrom pn)
-
-      sto <- getStorage
-      api <- getClientAPI @MailboxAPI @UNIX
-      let ob = Outbound sto api rpcTimeout
-
-      -- ONE: the attachment, so it has a name and a proof that it is ours.
-      parts <- attachToLetter ob (pnAuthor pn) (pnSender pn) [pnRcpt pn]
-                 [ ( [ ("file-name", "pr.bundle")
-                     , ("mime-type", "application/x-git-bundle") ]
-                   , pure (LBS.fromStrict (bnBytes b)) ) ]
-
-      part <- case parts of
-                [p] -> pure p
-                _   -> liftIO (refuse "the attachment was not stored" codeBundleFailed)
+      (b, base, part) <- propose (pnAuthor pn) (pnSender pn) (pnRcpt pn)
+                                 (pnOnto pn) (pnFrom pn) (pnBase pn)
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
@@ -265,22 +273,12 @@ prEntries = do
       -- on it may omit the fork pointer. What makes the change fetchable is
       -- the bundle, which the fold checks for (reachableCoords).
       let coords = PRCoords Nothing (pnFrom pn) (bnTip b) (pnOnto pn) base (Just part)
-          content = AOpen (pnRepo pn) HubPR (pnTitle pn) [] (bodyOf body)
+          content = AOpen (pnRepo pn) HubPR (pnTitle pn) [] (letterBody body)
                           Nothing (Just coords) now
 
-      for_ (oversizedField content) $ \f ->
-        liftIO $ refuse (show ("over the size limit for a letter:" <+> pretty f)) 1
+      box <- sealed (pnAuthor pn) creds content
 
-      let box = signAuthor (pnAuthor pn) (_peerSignSk creds) content
-
-      -- Every way sending can fail, and two of these were leaking out through
-      -- the RTS as exit 1 -- the code PEP-22 gives to a mistyped flag. A hook
-      -- that cannot tell "your arguments are wrong" from "the letter is in no
-      -- mailbox" retries the wrong one of them.
-      h <- sendLetterWith ob (pnSender pn) [pnRcpt pn] [ptPart part] box noReplyChannel
-             `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
-             `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
-             `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
+      h <- send (pnSender pn) (pnRcpt pn) part box
 
       liftIO $ print $ vcat
         [ "queued" <+> pretty h
@@ -290,13 +288,98 @@ prEntries = do
             <+> parens (pretty (BS.length (bnBytes b)) <+> "bytes before encryption")
         ]
 
-    gitOr = either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
+    -- | @hub pr revise@: the same two steps, against a thread that exists.
+    --
+    -- No title and no body, because 'ARevise' carries neither: PEP-20 makes a
+    -- revision a change of COORDINATES and nothing else, so what a contributor
+    -- wants to say about it is a comment, which is its own op and its own verb.
+    prRevise pr = do
+      creds <- signingKey (pvAuthor pr)
 
-    -- A trailing newline from the shell is not part of the body, and an empty
-    -- body is absent rather than a zero-length one.
-    bodyOf s = case Text.dropWhileEnd (== '\n') (Text.pack s) of
-                 t | Text.null t -> Nothing
-                   | otherwise   -> Just t
+      (b, base, part) <- propose (pvAuthor pr) (pvSender pr) (pvRcpt pr)
+                                 (pvOnto pr) (pvFrom pr) (pvBase pr)
+
+      now <- liftIO getPOSIXTime <&> floor . (* 1000)
+
+      let coords = PRCoords Nothing (pvFrom pr) (bnTip b) (pvOnto pr) base (Just part)
+          content = ARevise (pvThread pr) coords now
+
+      box <- sealed (pvAuthor pr) creds content
+
+      h <- send (pvSender pr) (pvRcpt pr) part box
+
+      liftIO $ print $ vcat
+        [ "queued" <+> pretty h
+        , "event" <+> pretty (authorBoxId box)
+        , "on" <+> pretty (pvThread pr)
+        , "tip" <+> pretty (bnTip b) <+> "base" <+> pretty base
+        , "bundle" <+> hashDoc (ptPart part)
+            <+> parens (pretty (BS.length (bnBytes b)) <+> "bytes before encryption")
+        -- Said here because the refusal happens on the maintainer's machine,
+        -- hours later, with no path back to the sender (PEP-18: the ack is
+        -- unbuilt). The bridge is stricter than the fold about this on purpose.
+        , "the author of record signs a revision: a letter signed by anyone else"
+            <+> "is refused at triage"
+        ]
+
+    -- The two steps that make a proposal, shared by both verbs above. The order
+    -- is the whole difficulty: a part is named by the hash of its encrypted
+    -- tree and PEP-18 puts that hash inside the signed box, so the bundle has
+    -- to exist before the box does.
+    propose author sender rcpt onto from mbase = do
+      -- The fork point first, because the bundle is a range from it and
+      -- because it is what the maintainer will be told to check against.
+      base <- case mbase of
+                Just b  -> pure b
+                Nothing -> gitOr =<< mergeBase Nothing onto from
+
+      b <- gitOr =<< bundleRange Nothing base from
+
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+      let ob = Outbound sto api rpcTimeout
+
+      -- ONE: the attachment, so it has a name and a proof that it is ours.
+      parts <- attachToLetter ob author sender [rcpt]
+                 [ ( [ ("file-name", "pr.bundle")
+                     , ("mime-type", "application/x-git-bundle") ]
+                   , pure (LBS.fromStrict (bnBytes b)) ) ]
+
+      part <- case parts of
+                [p] -> pure p
+                _   -> liftIO (refuse "the attachment was not stored" codeBundleFailed)
+
+      pure (b, base, part)
+
+    signingKey k =
+      runKeymanClientRO (loadCredentials k)
+        >>= maybe (liftIO (refuse (show ("no signing key here for"
+                                          <+> pretty (AsBase58 k)))
+                                  codeNoKey))
+                  pure
+
+    sealed author creds content = do
+      -- The same bound the fold will apply, before anything is signed: an
+      -- oversized field inside a signed box is a letter no hub will fold, and
+      -- the signature cannot be redone over less.
+      for_ (oversizedField content) $ \f ->
+        liftIO $ refuse (show ("over the size limit for a letter:" <+> pretty f)) 1
+      pure (signAuthor author (_peerSignSk creds) content)
+
+    send sender rcpt part box = do
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+      let ob = Outbound sto api rpcTimeout
+      -- Every way sending can fail, and two of these were leaking out through
+      -- the RTS as exit 1 -- the code PEP-22 gives to a mistyped flag. A hook
+      -- that cannot tell "your arguments are wrong" from "the letter is in no
+      -- mailbox" retries the wrong one of them.
+      sendLetterWith ob sender [rcpt] [ptPart part] box noReplyChannel
+        `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
+        `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
+        `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
+
+    gitOr = either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
 
 -- Every value behind a flag, for the reason `hub inbox accept` has none
 -- positional: a repo key, a sigil hash and an author key are all thirty-two
@@ -328,6 +411,44 @@ prNewArgs syn = do
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
     -- Through 'flagText', so a branch or a title that spells a number is one:
     -- `--from 2026` is a branch name, and this refused it as a usage error.
+    asText = fmap Text.pack . flagText
+
+-- | What @hub pr revise@ was asked to propose instead.
+--
+-- 'PrNew' minus the repository and the title, plus the thread: the repository
+-- is not named because the thread names it (the fold makes that binding), and
+-- the title is not named because a revision does not change one.
+data PrRevise = PrRevise
+  { pvSender :: HashRef
+  , pvRcpt   :: HashRef
+  , pvAuthor :: HubKey       -- ^ must be the thread's author of record
+  , pvThread :: ThreadId
+  , pvOnto   :: Text
+  , pvFrom   :: Text
+  , pvBase   :: Maybe Text
+  }
+  deriving stock (Eq,Show)
+
+prReviseUsage :: Doc ()
+prReviseUsage =
+  "usage: hbs2-hub pr revise --sender <sigil> --recipient <sigil> --author <key>"
+    <> line <> "       --thread <thread-id> --onto <ref> --from <ref> [--base <sha>]"
+
+prReviseArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrRevise
+prReviseArgs syn = do
+  kvs    <- flagsOf [ "--sender","--recipient","--author","--thread"
+                    , "--onto","--from","--base" ] syn
+  sender <- flagOnce kvs "--sender"    >>= asHash
+  rcpt   <- flagOnce kvs "--recipient" >>= asHash
+  author <- flagOnce kvs "--author"    >>= asKey
+  thread <- flagOnce kvs "--thread"    >>= asHash
+  onto   <- flagOnce kvs "--onto"      >>= asText
+  from   <- flagOnce kvs "--from"      >>= asText
+  base   <- flagMaybe kvs "--base" asText
+  pure (PrRevise sender rcpt author thread onto from base)
+  where
+    asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    asHash = \case { HashLike h -> Just h ; _ -> Nothing }
     asText = fmap Text.pack . flagText
 
 -- | What @hub pr merge@ was asked to record.

@@ -19,6 +19,7 @@ module HBS2.Hub.CLI.Compose
   , issueUsage
   , issueArgs
   , readBody
+  , letterBody
   , codeNoKey
   , NotStored(..)
   , codeNotStored
@@ -413,19 +414,29 @@ composeEntries = do
         _ -> liftIO (die (show (issueUsage :: Doc ())))
 
   where
-    -- A trailing newline from the shell is not part of the body, and an empty
-    -- body is absent rather than a zero-length one: the fold reports a
-    -- reference to a part with no body, and "" would look like content.
-    --
-    -- TRAILING only. This was 'Text.strip', which also removes LEADING
-    -- whitespace, so a body whose first line is an indented code block or a
-    -- quoted diff was signed as different bytes from the file that was piped in
-    -- -- and the body is inside the author box, so it is inside the event-id and
-    -- cannot be corrected afterwards. The comment above described the trailing
-    -- half and the code did both.
-    bodyOf s = case Text.dropWhileEnd isSpace (Text.pack s) of
-      t | Text.null t -> Nothing
-        | otherwise   -> Just t
+    bodyOf = letterBody
+
+-- | The bytes a body is, once the shell has had its say.
+--
+-- A trailing newline from the shell is not part of the body, and an empty body
+-- is absent rather than a zero-length one: the fold reports a reference to a
+-- part with no body, and @""@ would look like content.
+--
+-- TRAILING only. This was 'Text.strip', which also removes LEADING whitespace,
+-- so a body whose first line is an indented code block or a quoted diff was
+-- signed as different bytes from the file that was piped in -- and the body is
+-- inside the author box, so it is inside the event-id and cannot be corrected
+-- afterwards. The comment on it described the trailing half and the code did
+-- both.
+--
+-- ONE definition, exported, because there were two: this one and a copy in the
+-- pull-request verb that trimmed newlines only. Two answers to "what did the
+-- author write", both feeding signed boxes, differing on a body that ends in a
+-- space -- which is what a shell here-doc and an editor both produce.
+letterBody :: String -> Maybe Text
+letterBody s = case Text.dropWhileEnd isSpace (Text.pack s) of
+  t | Text.null t -> Nothing
+    | otherwise   -> Just t
 
 -- | The arguments to @hub issue new@, positionally or by name.
 --

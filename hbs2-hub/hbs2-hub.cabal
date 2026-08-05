@@ -120,6 +120,7 @@ library hub-ingress
       HBS2.Hub.Repo.GitWrite
       HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Ban
+      HBS2.Hub.CLI.Comment
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Drop
       HBS2.Hub.CLI.Accept
@@ -194,6 +195,7 @@ test-suite spec
   other-modules:
       HBS2.Hub.AcceptSpec
       HBS2.Hub.ArgvSpec
+      HBS2.Hub.CommentSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
       HBS2.Hub.TextSpec
