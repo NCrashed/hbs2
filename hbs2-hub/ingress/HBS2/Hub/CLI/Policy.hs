@@ -25,6 +25,12 @@ module HBS2.Hub.CLI.Policy
   , policyArgs
   , PolicyArgs(..)
   , denying
+  , withPoW
+  , withDefaults
+  , powUsage
+  , powArgs
+  , defaultUsage
+  , defaultArgs
   , policyText
   , readPolicy
   , readPolicyWith
@@ -36,7 +42,7 @@ module HBS2.Hub.CLI.Policy
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Ingress (rpcTimeout)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..),bounded)
 
 import HBS2.CLI.Prelude
@@ -59,6 +65,8 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort)
+import Data.Maybe (fromMaybe,isJust)
+import Data.Word (Word8)
 import Data.Text qualified as Text
 import Control.Monad.Except (runExceptT,throwError)
 import Data.Coerce (coerce)
@@ -99,6 +107,35 @@ denying deny who p
   -- against a deny-all default is asking for something else, and this verb
   -- does not offer it rather than doing it by accident.
   | otherwise = p { bpSenders = HM.delete who (bpSenders p) }
+
+-- | The policy with a proof-of-work floor, or with none.
+--
+-- Pure and exported for the reason 'denying' is: it is the whole of what the
+-- verb decides, and a re-run that changes nothing must produce the same policy
+-- rather than a version bump that republishes a file to every peer.
+--
+-- Zero IS the absent value here rather than a separate case (@bpPoW@ is
+-- documented as "zero when unset"), so clearing the floor and setting it to
+-- zero are one operation. That is not a coincidence to paper over: a floor of
+-- zero bits is work every message already does.
+withPoW :: PoWDifficulty -> BasicPolicy HBS2Basic -> BasicPolicy HBS2Basic
+withPoW d p = p { bpPoW = d }
+
+-- | The policy with its default actions replaced, where they were named.
+--
+-- The two defaults are what an unlisted key gets, and they answer different
+-- questions: the SENDER default decides whose letters this mailbox takes, and
+-- the PEER default decides which peers it will sync with at all. Naming one
+-- must not silently restate the other, which is why both are 'Maybe' and an
+-- absent one is left alone.
+withDefaults :: Maybe BasicPolicyAction     -- ^ sender
+             -> Maybe BasicPolicyAction     -- ^ peer
+             -> BasicPolicy HBS2Basic
+             -> BasicPolicy HBS2Basic
+withDefaults sender peer p =
+  p { bpDefaultSenderAction = fromMaybe (bpDefaultSenderAction p) sender
+    , bpDefaultPeerAction = fromMaybe (bpDefaultPeerAction p) peer
+    }
 
 -- | The bytes a policy is stored as.
 --
@@ -221,7 +258,8 @@ policyEntries = do
               [ "no policy set"
               , "  messages are denied (the peer falls back to deny/deny to admit one)"
               , "  and every peer is answered (a mailbox with no policy row syncs with all)"
-              , "  write one with: hbs2-peer mailbox set-policy <key> 1 <file>"
+              , "  write one with: hub policy default --mailbox <key>"
+                  <+> "--sender allow --peer allow"
               ]
             Just (v, p) -> liftIO $ print $ vcat
               [ "version" <+> pretty v
@@ -231,6 +269,54 @@ policyEntries = do
 
   denyVerb "hub:block" True "refuse a sender at the peer layer"
   denyVerb "hub:unblock" False "stop refusing a sender at the peer layer"
+
+  brief "charge every sender proof-of-work, or stop charging it"
+    $ args [ arg "string" "--mailbox mailbox-key", arg "string" "--bits n" ]
+    $ desc ( "Sets the (pow D) clause: a mailbox that charges D bits refuses"
+             <> line <> "a message whose stamp does not carry them (PEP-21). The"
+             <> line <> "sender grinds it once per mailbox, before sending; every"
+             <> line <> "peer checks it before storing anything."
+             <> line
+             <> line <> "--bits 0 removes the charge, and it is the same thing as"
+             <> line <> "removing the clause: zero bits is work every message has"
+             <> line <> "already done."
+             <> line
+             <> line <> "WHAT IT BOUNDS AND WHAT IT DOES NOT. It prices a message,"
+             <> line <> "so a flood of them costs the sender time. It is not a ban"
+             <> line <> "and not a rate limit: work is per message and nothing"
+             <> line <> "carries over, so a determined sender pays and continues."
+             <> line <> "Keeping one author out of canon is hub ban."
+             <> line
+             <> line <> "Refuses a mailbox with no policy, like hub block: a policy"
+             <> line <> "invented here would be deny/deny plus your clause, which"
+             <> line <> "stops the mailbox syncing with every peer at once. Write"
+             <> line <> "the defaults first with hub policy default." )
+    $ entry $ bindMatch "hub:policy:pow" $ nil_ \case
+        (powArgs -> Just (mbox, bits)) -> lift (setPoW mbox bits)
+        _ -> liftIO (die (show powUsage))
+
+  brief "set what an unlisted sender or peer gets"
+    $ args [ arg "string" "--mailbox mailbox-key"
+           , arg "string" "--sender allow|deny", arg "string" "--peer allow|deny" ]
+    $ desc ( "The two defaults, which are the shape of the mailbox: --sender"
+             <> line <> "says whose letters it takes, --peer says which peers it"
+             <> line <> "will sync with at all. A public forge is (sender allow"
+             <> line <> "all) with a proof-of-work floor beside it; a private one"
+             <> line <> "is (sender deny all) plus named keys."
+             <> line
+             <> line <> "This is the verb that MAY create a policy, and the only"
+             <> line <> "one: it is the only one whose arguments say what both"
+             <> line <> "defaults are. Creating one therefore needs both, and"
+             <> line <> "editing an existing one needs only the half you mean."
+             <> line
+             <> line <> "A mailbox with no policy is not the same as an empty"
+             <> line <> "one: the peer denies messages and answers every peer, so"
+             <> line <> "writing (peer deny all) here is how a mailbox stops"
+             <> line <> "syncing, which is rarely what anybody wants." )
+    $ entry $ bindMatch "hub:policy:default" $ nil_ \case
+        (defaultArgs -> Just (mbox, sender, peer))
+          | isJust sender || isJust peer -> lift (setDefaults mbox sender peer)
+        _ -> liftIO (die (show defaultUsage))
 
   where
 
@@ -267,33 +353,75 @@ policyEntries = do
       -- that syncs with everybody into one that syncs with nobody, in a verb
       -- whose whole job is to refuse ONE key. There is no way back from here
       -- either: `hub unblock` removes the clause and leaves the row, and nothing
-      -- in this CLI writes `peer allow all`.
-      (v, p) <- currentPolicy (paMailbox pa)
-                  >>= maybe (liftIO (refuse (show ( "this mailbox has no policy, and blocking"
-                                                      <+> "one key is not a reason to write one"
-                                                      <> line
-                                                      <> "  a policy written from here would be"
-                                                      <+> "deny/deny plus your clause, which stops"
-                                                      <> line
-                                                      <> "  the mailbox syncing with every peer"
-                                                      <+> "at once"
-                                                      <> line
-                                                      <> "  write the policy you mean first:"
-                                                      <+> "hbs2-peer mailbox set-policy"
-                                                      <+> pretty (AsBase58 (paMailbox pa))
-                                                      <+> "1 <file>" ))
-                                            codeNoPolicy))
-                            pure
+      -- in this CLI writes `peer allow all` except `hub policy default`.
+      (v, p) <- existing (paMailbox pa) "blocking one key"
+      publish (paMailbox pa) (succ v) (denying deny who p)
+        ((if deny then "blocked" else "unblocked") <+> pretty (AsBase58 who))
 
-      let p' = denying deny who p
+    setPoW mbox bits = do
+      (v, p) <- existing mbox "charging work"
+      publish mbox (succ v) (withPoW bits p)
+        (if bits == 0 then "no proof-of-work is charged"
+                      else "charging" <+> pretty bits <+> "bits of work")
 
-      when (p' == p) $ liftIO do
+    -- The one verb that may write a policy where there was none, because it is
+    -- the only one whose arguments say what BOTH defaults are. Everything else
+    -- edits one clause and would have to invent the rest.
+    setDefaults mbox sender peer =
+      currentPolicy mbox >>= \case
+        Just (v, p) -> publish mbox (succ v) (withDefaults sender peer p) "policy changed"
+        Nothing -> case (sender, peer) of
+          (Just s, Just q) ->
+            -- Version 1, which is what a mailbox with no policy row expects: the
+            -- peer admits a strictly greater version and there is nothing to be
+            -- greater than yet.
+            publish mbox 1 (withDefaults (Just s) (Just q) (defaultBasicPolicy @HBS2Basic))
+                    "policy written"
+          _ -> liftIO $ refuse (show ( "this mailbox has no policy, so both defaults"
+                                         <+> "have to be named" <> line
+                                         <> "  --sender says whose letters it takes,"
+                                         <+> "--peer says which peers it syncs with"
+                                         <> line
+                                         <> "  naming one and inheriting the other means"
+                                         <+> "inheriting deny, which for --peer is a"
+                                         <> line
+                                         <> "  mailbox that stops syncing at all" ))
+                               codeNoPolicy
+
+    -- The policy as it stands, or a refusal that says what to do instead. Every
+    -- verb but the one above needs one to exist.
+    existing mbox what =
+      currentPolicy mbox
+        >>= maybe (liftIO (refuse (show ( "this mailbox has no policy, and" <+> what
+                                            <+> "is not a reason to write one"
+                                            <> line
+                                            <> "  a policy written from here would be"
+                                            <+> "deny/deny plus your clause, which stops"
+                                            <> line
+                                            <> "  the mailbox syncing with every peer"
+                                            <+> "at once"
+                                            <> line
+                                            <> "  write the defaults you mean first:"
+                                            <+> "hub policy default --mailbox"
+                                            <+> pretty (AsBase58 mbox)
+                                            <+> "--sender allow --peer allow" ))
+                                  codeNoPolicy))
+                  pure
+
+    -- Sign, store, publish, report. One copy, because a policy is a file every
+    -- peer holding the mailbox will fetch, and three verbs writing it three
+    -- ways is three answers to what a version bump costs.
+    publish mbox v p' said = do
+      -- A re-run that changes nothing writes nothing. A version bump is not
+      -- free: it republishes the file to every peer holding the mailbox.
+      unchanged <- currentPolicy mbox <&> maybe False ((== p') . snd)
+      when unchanged $ liftIO do
         print ("nothing to change; the policy was not rewritten" :: Doc ())
         exitSuccess
 
-      creds <- runKeymanClientRO (loadCredentials (paMailbox pa))
+      creds <- runKeymanClientRO (loadCredentials mbox)
                  >>= maybe (liftIO (refuse (show ( "no signing key here for"
-                                                     <+> pretty (AsBase58 (paMailbox pa))
+                                                     <+> pretty (AsBase58 mbox)
                                                      <> line
                                                      <> "  the mailbox's own key signs its"
                                                      <+> "policy" ))
@@ -305,10 +433,10 @@ policyEntries = do
 
       href <- liftIO (writeAsMerkle sto (LBS.pack (Text.unpack (policyText p'))))
 
-      let payload = SetPolicyPayload (paMailbox pa) (succ v) (HashRef href)
-          box = makeSignedBox @HubScheme (paMailbox pa) (_peerSignSk creds) payload
+      let payload = SetPolicyPayload mbox v (HashRef href)
+          box = makeSignedBox @HubScheme mbox (_peerSignSk creds) payload
 
-      callRpcWaitMay @RpcMailboxSetPolicy rpcTimeout api (paMailbox pa, box)
+      callRpcWaitMay @RpcMailboxSetPolicy rpcTimeout api (mbox, box)
         >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox policy")) codePeerSilent))
                   pure
         >>= either (\e -> liftIO (refuse (show ("the peer refused the policy:"
@@ -317,8 +445,8 @@ policyEntries = do
                    pure
 
       liftIO $ print $ vcat
-        [ (if deny then "blocked" else "unblocked") <+> pretty (AsBase58 who)
-        , "policy version" <+> pretty (succ v)
+        [ said
+        , "policy version" <+> pretty v
         , pretty (safeText (policyText p'))
         ]
 
@@ -331,3 +459,51 @@ policyArgs syn = do
   pure (PolicyArgs mbox k)
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+
+powUsage :: Doc ()
+powUsage = "usage: hbs2-hub policy pow --mailbox <key> --bits <0..255>"
+
+-- | @--mailbox <key> --bits <n>@.
+--
+-- The difficulty is a 'Word8' on the wire, and a value outside it is refused
+-- rather than truncated: @--bits 256@ silently becoming 0 is a mailbox an
+-- operator believes is charging the most work possible and which charges none.
+powArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, PoWDifficulty)
+powArgs syn = do
+  kvs  <- flagsOf ["--mailbox","--bits"] syn
+  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  bits <- flagOnce kvs "--bits" >>= flagWord >>= inRange
+  pure (mbox, bits)
+  where
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+    inRange n | n <= fromIntegral (maxBound :: Word8) = Just (fromIntegral n)
+              | otherwise = Nothing
+
+defaultUsage :: Doc ()
+defaultUsage =
+  "usage: hbs2-hub policy default --mailbox <key> [--sender allow|deny] [--peer allow|deny]"
+    <> line <> "  both are required when the mailbox has no policy yet"
+
+-- | @--mailbox <key> [--sender allow|deny] [--peer allow|deny]@.
+--
+-- Each default is optional HERE and constrained by the verb: absent means "do
+-- not change this half", which only means something when there is a policy to
+-- inherit from. The reader cannot tell, so the verb decides.
+defaultArgs :: forall c . IsContext c
+            => [Syntax c]
+            -> Maybe (HubKey, Maybe BasicPolicyAction, Maybe BasicPolicyAction)
+defaultArgs syn = do
+  kvs    <- flagsOf ["--mailbox","--sender","--peer"] syn
+  mbox   <- flagOnce kvs "--mailbox" >>= asKey
+  sender <- flagMaybe kvs "--sender" asAction
+  peer   <- flagMaybe kvs "--peer" asAction
+  pure (mbox, sender, peer)
+  where
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+    -- The two words the policy file itself uses, and nothing else: "yes",
+    -- "true" and "open" are all things somebody would type and all things a
+    -- reader would have to guess the sense of.
+    asAction v = flagText v >>= \case
+      "allow" -> Just Allow
+      "deny"  -> Just Deny
+      _       -> Nothing

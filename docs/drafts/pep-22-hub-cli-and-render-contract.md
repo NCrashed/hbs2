@@ -479,14 +479,35 @@ build has no verb that composes one; a contributor asks in a comment.
 Moderate (PEP-21; owner or delegated where noted):
 
 ```
-hub policy show
-hub policy set (sender allow|deny all|<key>) | (pow D) | (rate <key> <s>) | (quota <key> <n>)
+hub policy show    --mailbox <key>
+hub policy default --mailbox <key> [--sender allow|deny] [--peer allow|deny]
+                                   ; the two defaults, which are the shape of the
+                                   ;   mailbox. The only verb that MAY create a
+                                   ;   policy, since it is the only one whose
+                                   ;   arguments say what both defaults are; both
+                                   ;   are required when creating one
+hub policy pow     --mailbox <key> --bits <0..255>
+                                   ; the (pow D) floor. --bits 0 removes it
 hub block <envelope-key>           ; peer-layer deny (bounds storage; evadable)
 hub ban   <inner-author-key>       ; triage-layer deny (authoritative for canon)
-hub delete <msg-predicate>         ; DeleteMessages (retention, PEP-21)
+hub delete <msg-predicate>         ; NOT BUILT as a verb: `hub inbox reject` deletes
+                                   ;   one letter, and a predicate that matches more
+                                   ;   than the caller read is a different decision
 hub maintainer add|remove <key>    ; delegate/revoke, OWNER key only (PEP-21)
-hub compact                        ; canon compaction (PEP-19/21), forces refs/hbs2/meta
+hub compact                        ; NOT BUILT: canon compaction (PEP-19/21)
 ```
+
+`(rate <key> <s>)` and `(quota <key> <n>)` were listed here and are not clauses
+the policy has: `BasicPolicy` carries the two defaults, a per-key action for
+senders and for peers, and `(pow D)`. A verb cannot set what the format cannot
+say, and adding them is a peer-side change first.
+
+The two write verbs above are read-modify-publish against the version the peer
+holds, and a run that would change nothing writes nothing: a version bump
+republishes the policy file to every peer holding the mailbox. Only
+`hub policy default` may write where there was no policy at all, and a mailbox
+with no policy is not an empty one -- the peer denies messages and answers every
+peer -- so creating one with `(peer deny all)` is how a mailbox stops syncing.
 
 Query DSL and templates are inherited from fixme-new: the query language
 `~attr:value` (like), `&&`/`||`/`!`, compiled over the folded view, and

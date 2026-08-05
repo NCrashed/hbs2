@@ -109,3 +109,94 @@ spec = do
       mbox <- aKey ; other <- aKey
       policyArgs (argv ["--mailbox", b58 mbox, "--mailbox", b58 other])
         `shouldBe` Nothing
+
+  describe "PEP-21 peer layer: the proof-of-work floor" $ do
+
+    it "writes the floor into the file, and takes it out again" $ do
+      let p = withPoW 12 (defaultBasicPolicy @'HBS2Basic)
+      Text.unpack (policyText p) `shouldSatisfy` isInfixOf "(pow 12)"
+      -- Zero IS absent: bpPoW is documented as zero when unset, so clearing
+      -- and setting to zero are one operation, and a floor of zero bits is
+      -- work every message has already done.
+      (withPoW 0 p == defaultBasicPolicy @'HBS2Basic) `shouldBe` True
+
+    -- A re-run that changes nothing must produce the same policy: the verb
+    -- compares before publishing, and a version bump republishes the file to
+    -- every peer holding the mailbox.
+    it "is idempotent, so re-running it publishes nothing" $ do
+      let p = withPoW 12 (defaultBasicPolicy @'HBS2Basic)
+      (withPoW 12 p == p) `shouldBe` True
+
+    it "changes nothing else about the policy" $ do
+      k <- aKey
+      let p = denying True k (defaultBasicPolicy @'HBS2Basic)
+      (bpSenders (withPoW 12 p) == bpSenders p) `shouldBe` True
+
+  describe "PEP-21 peer layer: the two defaults" $ do
+
+    it "sets each half on its own and leaves the other alone" $ do
+      let p0 = withDefaults (Just Allow) (Just Allow) (defaultBasicPolicy @'HBS2Basic)
+          p1 = withDefaults (Just Deny) Nothing p0
+      bpDefaultSenderAction p1 `shouldBe` Deny
+      bpDefaultPeerAction p1 `shouldBe` Allow
+      let p2 = withDefaults Nothing (Just Deny) p0
+      bpDefaultSenderAction p2 `shouldBe` Allow
+      bpDefaultPeerAction p2 `shouldBe` Deny
+
+    it "naming neither is the policy unchanged" $ do
+      let p = withDefaults (Just Allow) (Just Deny) (defaultBasicPolicy @'HBS2Basic)
+      (withDefaults Nothing Nothing p == p) `shouldBe` True
+
+    it "says both defaults in the file it writes" $ do
+      let out = Text.unpack (policyText (withDefaults (Just Allow) (Just Allow)
+                                          (defaultBasicPolicy @'HBS2Basic)))
+      out `shouldSatisfy` isInfixOf "(sender allow all)"
+      out `shouldSatisfy` isInfixOf "(peer allow all)"
+
+  describe "PEP-21 peer layer: arguments of the new verbs" $ do
+
+    it "reads a floor, in either order" $ do
+      mbox <- aKey
+      powArgs (argv ["--mailbox", b58 mbox, "--bits", "12"])
+        `shouldBe` Just (mbox, 12)
+      powArgs (argv ["--bits", "12", "--mailbox", b58 mbox])
+        `shouldBe` Just (mbox, 12)
+
+    -- The difficulty is a Word8 on the wire. Truncating 256 to 0 would leave
+    -- an operator believing the mailbox charges the most work possible while
+    -- it charges none.
+    it "refuses a floor that is not one, rather than truncating it" $ do
+      mbox <- aKey
+      let with n = powArgs (argv ["--mailbox", b58 mbox, "--bits", n])
+      with "0" `shouldBe` Just (mbox, 0)
+      with "255" `shouldBe` Just (mbox, 255)
+      with "256" `shouldBe` Nothing
+      with "-1" `shouldBe` Nothing
+      with "lots" `shouldBe` Nothing
+
+    it "refuses a floor with no mailbox, and an unknown flag" $ do
+      mbox <- aKey
+      powArgs (argv ["--bits", "12"]) `shouldBe` Nothing
+      powArgs (argv ["--mailbox", b58 mbox, "--bits", "12", "--force"])
+        `shouldBe` Nothing
+
+    it "reads the defaults, either or both" $ do
+      mbox <- aKey
+      defaultArgs (argv ["--mailbox", b58 mbox, "--sender", "allow", "--peer", "deny"])
+        `shouldBe` Just (mbox, Just Allow, Just Deny)
+      defaultArgs (argv ["--mailbox", b58 mbox, "--peer", "allow"])
+        `shouldBe` Just (mbox, Nothing, Just Allow)
+      defaultArgs (argv ["--mailbox", b58 mbox])
+        `shouldBe` Just (mbox, Nothing, Nothing)
+
+    -- The two words the policy file itself uses, and nothing else: a reader
+    -- that guessed at "yes" or "open" would be guessing which way a mailbox
+    -- faces.
+    it "takes allow and deny and no synonym for either" $ do
+      mbox <- aKey
+      let with v = defaultArgs (argv ["--mailbox", b58 mbox, "--sender", v])
+      with "allow" `shouldBe` Just (mbox, Just Allow, Nothing)
+      with "deny" `shouldBe` Just (mbox, Just Deny, Nothing)
+      with "yes" `shouldBe` Nothing
+      with "open" `shouldBe` Nothing
+      with "Allow" `shouldBe` Nothing
