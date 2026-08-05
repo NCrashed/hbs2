@@ -115,6 +115,7 @@ library hub-ingress
     exposed-modules:
       HBS2.Hub.Deny
       HBS2.Hub.Ingress
+      HBS2.Hub.Sent
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.GitBundle
       HBS2.Hub.Repo.GitWrite
@@ -216,6 +217,7 @@ test-suite spec
       HBS2.Hub.ReadSpec
       HBS2.Hub.RejectSpec
       HBS2.Hub.RepoSpec
+      HBS2.Hub.SentSpec
       HBS2.Hub.ShowSpec
       HBS2.Hub.GitBundleSpec
       HBS2.Hub.GitRepoSpec

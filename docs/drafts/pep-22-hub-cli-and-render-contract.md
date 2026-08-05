@@ -133,6 +133,7 @@ and a tree full of forged events were the same event.
 | 35   | the policy was not changed (`hub block`, `hub unblock`)          |
 | 36   | the deny-list will not read (`hub ban`)                         |
 | 37   | the proof-of-work a mailbox charges could not be solved in time |
+| 38   | the log of what this node sent will not read (`hub updates`)   |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
@@ -315,10 +316,12 @@ hub pr new     --target <repo> --onto master --from <ref>   ; builds a bundle (P
 hub pr revise  --thread <thread-id> --onto <ref> --from <ref>
                                                ; author-of-record (PEP-20): new
                                                ;   coordinates, no title and no body
-hub updates    --mailbox <own-key> --repo <repo-key>
+hub updates    --mailbox <own-key> --repo <repo-key> [--all]
                                                ; read your own mailbox: the acks a
                                                ;   hub sent back, checked against that
-                                               ;   repository maintainer set
+                                               ;   repository maintainer set AND against
+                                               ;   the log of what this node sent.
+                                               ;   --all shows the ones that did not match
 hub identity set-reply-mailbox <key> --sigil <hashref>      ; NOT BUILT, and not needed:
                                                ;   PEP-18 admits exactly one channel,
                                                ;   (author key, sender sigil), so the
@@ -352,13 +355,16 @@ back-channel: the owner's acknowledgements arrive as messages in the
 contributor's own mailbox (PEP-18/20), and this verb reads that mailbox and
 shows the ones a maintainer of the named repository signed.
 
-It does NOT correlate each ack to a thread it sent, which this paragraph used
-to promise. That check needs a record of what was sent and nothing keeps one:
-the compose verbs print the message hash and the thread-id and forget them. So
-the verb shows every maintainer-signed ack and says on stderr that it could not
-tell whose thread it was about. The fix is a sent log, which is a file and a
-decision about where it lives; until then this is the difference between a
-check that did not run and a check that is implied.
+It correlates each ack to a thread it sent, against a log the compose verbs
+write: one line per letter under the XDG data directory, beside the deny-list
+and for the same reason (a file in the working tree looks like something that
+travels, and this one names your threads and your author key). An ack that does
+not match is set aside and counted rather than shown, and `--all` shows those
+too, which is what a reader wants after losing the log or when reading the same
+mailbox from a second machine.
+
+The log is also the only record a contributor has of what they sent: before it,
+the message hash and the thread-id were printed once and forgotten.
 
 Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 

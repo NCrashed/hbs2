@@ -281,16 +281,24 @@ the thread-id itself before sending (see Thread identity). Note also that an
 is nothing to dedup on. Both are reasons the status shown to a user should come
 from canon, with the ack serving only to say when to go and look.
 
-WHAT IS BUILT, and where the correlation check above is not. `hub inbox accept`
-sends an ack signed by the canon key, and `hub updates` reads them, checking the
-signer against the maintainer set from the repository's canon in the reader's
-own clone. The `(target, thread)` check is NOT built, and cannot be until
-something records what this node sent: the compose verbs print the message hash
-and the thread-id and forget them, so a running hbs2-hub has no memory of its
-own submissions. So `hub updates` shows a maintainer-signed ack about any thread
-and says on stderr that it did not check whose it was. Closing this is a sent
-log, which is a small file and a decision about where it lives, not a protocol
-change.
+WHAT IS BUILT: both checks. `hub inbox accept` sends an ack signed by the canon
+key. `hub updates` reads them, checking the signer against the maintainer set
+from the repository's canon in the reader's own clone, and the `(target,
+thread)` pair against a log the compose verbs write -- one line per letter,
+under the XDG data directory, holding the thread, the event, the message, the
+author and (when the letter named one) the repository.
+
+Two properties of that log are worth stating, because they are what make it
+sound to use for this. A comment names a thread and no repository, so its record
+has none and matches on the thread alone: the alternative readings are to drop
+replies from the check or to invent a target the letter never carried. And an
+ack that fails the check is set aside rather than refused, and counted where the
+reader can see it -- it is a real maintainer's true statement about somebody
+else's thread, and treating it as an attack would hide the case where the log
+was lost or the letter went out from another machine.
+
+The log is local, unsigned, and nothing depends on its being complete: losing it
+costs this check and nothing else, and it fails towards showing less.
 
 
 The back-channel (transport, not canon)

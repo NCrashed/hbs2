@@ -37,6 +37,7 @@ module HBS2.Hub.CLI.Pr
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
@@ -280,6 +281,16 @@ prEntries = do
 
       h <- send (pnAuthor pn) (pnSender pn) (pnRcpt pn) part box
 
+      recordSent Sent { seThread = authorBoxId box
+                      , seEvent = authorBoxId box
+                      , seMessage = h
+                      , seRepo = Just (pnRepo pn)
+                      , seAuthor = pnAuthor pn
+                      , seAt = now
+                      , seWhat = "pr new"
+                      , seTitle = Just (pnTitle pn)
+                      }
+
       liftIO $ print $ vcat
         [ "queued" <+> pretty h
         , "thread" <+> pretty (authorBoxId box)
@@ -307,6 +318,20 @@ prEntries = do
       box <- sealed (pvAuthor pr) creds content
 
       h <- send (pvAuthor pr) (pvSender pr) (pvRcpt pr) part box
+
+      -- The THREAD is the one being revised and the event is this letter own
+      -- id: on an open the two coincide, and here they must not, or an ack
+      -- about the thread would correlate against a revision.
+      recordSent Sent { seThread = pvThread pr
+                      , seEvent = authorBoxId box
+                      , seMessage = h
+                      -- No repo: a revision names a thread, like a comment.
+                      , seRepo = Nothing
+                      , seAuthor = pvAuthor pr
+                      , seAt = now
+                      , seWhat = "pr revise"
+                      , seTitle = Nothing
+                      }
 
       liftIO $ print $ vcat
         [ "queued" <+> pretty h

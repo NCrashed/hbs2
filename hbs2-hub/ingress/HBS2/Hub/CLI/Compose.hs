@@ -31,6 +31,7 @@ module HBS2.Hub.CLI.Compose
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent,saying)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
@@ -412,6 +413,20 @@ composeEntries = do
                  `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
                  `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
                  `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
+
+          -- AFTER it is queued, and not before: a log of letters that were not
+          -- sent is a log that makes an unrelated ack look like an answer to
+          -- one of them. An open is its own thread (PEP-18 threading), which is
+          -- why the two hashes below are the same value.
+          recordSent Sent { seThread = authorBoxId box
+                          , seEvent = authorBoxId box
+                          , seMessage = h
+                          , seRepo = Just repo
+                          , seAuthor = author
+                          , seAt = now
+                          , seWhat = "issue new"
+                          , seTitle = Just (fromString title)
+                          }
 
           -- Both hashes, because they answer different questions and only one
           -- of them is guessable from the other. The message hash is how the

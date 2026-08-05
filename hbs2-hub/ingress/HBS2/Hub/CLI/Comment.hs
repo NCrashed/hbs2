@@ -28,6 +28,7 @@ module HBS2.Hub.CLI.Comment
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText)
 import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
@@ -166,6 +167,18 @@ commentEntries = do
       -- "queued" and not "sent", like the sibling verbs: the peer's send RPC
       -- answers unit, so a zero exit says the peer took the message off our
       -- hands and nothing about any mailbox having accepted it.
+      recordSent Sent { seThread = cmThread cm
+                      , seEvent = authorBoxId box
+                      , seMessage = h
+                      -- A comment names a thread and nothing else (PEP-18), so
+                      -- there is no repository to record and none is invented.
+                      , seRepo = Nothing
+                      , seAuthor = cmAuthor cm
+                      , seAt = now
+                      , seWhat = "comment"
+                      , seTitle = Nothing
+                      }
+
       liftIO $ print $ vcat
         [ "queued" <+> hashDoc h
         , "event" <+> hashDoc (authorBoxId box)
