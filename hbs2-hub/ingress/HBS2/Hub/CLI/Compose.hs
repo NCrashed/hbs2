@@ -15,6 +15,7 @@ module HBS2.Hub.CLI.Compose
   , Outbound(..)
   , sendLetter
   , sendLetterWith
+  , sendPayload
   , attachToLetter
   , issueUsage
   , issueArgs
@@ -40,6 +41,7 @@ import HBS2.CLI.Run.Internal
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.SignedBox (SignedBox,unboxSignedBox0)
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.Credentials.Sigil (Sigil)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
 import HBS2.Peer.Proto.Mailbox.PoW (solveStamp)
@@ -131,12 +133,36 @@ sendLetterWith
   -> SignedBox AuthorContent HubScheme
   -> ReplyChannel
   -> m HashRef
-sendLetterWith ob sender rcpts parts box reply = do
+sendLetterWith ob sender rcpts parts box reply =
+  sendPayload ob (Left sender) rcpts parts
+    (MessageData hubMsgVersion (Letter box reply))
+
+-- | Seal any hub payload and hand it to the peer.
+--
+-- Split out of 'sendLetterWith' when the second kind of payload appeared: an
+-- acknowledgement is not a letter (no inner box, never folded, PEP-18), and
+-- everything below the payload -- the flags, the group key, storing the bytes
+-- before sending, the stamps, the four ways it can fail -- is the same for
+-- both. Two copies of that would be two answers to what a hub asks a peer for.
+--
+-- The sender may be a sigil that already exists (a contributor's, published
+-- and fetchable) or one made on the spot from credentials, which is what a hub
+-- acking a letter does: it has the canon key and no reason to have published a
+-- sigil for it.
+sendPayload
+  :: MonadUnliftIO m
+  => Outbound
+  -> Either HashRef (Sigil HBS2Basic)   -- ^ sender
+  -> [HashRef]                          -- ^ recipient sigils
+  -> [HashRef]                          -- ^ parts, from 'attachToLetter'
+  -> MessageData
+  -> m HashRef
+sendPayload ob sender rcpts parts payload = do
   flags <- defMessageFlags
 
-  msg <- createMessageWith (services ob) flags Nothing (Left sender) (fmap Left rcpts)
+  msg <- createMessageWith (services ob) flags Nothing sender (fmap Left rcpts)
            parts
-           (letterPayload (MessageData hubMsgVersion (Letter box reply)))
+           (letterPayload payload)
 
   -- Stored before it is sent, and this is not belt-and-braces. The peer takes a
   -- Message by value, but everything downstream of it refers to the letter by
@@ -382,7 +408,7 @@ composeEntries = do
           let box = signAuthor author (_peerSignSk creds) content
               ob = Outbound sto api rpcTimeout
 
-          h <- sendLetter ob senderSigil [rcptSigil] box noReplyChannel
+          h <- sendLetter ob senderSigil [rcptSigil] box (ReplyTo author senderSigil)
                  `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
                  `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
                  `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))

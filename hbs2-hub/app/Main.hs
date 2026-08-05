@@ -19,6 +19,7 @@ import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Read
 import HBS2.Hub.CLI.Show
 import HBS2.Hub.CLI.Reject
+import HBS2.Hub.CLI.Updates
 import HBS2.Hub.CLI.Verify
 
 import HBS2.CLI.Prelude
@@ -114,6 +115,7 @@ main = do
         acceptEntries
         commentEntries
         composeEntries
+        updatesEntries
         verifyEntries
         readEntries
         showEntries

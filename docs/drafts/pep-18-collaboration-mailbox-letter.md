@@ -281,6 +281,17 @@ the thread-id itself before sending (see Thread identity). Note also that an
 is nothing to dedup on. Both are reasons the status shown to a user should come
 from canon, with the ack serving only to say when to go and look.
 
+WHAT IS BUILT, and where the correlation check above is not. `hub inbox accept`
+sends an ack signed by the canon key, and `hub updates` reads them, checking the
+signer against the maintainer set from the repository's canon in the reader's
+own clone. The `(target, thread)` check is NOT built, and cannot be until
+something records what this node sent: the compose verbs print the message hash
+and the thread-id and forget them, so a running hbs2-hub has no memory of its
+own submissions. So `hub updates` shows a maintainer-signed ack about any thread
+and says on stderr that it did not check whose it was. Closing this is a sent
+log, which is a small file and a decision about where it lives, not a protocol
+change.
+
 
 The back-channel (transport, not canon)
 =====================================
@@ -302,6 +313,18 @@ Threading) and can read status from public canon. When present, `reply-sigil`
 is required alongside it: the sender's sign key is recoverable from the inner
 box signature, but a sign key is not an encryption key, so the owner needs
 the sigil to reply privately.
+
+WHAT THE TWO RULES BELOW LEAVE, and it is worth naming because it removes a
+verb PEP-22 planned. Triage honours a channel only when it names the inner
+author's own mailbox AND the envelope signer is that same key, so the only
+channel that can ever be honoured is `(author-key, the sender's own sigil)` --
+which is exactly the pair every compose verb already has in its arguments.
+There is nothing left to configure: `hub identity set-reply-mailbox` would set
+a value whose only admissible content is already known, so the compose verbs
+attach it and no identity file exists. It adds nothing to the wire either: the
+key is the envelope signer and the sigil is the sender's, both already in the
+message. What the flag would buy is the choice not to be notified, which is
+worth a flag the day somebody wants it and not a stored identity.
 
 Because `ReplyChannel` is authenticated only by the outer transport signature,
 a rewrapper (see Replay) can substitute their own back-channel. Resolved in

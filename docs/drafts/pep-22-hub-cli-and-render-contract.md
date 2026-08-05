@@ -315,8 +315,14 @@ hub pr new     --target <repo> --onto master --from <ref>   ; builds a bundle (P
 hub pr revise  --thread <thread-id> --onto <ref> --from <ref>
                                                ; author-of-record (PEP-20): new
                                                ;   coordinates, no title and no body
-hub updates                        ; NOT BUILT: needs the reply-mailbox back-channel
-hub identity set-reply-mailbox <key> --sigil <hashref>      ; NOT BUILT, same reason
+hub updates    --mailbox <own-key> --repo <repo-key>
+                                               ; read your own mailbox: the acks a
+                                               ;   hub sent back, checked against that
+                                               ;   repository maintainer set
+hub identity set-reply-mailbox <key> --sigil <hashref>      ; NOT BUILT, and not needed:
+                                               ;   PEP-18 admits exactly one channel,
+                                               ;   (author key, sender sigil), so the
+                                               ;   compose verbs attach it themselves
 ```
 
 Every value is behind a flag and nothing is positional (except `hub issue new`'s
@@ -342,9 +348,17 @@ ack path unbuilt there is nothing to tell the sender, so the verb says it up
 front instead.
 
 `hub updates` is how a contributor reads the
-back-channel: the owner's acknowledgements and status updates arrive as
-messages in the contributor's own `reply-mailbox` (PEP-18/20), and this verb
-reads that mailbox and correlates each ack to the thread it sent.
+back-channel: the owner's acknowledgements arrive as messages in the
+contributor's own mailbox (PEP-18/20), and this verb reads that mailbox and
+shows the ones a maintainer of the named repository signed.
+
+It does NOT correlate each ack to a thread it sent, which this paragraph used
+to promise. That check needs a record of what was sent and nothing keeps one:
+the compose verbs print the message hash and the thread-id and forget them. So
+the verb shows every maintainer-signed ack and says on stderr that it could not
+tell whose thread it was about. The fix is a sent log, which is a file and a
+decision about where it lives; until then this is the difference between a
+check that did not run and a check that is implied.
 
 Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 
@@ -361,8 +375,9 @@ hub inbox accept <msg> [--keep]    ; fold into canon (assigns number), then drop
                                    ;   signs a drop, so a delegate folding with --as
                                    ;   cannot make one: the fold stands, the letter
                                    ;   stays, and the report says which happened
-hub inbox reject <msg>             ; refuse it here; NO canon event, and no courtesy
-                                   ;   note either -- the ack path is unbuilt (PEP-18)
+hub inbox reject <msg>             ; refuse it here; NO canon event. An accept acks
+                                   ;   the contributor; a reject still does not, and
+                                   ;   PEP-18 calls that note optional
 hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]
                                    ; owner-signed status event on a folded thread; the
                                    ;   status follows from the op, so no separate set

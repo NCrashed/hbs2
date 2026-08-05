@@ -118,6 +118,7 @@ library hub-ingress
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.GitBundle
       HBS2.Hub.Repo.GitWrite
+      HBS2.Hub.CLI.Ack
       HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Ban
       HBS2.Hub.CLI.Comment
@@ -132,6 +133,7 @@ library hub-ingress
       HBS2.Hub.CLI.Read
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
+      HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
 
 -- The CLI itself.
@@ -218,4 +220,5 @@ test-suite spec
       HBS2.Hub.GitBundleSpec
       HBS2.Hub.GitRepoSpec
       HBS2.Hub.GitWriteSpec
+      HBS2.Hub.UpdatesSpec
       HBS2.Hub.VerifySpec

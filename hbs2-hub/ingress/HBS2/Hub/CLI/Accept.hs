@@ -35,11 +35,12 @@
 -- has a caller. What a purge must never do is take the parts of a letter
 -- BECAUSE it was dropped, when the reason it was dropped is that canon took it.
 --
--- ONE THING PEP-22 PUTS IN THIS VERB IS STILL NOT HERE, and it is named on
--- stdout rather than left for somebody to discover: no acknowledgement is sent
--- to the contributor's reply channel. The record type exists
--- ("HBS2.Hub.Letter"), the sending does not. A contributor without an ack reads
--- status from public canon, which PEP-18 already says is the fallback.
+-- AND THE CONTRIBUTOR IS TOLD, when the letter asked and this node can (see
+-- "HBS2.Hub.CLI.Ack"). Between the commit and the drop, because it reports the
+-- fold and must not depend on the letter still being in the mailbox. Like the
+-- drop, it is soft: an ack that does not go out is a notification that did not
+-- happen, and the report says which. Canon is the authority either way, which
+-- is what PEP-18 means by calling this a courtesy.
 module HBS2.Hub.CLI.Accept
   ( acceptEntries
   , acceptUsage
@@ -56,7 +57,8 @@ module HBS2.Hub.CLI.Accept
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
-import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes)
+import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,AckRecord(..),ReplyChannel(..)
+                       ,openLetterAs)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
@@ -64,6 +66,8 @@ import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, codeMailboxUnknown, codePeerSilent, PeerSilent)
+import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
+import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -81,6 +85,7 @@ import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Storage
 
 import Data.ByteString.Lazy qualified as LBS
+import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
@@ -204,9 +209,12 @@ acceptEntries = do
              <> line <> "which happened rather than exiting non-zero for a"
              <> line <> "cleanup step after the work is published."
              <> line
-             <> line <> "No acknowledgement is sent to the contributor: PEP-18"
-             <> line <> "back-channel work this build does not have. Accepting the"
-             <> line <> "same letter twice is refused either way."
+             <> line <> "An acknowledgement goes to the contributor when their"
+             <> line <> "letter asked for one and named their own mailbox (PEP-18"
+             <> line <> "honours no other kind). It is signed by the canon key,"
+             <> line <> "which is what makes it checkable, and it is a courtesy:"
+             <> line <> "canon is the authority, so an ack that does not go out"
+             <> line <> "costs a notification and nothing else."
              <> line
              <> line <> "This node's triage deny-list IS applied (see hub ban):"
              <> line <> "a letter whose INNER author is denied here is refused"
@@ -440,6 +448,49 @@ acceptEntries = do
                 Left e   -> notStaged e
         _ -> pure Nothing
 
+      -- THE CONTRIBUTOR IS TOLD, when they asked to be and this node can.
+      --
+      -- Before the drop and after the commit: what it reports is the fold, so
+      -- it needs the fold to have happened, and it must not depend on the
+      -- letter still being in the mailbox.
+      --
+      -- The channel comes from a second read of the same payload, vetted the
+      -- same way the queue vets it: 'openLetterAs' honours a reply channel only
+      -- when it names the inner author's own mailbox and the envelope signer is
+      -- that key, so a rewrapper cannot redirect it and a sender cannot name a
+      -- stranger's. Read here rather than carried through the bridge because it
+      -- is transport, not content: it is deliberately outside the signed box so
+      -- that it never reaches canon.
+      let reply = case openLetterAs allowed (EnvelopeSigner (lrEnvelope raw))
+                                    (lrData raw) of
+                    Right (_, _, _, rc) -> rc
+                    Left _              -> NoReply
+
+          thread = case acScope acc of { ThreadScope t -> Just t ; _ -> Nothing }
+
+          -- What canon says the thread's status is now. An open is open by
+          -- definition; anything else inherits what the thread already had,
+          -- which is the value this event did not change.
+          statusNow t = case acContent acc of
+            AOpen{} -> "open"
+            _ -> maybe "open" (fromMaybe "open" . HM.lookup "status" . tsAttrs)
+                       (HM.lookup t (frThreads fr))
+
+      acked <- case thread of
+        Nothing -> pure (Left AckNotAsked)
+        Just t -> do
+          let ackRec = AckRecord { akTarget = repo
+                                 , akThread = t
+                                   -- The number a person will use, which for a
+                                   -- comment is the thread's and not this
+                                   -- event's: only an open mints one.
+                                 , akNumber = stageAt
+                                 , akStatus = statusNow t
+                                 , akMergeCommit = Nothing
+                                 , akNote = Nothing
+                                 }
+          sendAck (Outbound sto api rpcTimeout) canonKey creds reply ackRec
+
       -- LAST, and only now: everything above can refuse, and a letter dropped
       -- before a refusal would be a letter neither folded nor in the queue.
       --
@@ -481,7 +532,9 @@ acceptEntries = do
                     (\why -> "left in the mailbox:" <+> pretty msg
                                <+> parens (pretty (why :: Text)))
                     kept
-            , "no acknowledgement was sent; see --help"
+            , either (\e -> "no acknowledgement:" <+> pretty e)
+                     (\h -> "acknowledged" <+> hashDoc h)
+                     acked
             ]
           for_ (omittedNote plan) print
 

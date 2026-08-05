@@ -157,7 +157,8 @@ commentEntries = do
       let ob = Outbound sto api rpcTimeout
           box = signAuthor (cmAuthor cm) (_peerSignSk creds) content
 
-      h <- sendLetter ob (cmSender cm) [cmRcpt cm] box noReplyChannel
+      h <- sendLetter ob (cmSender cm) [cmRcpt cm] box
+             (ReplyTo (cmAuthor cm) (cmSender cm))
              `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
              `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
              `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))

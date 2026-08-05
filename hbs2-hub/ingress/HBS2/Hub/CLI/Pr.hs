@@ -278,7 +278,7 @@ prEntries = do
 
       box <- sealed (pnAuthor pn) creds content
 
-      h <- send (pnSender pn) (pnRcpt pn) part box
+      h <- send (pnAuthor pn) (pnSender pn) (pnRcpt pn) part box
 
       liftIO $ print $ vcat
         [ "queued" <+> pretty h
@@ -306,7 +306,7 @@ prEntries = do
 
       box <- sealed (pvAuthor pr) creds content
 
-      h <- send (pvSender pr) (pvRcpt pr) part box
+      h <- send (pvAuthor pr) (pvSender pr) (pvRcpt pr) part box
 
       liftIO $ print $ vcat
         [ "queued" <+> pretty h
@@ -366,7 +366,7 @@ prEntries = do
         liftIO $ refuse (show ("over the size limit for a letter:" <+> pretty f)) 1
       pure (signAuthor author (_peerSignSk creds) content)
 
-    send sender rcpt part box = do
+    send author sender rcpt part box = do
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
       let ob = Outbound sto api rpcTimeout
@@ -374,7 +374,7 @@ prEntries = do
       -- the RTS as exit 1 -- the code PEP-22 gives to a mistyped flag. A hook
       -- that cannot tell "your arguments are wrong" from "the letter is in no
       -- mailbox" retries the wrong one of them.
-      sendLetterWith ob sender [rcpt] [ptPart part] box noReplyChannel
+      sendLetterWith ob sender [rcpt] [ptPart part] box (ReplyTo author sender)
         `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
         `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
         `catch` (\(e :: PoWTooHard) -> liftIO (refuse (show e) codeNoWork))
