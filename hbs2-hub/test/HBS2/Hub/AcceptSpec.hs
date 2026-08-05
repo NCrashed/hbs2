@@ -52,7 +52,7 @@ spec1 = do
       mbox <- aKey
       repo <- aKey
       let h = aHash "a message"
-          want = Just (AcceptArgs mbox repo h Nothing False)
+          want = Just (AcceptArgs (Just mbox) repo h Nothing False)
       acceptArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)])
         `shouldBe` want
       acceptArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox, "--message", show (pretty h)])
@@ -67,7 +67,7 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv [ "--mailbox", b58 mbox, "--repo", b58 repo
                        , "--as", b58 bob, "--message", show (pretty h) ])
-        `shouldBe` Just (AcceptArgs mbox repo h (Just bob) False)
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h (Just bob) False)
 
     -- The letter is dropped from the mailbox after the fold, so the flag that
     -- keeps it has to be a flag and not an absence: an accept that quietly kept
@@ -85,13 +85,15 @@ spec1 = do
       acceptArgs (argv (base <> ["--keep", "yes"])) `shouldBe` Nothing
       acceptArgs (argv (base <> ["--keep", "--keep"])) `shouldBe` Nothing
 
-    -- Both are keys, so a form missing one is not a form with one key in the
-    -- wrong place: it is a form this verb must not act on at all.
-    it "refuses a form with either key missing" $ do
+    -- The repository is required and the mailbox is not: without one the
+    -- manifest is read (PEP-18), and a mailbox named by hand skips that. A
+    -- form with neither is a form this verb must not act on at all.
+    it "refuses a form with no repository, and takes one with no mailbox" $ do
       k <- aKey
       let h = aHash "a message"
       acceptArgs (argv ["--mailbox", b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
-      acceptArgs (argv ["--repo", b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
+      acceptArgs (argv ["--repo", b58 k, "--message", show (pretty h)])
+        `shouldBe` Just (AcceptArgs Nothing k h Nothing False)
       acceptArgs (argv [b58 k, b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
 
     it "refuses a form with no message" $ do

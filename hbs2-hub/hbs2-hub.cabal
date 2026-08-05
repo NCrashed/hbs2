@@ -117,6 +117,7 @@ library hub-ingress
       HBS2.Hub.Ingress
       HBS2.Hub.Sent
       HBS2.Hub.Repo.Git
+      HBS2.Hub.Repo.Manifest
       HBS2.Hub.Repo.GitBundle
       HBS2.Hub.Repo.GitWrite
       HBS2.Hub.CLI.Ack

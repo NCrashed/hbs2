@@ -27,10 +27,10 @@ module HBS2.Hub.CLI.Comment
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
-import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText)
-import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent)
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 

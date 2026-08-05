@@ -31,8 +31,8 @@ module HBS2.Hub.CLI.Ack
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
+import HBS2.Hub.Ingress (PeerSilent(..))
 import HBS2.Hub.CLI.Compose (Outbound(..),sendPayload,NotStored(..),PoWTooHard(..))
-import HBS2.Hub.CLI.Inbox (PeerSilent(..))
 
 import HBS2.CLI.Prelude
 

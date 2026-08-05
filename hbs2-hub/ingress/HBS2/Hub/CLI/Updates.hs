@@ -44,8 +44,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch)
-import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent
-                          ,PeerSilent)
+import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude

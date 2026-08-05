@@ -31,7 +31,8 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..))
+import HBS2.Hub.Ingress (PeerSilent(..))
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 

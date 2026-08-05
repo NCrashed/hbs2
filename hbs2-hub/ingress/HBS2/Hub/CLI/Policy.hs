@@ -41,9 +41,9 @@ module HBS2.Hub.CLI.Policy
   ) where
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
-import HBS2.Hub.Ingress (rpcTimeout)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..),bounded)
+import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal

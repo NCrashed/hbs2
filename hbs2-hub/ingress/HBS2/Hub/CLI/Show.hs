@@ -41,7 +41,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,utcOf
-                          ,codeMailboxUnknown,codePeerSilent,PeerSilent)
+                          ,codeMailboxUnknown,codePeerSilent)
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)

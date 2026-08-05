@@ -37,6 +37,8 @@ module HBS2.Hub.Ingress
   , maxInboxLetters
   , fetchRound
   , rpcTimeout
+  , bounded
+  , PeerSilent(..)
   , LetterRaw(..)
   , rawMessage
   , PartFacts(..)
@@ -840,3 +842,38 @@ measurePart ig h = do
             { pfSize = fromIntegral (sum [ s | Just s <- sizes ])
             , pfHere = all isJust sizes
             }
+
+-- | Bound one call to the peer, and say which call it was if it does not answer.
+--
+-- Top-level rather than a @where@ binding, because this is the fix a whole
+-- rewrite was about and nothing could reach it: the storage client's 'getBlock'
+-- calls 'callService' raw, which blocks on a TQueue with no timeout at all.
+--
+-- ONE CALL, and the haddock says so because the first version of it did not:
+-- this is 10 s per block, not 10 s for the walk. A peer answering every merkle
+-- node just inside the bound still takes as long as the mailbox is big. What it
+-- rules out is the wedge -- a peer that answers the mailbox service and then
+-- stops -- which is the state that hung the verb forever.
+--
+-- HERE rather than beside the verb that first needed it, because the manifest
+-- reader needs it too and lives below the CLI: a module that reads a peer's
+-- answers cannot import the module that prints refusals.
+bounded :: MonadUnliftIO m => Timeout 'Seconds -> String -> m a -> m a
+bounded t what act =
+  race (pause t) act >>= either (\() -> throwIO (PeerSilent what)) pure
+
+-- | The peer is up and stopped answering.
+--
+-- Distinct from "no peer" (which fails before any verb runs) and from a usage
+-- error, because the three call for different things: start it, fix the command,
+-- and look at why it is stuck. It used to arrive as @user error (...)@ with exit
+-- 1, under the ten GHC call stacks the socket layer logs on the way.
+newtype PeerSilent = PeerSilent String
+
+instance Show PeerSilent where
+  show (PeerSilent what) =
+    "the peer did not answer for " <> show what <> " within "
+      <> show (pretty rpcTimeout) <> ". It is running, so this is not a"
+      <> " connection problem: check `hbs2-peer poke` and the peer's log."
+
+instance Exception PeerSilent

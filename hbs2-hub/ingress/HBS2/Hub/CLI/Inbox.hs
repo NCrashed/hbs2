@@ -33,24 +33,25 @@ module HBS2.Hub.CLI.Inbox
   , inboxUsage
   , refuse
   , saying
-  , bounded
-  , PeerSilent(..)
   , codeMailboxUnknown
   , codePeerSilent
   , maxMissingLines
   , overRpc
+  , manifestCode
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Peer.Proto.Mailbox
+import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -77,6 +78,7 @@ inboxEntries :: forall c m . ( IsContext c
                              , MonadUnliftIO m
                              , HasStorage m
                              , HasClientAPI MailboxAPI UNIX m
+                             , HasClientAPI LWWRefAPI UNIX m
                              , Exception (BadFormException c)
                              ) => MakeDictM c m ()
 inboxEntries = do
@@ -98,9 +100,10 @@ inboxEntries = do
              <> line <> "reads as empty forever. Create one with"
              <> line <> "'hbs2-peer mailbox create --key KEY hub'."
              <> line
-             <> line <> "Takes the mailbox key directly, which is the form PEP-22"
-             <> line <> "spells --mailbox. The form that reads the key from the repo"
-             <> line <> "manifest needs a manifest reader, which does not exist yet."
+             <> line <> "--mailbox names the key directly. Without it, --repo is"
+             <> line <> "read: the repository manifest declares its ingress mailbox"
+             <> line <> "(PEP-18), so a maintainer who knows the repository does not"
+             <> line <> "have to know the mailbox. One of the two has to be given."
              <> line
              <> line <> "--repo names whose deny-list to apply (hub ban), which is"
              <> line <> "this node's own state keyed by repository and not anything"
@@ -111,8 +114,11 @@ inboxEntries = do
     -- the spec calls `--mailbox <key>`, and a form the spec names has to be
     -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
-        [ SignPubKeyLike mbox ] -> lift (listInbox mbox Nothing)
-        (inboxArgs -> Just (mbox, mrepo)) -> lift (listInbox mbox mrepo)
+        [ SignPubKeyLike mbox ] -> lift (listInbox (Just mbox) Nothing)
+        (inboxArgs -> Just (mbox, mrepo))
+          -- One of the two, and the reader cannot say which: a queue with
+          -- neither a mailbox nor a repository is a queue nobody named.
+          | isJust mbox || isJust mrepo -> lift (listInbox mbox mrepo)
         -- Its own message, not a BadFormException. Two things were wrong with
         -- that: it names an internal Haskell type and a spelling the caller did
         -- not type, which is the defect `hub verify` was already fixed for; and
@@ -123,9 +129,17 @@ inboxEntries = do
         _ -> liftIO (die (show (inboxUsage :: Doc ())))
 
   where
-    listInbox mbox mrepo = do
+    listInbox mmbox mrepo = do
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
+
+      -- The mailbox named, or the one the repository declares. Costs nothing
+      -- when it was named: `mailboxFor` makes no call in that case.
+      mbox <- case mrepo of
+        Nothing -> maybe (liftIO (die (show (inboxUsage :: Doc ())))) pure mmbox
+        Just repo -> mailboxFor mmbox repo
+                       >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
+                                  pure
 
       -- THE DENY-LIST, when the caller says which repository's. It is this
       -- node's own state keyed by repo (PEP-21 "Two enforcement layers"), not
@@ -182,21 +196,6 @@ inboxEntries = do
         0 -> pure ()
         n -> exitWith (ExitFailure n)
 
--- | Bound one call to the peer, and say which call it was if it does not answer.
---
--- Top-level rather than a @where@ binding, because this is the fix the whole
--- rewrite is about and nothing could reach it: the storage client's 'getBlock'
--- calls 'callService' raw, which blocks on a TQueue with no timeout at all.
---
--- ONE CALL, and the haddock says so because the first version of it did not:
--- this is 10 s per block, not 10 s for the walk. A peer answering every merkle
--- node just inside the bound still takes as long as the mailbox is big. What it
--- rules out is the wedge -- a peer that answers the mailbox service and then
--- stops -- which is the state that hung the verb forever.
-bounded :: MonadUnliftIO m => Timeout 'Seconds -> String -> m a -> m a
-bounded t what act =
-  race (pause t) act >>= either (\() -> throwIO (PeerSilent what)) pure
-
 -- | Say why, on stderr, and leave with the code that says which why.
 --
 -- The write is GUARDED and the exit is not. A closed stderr is not a reason to
@@ -216,22 +215,6 @@ saying d =
              (\_ -> pure ())
              (hPutDoc stderr d)
 
--- | The peer is up and stopped answering.
---
--- Distinct from "no peer" (which fails before any verb runs) and from a usage
--- error, because the three call for different things: start it, fix the command,
--- and look at why it is stuck. It used to arrive as @user error (...)@ with exit
--- 1, under the ten GHC call stacks the socket layer logs on the way.
-newtype PeerSilent = PeerSilent String
-
-instance Show PeerSilent where
-  show (PeerSilent what) =
-    "the peer did not answer for " <> show what <> " within "
-      <> show (pretty rpcTimeout) <> ". It is running, so this is not a"
-      <> " connection problem: check `hbs2-peer poke` and the peer's log."
-
-instance Exception PeerSilent
-
 -- | What the peer not holding the mailbox exits with.
 --
 -- Above the range PEP-22 assigns to `hub verify`'s own refusals (3..16), and
@@ -246,9 +229,10 @@ codePeerSilent = 18
 
 -- | What this verb takes, in the words somebody typing it would use.
 inboxUsage :: Doc ann
-inboxUsage = "usage: hub inbox [--mailbox] <mailbox-key>" <> line
-          <> "  the hub's ingress mailbox key in base58. The peer must already"
-          <> line <> "  hold it: `hbs2-peer mailbox create --key KEY hub`."
+inboxUsage = "usage: hub inbox [--mailbox <key>] [--repo <key>]" <> line
+          <> "  one of the two: the mailbox key in base58, or the repository"
+          <> line <> "  whose manifest declares it. The peer must already hold the"
+          <> line <> "  mailbox: `hbs2-peer mailbox create --key KEY hub`."
           <> line <> "  `hub help inbox` says more."
 
 -- | The queue itself: one line per letter, on stdout.
@@ -534,11 +518,25 @@ silent what = maybe (throwIO (PeerSilent what)) pure
 -- says so rather than leaving "(folds)" to be read as permission.
 --
 -- Exported and pure, like every other argument reader here.
-inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Maybe HubKey)
+inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe (Maybe HubKey, Maybe HubKey)
 inboxArgs syn = do
   kvs  <- flagsOf ["--mailbox","--repo"] syn
-  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  -- BOTH optional here and not in the verb: a queue named by repository alone
+  -- resolves its mailbox from the manifest, and one named by neither is a
+  -- usage error the verb reports with its own words.
+  mbox <- flagMaybe kvs "--mailbox" asKey
   repo <- flagMaybe kvs "--repo" asKey
   pure (mbox, repo)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
+-- | What a verb that could not resolve a mailbox should exit with.
+--
+-- Here rather than beside 'ManifestGone', because an exit code is this layer's
+-- business and the reader below the CLI cannot import the module that owns
+-- them. Silence keeps its own number: it is the one case where trying again is
+-- the answer.
+manifestCode :: ManifestGone -> Int
+manifestCode = \case
+  ManifestPeerSilent -> codePeerSilent
+  _                  -> codeNoManifest

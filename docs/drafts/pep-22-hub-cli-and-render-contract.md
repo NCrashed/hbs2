@@ -163,6 +163,7 @@ and a tree full of forged events were the same event.
 | 38   | the log of what this node sent will not read (`hub updates`)   |
 | 39   | nothing was checked out, and this clone is as it was (`hub pr checkout`) |
 | 40   | canon here and canon there have diverged; nothing was written (`hub sync`) |
+| 41   | the repository declares no mailbox, or its manifest will not read |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
@@ -399,12 +400,15 @@ Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 
 ```
 hub inbox [--mailbox <key>] [--repo <key>]   ; decrypted triage queue (Tier B), verified;
-                                   ;   --repo applies that repository deny-list
+                                   ;   one of the two is required. --repo alone
+                                   ;   resolves the mailbox from the repository
+                                   ;   manifest and applies its deny-list
 hub inbox show --mailbox <key> --message <hash> [--repo <key>]
                                    ; one submission whole: inner author, title, body,
                                    ;   attachments measured, and what triage makes of
                                    ;   it. --repo also asks canon whether it is folded
-hub inbox accept <msg> [--keep]    ; fold into canon (assigns number), then drop the
+hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--keep]
+                                   ; fold into canon (assigns number), then drop the
                                    ;   letter from the mailbox (PEP-21 fold-then-
                                    ;   delete). --keep leaves it. The MAILBOX key
                                    ;   signs a drop, so a delegate folding with --as
@@ -436,10 +440,22 @@ thread through the same fold every reader runs, so a number canon does not hold
 is a refusal here rather than an event minted against a thread that does not
 exist.
 
-`hub inbox` takes no mailbox key in the ordinary case: it reads the repository
-you are standing in and resolves the ingress mailbox from its manifest (PEP-18
-`mailboxByTier`). `--mailbox <key>` names one directly and skips that, which
-makes it the form available before a manifest reader exists.
+`hub inbox` and `hub inbox accept` take no mailbox key when they are given a
+repository: the manifest declares the ingress mailbox (PEP-18 `mailboxByTier`)
+and they read it. `--mailbox <key>` names one directly, wins, and costs no
+lookup at all -- a caller who names a mailbox is not asking to be corrected.
+
+The repository key is still typed rather than read from the clone you stand in,
+which this section used to promise. That is a second lookup (the git remote's
+url, or a config entry) and a decision about which remote counts when there are
+several; naming it is one argument and no ambiguity.
+
+Reading a manifest asks the peer for an LWWRef, so it is the one thing in the
+read path that a peer must answer: a clone whose peer has never fetched the ref
+cannot resolve the mailbox, and says so with exit 41 rather than reading an
+empty queue. `hub inbox show` and `hub inbox reject` still require `--mailbox`,
+since for them the repository is optional for a different reason (canon, not
+addressing) and making one flag mean two things would be worse than typing it.
 
 THE DENY-LIST IS NOT IN THE MANIFEST, and this section used to say it was,
 which contradicts PEP-21 and the implementation both. It is hub state, local to

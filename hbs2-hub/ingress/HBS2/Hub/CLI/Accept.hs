@@ -65,18 +65,21 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
-import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, codeMailboxUnknown, codePeerSilent, PeerSilent)
+import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, manifestCode
+                          ,codeMailboxUnknown, codePeerSilent)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Repo.Manifest (mailboxFor)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
+import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Peer.RPC.Client
@@ -157,7 +160,7 @@ bundleOf = \case
 -- the same key type: a positional reading of that is a well-typed accept
 -- against the wrong repository.
 data AcceptArgs = AcceptArgs
-  { aaMailbox :: HubKey
+  { aaMailbox :: Maybe HubKey   -- ^ absent: read it from the repository manifest
   , aaRepo    :: RepoRef
   , aaMessage :: HashRef
   , aaAs      :: Maybe HubKey   -- ^ a delegate's canon key (PEP-21)
@@ -173,13 +176,14 @@ data AcceptArgs = AcceptArgs
 
 acceptUsage :: Doc ()
 acceptUsage =
-  "usage: hbs2-hub hub inbox accept --mailbox <key> --repo <key> --message <hash> [--as <key>] [--keep]"
+  "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep]"
 
 -- | @hub inbox accept@.
 acceptEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
                               , HasStorage m
                               , HasClientAPI MailboxAPI UNIX m
+                              , HasClientAPI LWWRefAPI UNIX m
                               , Exception (BadFormException c)
                               ) => MakeDictM c m ()
 acceptEntries = do
@@ -227,10 +231,16 @@ acceptEntries = do
   where
 
     accept a = do
-      let mbox = aaMailbox a
-          repo = aaRepo a
+      let repo = aaRepo a
           msg  = aaMessage a
           canonKey = fromMaybe repo (aaAs a)
+
+      -- The mailbox named, or the one this repository declares (PEP-18). The
+      -- repository is required by this verb either way, so the lookup always
+      -- has something to ask about, and naming the mailbox skips it.
+      mbox <- mailboxFor (aaMailbox a) repo
+                >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
+                           pure
 
       creds <- runKeymanClientRO (loadCredentials canonKey)
                  >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -560,7 +570,10 @@ acceptEntries = do
 acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe AcceptArgs
 acceptArgs syn = do
   kvs  <- flagsAndSwitches ["--mailbox","--repo","--message","--as"] ["--keep"] syn
-  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  -- Optional, unlike the repository: without it the manifest is read. A
+  -- caller who names it is not asking to be corrected, so it wins and costs
+  -- no lookup.
+  mbox <- flagMaybe kvs "--mailbox" asKey
   repo <- flagOnce kvs "--repo"    >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
   -- 'flagMaybe' and not a lookup that swallows a bad value: --as names the key

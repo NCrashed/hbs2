@@ -4,6 +4,8 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter (Disposition(..))
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Inbox
+import HBS2.Hub.CLI.Argv (argvAtom)
+import Data.Config.Suckless (Syntax,C)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
@@ -47,12 +49,21 @@ fatRef n = HashRef (fromString (replicate n 'z'))
 aKey :: IO HubKey
 aKey = _peerSignPk <$> newCredentials @'HBS2Basic
 
+argv :: [String] -> [Syntax C]
+argv = fmap argvAtom
+
+b58 :: HubKey -> String
+b58 = show . pretty . AsBase58
+
 -- One queue line, with everything a stranger controls left to the caller.
 view :: HashRef -> Maybe HubKey -> Either OpenError (HubKey, AuthorContent, Disposition) -> LetterView
 view m env letter = LetterView m env letter Nothing
 
 spec :: Spec
-spec = do
+spec = spec1 >> spec2
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-22 hub inbox: the queue line" $ do
 
@@ -301,3 +312,30 @@ onStderr act = bracket (hDuplicate stderr)
                  (\_ -> withFile "/dev/null" WriteMode $ \n ->
                           hDuplicateTo n stderr >> act)
 
+
+spec2 :: Spec
+spec2 =
+  describe "PEP-22 hub inbox: arguments" $ do
+
+    it "reads either flag, or both, in any order" $ do
+      mbox <- aKey ; repo <- aKey
+      inboxArgs (argv ["--mailbox", b58 mbox]) `shouldBe` Just (Just mbox, Nothing)
+      inboxArgs (argv ["--repo", b58 repo]) `shouldBe` Just (Nothing, Just repo)
+      inboxArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo])
+        `shouldBe` Just (Just mbox, Just repo)
+      inboxArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox])
+        `shouldBe` Just (Just mbox, Just repo)
+
+    -- BOTH are optional to the reader and not to the verb: a repository alone
+    -- resolves its mailbox from the manifest (PEP-18), and neither is a queue
+    -- nobody named. The reader cannot tell those apart, so it parses and the
+    -- verb refuses.
+    it "parses a line naming neither, which the verb then refuses" $ do
+      inboxArgs (argv []) `shouldBe` Just (Nothing, Nothing)
+
+    it "refuses a positional key, an unknown flag and a repeat" $ do
+      mbox <- aKey ; other <- aKey
+      inboxArgs (argv [b58 mbox]) `shouldBe` Nothing
+      inboxArgs (argv ["--mailbox", b58 mbox, "--all"]) `shouldBe` Nothing
+      inboxArgs (argv ["--mailbox", b58 mbox, "--mailbox", b58 other])
+        `shouldBe` Nothing

@@ -30,10 +30,10 @@ module HBS2.Hub.CLI.Compose
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
-import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe)
-import HBS2.Hub.CLI.Inbox (PeerSilent(..),refuse,codePeerSilent,saying)
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,saying)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
 import HBS2.CLI.Prelude
