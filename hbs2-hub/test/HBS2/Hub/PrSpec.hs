@@ -47,7 +47,7 @@ full repo sender rcpt author =
   ]
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3
+spec = spec1 >> spec2 >> spec3 >> spec4
 
 spec1 :: Spec
 spec1 = do
@@ -262,3 +262,38 @@ spec3 =
                                , "--onto", "master", "--from", "2026"
                                , "--base", "1234567" ]))
         `shouldBe` Just ("2026", Just "1234567")
+
+
+spec4 :: Spec
+spec4 =
+  describe "PEP-22 hub pr checkout: arguments" $ do
+
+    it "reads a complete call, and defaults the branch to nothing" $ do
+      repo <- aKey
+      prCheckoutArgs (argv ["--repo", b58 repo, "--number", "7"])
+        `shouldBe` Just (PrCheckout repo 7 Nothing)
+      prCheckoutArgs (argv ["--number", "7", "--repo", b58 repo, "--branch", "review"])
+        `shouldBe` Just (PrCheckout repo 7 (Just "review"))
+
+    it "refuses a call with no repository or no number" $ do
+      repo <- aKey
+      prCheckoutArgs (argv ["--number", "7"]) `shouldBe` Nothing
+      prCheckoutArgs (argv ["--repo", b58 repo]) `shouldBe` Nothing
+
+    -- The number is a Word64 in canon, and both ends matter: this shape is
+    -- what wrapped elsewhere.
+    it "refuses a number that is not one" $ do
+      repo <- aKey
+      let with n = prCheckoutArgs (argv ["--repo", b58 repo, "--number", n])
+      with "-1" `shouldBe` Nothing
+      with "seven" `shouldBe` Nothing
+      with "18446744073709551617" `shouldBe` Nothing
+
+    -- A branch may be called 2026, and argvAtom keeps that as a number.
+    it "takes a branch that spells a number, and refuses an unknown flag" $ do
+      repo <- aKey
+      fmap pcBranch (prCheckoutArgs (argv [ "--repo", b58 repo, "--number", "7"
+                                          , "--branch", "2026" ]))
+        `shouldBe` Just (Just "2026")
+      prCheckoutArgs (argv ["--repo", b58 repo, "--number", "7", "--force"])
+        `shouldBe` Nothing

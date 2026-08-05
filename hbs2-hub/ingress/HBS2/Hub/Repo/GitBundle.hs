@@ -27,6 +27,8 @@ module HBS2.Hub.Repo.GitBundle
   , mergeBase
   , stagePull
   , pullTip
+  , refTip
+  , checkoutBranch
   , pullRef
   , Bundled(..)
   , BundleError(..)
@@ -288,17 +290,54 @@ isAncestor cwd a b = runExceptT do
 -- first stage, and it is what @--quiet@ is for.
 pullTip :: MonadUnliftIO m
         => Maybe FilePath -> Word64 -> m (Either BundleError (Maybe Text))
-pullTip cwd n =
-  run cwd smallSeconds "rev-parse"
-      [ "rev-parse", "--verify", "--quiet"
-      , Text.unpack (pullRef n) <> "^{commit}" ] <&> \case
-    Left e -> Left e
-    Right (ExitSuccess, out, _) ->
-      Right (nonEmpty (Text.strip (Text.decodeUtf8Lenient out)))
-    Right (ExitFailure 1, _, _)  -> Right Nothing
-    Right (ExitFailure c, _, e0) -> Left (refusal "rev-parse" c e0)
+pullTip cwd n = refTip cwd (pullRef n)
+
+-- | What any ref points at, or nothing if it is not there.
+--
+-- 'pullTip' generalized when a second caller appeared: checking out a proposal
+-- has to ask what a BRANCH holds before it will touch it, and that is the same
+-- question about a different name.
+--
+-- Absent is an ANSWER and not a failure -- the ordinary state of a branch
+-- nobody has made yet -- which is what @--quiet@ is for.
+refTip :: MonadUnliftIO m
+       => Maybe FilePath -> Text -> m (Either BundleError (Maybe Text))
+refTip cwd ref = runExceptT do
+  checked "ref name" validRefName ref
+  r <- ExceptT (run cwd smallSeconds "rev-parse"
+                    [ "rev-parse", "--verify", "--quiet"
+                    , Text.unpack ref <> "^{commit}" ])
+  case r of
+    (ExitSuccess, out, _) -> pure (nonEmpty (Text.strip (Text.decodeUtf8Lenient out)))
+    (ExitFailure 1, _, _)  -> pure Nothing
+    (ExitFailure c, _, e0) -> throwError (refusal "rev-parse" c e0)
   where
     nonEmpty t = if Text.null t then Nothing else Just t
+
+-- | Put a branch at a commit and switch to it, without discarding anything.
+--
+-- THREE STATES AND ONLY ONE OF THEM WRITES A BRANCH, because the fourth thing
+-- git offers -- @checkout -B@, which moves a branch wherever you say -- would
+-- silently discard commits somebody made on that name. A reviewer's local work
+-- is not this verb's to throw away, and a name it will not move is a name they
+-- can pick again with a flag.
+--
+-- The switch itself is git's to refuse: an uncommitted change that would be
+-- clobbered stops it, and that refusal is the caller's to print.
+checkoutBranch :: MonadUnliftIO m
+               => Maybe FilePath -> Text -> Text -> m (Either BundleError ())
+checkoutBranch cwd branch tip = runExceptT do
+  checked "ref name" validRefName branch
+  checked "object name" validSha tip
+  here <- ExceptT (refTip cwd branch)
+  case here of
+    Nothing ->
+      void $ ExceptT $ call cwd smallSeconds "checkout"
+        ["checkout", "-b", Text.unpack branch, Text.unpack tip]
+    Just at | at == tip ->
+      void $ ExceptT $ call cwd smallSeconds "checkout"
+        ["checkout", Text.unpack branch]
+    Just at -> throwError (BundleTipMismatch tip at)
 
 -- | Stage a proposed tip where PEP-19 puts it.
 --

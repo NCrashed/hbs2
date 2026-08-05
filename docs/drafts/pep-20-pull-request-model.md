@@ -176,6 +176,14 @@ happens as PEP-19 `comment` events on the PR thread (from either side, via
 letters or owner-native), so the review conversation is canon and travels
 with the repo.
 
+`hub pr checkout` is the one step of that which is not ordinary git, and only
+because of what it checks first: the staged ref and canon can disagree, and the
+disagreement is silent. A revision that landed in canon whose stage failed
+leaves `pulls/<n>/head` on the previous proposal, so a reviewer reads the code
+the contributor has already replaced and comments on it. The verb compares the
+two and refuses rather than guessing, which is also the only place that failure
+is ever noticed: nothing else looks at both.
+
 
 Merge
 ====

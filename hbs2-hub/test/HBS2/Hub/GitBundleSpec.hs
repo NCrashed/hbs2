@@ -64,7 +64,7 @@ ok :: Show e => Either e a -> IO a
 ok = either (fail . show) pure
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3
+spec = spec1 >> spec2 >> spec3 >> spec4
 
 spec1 :: Spec
 spec1 = do
@@ -344,3 +344,57 @@ spec3 =
       case r of
         Left (BundleBadName what _) -> what `shouldBe` "ref name"
         other -> expectationFailure ("expected a refusal, got " <> show other)
+
+spec4 :: Spec
+spec4 =
+  describe "PEP-22 hub pr checkout: putting a proposal on a branch" $ do
+
+    it "makes the branch and leaves the work tree on it" $
+      withWork $ \dir base tip -> do
+        -- From the base, so that switching is a real change rather than a
+        -- no-op: this is what a reviewer standing on master does.
+        void (git dir ["checkout", "-q", "master"])
+        ok =<< checkoutBranch (Just dir) "pr/7" tip
+        git dir ["rev-parse", "HEAD"] >>= (`shouldBe` Text.unpack tip)
+        git dir ["rev-parse", "--abbrev-ref", "HEAD"] >>= (`shouldBe` "pr/7")
+        -- And the base is still where it was: nothing was moved onto it.
+        git dir ["rev-parse", "master"] >>= (`shouldBe` Text.unpack base)
+
+    it "runs again on the branch it already made" $
+      withWork $ \dir _ tip -> do
+        void (git dir ["checkout", "-q", "master"])
+        ok =<< checkoutBranch (Just dir) "pr/7" tip
+        void (git dir ["checkout", "-q", "master"])
+        ok =<< checkoutBranch (Just dir) "pr/7" tip
+        git dir ["rev-parse", "--abbrev-ref", "HEAD"] >>= (`shouldBe` "pr/7")
+
+    -- The one that matters: `checkout -B` would move the branch and throw away
+    -- whatever a reviewer had committed on that name. This refuses instead.
+    it "will not move a branch that points somewhere else" $
+      withWork $ \dir base tip -> do
+        void (git dir ["checkout", "-q", "master"])
+        ok =<< checkoutBranch (Just dir) "pr/7" base
+        r <- checkoutBranch (Just dir) "pr/7" tip
+        case r of
+          Left (BundleTipMismatch want got) -> do
+            want `shouldBe` tip
+            got `shouldBe` base
+          other -> expectationFailure ("expected a refusal, got " <> show other)
+        -- And the branch still holds what it held.
+        git dir ["rev-parse", "pr/7"] >>= (`shouldBe` Text.unpack base)
+
+    it "refuses a branch name or a tip it would not pass to git" $
+      withWork $ \dir _ tip -> do
+        r <- checkoutBranch (Just dir) "--track=x" tip
+        case r of
+          Left (BundleBadName what _) -> what `shouldBe` "ref name"
+          other -> expectationFailure ("expected a refusal, got " <> show other)
+        r2 <- checkoutBranch (Just dir) "pr/7" "HEAD"
+        case r2 of
+          Left (BundleBadName what _) -> what `shouldBe` "object name"
+          other -> expectationFailure ("expected a refusal, got " <> show other)
+
+    it "says what any ref holds, and that a branch nobody made holds nothing" $
+      withWork $ \dir _ tip -> do
+        (ok =<< refTip (Just dir) "feature") >>= (`shouldBe` Just tip)
+        (ok =<< refTip (Just dir) "pr/7") >>= (`shouldBe` Nothing)

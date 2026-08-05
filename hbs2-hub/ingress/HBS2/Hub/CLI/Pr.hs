@@ -27,6 +27,10 @@ module HBS2.Hub.CLI.Pr
   , prReviseArgs
   , PrRevise(..)
   , codeBundleFailed
+  , codeNotStaged
+  , prCheckoutUsage
+  , prCheckoutArgs
+  , PrCheckout(..)
   , codeNoSuchPr
   , codeNotMerged
   , prMergeUsage
@@ -165,6 +169,32 @@ prEntries = do
         (prReviseArgs -> Just pr) -> lift (prRevise pr)
         _ -> liftIO (die (show prReviseUsage))
 
+  brief "put a proposed change on a local branch and switch to it"
+    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+           , arg "string" "--branch name" ]
+    $ desc ( "Reads canon for what #n proposes, checks that against what is"
+             <> line <> "staged at refs/hbs2/pulls/<n>/head in this repository,"
+             <> line <> "and puts a branch there. --branch names it; the default"
+             <> line <> "is pr/<n>."
+             <> line
+             <> line <> "THE TWO ARE CHECKED AGAINST EACH OTHER because they can"
+             <> line <> "differ, and reviewing the wrong one is silent. Canon says"
+             <> line <> "what the contributor proposes now; the ref says what this"
+             <> line <> "clone staged, which is what a failed stage after a revise"
+             <> line <> "leaves behind. This refuses rather than guessing, and"
+             <> line <> "prints both so the difference can be looked at."
+             <> line
+             <> line <> "Talks to no peer. The objects are already here: they came"
+             <> line <> "in with the bundle when the letter was accepted, or with"
+             <> line <> "a fetch of refs/hbs2/pulls/* in a clone that reviews."
+             <> line
+             <> line <> "It will not move a branch that exists and points"
+             <> line <> "elsewhere: that name may carry somebody's commits, and"
+             <> line <> "moving it would throw them away. Pick another --branch." )
+    $ entry $ bindMatch "hub:pr:checkout" $ nil_ \case
+        (prCheckoutArgs -> Just pc) -> lift (prCheckout pc)
+        _ -> liftIO (die (show prCheckoutUsage))
+
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
            , arg "string" "--commit sha", arg "string" "--into ref" ]
@@ -189,6 +219,74 @@ prEntries = do
 
   where
 
+    prCheckout pc = do
+      (_, fr) <- withGitCanon (\cs -> readCanon cs (pcRepo pc)) >>= \case
+        Right st -> pure (Just (stCommit st), stFold st)
+        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+
+      t <- numbered fr (pcNumber pc)
+
+      pr <- case (tsKind t, tsPR t) of
+              (HubPR, Just pr) -> pure pr
+              _ -> liftIO $ refuse (show ("#" <> pretty (pcNumber pc)
+                                            <+> "is not a pull request"))
+                                   codeNoSuchPr
+
+      let want = prSourceTip (psCoords pr)
+          branch = fromMaybe ("pr/" <> tshow (pcNumber pc)) (pcBranch pc)
+
+      -- What this clone actually staged, which is a different question from
+      -- what canon says is proposed, and the answer differs exactly when
+      -- something went wrong: a stage that failed after the fold (accept says
+      -- so and prints the command), or a clone that has not fetched the pull
+      -- refs.
+      staged <- pullTip Nothing (pcNumber pc)
+                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
+
+      case staged of
+        Nothing ->
+          liftIO $ refuse (show ( "nothing is staged for #" <> pretty (pcNumber pc)
+                                    <> line
+                                    <> "  canon says the proposal is" <+> pretty want
+                                    <> line
+                                    <> "  this clone has no" <+> pretty (pullRef (pcNumber pc))
+                                    <> ". If you folded it here, the stage"
+                                    <> line
+                                    <> "  failed and `hub inbox accept` printed the"
+                                    <+> "update-ref to run. If you are reviewing"
+                                    <> line
+                                    <> "  somebody else's canon, fetch"
+                                    <+> "'+refs/hbs2/pulls/*:refs/hbs2/pulls/*' first." ))
+                          codeNotStaged
+        Just at | at /= want ->
+          liftIO $ refuse (show ( "what is staged for #" <> pretty (pcNumber pc)
+                                    <+> "is not what canon says is proposed"
+                                    <> line <> "  canon " <+> pretty want
+                                    <> line <> "  staged" <+> pretty at
+                                    <> line
+                                    <> "  a revision landed in canon and the ref did"
+                                    <+> "not move, or the ref moved and canon did not."
+                                    <> line
+                                    <> "  Nothing was checked out: reviewing the wrong"
+                                    <+> "one of these is silent." ))
+                          codeNotStaged
+        Just at ->
+          checkoutBranch Nothing branch at >>= \case
+            Right () -> liftIO $ print $ vcat
+              [ "on branch" <+> pretty branch
+              , "#" <> pretty (pcNumber pc) <+> "proposes" <+> pretty at
+              , "onto" <+> pretty (prOnto (psCoords pr))
+                  <+> "base" <+> pretty (prBase (psCoords pr))
+              ]
+            Left e@BundleTipMismatch{} ->
+              liftIO $ refuse (show ( "the branch" <+> pretty branch <+> "exists and"
+                                        <+> "points somewhere else" <> line
+                                        <> "  " <> pretty e <> line
+                                        <> "  it is not this verb's to move: name"
+                                        <+> "another with --branch, or delete it" ))
+                              codeNotStaged
+            Left e -> liftIO (refuse (show (pretty e)) codeBundleFailed)
+
     prMerge pm = do
       creds <- runKeymanClientRO (loadCredentials (pmAs pm))
                  >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -200,14 +298,7 @@ prEntries = do
         Right st -> pure (Just (stCommit st), stFold st)
         Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
 
-      -- The thread by its number, which is what a person has in front of them.
-      -- Canon is the only place that maps one to the other, and it is the map
-      -- the fold rebuilt rather than the convenience index in the tree.
-      t <- case [ x | x <- HM.elems (frThreads fr), tsNumber x == Just (pmNumber pm) ] of
-             (x:_) -> pure x
-             []    -> liftIO $ refuse (show ("canon holds no thread numbered"
-                                               <+> pretty (pmNumber pm)))
-                                      codeNoSuchPr
+      t <- numbered fr (pmNumber pm)
 
       pr <- case (tsKind t, tsPR t) of
               (HubPR, Just pr) -> pure pr
@@ -256,6 +347,15 @@ prEntries = do
 
     tshow :: Word64 -> Text
     tshow = fromString . show
+
+    -- The thread by its number, which is what a person has in front of them.
+    -- Canon is the only place that maps one to the other, and it is the map the
+    -- fold rebuilt rather than the convenience index in the tree.
+    numbered fr n =
+      case [ x | x <- HM.elems (frThreads fr), tsNumber x == Just n ] of
+        (x:_) -> pure x
+        []    -> liftIO $ refuse (show ("canon holds no thread numbered" <+> pretty n))
+                                 codeNoSuchPr
 
     prNew pn = do
 
@@ -474,6 +574,42 @@ prReviseArgs syn = do
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
+    asText = fmap Text.pack . flagText
+
+-- | Nothing was checked out, and the repository is as it was.
+--
+-- Its own code because every way of reaching it is a state of THIS clone that a
+-- person fixes here -- a stage that did not happen, a ref nobody fetched, a
+-- branch name already taken -- and none of them says anything about the
+-- proposal or about canon.
+codeNotStaged :: Int
+codeNotStaged = 39
+
+-- | What @hub pr checkout@ was asked to put on a branch.
+data PrCheckout = PrCheckout
+  { pcRepo   :: RepoRef
+  , pcNumber :: Word64
+    -- | The branch to make. Defaults to @pr/\<n\>@, which is a name a reviewer
+    -- can guess and this verb will reuse on the next run.
+  , pcBranch :: Maybe Text
+  }
+  deriving stock (Eq,Show)
+
+prCheckoutUsage :: Doc ()
+prCheckoutUsage =
+  "usage: hbs2-hub pr checkout --repo <key> --number <n> [--branch <name>]"
+
+prCheckoutArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrCheckout
+prCheckoutArgs syn = do
+  kvs    <- flagsOf ["--repo","--number","--branch"] syn
+  repo   <- flagOnce kvs "--repo" >>= asKey
+  n      <- flagOnce kvs "--number" >>= flagWord
+  branch <- flagMaybe kvs "--branch" asText
+  pure (PrCheckout repo n branch)
+  where
+    asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    -- Through 'flagText', so a branch that spells a number is one. The shape
+    -- git will accept is checked further in, by 'checkoutBranch'.
     asText = fmap Text.pack . flagText
 
 -- | What @hub pr merge@ was asked to record.

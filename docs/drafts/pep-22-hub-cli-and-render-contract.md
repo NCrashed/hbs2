@@ -67,7 +67,11 @@ hub issue list [query]             ; folded issues; query DSL below
 hub issue show <n|thread-id>       ; thread with comments, status, labels
 hub pr    list [query]
 hub pr    show  <n|thread-id>      ; PR thread + coordinates + diff
-hub pr    checkout <n>            ; fetch pulls/<n>/head to a local branch for review
+hub pr    checkout --repo <key> --number <n> [--branch <name>]
+                                   ; put what is staged at pulls/<n>/head on a
+                                   ;   branch and switch to it. Checks it against
+                                   ;   what canon says is proposed and refuses when
+                                   ;   the two differ; default branch is pr/<n>
 hub log   [<n>]                    ; timeline of surviving events (subject to compaction)
 hub verify <repo-key>              ; re-run the fold's checks; report dropped events
 ```
@@ -134,6 +138,7 @@ and a tree full of forged events were the same event.
 | 36   | the deny-list will not read (`hub ban`)                         |
 | 37   | the proof-of-work a mailbox charges could not be solved in time |
 | 38   | the log of what this node sent will not read (`hub updates`)   |
+| 39   | nothing was checked out, and this clone is as it was (`hub pr checkout`) |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
