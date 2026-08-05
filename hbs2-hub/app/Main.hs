@@ -20,6 +20,7 @@ import HBS2.Hub.CLI.Read
 import HBS2.Hub.CLI.Show
 import HBS2.Hub.CLI.Reject
 import HBS2.Hub.CLI.Updates
+import HBS2.Hub.CLI.Sync
 import HBS2.Hub.CLI.Verify
 
 import HBS2.CLI.Prelude
@@ -115,6 +116,7 @@ main = do
         acceptEntries
         commentEntries
         composeEntries
+        syncEntries
         updatesEntries
         verifyEntries
         readEntries
@@ -276,7 +278,7 @@ main = do
                     , "hub:log", "hub:maintainer:list", "hub:ban:list"
                     , "hub:ban", "hub:unban"
                     , "hub:maintainer:add", "hub:maintainer:remove"
-                    , "hub:pr:merge"
+                    , "hub:pr:merge", "hub:pr:checkout", "hub:sync"
                     , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
                     , "hub:redact"
                     ] <> helpNames

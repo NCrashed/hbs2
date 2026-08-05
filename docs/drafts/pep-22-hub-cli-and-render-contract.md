@@ -61,8 +61,13 @@ command grammar (see Reuse). Commands group by the capability they need.
 Read (any clone; needs only the repo and its canon):
 
 ```
-hub clone   hbs23://<repo-key>      ; clone code + fetch refs/hbs2/meta
-hub sync                            ; fetch code + '+refs/hbs2/meta:...' (PEP-19)
+hub clone   hbs23://<repo-key>      ; NOT BUILT: it is `git clone` and then
+                                   ;   `hub sync`, and a verb for that would add
+                                   ;   a directory argument and nothing else
+hub sync    [--remote <name>]       ; fetch code, canon and the staged proposals.
+                                   ;   Canon is NOT forced, though this document
+                                   ;   used to spell the refspec with a plus: see
+                                   ;   below. --remote defaults to origin
 hub issue list [query]             ; folded issues; query DSL below
 hub issue show <n|thread-id>       ; thread with comments, status, labels
 hub pr    list [query]
@@ -75,6 +80,24 @@ hub pr    checkout --repo <key> --number <n> [--branch <name>]
 hub log   [<n>]                    ; timeline of surviving events (subject to compaction)
 hub verify <repo-key>              ; re-run the fold's checks; report dropped events
 ```
+
+CANON IS FETCHED WITHOUT A PLUS, and the refspec above used to have one. A
+forced fetch replaces the canon of whoever runs it, and the person most likely
+to run `hub sync` is a maintainer who has just accepted letters: between the
+accept and the push their ref holds commits the remote has not seen, and the
+plus drops it onto the older one. The events survive in the object store either
+way -- git keeps them until it prunes -- but the ref is what every reader
+follows, so what is lost is which events canon has.
+
+So the remote's tip goes into `FETCH_HEAD`, is compared, and the ref is moved
+only when the move is a fast-forward. A divergence is reported with both hashes
+and its own exit code (40), and nothing is written in either direction. The
+`git update-ref` that takes the remote's side is printed rather than run:
+choosing it is the operator's, and it is one command.
+
+The staged proposals under `refs/hbs2/pulls/*` ARE forced, and the asymmetry is
+the point: they are a cache of what a maintainer published, nobody commits on
+them, and `hub inbox accept` prints the command to redo one.
 
 `hub verify` takes the repository key rather than reading it from canon, and
 this is the one place a verb needs an argument that looks like it should be
@@ -139,6 +162,7 @@ and a tree full of forged events were the same event.
 | 37   | the proof-of-work a mailbox charges could not be solved in time |
 | 38   | the log of what this node sent will not read (`hub updates`)   |
 | 39   | nothing was checked out, and this clone is as it was (`hub pr checkout`) |
+| 40   | canon here and canon there have diverged; nothing was written (`hub sync`) |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added

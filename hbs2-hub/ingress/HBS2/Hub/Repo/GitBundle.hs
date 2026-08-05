@@ -1,11 +1,17 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
--- | The git side of a pull request (PEP-20 "Two submission paths", "Fetch and
--- verify").
+-- | The git side of what a hub does (PEP-20 "Two submission paths", "Fetch and
+-- verify"; PEP-19 for the refs).
 --
--- Four operations, and between them they are the whole delta path as far as
--- git is concerned: build a bundle of @base..source-ref@, take a stranger's
--- bundle in, check that the signed base really is an ancestor of the signed
--- tip, and stage the proposed tip under @refs\/hbs2\/pulls\/<n>\/head@.
+-- The delta path, as far as git is concerned: build a bundle of
+-- @base..source-ref@, take a stranger's bundle in, check that the signed base
+-- really is an ancestor of the signed tip, and stage the proposed tip under
+-- @refs\/hbs2\/pulls\/<n>\/head@.
+--
+-- And, since they are the same plumbing, the two operations that move those
+-- refs about afterwards: putting a staged proposal on a branch, and fetching
+-- code and canon from a remote. They live here rather than in a module of their
+-- own because the timeouts, the refusal type and the name checks are here, and
+-- a second copy of those is a second answer to what this build will hand git.
 --
 -- WHAT ARRIVES HERE IS SIGNED, NOT TRUSTED. A ref name and a sha come out of a
 -- contributor's inner box: the signature says who wrote them, and says nothing
@@ -29,6 +35,9 @@ module HBS2.Hub.Repo.GitBundle
   , pullTip
   , refTip
   , checkoutBranch
+  , syncFrom
+  , Synced(..)
+  , SyncedCanon(..)
   , pullRef
   , Bundled(..)
   , BundleError(..)
@@ -48,7 +57,7 @@ import Control.Monad.Except (ExceptT(..),runExceptT,throwError)
 import Data.Char (isHexDigit)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
-import Data.Word (Word64)
+import Data.Word (Word8,Word64)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.Process.Typed (ExitCode(..))
@@ -334,10 +343,107 @@ checkoutBranch cwd branch tip = runExceptT do
     Nothing ->
       void $ ExceptT $ call cwd smallSeconds "checkout"
         ["checkout", "-b", Text.unpack branch, Text.unpack tip]
-    Just at | at == tip ->
+    Just was | was == tip ->
       void $ ExceptT $ call cwd smallSeconds "checkout"
         ["checkout", Text.unpack branch]
-    Just at -> throwError (BundleTipMismatch tip at)
+    Just was -> throwError (BundleTipMismatch tip was)
+
+-- | What one sync did (PEP-19 "refs/hbs2/meta", PEP-22 @hub sync@).
+--
+-- A record rather than a line of output, so the rendering is somebody else's
+-- and a test can ask what happened without reading a terminal.
+data Synced = Synced
+  { syCanon :: SyncedCanon
+    -- | Whether the pull refs were fetched. False only when the fetch itself
+    -- failed, which is reported as an error instead.
+  , syPulls :: Bool
+  }
+  deriving stock (Eq,Show)
+
+-- | What happened to this clone's copy of canon.
+data SyncedCanon =
+    CanonNone              -- ^ the remote has none: nobody has folded anything
+  | CanonSame              -- ^ the same commit is already here
+  | CanonMoved Text Text   -- ^ from, to: a fast-forward
+    -- | The two have diverged and NOTHING was written. Local, then remote.
+    --
+    -- The case this whole function exists to make visible: a maintainer who has
+    -- accepted a letter holds canon the remote has not seen, and a forced fetch
+    -- would replace it. The events survive in the object store either way, but
+    -- the ref is what every reader follows.
+  | CanonDiverged Text Text
+  deriving stock (Eq,Show)
+
+-- | Fetch code and canon from a remote.
+--
+-- THE CODE FETCH AND THE HUB REFS ARE TWO CALLS because giving git a refspec
+-- replaces the configured one: a single call with @refs/hbs2/*@ in it fetches
+-- the hub namespace and no branches at all.
+--
+-- CANON IS NOT FORCED, which is where this stops being a wrapper. PEP-22 writes
+-- the refspec with a plus, and a plus here replaces the canon of whoever runs
+-- it: a maintainer who has just accepted a letter holds a commit the remote has
+-- not seen. So the remote's tip is fetched into FETCH_HEAD, compared, and the
+-- ref is moved only when the move is a fast-forward. A divergence is reported
+-- and left alone.
+--
+-- THE PULL REFS ARE forced, and the asymmetry is the point: they are a staging
+-- cache of what a maintainer published, nobody commits on them, and the verb
+-- that writes them prints the command to redo one.
+syncFrom :: MonadUnliftIO m
+         => Maybe FilePath -> Text -> m (Either BundleError Synced)
+syncFrom cwd remote = runExceptT do
+  checked "remote name" validRefName remote
+
+  -- The branches, by whatever refspec the remote is configured with.
+  _ <- ExceptT $ call cwd fetchSeconds "fetch" ["fetch", Text.unpack remote]
+
+  -- ASKED FOR FIRST, because git fails outright on a NAMED ref the remote does
+  -- not have ("couldn't find remote ref"), and a repository where nobody has
+  -- folded anything yet is the ordinary state of a new one rather than an
+  -- error. A wildcard would be quiet, and would also mirror whatever else ever
+  -- appears under refs/hbs2; ls-remote asks the question that is being asked.
+  probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
+             ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
+
+  here <- ExceptT (refTip cwd "refs/hbs2/meta")
+
+  canon <- if BS.null (BS.filter (not . isSpace8) probe) then pure CanonNone else do
+    -- Canon, into FETCH_HEAD only: a source-only refspec updates no local ref,
+    -- which is what makes the comparison below possible at all.
+    _ <- ExceptT $ call cwd fetchSeconds "fetch"
+           ["fetch", Text.unpack remote, "refs/hbs2/meta"]
+
+    there <- ExceptT (refTip cwd "FETCH_HEAD")
+
+    case (here, there) of
+      -- ls-remote said it was there and FETCH_HEAD says it is not, which is a
+      -- ref that vanished between two calls. Reported as absent because that
+      -- is what this clone can see; the next run will say the same or move on.
+      (_, Nothing) -> pure CanonNone
+      (Nothing, Just t) -> do
+        _ <- ExceptT $ call cwd smallSeconds "update-ref"
+               ["update-ref", "refs/hbs2/meta", Text.unpack t]
+        pure (CanonMoved "" t)
+      (Just a, Just b) | a == b -> pure CanonSame
+      (Just a, Just b) -> do
+        ff <- ExceptT (isAncestor cwd a b)
+        if not ff then pure (CanonDiverged a b)
+          else do
+            -- Through what it currently holds, like every other ref this
+            -- package moves: between the read and the write another process
+            -- may have folded something.
+            _ <- ExceptT $ call cwd smallSeconds "update-ref"
+                   ["update-ref", "refs/hbs2/meta", Text.unpack b, Text.unpack a]
+            pure (CanonMoved a b)
+
+  -- And the staged proposals. A wildcard, so a remote with none is quiet
+  -- rather than an error: git fails on a named ref it cannot find and says
+  -- nothing about a pattern that matches nothing.
+  _ <- ExceptT $ call cwd fetchSeconds "fetch"
+         [ "fetch", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
+
+  pure (Synced canon True)
 
 -- | Stage a proposed tip where PEP-19 puts it.
 --
@@ -359,8 +465,12 @@ stagePull cwd n tip old = runExceptT do
   pure ()
 
 -- Bundling and fetching walk history; the rest are single lookups.
-bundleSeconds, smallSeconds :: Int
+bundleSeconds, fetchSeconds, smallSeconds :: Int
 bundleSeconds = 600
+-- A fetch is a network operation over whatever transport the remote names,
+-- which for hbs23:// is a peer talking to the network. Bounded like the bundle
+-- and for the same reason: the alternative is a verb that hangs.
+fetchSeconds  = 600
 smallSeconds  = 60
 
 -- A value that will not go to git is refused before anything runs.
@@ -417,3 +527,9 @@ refusal what c e0
       (ReaderSays ("exited " <> Text.pack (show c) <> " and said nothing"))
   | otherwise = BundleRefused what (ToolSaid said)
   where said = Text.dropWhileEnd (`elem` ("\r\n" :: String)) (Text.decodeUtf8Lenient e0)
+
+-- Whitespace, as a byte. git answers ls-remote with either nothing or a line,
+-- and "nothing" arrives as an empty string or a bare newline depending on the
+-- transport.
+isSpace8 :: Word8 -> Bool
+isSpace8 w = w `elem` [0x20, 0x09, 0x0a, 0x0d]

@@ -19,6 +19,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Environment qualified as Env
+import System.Directory (createDirectoryIfMissing)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
 import Test.Hspec
@@ -64,7 +65,7 @@ ok :: Show e => Either e a -> IO a
 ok = either (fail . show) pure
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> spec4
+spec = spec1 >> spec2 >> spec3 >> spec4 >> spec5
 
 spec1 :: Spec
 spec1 = do
@@ -398,3 +399,86 @@ spec4 =
       withWork $ \dir _ tip -> do
         (ok =<< refTip (Just dir) "feature") >>= (`shouldBe` Just tip)
         (ok =<< refTip (Just dir) "pr/7") >>= (`shouldBe` Nothing)
+
+-- A clone and the repository it came from, which is the shape every read verb
+-- runs in: canon is written on one machine and folded on another.
+withClone :: (FilePath -> FilePath -> IO a) -> IO a
+withClone act = withSystemTempDirectory "hub-sync" $ \root -> do
+  let origin = root <> "/origin"
+      here = root <> "/clone"
+  createDirectoryIfMissing True origin
+  void $ git origin ["init", "-q", "."]
+  writeFile (origin <> "/a.txt") "one\n"
+  void $ git origin ["add", "a.txt"]
+  void $ git origin ["commit", "-q", "-m", "base"]
+  void $ git root ["clone", "-q", origin, here]
+  act origin here
+
+-- Canon is an ordinary commit as far as git is concerned, so the fixture can
+-- make one without the hub: what is under test is which ref moves and when.
+canonCommit :: FilePath -> String -> IO String
+canonCommit dir what = do
+  writeFile (dir <> "/canon.txt") (what <> "\n")
+  void $ git dir ["add", "canon.txt"]
+  void $ git dir ["commit", "-q", "-m", what]
+  c <- git dir ["rev-parse", "HEAD"]
+  void $ git dir ["update-ref", "refs/hbs2/meta", c]
+  pure c
+
+spec5 :: Spec
+spec5 =
+  describe "PEP-22 hub sync: bringing a clone up to date" $ do
+
+    it "says the remote has no canon rather than failing on a missing ref" $
+      withClone $ \_ here -> do
+        r <- ok =<< syncFrom (Just here) "origin"
+        syCanon r `shouldBe` CanonNone
+        syPulls r `shouldBe` True
+
+    it "brings canon in the first time, and says nothing changed the second" $
+      withClone $ \origin here -> do
+        c <- canonCommit origin "one"
+        r <- ok =<< syncFrom (Just here) "origin"
+        syCanon r `shouldBe` CanonMoved "" (Text.pack c)
+        git here ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` c)
+        (syCanon <$> (ok =<< syncFrom (Just here) "origin")) >>= (`shouldBe` CanonSame)
+
+    it "fast-forwards when the remote has folded more" $
+      withClone $ \origin here -> do
+        c1 <- canonCommit origin "one"
+        void (ok =<< syncFrom (Just here) "origin")
+        c2 <- canonCommit origin "two"
+        r <- ok =<< syncFrom (Just here) "origin"
+        syCanon r `shouldBe` CanonMoved (Text.pack c1) (Text.pack c2)
+        git here ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` c2)
+
+    -- The case the plus in the refspec would eat: this clone has folded a
+    -- letter the remote has not seen, and a forced fetch would drop the ref
+    -- onto the older commit.
+    it "refuses to move canon when the two have diverged, and writes nothing" $
+      withClone $ \origin here -> do
+        c1 <- canonCommit origin "one"
+        void (ok =<< syncFrom (Just here) "origin")
+        -- Both sides move, independently: an accept here, an accept there.
+        mine <- canonCommit here "mine"
+        theirs <- canonCommit origin "theirs"
+        r <- ok =<< syncFrom (Just here) "origin"
+        syCanon r `shouldBe` CanonDiverged (Text.pack mine) (Text.pack theirs)
+        -- Untouched, which is the whole point.
+        git here ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` mine)
+        c1 `shouldNotBe` mine
+
+    it "brings the staged proposals in, so a reviewer can check one out" $
+      withClone $ \origin here -> do
+        void (canonCommit origin "one")
+        tip <- git origin ["rev-parse", "HEAD"]
+        void (git origin ["update-ref", Text.unpack (pullRef 7), tip])
+        void (ok =<< syncFrom (Just here) "origin")
+        (ok =<< pullTip (Just here) 7) >>= (`shouldBe` Just (Text.pack tip))
+
+    it "refuses a remote name it would not pass to git" $
+      withClone $ \_ here -> do
+        r <- syncFrom (Just here) "--upload-pack=touch /tmp/pwned"
+        case r of
+          Left (BundleBadName what _) -> what `shouldBe` "remote name"
+          other -> expectationFailure ("expected a refusal, got " <> show other)

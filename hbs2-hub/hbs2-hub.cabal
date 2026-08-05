@@ -134,6 +134,7 @@ library hub-ingress
       HBS2.Hub.CLI.Read
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
+      HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
 
@@ -201,6 +202,7 @@ test-suite spec
       HBS2.Hub.CommentSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
+      HBS2.Hub.SyncSpec
       HBS2.Hub.TextSpec
       HBS2.Hub.FoldSpec
       HBS2.Hub.LetterSpec

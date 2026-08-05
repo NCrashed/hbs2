@@ -258,11 +258,11 @@ prEntries = do
                                     <> "  somebody else's canon, fetch"
                                     <+> "'+refs/hbs2/pulls/*:refs/hbs2/pulls/*' first." ))
                           codeNotStaged
-        Just at | at /= want ->
+        Just got | got /= want ->
           liftIO $ refuse (show ( "what is staged for #" <> pretty (pcNumber pc)
                                     <+> "is not what canon says is proposed"
                                     <> line <> "  canon " <+> pretty want
-                                    <> line <> "  staged" <+> pretty at
+                                    <> line <> "  staged" <+> pretty got
                                     <> line
                                     <> "  a revision landed in canon and the ref did"
                                     <+> "not move, or the ref moved and canon did not."
@@ -270,11 +270,11 @@ prEntries = do
                                     <> "  Nothing was checked out: reviewing the wrong"
                                     <+> "one of these is silent." ))
                           codeNotStaged
-        Just at ->
-          checkoutBranch Nothing branch at >>= \case
+        Just got ->
+          checkoutBranch Nothing branch got >>= \case
             Right () -> liftIO $ print $ vcat
               [ "on branch" <+> pretty branch
-              , "#" <> pretty (pcNumber pc) <+> "proposes" <+> pretty at
+              , "#" <> pretty (pcNumber pc) <+> "proposes" <+> pretty got
               , "onto" <+> pretty (prOnto (psCoords pr))
                   <+> "base" <+> pretty (prBase (psCoords pr))
               ]
