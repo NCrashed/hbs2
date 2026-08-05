@@ -19,19 +19,32 @@
 -- until canon holds it. So the order is verify, fold, stage, which is the
 -- order the spec gives and the only one the dependencies allow.
 --
--- TWO THINGS PEP-22 PUTS IN THIS VERB ARE NOT HERE, and both are named on
--- stdout after a successful accept rather than left for somebody to discover.
--- The letter is NOT deleted from the mailbox: fold-then-delete is PEP-21
--- retention, which needs a @DeleteMessages@ path this build does not have.
--- No acknowledgement is sent to the contributor's reply channel: the record
--- type exists ("HBS2.Hub.Letter"), the sending does not. Neither omission
--- loses anything -- re-accepting the same letter is refused by the bridge as
--- @AlreadyInCanon@, and a contributor without an ack reads status from public
--- canon, which PEP-18 already says is the fallback.
+-- THE LETTER IS DROPPED FROM THE MAILBOX LAST, which is PEP-21's fold-then-
+-- delete ("hub behaviour on top of existing @DeleteMessages@"). Last, because
+-- everything above it can refuse and this cannot be taken back; and soft,
+-- because by the time it runs the accept has already happened. A drop that
+-- fails leaves a folded letter in the queue and says so, and that is a queue
+-- entry rather than a lost fold: re-accepting is refused by the bridge as
+-- @AlreadyInCanon@, so nothing about canon depends on it.
+--
+-- WHAT PROTECTS THE ATTACHMENTS is the fold and not the tombstone. Rule A2 says
+-- a hub may not delete an attachment canon references, and dropping the letter
+-- does not: the entry is a tombstone, the blocks stay, and PEP-21 puts the
+-- obligation on the purge nobody has written yet -- it must skip any tree
+-- pinned by a folded canon event. This verb is the reason that obligation now
+-- has a caller. What a purge must never do is take the parts of a letter
+-- BECAUSE it was dropped, when the reason it was dropped is that canon took it.
+--
+-- ONE THING PEP-22 PUTS IN THIS VERB IS STILL NOT HERE, and it is named on
+-- stdout rather than left for somebody to discover: no acknowledgement is sent
+-- to the contributor's reply channel. The record type exists
+-- ("HBS2.Hub.Letter"), the sending does not. A contributor without an ack reads
+-- status from public canon, which PEP-18 already says is the fallback.
 module HBS2.Hub.CLI.Accept
   ( acceptEntries
   , acceptUsage
   , acceptArgs
+  , AcceptArgs(..)
   , codeNoCanonKey
   , codeLetterUnreadable
   , codeTriageRefused
@@ -50,8 +63,9 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
-import HBS2.Hub.CLI.Inbox (overRpc, refuse, codeMailboxUnknown, codePeerSilent, PeerSilent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, codeMailboxUnknown, codePeerSilent, PeerSilent)
+import HBS2.Hub.CLI.Drop (dropMessage)
+import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 
@@ -132,9 +146,29 @@ bundleOf = \case
       part <- prBundle c
       pure (ptPart part, prSourceRef c, prSourceTip c, prBase c)
 
+-- | What one accept was asked to fold.
+--
+-- A record and not a tuple since @--keep@ made it five values, two of which are
+-- the same key type: a positional reading of that is a well-typed accept
+-- against the wrong repository.
+data AcceptArgs = AcceptArgs
+  { aaMailbox :: HubKey
+  , aaRepo    :: RepoRef
+  , aaMessage :: HashRef
+  , aaAs      :: Maybe HubKey   -- ^ a delegate's canon key (PEP-21)
+    -- | Leave the letter in the mailbox after folding it.
+    --
+    -- For the operator who wants the queue to be the record of what arrived
+    -- rather than of what is outstanding. It is not the default, because a
+    -- queue that keeps everything it folded is a queue nobody can triage from
+    -- after a week.
+  , aaKeep    :: Bool
+  }
+  deriving stock (Eq,Show)
+
 acceptUsage :: Doc ()
 acceptUsage =
-  "usage: hbs2-hub hub inbox accept --mailbox <key> --repo <key> --message <hash> [--as <key>]"
+  "usage: hbs2-hub hub inbox accept --mailbox <key> --repo <key> --message <hash> [--as <key>] [--keep]"
 
 -- | @hub inbox accept@.
 acceptEntries :: forall c m . ( IsContext c
@@ -162,10 +196,17 @@ acceptEntries = do
              <> line <> "(PEP-21). It defaults to the repo key, which is the owner"
              <> line <> "and the root of trust."
              <> line
-             <> line <> "The letter is NOT deleted afterwards and no acknowledgement"
-             <> line <> "is sent: both are PEP-21 retention and PEP-18 back-channel"
-             <> line <> "work this build does not have. Accepting the same letter"
-             <> line <> "twice is refused, so leaving it in the mailbox is safe."
+             <> line <> "The letter is dropped from the mailbox afterwards, which"
+             <> line <> "writes a tombstone and frees no disk (see hub inbox"
+             <> line <> "reject). --keep skips it. The MAILBOX key signs a drop,"
+             <> line <> "so a delegate signing canon with --as cannot make one:"
+             <> line <> "the fold still stands and the letter stays, and this says"
+             <> line <> "which happened rather than exiting non-zero for a"
+             <> line <> "cleanup step after the work is published."
+             <> line
+             <> line <> "No acknowledgement is sent to the contributor: PEP-18"
+             <> line <> "back-channel work this build does not have. Accepting the"
+             <> line <> "same letter twice is refused either way."
              <> line
              <> line <> "This node's triage deny-list IS applied (see hub ban):"
              <> line <> "a letter whose INNER author is denied here is refused"
@@ -177,8 +218,11 @@ acceptEntries = do
 
   where
 
-    accept (mbox, repo, msg, asKey) = do
-      let canonKey = fromMaybe repo asKey
+    accept a = do
+      let mbox = aaMailbox a
+          repo = aaRepo a
+          msg  = aaMessage a
+          canonKey = fromMaybe repo (aaAs a)
 
       creds <- runKeymanClientRO (loadCredentials canonKey)
                  >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -226,24 +270,28 @@ acceptEntries = do
       -- picked this line out of it" is the thing the verb is supposed to mean,
       -- and it is cheap to make true.
       --
-      -- One inbox read per accept, which is the same read `hub inbox` just did.
-      inbox <- readInbox ig mbox
+      -- The mailbox's live set and NOT the queue: this asks a membership
+      -- question, and asking it through 'readInbox' decrypted up to
+      -- 'maxInboxLetters' letters -- a keyman lookup, a secretbox open and a
+      -- parse each -- to answer whether one hash is in a set the walk already
+      -- had.
+      inbox <- mailboxLive ig mbox
                  `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
                  `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
       -- Against everything the mailbox HOLDS, not against the page of it the
-      -- queue opened. `readInbox` sorts the live set by hash and opens the first
+      -- queue opens. `readInbox` sorts the live set by hash and opens the first
       -- thousand, so asking the opened prefix made membership a function of how
       -- many letters a stranger had sent: a thousand messages ground to hashes
       -- below the honest one (a few thousand signatures, minutes of CPU) sorted
       -- every real letter past the cut, and this verb then answered "is not in
-      -- mailbox" about a letter that is, with no flag to raise the bound and no
-      -- DeleteMessages path in this build to clear the junk with. Permanent, for
-      -- the price of an afternoon.
-      unless (HS.member msg (irLive inbox)) $
+      -- mailbox" about a letter that is, with no flag to raise the bound. That
+      -- one was permanent for the price of an afternoon; the drop below now
+      -- clears the junk, which shortens the queue and does not fix the reasoning.
+      unless (HS.member msg (mlLive inbox)) $
         liftIO $ refuse (show ( pretty msg <+> "is not in mailbox"
                                   <+> pretty (AsBase58 mbox)
-                                  <> (if irSettled inbox
+                                  <> (if mlSettled inbox
                                         then mempty
                                         else ", which had not settled when it was read") ))
                         codeLetterUnreadable
@@ -392,6 +440,26 @@ acceptEntries = do
                 Left e   -> notStaged e
         _ -> pure Nothing
 
+      -- LAST, and only now: everything above can refuse, and a letter dropped
+      -- before a refusal would be a letter neither folded nor in the queue.
+      --
+      -- A failure here is reported and does not change the exit code, for the
+      -- same reason a failed stage does not: the accept happened. A caller that
+      -- read non-zero as "not folded" would be wrong about the one verb whose
+      -- work cannot be undone, and re-running it hits AlreadyInCanon.
+      kept <- if aaKeep a
+                then pure (Just "--keep was given")
+                else dropMessage mbox msg >>= \case
+                       Right () -> pure Nothing
+                       Left e -> do
+                         liftIO $ saying
+                           ( "hbs2-hub: the event is in canon and the letter was not"
+                               <+> "dropped:" <+> pretty e <> line
+                               <> "  nothing else is pending. To drop it by hand:" <> line
+                               <> "    hbs2-peer mailbox delete:message"
+                               <+> pretty (AsBase58 mbox) <+> pretty msg <> line )
+                         pure (Just "see stderr")
+
       -- The same guard the three read verbs carry, and this is the verb that
       -- needed it most. Everything above has happened: the event is minted, the
       -- bundle is verified, the commit has landed and the ref is staged. A
@@ -409,8 +477,11 @@ acceptEntries = do
             , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
             , "commit" <+> pretty commit
             , maybe mempty ("staged" <+>) (fmap pretty staged)
-            , "left in the mailbox:" <+> pretty msg
-                <+> "(no delete, no acknowledgement; see --help)"
+            , maybe ("dropped from the mailbox:" <+> pretty msg)
+                    (\why -> "left in the mailbox:" <+> pretty msg
+                               <+> parens (pretty (why :: Text)))
+                    kept
+            , "no acknowledgement was sent; see --help"
             ]
           for_ (omittedNote plan) print
 
@@ -433,9 +504,9 @@ acceptEntries = do
 -- Named flags for the two keys rather than positions, for the reason the
 -- compose verb gives about its own: a repo key and a mailbox key are the same
 -- type, so a swap is a well-typed accept against the wrong repository.
-acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, RepoRef, HashRef, Maybe HubKey)
+acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe AcceptArgs
 acceptArgs syn = do
-  kvs  <- flagsOf ["--mailbox","--repo","--message","--as"] syn
+  kvs  <- flagsAndSwitches ["--mailbox","--repo","--message","--as"] ["--keep"] syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   repo <- flagOnce kvs "--repo"    >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
@@ -444,7 +515,9 @@ acceptArgs syn = do
   -- key" fell back to the repo key and signed canon under a key the caller did
   -- not name.
   as   <- flagMaybe kvs "--as" asKey
-  pure (mbox, repo, h, as)
+  -- A switch, so `--keep --repo K` cannot bind the repository as its value.
+  keep <- flagSwitch kvs "--keep"
+  pure (AcceptArgs mbox repo h as keep)
   where
     -- EVERY value is behind a flag, including the message, and nothing is
     -- positional. Not a style choice: a sign key and a hash are both thirty-two

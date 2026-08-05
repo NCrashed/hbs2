@@ -1,28 +1,22 @@
 -- | @hub inbox reject@ (PEP-21 "Retention", PEP-22 "Maintain").
 --
--- The first verb in this build that deletes anything, and therefore the first
--- that has to obey the rule A2 settles: a hub does not delete an attachment
--- canon references. The fold already computes that set ('frParts'); this is the
--- first caller with a reason to consult it.
+-- The verb for a letter a maintainer will not fold: it drops it from the
+-- mailbox and writes nothing to canon, which is the whole difference between it
+-- and @hub inbox accept@.
 --
--- WHAT "DELETE" MEANS HERE, exactly, because the word promises more than the
--- system does. It writes a @Deleted@ entry into the mailbox, which is a
--- tombstone: 'liveMessages' stops reporting the message and the triage queue
--- stops showing it. The blocks stay in storage. Nothing in this project walks a
--- mailbox and frees bytes, so no disk is reclaimed by this and none is claimed
--- to be.
---
--- THE MAILBOX KEY SIGNS IT, not the repo key and not a canon key. The peer
--- takes the signer of the payload AS the mailbox being deleted from
--- (@mailboxAcceptDelete adapter (MailboxRefKey mbox)@), so a delete signed by
--- anything else is a delete against a mailbox nobody has. A delegate holding
--- only a canon key therefore cannot reject, which is the same
--- signing-is-not-publishing boundary the maintainer verbs describe.
+-- WHAT "DELETE" MEANS HERE, and who signs it, is "HBS2.Hub.CLI.Drop": this verb
+-- is that one act plus the two questions worth asking before it.
 --
 -- REJECTING IS NOT CLOSING. A letter that was never folded has no canon thread,
 -- so there is nothing to close and no event is written (PEP-22). Closing a
 -- folded thread is @hub issue close@, and is a different act on a different
 -- object.
+--
+-- AND REJECTING IS NOT ACCEPTING'S CLEANUP. A folded letter is refused here
+-- (exit 32) while @hub inbox accept@ drops the same letter itself, and the two
+-- are not in tension: the tombstone is identical, the meaning is not. Rejecting
+-- says this was not taken, and saying that about something canon holds is a
+-- claim the mailbox cannot carry and the operator probably did not mean.
 module HBS2.Hub.CLI.Reject
   ( rejectEntries
   , rejectUsage
@@ -36,7 +30,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,PeerSilent(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -45,19 +39,16 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Types.SignedBox (makeSignedBox)
-import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.HashSet qualified as HS
 import System.Exit (die)
 
--- | The letter is already in canon, so its parts are not this hub's to drop.
+-- | The letter is already in canon, so "rejected" is not what happened to it.
 --
 -- Its own code because it is the one refusal that is about canon rather than
 -- about the mailbox, and because a script sweeping a queue wants to skip these
@@ -76,8 +67,8 @@ data Reject = Reject
     -- | The repository whose canon to check first.
     --
     -- Optional, and the help says what skipping it costs: without a repo there
-    -- is nothing to ask whether this letter was folded, so the check that
-    -- protects canon's attachments cannot run.
+    -- is nothing to ask whether this letter was folded, so a letter canon holds
+    -- can be rejected here, and the word will be wrong about it.
   , rjRepo    :: Maybe RepoRef
   }
   deriving stock (Eq,Show)
@@ -107,10 +98,10 @@ rejectEntries = do
              <> line <> "nobody has."
              <> line
              <> line <> "--repo is optional and worth giving: with it, a letter"
-             <> line <> "already folded into canon is refused. Canon references"
-             <> line <> "that letter's attachments forever and publishes the key"
-             <> line <> "to them, so a hub that dropped them would leave every"
-             <> line <> "clone with a reference it can see and cannot follow."
+             <> line <> "already folded into canon is refused. Not because the"
+             <> line <> "tombstone would differ (accept writes the same one), but"
+             <> line <> "because rejecting says the letter was not taken, and canon"
+             <> line <> "says it was."
              <> line
              <> line <> "Rejecting is not closing. An unfolded letter has no canon"
              <> line <> "thread, so no event is written; closing a folded thread is"
@@ -132,37 +123,25 @@ rejectEntries = do
           Right st -> do
             let fr = stFold st
             when (HS.member (rjMessage rj) (frOrigins fr)) $
-              liftIO $ refuse (show ( "this letter is already in canon; its"
-                                        <+> "attachments are referenced there and"
-                                        <+> "the key to them is published"
-                                        <> line <> "  nothing was deleted" ))
+              liftIO $ refuse (show ( "this letter is already in canon: rejecting"
+                                        <+> "is not what happened to it"
+                                        <> line <> "  nothing was deleted."
+                                        <+> "`hub inbox accept` drops a letter when"
+                                        <+> "it folds it; if this one stayed (--keep,"
+                                        <+> "or no mailbox key at the time) it is a"
+                                        <+> "queue entry and not a decision:"
+                                        <> line <> "    hbs2-peer mailbox delete:message"
+                                        <+> pretty (AsBase58 (rjMailbox rj))
+                                        <+> pretty (rjMessage rj) ))
                               codeAlreadyFolded
 
-      creds <- runKeymanClientRO (loadCredentials (rjMailbox rj))
-                 >>= maybe (liftIO (refuse (show ( "no signing key here for"
-                                                     <+> pretty (AsBase58 (rjMailbox rj))
-                                                     <> line
-                                                     <> "  the mailbox's own key signs a"
-                                                     <+> "delete; see --help" ))
-                                           codeNotRejected))
-                           pure
-
-      api <- getClientAPI @MailboxAPI @UNIX
-
-      -- One message and no more. The predicate language has And/Or, and a
-      -- sweep is a thing an operator may want, but a verb that took a
-      -- predicate would take one that can match more than the caller read.
-      let payload = DeleteMessagesPayload
-                      (MailboxMessagePredicate1 (Op (MessageHashEq (rjMessage rj))))
-          box = makeSignedBox @HubScheme (rjMailbox rj) (_peerSignSk creds) payload
-
-      callRpcWaitMay @RpcMailboxDeleteMessages rpcTimeout api box
-        >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox delete")) codePeerSilent))
-                  pure
-        >>= either (\e -> liftIO (refuse (show ("the peer refused the delete:"
-                                                  <+> viaShow e))
-                                         codeNotRejected))
-                   pure
+      -- The peer is silent for the reason 'PeerSilent' says and NOT for the
+      -- reason a missing key is, so the three answers keep their own codes.
+      dropMessage (rjMailbox rj) (rjMessage rj) >>= \case
+        Right () -> pure ()
+        Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
+                                              codePeerSilent)
+        Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
 
       liftIO $ print $ vcat
         [ "rejected" <+> pretty (rjMessage rj)

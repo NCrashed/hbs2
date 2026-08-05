@@ -28,6 +28,7 @@ module HBS2.Hub.CLI.Inbox
   , inboxDoc
   , inboxNotes
   , inboxArgs
+  , utcOf
   , inboxCode
   , inboxUsage
   , refuse
@@ -429,7 +430,7 @@ render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body
 badService :: MonadUnliftIO m => MailboxServiceError -> m a
 badService e = throwIO (userError (show ("mailbox service:" <+> viaShow e)))
 
--- The author's declared time as something a human reads. Epoch milliseconds are
+-- | The author's declared time as something a human reads. Epoch milliseconds are
 -- what the field IS (PEP-19) and what any tooling should parse, but a triage
 -- queue is read by a person, and a column of thirteen-digit integers is a column
 -- nobody compares.

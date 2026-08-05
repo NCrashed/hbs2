@@ -52,7 +52,7 @@ spec1 = do
       mbox <- aKey
       repo <- aKey
       let h = aHash "a message"
-          want = Just (mbox, repo, h, Nothing)
+          want = Just (AcceptArgs mbox repo h Nothing False)
       acceptArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)])
         `shouldBe` want
       acceptArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox, "--message", show (pretty h)])
@@ -67,7 +67,23 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv [ "--mailbox", b58 mbox, "--repo", b58 repo
                        , "--as", b58 bob, "--message", show (pretty h) ])
-        `shouldBe` Just (mbox, repo, h, Just bob)
+        `shouldBe` Just (AcceptArgs mbox repo h (Just bob) False)
+
+    -- The letter is dropped from the mailbox after the fold, so the flag that
+    -- keeps it has to be a flag and not an absence: an accept that quietly kept
+    -- everything would leave a queue nobody can triage from, and one that
+    -- quietly dropped what the operator meant to keep cannot be undone either.
+    it "reads --keep, and it takes no value" $ do
+      mbox <- aKey
+      repo <- aKey
+      let h = aHash "a message"
+          base = ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)]
+      fmap aaKeep (acceptArgs (argv base)) `shouldBe` Just False
+      fmap aaKeep (acceptArgs (argv (base <> ["--keep"]))) `shouldBe` Just True
+      -- Not a value-taking flag: it must not swallow the word after it, and a
+      -- value given to it is a line that does not parse.
+      acceptArgs (argv (base <> ["--keep", "yes"])) `shouldBe` Nothing
+      acceptArgs (argv (base <> ["--keep", "--keep"])) `shouldBe` Nothing
 
     -- Both are keys, so a form missing one is not a form with one key in the
     -- wrong place: it is a form this verb must not act on at all.

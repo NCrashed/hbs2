@@ -29,6 +29,8 @@ module HBS2.Hub.Ingress
   , MailboxUnknown(..)
   , liveMessages
   , readInbox
+  , MailboxLive(..)
+  , mailboxLive
   , openMessage
   , awaitMailbox
   , maxFetchRounds
@@ -437,25 +439,47 @@ awaitMailbox ig mbox = do
 -- will open.
 readInbox :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
 readInbox ig mbox = do
+  ml <- mailboxLive ig mbox
+  -- Sorted explicitly. This used to be HS.toList with a comment claiming it
+  -- was sorted by hash: that is the HAMT traversal order, which is a property
+  -- of the container's implementation and not a promise it makes. A triage
+  -- queue that reorders itself on a dependency bump is one a maintainer cannot
+  -- work through a page at a time.
+  -- Sorted BEFORE the bound is applied, so which thousand you get is a function
+  -- of the mailbox and not of the order the walk happened to return: a
+  -- truncated queue that reshuffles between runs would be worse than a
+  -- truncated one.
+  let live = sort (HS.toList (mlLive ml))
+      (taken, left) = List.splitAt maxInboxLetters live
+  lvs <- mapM (openMessage ig) taken
+  pure (InboxRead lvs (mlMissing ml) (mlSettled ml) (length left) (mlLive ml))
+
+-- | What a mailbox HOLDS, without opening any of it.
+--
+-- Split out of 'readInbox' because two callers ask only this, and asking it
+-- through the queue made them pay for a page of the queue: @hub inbox accept@
+-- and @hub inbox show@ name one message and need to know it is in this mailbox
+-- (a hash is not a claim about where the bytes came from), and both were
+-- decrypting up to 'maxInboxLetters' letters to answer a set membership.
+--
+-- The walk itself is the same one and its cost is the tree's, which is a
+-- stranger's; what is skipped is the keyman lookup, the secretbox open and the
+-- parse, per letter, per accept.
+data MailboxLive = MailboxLive
+  { mlLive    :: HashSet HashRef  -- ^ every live message, unbounded
+  , mlMissing :: [HashRef]        -- ^ tree blocks the walk could not read
+  , mlSettled :: Bool             -- ^ whether the peer's copy had stopped changing
+  }
+  deriving stock (Eq,Show)
+
+mailboxLive :: MonadUnliftIO m => Ingress m -> HubKey -> m MailboxLive
+mailboxLive ig mbox = do
   (root, settled) <- awaitMailbox ig mbox
   case root of
-    Nothing   -> pure (InboxRead [] [] settled 0 mempty)
+    Nothing   -> pure (MailboxLive mempty [] settled)
     Just tree -> do
       (entries, misses) <- readEntries tree
-      -- Sorted explicitly. This used to be HS.toList with a comment claiming it
-      -- was sorted by hash: that is the HAMT traversal order, which is a
-      -- property of the container's implementation and not a promise it makes.
-      -- A triage queue that reorders itself on a dependency bump is one a
-      -- maintainer cannot work through a page at a time.
-      -- Sorted BEFORE the bound is applied, so which thousand you get is a
-      -- function of the mailbox and not of the order the walk happened to
-      -- return: a truncated queue that reshuffles between runs would be worse
-      -- than a truncated one.
-      let alive = liveMessages entries
-          live = sort (HS.toList alive)
-          (taken, left) = List.splitAt maxInboxLetters live
-      lvs <- mapM (openMessage ig) taken
-      pure (InboxRead lvs misses settled (length left) alive)
+      pure (MailboxLive (liveMessages entries) misses settled)
 
   where
     readEntries tree = do

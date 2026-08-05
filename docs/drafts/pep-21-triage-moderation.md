@@ -579,8 +579,18 @@ it hands out.
     monotonic without breaking canon references.
 
 Must be built: compound-predicate handling, TTL expiry, the purge/GC pass, and
-the canon-referenced-part pin set. Fold-then-delete is hub behaviour on top of
-existing `DeleteMessages`.
+the canon-referenced-part pin set.
+
+Fold-then-delete is DONE, as the hub behaviour this predicted: `hub inbox
+accept` drops the letter it folded (`--keep` opts out), and `hub inbox reject`
+drops one it did not. Both go through the same signed single-message delete, so
+the tombstone is identical and only the meaning differs.
+
+That makes the pin above load-bearing rather than anticipated, and it is the one
+part of this section a later writer must not skip: the letters a purge finds
+tombstoned now include every letter canon took, so a purge that reclaims their
+attachment trees without consulting canon breaks exactly the references rule A2
+protects. Until such a purge exists nothing is reclaimed and nothing is at risk.
 
 
 Delegated canon-signing keys

@@ -328,11 +328,16 @@ Maintain (Tier A, owner or delegated maintainer; PEP-19/20):
 ```
 hub inbox [--mailbox <key>] [--repo <key>]   ; decrypted triage queue (Tier B), verified;
                                    ;   --repo applies that repository deny-list
-hub inbox show <msg>               ; one submission, inner author + payload + attachments
-hub inbox accept <msg>             ; fold into canon (assigns number). NOT a delete:
-                                   ;   fold-then-delete needs a DeleteMessages path
-                                   ;   this build does not have, so the letter stays
-                                   ;   in the mailbox and a second accept is refused
+hub inbox show --mailbox <key> --message <hash> [--repo <key>]
+                                   ; one submission whole: inner author, title, body,
+                                   ;   attachments measured, and what triage makes of
+                                   ;   it. --repo also asks canon whether it is folded
+hub inbox accept <msg> [--keep]    ; fold into canon (assigns number), then drop the
+                                   ;   letter from the mailbox (PEP-21 fold-then-
+                                   ;   delete). --keep leaves it. The MAILBOX key
+                                   ;   signs a drop, so a delegate folding with --as
+                                   ;   cannot make one: the fold stands, the letter
+                                   ;   stays, and the report says which happened
 hub inbox reject <msg>             ; refuse it here; NO canon event, and no courtesy
                                    ;   note either -- the ack path is unbuilt (PEP-18)
 hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]
@@ -393,12 +398,23 @@ those two apart is reporting silence as an answer. The distinction is available
 (`mailboxGetStatus` answers `Nothing` for a mailbox the peer does not know) and
 has to be used.
 
+A DROP IS NOT A DELETE, and both verbs that make one say so. `DeleteMessages`
+writes a tombstone: the queue stops showing the letter, and the blocks stay on
+disk, because nothing in this project walks a mailbox and frees bytes. What
+protects a folded letter's attachments is therefore not the tombstone but
+PEP-21's pin -- a purge, when somebody writes one, must skip any tree a folded
+canon event references. Accept dropping the letter it folded is the first caller
+that obligation has.
+
 Two distinctions matter here. `hub inbox reject` acts on an unfolded Tier B
 submission: there is no canon thread to close (the fold never ran), so it emits
 no canon event. It was specified as a `DeleteMessages` plus an optional courtesy
-note to the sender's `reply-mailbox`, and it is neither yet: both need paths
-this build does not have (retention on one side, the ack on the other), so what
-it does today is refuse the letter here and say so. Closing an already-folded thread is
+note to the sender's `reply-mailbox`; the delete is built and the note is not
+(the ack path is unbuilt), so what it does today is drop the letter and say
+nothing to its author. It refuses a letter canon already holds, and not because
+the tombstone would differ -- accept writes the same one -- but because
+rejecting says the letter was not taken and canon says it was. Closing an
+already-folded thread is
 the separate `hub issue close --number <n>`, an owner-signed close event on an
 existing canon thread.
 
@@ -730,13 +746,13 @@ Must be built:
     verified flags, since only admitted events materialize), plus the
     `folded-ts` and issue-number checks described above.
 
-    The reading half of this exists: canon comes out of the git ref, the fold
-    runs over it, and drops, anomalies and unreadable files are reported with a
-    non-zero exit. What is not built is the part that needs canon to have been
-    WRITTEN by something, which is the accept path, so the verb has so far only
-    been run against trees assembled by hand. Reading canon is also the piece
-    both remaining branches stand on: the accept path needs the view it mints
-    against, and the render contract is a projection of the same fold.
+    This is built, and this paragraph used to say half of it was: canon comes
+    out of the git ref, the fold runs over it, and drops, anomalies and
+    unreadable files are reported with a non-zero exit. It said the verb had
+    only ever run against trees assembled by hand, which stopped being true when
+    the accept path landed: the suite now folds letters through accept and
+    audits what it wrote. What remains of this bullet is the render contract,
+    which is a projection of the same fold.
 
 
 Rejected alternatives

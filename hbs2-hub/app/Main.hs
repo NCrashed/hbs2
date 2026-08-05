@@ -16,6 +16,7 @@ import HBS2.Hub.CLI.Own
 import HBS2.Hub.CLI.Policy
 import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Read
+import HBS2.Hub.CLI.Show
 import HBS2.Hub.CLI.Reject
 import HBS2.Hub.CLI.Verify
 
@@ -113,6 +114,7 @@ main = do
         composeEntries
         verifyEntries
         readEntries
+        showEntries
         prEntries
         maintainerEntries
         rejectEntries
