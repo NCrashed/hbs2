@@ -36,6 +36,7 @@ module HBS2.Hub.Letter
   , hubMsgVersion
   , maxInlineBody
   , maxPartBytes
+  , maxMessageParts
   , maxBoxBytes
   , maxPayloadBytes
   , maxTitle
@@ -146,6 +147,28 @@ maxInlineBody = 32 * 1024
 -- parked rather than deleted.
 maxPartBytes :: Word64
 maxPartBytes = 64 * 1024 * 1024
+
+-- | And on HOW MANY parts one letter may name.
+--
+-- The bound above is per part, which bounds nothing on its own: the count is
+-- the sender's to choose, and the triage path walks every part a message names
+-- before the bridge sees any of them. So a letter naming a hundred parts is a
+-- hundred times whatever one part costs -- up to 'maxPartBytes' resident each
+-- while the accept holds them, and 'maxPartBlocks' storage reads each while it
+-- measures them, which is the cheaper attack of the two because a tree that
+-- costs its whole walk budget is about a kilobyte to send.
+--
+-- The number is chosen from what a letter is FOR. PEP-18 gives a letter one
+-- body part and PEP-20 gives a pull request one bundle; anything past a
+-- handful is not a shape this format has. Sixteen leaves room for a shape
+-- nobody has thought of yet and still bounds the walk at something a
+-- maintainer waits through.
+--
+-- Triage policy like the two above, so a letter over it is PARKED and not
+-- refused: canon says nothing about attachment counts, and a hub that raises
+-- this later must be able to fold what it turned away today.
+maxMessageParts :: Int
+maxMessageParts = 16
 
 -- | And on a title, which has no attachment form: it is an attribute of the
 -- thread, rendered in every list. A title long enough to need chunking is a

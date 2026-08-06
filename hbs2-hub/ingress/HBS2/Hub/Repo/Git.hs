@@ -25,6 +25,7 @@ module HBS2.Hub.Repo.Git
   , nowSeconds
   , gitIn
   , gitRun
+  , gitToolMessage
   , GitTrouble(..)
   ) where
 
@@ -144,7 +145,7 @@ gitBounds :: GitBounds
 gitBounds = GitBounds
   { gbListingBytes = maxListingBytes
   , gbListingFiles = maxCanonFiles
-  , gbToolMessage  = 64 * 1024
+  , gbToolMessage  = gitToolMessage
   , gbBlobMessage  = 512
   , gbCallSeconds  = 60
   , gbListingSeconds = 600
@@ -1458,14 +1459,21 @@ gitRun cwd extra secs what args input = do
            -- BEFORE the teardown closes the handles they are sitting on. A bare
            -- async here is the deadlock described above.
            --
-           -- Both drained to EOF and nothing dropped: stdout of `bundle create -`
-           -- IS the bundle, so a keep-bound here would be a truncated artifact
-           -- rather than a bounded message. What bounds this call is the clock
-           -- and the teardown; bounding what git may say is a separate question
-           -- from bounding how long it may take, and only the second one was
-           -- ever claimed here.
+           -- Both drained to EOF, and only one of them kept whole. stdout of
+           -- `bundle create -` IS the bundle, so a keep-bound there would be a
+           -- truncated artifact rather than a bounded message.
+           --
+           -- STDERR IS A MESSAGE, and that distinction is the one this call
+           -- used to miss: the sentence above was written about stdout and the
+           -- @maxBound@ was applied to both, so a tool asked about a stranger's
+           -- bytes could answer with as many as it liked. `git bundle verify`
+           -- does exactly that, one line per missing prerequisite, and every
+           -- one of those bytes was then decoded, escaped, split into a 'Doc'
+           -- per line and rendered to a 'String' before anything was printed.
+           -- The reader half of this module has capped the identical stream at
+           -- 'gbToolMessage' all along.
            withAsync (gitDrain maxBound (getStdout p)) $ \out ->
-           withAsync (gitDrain maxBound (getStderr p)) $ \errA ->
+           withAsync (gitDrain gitToolMessage (getStderr p)) $ \errA ->
              timeout (secs * 1000000) do
                o <- wait out
                code <- waitExitCode p
@@ -1481,6 +1489,22 @@ gitRun cwd extra secs what args input = do
       Left (GitStalled ( "git " <> what <> " did not finish in "
                            <> Text.pack (show secs) <> "s" ))
     Right (Just (code, out, err)) -> Right (code, out, err)
+
+-- | How much of a tool's complaint is worth keeping, in bytes.
+--
+-- Named here and used by 'gitBounds' rather than the other way round, for the
+-- reason 'gitTeardownSeconds' is: the callers in this half of the module carry
+-- no 'GitBounds', and a second literal would be a second bound that drifts.
+--
+-- 64 KiB, which is far more than any diagnostic a person reads and far less
+-- than what git will say when asked. `git bundle verify` echoes one
+-- @error: \<40 hex\>@ line per missing prerequisite, so a bundle that is only a
+-- header -- no pack, no objects, a text file a contributor uploads as an
+-- attachment -- produces stderr in proportion to its own size. At
+-- 'maxPartBytes' that was tens of megabytes accumulated, then decoded, then
+-- escaped, then split into one 'Doc' per line and rendered to a 'String'.
+gitToolMessage :: Int
+gitToolMessage = 64 * 1024
 
 -- | How long a git that will not go is given, in this half of the module.
 --

@@ -7,7 +7,7 @@
 module HBS2.Hub.ShowSpec (spec) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Letter (Disposition(..))
+import HBS2.Hub.Letter (Disposition(..),maxMessageParts)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Show
 import HBS2.Hub.CLI.Argv (argvAtom)
@@ -45,6 +45,7 @@ letter :: HubKey -> AuthorContent -> Disposition -> Shown
 letter author ac disp =
   Shown (LetterView (mh "m") (Just author) (Right (author, ac, disp)) (Just (mh "e")))
         []
+        0
         Nothing
 
 spec :: Spec
@@ -114,12 +115,40 @@ spec = do
 
     it "prints an unreadable letter as far as it got" $ do
       author <- aKey
-      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing) [] Nothing
+      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing) [] 0 Nothing
           out = shown (showDoc sw)
       -- The envelope key is the one thing a maintainer can act on (hub block),
       -- so it survives every failure path that knows it.
       out `shouldSatisfy` isInfixOf (b58 author)
       out `shouldSatisfy` isInfixOf "unreadable"
+
+    -- A truncated list is a WRONG list, not a shorter one, and this one is
+    -- truncated by a number a stranger chose: the letter names the parts, and
+    -- walking each costs a tree walk. So the count that was not walked is said
+    -- rather than dropped, and it says what an accept will do with the letter,
+    -- since that is the next thing a maintainer tries.
+    it "says how many attachments it did not walk, and why" $ do
+      repo <- aKey ; author <- aKey
+      let ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5
+          sw = (letter author ac FoldsToCanon)
+                 { swParts = [ (mh "a", Right (PartFacts 1024 True)) ]
+                 , swPartsUnmeasured = 40
+                 }
+          out = shown (showDoc sw)
+      out `shouldSatisfy` isInfixOf "parts-unmeasured"
+      out `shouldSatisfy` isInfixOf "40"
+      -- And the number that decides it, so a reader is not left guessing where
+      -- the line falls.
+      out `shouldSatisfy` isInfixOf (show maxMessageParts)
+      out `shouldSatisfy` isInfixOf "refuses"
+
+    -- The ordinary letter says nothing about it. A note that appears when
+    -- nothing was left out is a note nobody reads when something was.
+    it "says nothing about unwalked attachments when there are none" $ do
+      repo <- aKey ; author <- aKey
+      let ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5
+          out = shown (showDoc (letter author ac FoldsToCanon))
+      out `shouldSatisfy` (not . isInfixOf "parts-unmeasured")
 
     it "reports each part's size and whether the peer has it" $ do
       repo <- aKey ; author <- aKey

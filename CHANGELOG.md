@@ -2,6 +2,45 @@
 
 ## Security
 
+  - **`hbs2-hub`: three places where one stranger chose how much work this node
+    did.** Each is the same shape: a bound existed for the size of one thing
+    and none for how many of them there were, or for how much a tool asked
+    about somebody's bytes was allowed to say back.
+
+    **Attachments per letter.** `maxPartBytes` (64 MiB) and `maxPartBlocks`
+    (32768 reads) are per part; the count is the sender's. `hub inbox accept`
+    measured and opened every part a message named, so a letter naming a
+    hundred was a hundred times whatever one part cost. The cheap direction is
+    measurement rather than size: a tree that spends its whole walk budget is
+    about a kilobyte to send, so a few thousand named parts bought a hundred
+    million storage reads for a few megabytes of upload. There is a
+    `maxMessageParts` now, checked before anything is read. `hub inbox show`
+    walks the same list and stops at the same number, reporting what it did not
+    walk rather than dropping it silently.
+
+    **What git is allowed to say.** `gitRun` drained both pipes with no
+    keep-bound. The comment beside it justifies that for stdout, which for
+    `bundle create -` IS the bundle; it was applied to stderr as well, where
+    the bytes are a message about a stranger's file. `git bundle verify` echoes
+    one `error: <sha>` line per missing prerequisite, and a bundle header needs
+    no pack behind it -- it is a text file somebody uploads as an attachment.
+    Measured on this build: 4000 fabricated prerequisites, a 172 KB
+    attachment, 196051 characters of stderr, all of it then decoded, escaped,
+    split into one `Doc` per line and rendered to a `String`. At the
+    attachment bound that is tens of megabytes. stderr is now kept to 64 KiB,
+    which is what the reader half of the same module has always used.
+
+    **S-expressions fetched from elsewhere.** A repository manifest and a
+    mailbox policy were handed straight to `parseTop` with no byte bound, no
+    clause bound and no escape bound, while canon files -- the same threat,
+    from the same kind of source -- go through a reader that checks all three
+    in one pass first. That reader's own note measures `parseTop` at 36
+    seconds for 128 KB of bare atoms, because it is superlinear in the number
+    of TOP-LEVEL items and in nothing else. The manifest is read for any repo
+    key a user types; the policy is read per recipient on every send. Both go
+    through the canon reader now, with limits of their own, since a manifest is
+    not an event.
+
   - **`hbs2-hub`: a compaction could delete a value canon was keeping, on the
     word of an event the fold had refused.** `compactionOf` decided which
     `set` events were superseded by asking `resolve`, which checks two

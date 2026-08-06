@@ -30,6 +30,7 @@ module HBS2.Hub.Repo.Manifest
   ) where
 
 import HBS2.Hub.Types (HubKey,RepoRef,safeText)
+import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.Manifest
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
 
@@ -137,13 +138,35 @@ readManifest repo = do
                  (runExceptT (getTreeContents sto mfref))
           case r of
             Left e -> pure (Left (ManifestUnreadable (tshow e)))
+            -- BOUNDED, through the same reader canon files go through. A
+            -- manifest is fetched from wherever the repository key points, so
+            -- it is a stranger's S-expression exactly as an event file is, and
+            -- this handed it straight to 'parseTop': no byte bound, no clause
+            -- bound, and 'parseTop' is superlinear in the number of top-level
+            -- items (see 'scanText' -- 128 KB of bare atoms measured at 36 s).
+            -- Every verb that resolves a repo key by hand reaches this.
             Right lbs ->
-              pure $ maybe (Left ManifestUnparsed) Right
-                       (either (const Nothing) Just
-                          (parseTop (Text.decodeUtf8Lenient (LBS.toStrict lbs))))
+              pure $ either (const (Left ManifestUnparsed)) Right
+                       (clausesWith maxManifestBytes maxManifestClauses
+                          (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
   where
     tshow :: Show e => e -> Text
     tshow = fromString . show
+
+-- | What a manifest may weigh, and how many clauses it may have.
+--
+-- Not the event file's numbers, because a manifest is not an event: it is a
+-- short declaration -- a few mailboxes, a sigil apiece, whatever else the repo
+-- format puts there -- and a repository with a thousand of anything in its
+-- manifest is not a shape this project has. Generous against that and still far
+-- under where 'parseTop' starts costing seconds.
+--
+-- Refusing one is not refusing the repository, the same way refusing an index
+-- is not: the caller answers 'ManifestUnparsed' and a verb given the mailbox by
+-- hand never reads it at all.
+maxManifestBytes, maxManifestClauses :: Int
+maxManifestBytes   = 256 * 1024
+maxManifestClauses = 1024
 
 -- | The mailbox a verb should read: the one it was given, or the one the
 -- repository declares.

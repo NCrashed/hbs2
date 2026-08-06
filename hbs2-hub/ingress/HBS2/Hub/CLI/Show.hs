@@ -35,7 +35,7 @@ module HBS2.Hub.CLI.Show
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold (frOrigins)
-import HBS2.Hub.Letter (Disposition(..))
+import HBS2.Hub.Letter (Disposition(..),maxMessageParts)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
@@ -84,6 +84,16 @@ data Shown = Shown
     -- would (PEP-18's size gate), and a part's size and presence are what
     -- decide whether an accept can proceed at all.
   , swParts :: [(HashRef, Either PartTrouble PartFacts)]
+    -- | How many parts were named and NOT measured, because the letter names
+    -- more than 'maxMessageParts'.
+    --
+    -- Counted and said rather than silently dropped, for the reason
+    -- 'irTruncated' is: a truncated list is a WRONG list, not a shorter one,
+    -- and this one is truncated by a number a stranger chose. Truncating at all
+    -- is what stops a letter naming a few thousand trees from costing this
+    -- read verb a walk apiece -- and @hub inbox show@ is exactly what somebody
+    -- runs before deciding whether to accept.
+  , swPartsUnmeasured :: Int
     -- | Whether canon already holds this letter, or 'Nothing' when no
     -- repository was named and canon was therefore not consulted.
   , swFolded :: Maybe Bool
@@ -171,8 +181,13 @@ showEntries = do
       raw <- rawMessage ig msg
                `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
 
-      parts <- for (either (const []) lrParts raw) $ \h ->
-                 (,) h <$> measurePart ig h
+      -- Bounded, and the bound is the accept's: a letter this verb measures in
+      -- full and the accept then refuses for its count would be a preview of a
+      -- thing that cannot happen.
+      let named = either (const []) lrParts raw
+          (walked, unmeasured) = splitAt maxMessageParts named
+
+      parts <- for walked $ \h -> (,) h <$> measurePart ig h
 
       folded <- for (shRepo sa) $ \repo ->
         withGitCanon (\cs -> readCanon cs repo) >>= \case
@@ -182,7 +197,7 @@ showEntries = do
           Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
           Right st -> pure (HS.member msg (frOrigins (stFold st)))
 
-      let sw = Shown lv parts folded
+      let sw = Shown lv parts (length unmeasured) folded
 
       liftIO $ handleJust
         (\e -> if isResourceVanishedError e then Just () else Nothing)
@@ -199,10 +214,23 @@ showDoc sw =
      ]
   <> letterDoc
   <> partsDoc (swParts sw)
+  <> unmeasuredDoc
   <> canonDoc
 
   where
     lv = swView sw
+
+    -- On stdout with the parts and not in the notes, because it is a fact
+    -- about the list above rather than about the run: a reader counting the
+    -- lines has to see that the count is short and by how much. Says the
+    -- accept's answer too, since that is the next thing they will try.
+    unmeasuredDoc
+      | swPartsUnmeasured sw <= 0 = []
+      | otherwise =
+          [ field "parts-unmeasured"
+                  ( pretty (swPartsUnmeasured sw)
+                      <+> "more named and not walked; this letter names more than"
+                      <+> pretty maxMessageParts <> "," <+> "so an accept refuses it" ) ]
 
     letterDoc = case lvLetter lv of
       -- Not a failure to stop on and not an empty report either: what could be

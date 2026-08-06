@@ -11,6 +11,8 @@
 module HBS2.Hub.GitBundleSpec (spec) where
 
 import HBS2.Hub.Repo.GitBundle
+import HBS2.Hub.Repo (Told(..))
+import HBS2.Hub.Repo.Git (gitToolMessage)
 
 import Control.Monad (void)
 import Data.ByteString qualified as BS
@@ -18,6 +20,7 @@ import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
 import System.Environment qualified as Env
 import System.Directory (createDirectoryIfMissing)
 import System.IO.Temp (withSystemTempDirectory)
@@ -104,6 +107,40 @@ spec1 = do
         case r of
           Left (BundleBadName what _) -> what `shouldBe` "object name"
           other -> expectationFailure ("expected a refusal, got " <> show other)
+
+    -- What a tool SAYS is a message, and a message from a tool asked about a
+    -- stranger's bytes is a message a stranger chose the length of.
+    --
+    -- `git bundle verify` echoes one `error: <sha>` line per missing
+    -- prerequisite, and a bundle header needs no pack and no objects behind it
+    -- -- it is a text file, which a contributor uploads as an attachment. So
+    -- the reply grows with the attachment, and every byte of it used to be
+    -- accumulated, decoded, escaped, split into one Doc per line and rendered
+    -- to a String before anything reached the terminal. At the attachment
+    -- bound that was tens of megabytes.
+    it "keeps only as much of git's complaint as a person would read" $
+      withWork $ \dir _ _ -> do
+        -- Enough prerequisites that git's answer is comfortably past the bound
+        -- on its own. Nothing here is a real object; that is the point, and it
+        -- is what makes the file cheap to build and expensive to be answered
+        -- about.
+        let sha n = Text.justifyRight 40 '0' (Text.pack (show (n :: Int)))
+            header = Text.unlines
+                       ( "# v2 git bundle"
+                       : [ "-" <> sha n <> " x" | n <- [1 .. 4000] ]
+                      <> [ sha 1 <> " refs/heads/feature" ] )
+            bogus = Text.encodeUtf8 (header <> "\n")
+
+        r <- acceptBundle (Just dir) bogus "feature" (Text.replicate 40 "0")
+        case r of
+          Left (BundleRefused _ (ToolSaid said)) ->
+            -- The bound is on bytes kept, so what is asserted is bytes. Loose
+            -- on purpose: the exact figure is git's to choose and this is not a
+            -- test of git.
+            Text.length said `shouldSatisfy` (<= gitToolMessage)
+          -- Any other refusal means git answered something this test did not
+          -- provoke, and asserting nothing about a bound is worse than failing.
+          other -> expectationFailure ("expected a quoted refusal, got " <> show other)
 
   describe "PEP-20 delta path: taking one in" $ do
 

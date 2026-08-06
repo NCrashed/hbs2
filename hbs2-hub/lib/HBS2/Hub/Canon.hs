@@ -28,6 +28,17 @@ module HBS2.Hub.Canon
   , maxClauses
   , maxEscapes
   , maxTokenBytes
+    -- | The bounded reader itself, for the files that are NOT canon.
+    --
+    -- A manifest and a policy are S-expressions this node fetched from
+    -- somewhere else, so they are the same threat as an event file and were
+    -- being handed straight to 'parseTop' with no bound at all. The limits are
+    -- the caller's, since a manifest is not an event and neither is an index;
+    -- the RULE -- count bytes, top-level forms and escapes in one pass, before
+    -- the parser sees anything -- is this module's, and there should be one of
+    -- it. The reasoning it encodes, including the measurements, is on
+    -- 'scanText' below and is not worth deriving twice.
+  , clausesWith
   , renderEvent
   , parseEvent
   , renderMeta

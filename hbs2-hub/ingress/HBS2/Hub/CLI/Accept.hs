@@ -57,7 +57,8 @@ module HBS2.Hub.CLI.Accept
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
-import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,AckRecord(..),ReplyChannel(..)
+import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,maxMessageParts
+                       ,AckRecord(..),ReplyChannel(..)
                        ,openLetterAs)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
@@ -103,6 +104,15 @@ codeNoCanonKey = 21
 -- | The letter named is not one this node can read.
 codeLetterUnreadable :: Int
 codeLetterUnreadable = 22
+
+-- | The letter names more attachments than this hub will walk.
+--
+-- Its own code and not 'codeTriageRefused', because nothing about the letter's
+-- CONTENT was judged: this fires before the parts are measured, which is the
+-- point of it. A hub that raises 'maxMessageParts' folds the same letter
+-- afterwards.
+codePartsTooMany :: Int
+codePartsTooMany = 44
 
 -- | The bridge would not bless it. Not a failure of this program: a letter
 -- that asks for something a stranger's signature cannot carry is the ordinary
@@ -334,6 +344,24 @@ acceptEntries = do
       -- the gate is about to refuse for its size is exactly the spend the gate
       -- exists to prevent (PEP-18). An oversized part is reported at its size
       -- and the refusal comes back as PartTooLarge.
+      -- HOW MANY, before what any of them costs. The two bounds below are per
+      -- part -- 'maxPartBytes' resident while a part is open, 'maxPartBlocks'
+      -- reads while it is measured -- and the count is the sender's to pick, so
+      -- without this the loop is unbounded work from one letter. The cheap
+      -- direction is measurement, not size: a tree that spends its whole walk
+      -- budget is about a kilobyte to send, so a few thousand named parts is
+      -- a hundred million storage reads for a few megabytes of upload.
+      --
+      -- Before the walk and not inside it, because a count is known without
+      -- touching the storage at all.
+      when (length (lrParts raw) > maxMessageParts) $
+        liftIO $ refuse (show ( pretty msg <+> "names" <+> pretty (length (lrParts raw))
+                                  <+> "attachments, and this hub walks at most"
+                                  <+> pretty maxMessageParts
+                                <> line
+                                <> "  nothing was read: the letter is left where it is." ))
+                        codePartsTooMany
+
       opened <- for (lrParts raw) $ \h -> do
         facts <- measurePart ig h
         (,) h <$> case facts of

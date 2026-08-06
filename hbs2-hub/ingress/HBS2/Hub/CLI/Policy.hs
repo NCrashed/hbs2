@@ -41,6 +41,7 @@ module HBS2.Hub.CLI.Policy
   ) where
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
+import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
@@ -68,10 +69,27 @@ import Data.List (sort)
 import Data.Maybe (fromMaybe,isJust)
 import Data.Word (Word8)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
 import Control.Monad.Except (runExceptT,throwError)
 import Data.Coerce (coerce)
 import HBS2.Storage.Operations.ByteString ()
 import System.Exit (die,exitSuccess)
+
+-- | What a policy file may weigh, and how many clauses it may have.
+--
+-- A policy is a deny-list, so unlike a manifest it has a reason to be long, and
+-- unlike an event file it has no writer on this side to derive a bound from.
+-- These are chosen against the cost instead: 'parseTop' is superlinear in the
+-- number of TOP-LEVEL items, which for a policy is one per rule, so the bound
+-- that matters is the clause count and not the size. Eight thousand rules is
+-- far past any moderation list somebody maintains by hand, and well under where
+-- the measurements in "HBS2.Hub.Canon" turn into seconds.
+--
+-- Refusing one reads as 'PolicyUnparsed', which is deny/deny: a policy this
+-- node cannot read is one the owner wrote and this node must not guess at.
+maxPolicyBytes, maxPolicyClauses :: Int
+maxPolicyBytes   = 4 * 1024 * 1024
+maxPolicyClauses = 8192
 
 -- | The mailbox has no policy to read, or it will not read.
 codeNoPolicy :: Int
@@ -227,8 +245,19 @@ readPolicyWith sto api mbox = runExceptT do
       lbs <- lift (bounded rpcTimeout "the policy file"
                      (liftIO (runExceptT (readFromMerkle sto (SimpleKey (coerce (sppPolicyRef spp)))))))
                >>= either (throwError . PolicyUnreadable . show . viaShow) pure
-      p <- lift (parseBasicPolicy @HBS2Basic (either (const mempty) id
-                                                (parseTop (LBS.unpack lbs))))
+      -- BOUNDED, through the reader canon files go through. A policy file is
+      -- fetched from a merkle tree somebody else published and was going
+      -- straight into 'parseTop' with no bound of any kind, on a path that runs
+      -- per recipient on every send. 'parseTop' is superlinear in the number of
+      -- top-level items (see 'scanText' in "HBS2.Hub.Canon"), so the file that
+      -- costs the most is not the biggest one.
+      --
+      -- Unreadable and unparseable stay one answer, deliberately: both mean
+      -- nothing usable was read, and the caller's decision is the same.
+      cs <- either (const (throwError PolicyUnparsed)) pure
+              (clausesWith maxPolicyBytes maxPolicyClauses
+                 (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
+      p <- lift (parseBasicPolicy @HBS2Basic cs)
              >>= maybe (throwError PolicyUnparsed) pure
       pure (Just (sppPolicyVersion spp, p))
 
