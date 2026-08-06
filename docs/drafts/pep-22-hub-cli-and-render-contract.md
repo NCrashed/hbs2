@@ -182,6 +182,7 @@ and a tree full of forged events were the same event.
 | 40   | canon here and canon there have diverged; nothing was written (`hub sync`) |
 | 41   | the repository declares no mailbox, or its manifest will not read |
 | 42   | there is nothing superseded to compact (`hub compact`)          |
+| 43   | the key named is not the owner this canon answers to (`hub compact`) |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added

@@ -323,3 +323,42 @@ spec = do
           out = unlines (fmap show (compactDoc "abc123" (compactionOf (o : many'))))
       length (lines out) `shouldSatisfy` (< 60)
       out `shouldSatisfy` isInfixOf "more"
+
+  describe "PEP-22 hub compact: whose canon this is" $ do
+
+    -- Not an authorization check: compaction signs nothing, so there is no key
+    -- to check it against. What this catches is a mistyped --repo, which the
+    -- selection rule would happily plan a rewrite for -- it never asks whose
+    -- canon it is looking at -- while the number index, derived from the fold,
+    -- would come out empty.
+    it "accepts a canon the named key blessed" $ do
+      owner <- kp
+      let repo = fst owner
+          evs = [anOpen owner 1 "one", anOpen owner 2 "two"]
+      ownsCanon evs (foldEvents repo evs) `shouldBe` True
+
+    it "refuses one where the named key blessed nothing" $ do
+      owner <- kp ; stranger <- kp
+      let evs = [anOpen owner 1 "one", anOpen owner 2 "two"]
+      -- The same events, folded under a key that owns nothing here: every one
+      -- of them is dropped as unauthorized, and the index would be empty.
+      ownsCanon evs (foldEvents (fst stranger) evs) `shouldBe` False
+
+    -- Some admitted and some dropped is the ordinary state of canon and says
+    -- nothing about the key.
+    it "says nothing about a canon that merely holds a dropped event" $ do
+      owner <- kp ; stranger <- kp
+      let repo = fst owner
+          good = anOpen owner 1 "one"
+          -- Blessed by somebody this repository never delegated to.
+          bad = mkEvent stranger stranger
+                        (AOpen repo HubIssue "two" [] Nothing Nothing Nothing 2000)
+                        (canonOf repo 2 (Just 2))
+          evs = [good, bad]
+      ownsCanon evs (foldEvents repo evs) `shouldBe` True
+
+    -- An empty canon is not a wrong key: it is a repository nobody has folded
+    -- anything into, and there is nothing to compact there anyway.
+    it "says nothing about an empty canon" $ do
+      owner <- kp
+      ownsCanon ([] :: [Event]) (foldEvents (fst owner) []) `shouldBe` True

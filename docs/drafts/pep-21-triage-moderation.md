@@ -721,8 +721,21 @@ winning `set`) and deferred the policy here.
     retain list.
   - Cadence. Compaction is an owner (or delegated-maintainer) operation run on
     a schedule or a size trigger, never automatic mid-fold, so the canon ref
-    is rewritten deliberately. `hub sync` follows the rewrite with the forcing
-    `+refs/hbs2/meta` refspec (PEP-19).
+    is rewritten deliberately. `hub sync --repo` resolves the divergence the
+    rewrite causes in every clone (PEP-19).
+
+    "Owner operation" describes who holds the two rights involved, and NOT a
+    check the verb makes: compaction signs nothing. It rewrites a git ref in
+    the repository it stands in, which is gated by who may write to that
+    repository, and publishing the result is a push, gated by who may push.
+    A signature here would be a value nothing reads.
+
+    What `hub compact` does check is that the key it was given is the owner
+    this canon answers to -- a canon holding events of which the fold admitted
+    none. That is the mistake with no symptom: the selection rule never asks
+    whose canon it is looking at, so a mistyped `--repo` plans a perfectly
+    good-looking rewrite, and the number index, which IS derived from the fold,
+    comes out empty.
   - What is preserved and what is not. Any clone that folds the compacted log
     computes the identical materialized state, because compaction only drops
     values the fold would have overwritten. What is lost, by design, is the

@@ -25,12 +25,15 @@ module HBS2.Hub.CLI.Compact
   , CompactArgs(..)
   , compactArgs
   , compactDoc
+  , ownsCanon
   , codeNothingToCompact
+  , codeNotThisCanon
   ) where
 
 import HBS2.Hub.Types
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Compact
-import HBS2.Hub.Fold (frMaxSeq)
+import HBS2.Hub.Fold (FoldResult(..),frMaxSeq)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
@@ -43,8 +46,35 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import Data.ByteString.Char8 qualified as BS8
+import Data.HashMap.Strict qualified as HM
 import Data.List qualified as List
 import System.Exit (die,exitSuccess)
+
+-- | Does the key named own the canon about to be rewritten?
+--
+-- NOT an authorization check, and the distinction is the whole of what this
+-- verb does and does not gate. Compaction signs nothing: it rewrites a git ref
+-- in the repository it stands in, so what gates it is who may write to this
+-- repository, and what gates PUBLISHING it is who may push -- neither of which
+-- is a question a signature here could answer. PEP-21 calls compaction an owner
+-- or delegated-maintainer operation, and that describes who in practice has
+-- those two rights, not a test this verb performs.
+--
+-- What IS worth catching is the mistake that looks like nothing: a mistyped or
+-- simply wrong @--repo@. The rule that selects events never asks whose canon
+-- this is, so it happily plans a rewrite; the number index, on the other hand,
+-- is derived from the FOLD, and a fold under a key that owns nothing here
+-- admits nothing -- so the tree would be rewritten with an empty index on the
+-- strength of a typo.
+--
+-- A canon holding events of which the fold admitted none is that case. Some
+-- admitted and some dropped is ordinary and says nothing.
+ownsCanon :: [a] -> FoldResult -> Bool
+ownsCanon events fr = List.null events || not (HM.null (frAdmitted fr))
+
+-- | The key named is not the owner of this canon.
+codeNotThisCanon :: Int
+codeNotThisCanon = 43
 
 -- | There is nothing superseded to drop.
 --
@@ -94,6 +124,17 @@ compactEntries = do
              <> line <> "first: canon is what every clone folds, and this is the"
              <> line <> "one verb that takes something out of it."
              <> line
+             <> line <> "NOTHING IS SIGNED HERE, so nothing is checked against a"
+             <> line <> "key: this rewrites a git ref in the repository you are"
+             <> line <> "standing in, and what gates that is who may write to it."
+             <> line <> "Publishing the result is a push, gated by who may push."
+             <> line <> "PEP-21 calls compaction an owner operation, and that is"
+             <> line <> "who holds those two rights, not a test run here."
+             <> line
+             <> line <> "What IS checked is that --repo names the owner this canon"
+             <> line <> "answers to. A wrong key plans a perfectly good-looking"
+             <> line <> "rewrite and an empty number index."
+             <> line
              <> line <> "EVERY CLONE SEES A DIVERGENCE afterwards, because the"
              <> line <> "lineage changed. `hub sync --repo <key>` folds both and"
              <> line <> "takes the rewrite when the two materialize identically,"
@@ -108,6 +149,18 @@ compactEntries = do
     compact ca = do
       st <- withGitCanon (\cs -> readCanon cs (caRepo ca))
               >>= either (\e -> liftIO (refuse (show (pretty e)) (codeOf e))) pure
+
+      -- BEFORE anything is planned or printed. A wrong --repo produces a
+      -- perfectly good-looking plan (the rule never asks whose canon this is)
+      -- and an empty number index, so the refusal has to come first.
+      unless (ownsCanon (stEvents st) (stFold st)) $ liftIO $
+        refuse (show ( "canon here holds" <+> pretty (length (stEvents st))
+                         <+> "event(s) and none of them is blessed by"
+                         <+> pretty (AsBase58 (caRepo ca))
+                       <> line
+                       <> "  that is a repository key this canon does not answer"
+                          <+> "to: nothing was written." ))
+               codeNotThisCanon
 
       let c = compactionOf (fmap snd (stEvents st))
           -- Back under the names the tree had. The reader carried them for
