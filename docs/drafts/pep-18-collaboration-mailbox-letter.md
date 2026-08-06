@@ -583,6 +583,21 @@ Sending, hosting, delivery
     then downloads and merges new entries. There is no per-remote-mailbox
     poller registration analogous to reflog/refchan; hosting plus gossip is
     the mechanism.
+
+    A STATUS CARRIES TWO THINGS AND THEY ARE NOT EQUALLY TRUSTWORTHY. The
+    policy pointer inside it is signed by the mailbox key, names its own
+    mailbox and is admitted only at a strictly greater version, so it
+    authenticates itself and needs no freshness check. The tree root does not:
+    it is a hash somebody announced, and acting on it means fetching and
+    merging whatever is under it.
+
+    So the two are decided separately. The tree moves only on a status that
+    answers a `CheckMailbox` this peer sent -- matched by the nonce it issued,
+    not by comparing two clocks -- and a status nobody asked for carries its
+    policy and nothing else. That is what lets the owner's post-policy-change
+    broadcast work with no clock window at all, and it leaves the transitional
+    window with exactly one user: the answer of a peer built before the nonce
+    was echoed. When that build is gone, the window goes with it.
   - Triage read. The maintainer walks the per-mailbox merkle tree
     (`RpcMailboxGet` root, then the `Exists`/`Deleted` entries), reads each
     message (`readMessage` decrypts the body with the maintainer's encryption

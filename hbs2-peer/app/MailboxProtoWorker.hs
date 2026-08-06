@@ -628,7 +628,7 @@ instance ( s ~ Encryption e, e ~ L4Proto
 
       pure $ Right r
 
-  mailboxAcceptStatus me@MailboxProtoWorker{..} ref who s2@MailBoxStatusPayload{..} = do
+  mailboxAcceptStatus me@MailboxProtoWorker{..} ref who origin s2@MailBoxStatusPayload{..} = do
 
     flip runContT pure $ callCC \stop -> do
 
@@ -673,9 +673,14 @@ instance ( s ~ Encryption e, e ~ L4Proto
                   <+> "from"
                   <+> pretty (AsBase58 who)
 
+      -- ТОЛЬКО ПО ОТВЕТУ НА НАШ ВОПРОС.
+      --
+      -- Дерево -- это хеш, который кто-то объявил, и принять его значит скачать
+      -- и слить всё, что под ним. Policy ниже подписана владельцем и проверяет
+      -- себя сама, поэтому она идёт и из непрошеного статуса; дерево -- нет.
       let downloadStatus v = do
             maybe1 mbsMailboxHash (okay ()) $ \h -> do
-              when (s0 /= Just h) do
+              when (s0 /= Just h && useTree (statusUse origin)) do
                 startDownloadStuff me h
                 -- one download per version per hash
                 let downKey = HashRef $ hashObject (serialise (v,h))

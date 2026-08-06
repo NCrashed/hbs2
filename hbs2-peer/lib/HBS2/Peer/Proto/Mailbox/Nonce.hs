@@ -38,6 +38,9 @@ module HBS2.Peer.Proto.Mailbox.Nonce
   , pruneCheckNonces
   , statusFreshWindow
   , statusIsFresh
+  , StatusUse(..)
+  , StatusOrigin(..)
+  , statusUse
   ) where
 
 import HBS2.Prelude
@@ -156,3 +159,44 @@ statusIsFresh :: Bool   -- ^ the nonce came back and we are the ones who issued 
               -> Word64 -- ^ the nonce field as it arrived
               -> Bool
 statusIsFresh nonceOk now nonce = nonceOk || clockSkew now nonce < statusFreshWindow
+
+-- | What a peer may act on from one status it has been sent.
+--
+-- A status carries two things and they are not equally trustworthy, which the
+-- accept path used to miss by deciding both at once.
+--
+-- The POLICY inside it authenticates itself: it is a 'SetPolicyPayload' signed
+-- by the mailbox key, naming its own mailbox, and admitted only at a strictly
+-- greater version. Nothing a freshness check adds can make that safer, and
+-- requiring freshness of it costs something real -- it is the only reason
+-- @mailboxSetPolicy@'s unsolicited broadcast depended on the clock window at
+-- all.
+--
+-- The TREE does not authenticate itself in any way: it is a hash somebody
+-- announced, and acting on it means fetching and merging whatever is under it.
+-- That is what the nonce is for, and what the poisoning note in the accept path
+-- is about.
+--
+-- So they are separated: an answer moves both, and a status nobody asked for
+-- moves only the policy.
+data StatusUse = StatusUse
+  { useTree   :: Bool
+  , usePolicy :: Bool
+  }
+  deriving stock (Eq,Show)
+
+-- | Where a status came from, as far as this peer can tell.
+data StatusOrigin =
+    -- | It echoed a nonce this peer issued for this mailbox -- or, while the
+    -- transitional window lives, it is stamped with a plausible clock.
+    StatusAnswered
+    -- | Nobody asked for it: the owner's broadcast after a policy change, or a
+    -- stranger announcing a tree.
+  | StatusUnasked
+  deriving stock (Eq,Show)
+
+-- | The rule, in one place.
+statusUse :: StatusOrigin -> StatusUse
+statusUse = \case
+  StatusAnswered -> StatusUse { useTree = True,  usePolicy = True }
+  StatusUnasked  -> StatusUse { useTree = False, usePolicy = True }

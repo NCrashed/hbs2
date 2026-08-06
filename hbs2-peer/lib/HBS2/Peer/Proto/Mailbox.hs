@@ -161,6 +161,10 @@ class ForMailbox s => IsMailboxService s a where
                       => a
                       -> MailboxRefKey s
                       -> PubKey 'Sign s -- ^ peer's key
+                      -- | What this status entitles the peer to act on. A
+                      -- status nobody asked for still carries a policy that
+                      -- signs for itself; the tree it names does not.
+                      -> StatusOrigin
                       -> MailBoxStatusPayload s
                       -> m (Either MailboxServiceError ())
 
@@ -507,11 +511,26 @@ mailboxProto inner adapter mess = deferred @p do
         -- арифметикой.
         let skew = clockSkew now mbsMailboxPayloadNonce
 
-        -- Молча: exit () ничего не пишет, поэтому теперь есть строка в логе.
-        unless ( statusIsFresh fresh now mbsMailboxPayloadNonce ) do
-          debug $ red "mailbox:" <+> "status dropped, no nonce of ours and clock skew"
+        -- НЕ ВЫХОД, и это разделение двух половин статуса.
+        --
+        -- Раньше непрошеный статус отбрасывался целиком, и из-за этого рассылка
+        -- новой policy зависела от окна часов: без него она не доходила. Но
+        -- policy внутри статуса подписана ключом ящика, называет сам себя и
+        -- принимается только со строго большей версией -- свежесть ей не даёт
+        -- ничего. Дерево -- даёт: это хеш, который кто-то объявил, и принять его
+        -- значит скачать и слить всё, что под ним лежит (см. заметку о
+        -- poisoning ниже).
+        --
+        -- Поэтому теперь непрошеный статус несёт policy и не двигает дерево, а
+        -- окно осталось ровно одному потребителю: ответу пира, который эту
+        -- сборку ещё не поставил. Когда она разойдётся, отсюда уходит
+        -- statusIsFresh и вместе с ним само окно.
+        let origin | statusIsFresh fresh now mbsMailboxPayloadNonce = StatusAnswered
+                   | otherwise = StatusUnasked
+
+        when (origin == StatusUnasked) do
+          debug $ red "mailbox:" <+> "status not an answer of ours, tree ignored, clock skew"
                     <+> pretty skew <+> "s from" <+> pretty (AsBase58 who)
-          exit ()
 
         -- NOTE: possible-poisoning-attack
         --  левый пир генерирует merkle tree сообщений и посылает его.
@@ -554,7 +573,7 @@ mailboxProto inner adapter mess = deferred @p do
                     <+> pretty (AsBase58 mbsMailboxKey) <+> "from" <+> pretty (AsBase58 who)
           exit ()
 
-        void $ mailboxAcceptStatus adapter (MailboxRefKey mbsMailboxKey) who content
+        void $ mailboxAcceptStatus adapter (MailboxRefKey mbsMailboxKey) who origin content
 
       DeleteMessages box -> do
 

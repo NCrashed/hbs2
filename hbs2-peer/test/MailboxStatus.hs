@@ -47,6 +47,7 @@ mailboxStatusTests = testGroup "mailbox status"
   , mailboxStatusNonceTests
   , mailboxStatusStoreTests
   , mailboxStatusFreshTests
+  , mailboxStatusUseTests
   ]
 
 -- | The store as it is actually used, clock and generator included.
@@ -103,8 +104,11 @@ mailboxStatusStoreTests = testGroup "mailbox status nonce store"
 --
 -- Both halves are tested apart in the groups above; this is the only thing that
 -- asserts they are combined with @||@. Flipping that to @&&@ breaks sync with
--- every peer on an older build AND the unsolicited policy broadcast, and until
--- this group existed the suite stayed green through it.
+-- every peer on an older build, and until this group existed the suite stayed
+-- green through it.
+--
+-- It no longer breaks the unsolicited policy broadcast, and that is the point
+-- of the group below: the broadcast stopped depending on this rule at all.
 mailboxStatusFreshTests :: TestTree
 mailboxStatusFreshTests = testGroup "mailbox status freshness rule"
   [ testCase "our own nonce is enough, whatever the clock says" $ do
@@ -265,4 +269,34 @@ mailboxStatusClockTests = testGroup "mailbox status freshness"
       assertBool "the extreme is not mistaken for fresh"
         (not (clockSkew 0 maxBound < window))
       clockSkew maxBound (maxBound - 1) @?= 1
+  ]
+
+-- | The two halves of a status, and which of them a stranger can move.
+--
+-- The reason the clock window could not simply be deleted was that
+-- @mailboxSetPolicy@ gossips a status NOBODY ASKED FOR, so a new policy would
+-- reach nobody without it. That was one decision doing two jobs: the policy
+-- inside a status signs for itself and is admitted only at a greater version,
+-- while the tree it names is a hash somebody announced and acting on it means
+-- fetching whatever is under it.
+--
+-- Split, the broadcast keeps working with no window at all, and the window is
+-- left with exactly one user: the answer of a peer on an older build. That is a
+-- transition with an end, rather than a hole with a reason.
+mailboxStatusUseTests :: TestTree
+mailboxStatusUseTests = testGroup "mailbox status: what it entitles a peer to"
+  [ testCase "an answer of ours moves both the tree and the policy" $ do
+      useTree (statusUse StatusAnswered) @?= True
+      usePolicy (statusUse StatusAnswered) @?= True
+
+  -- The half that used to be lost with the whole status, and the reason the
+  -- fallback existed.
+  , testCase "a status nobody asked for still carries its policy" $
+      usePolicy (statusUse StatusUnasked) @?= True
+
+  -- And the half that must not travel unasked: a hash a stranger announced,
+  -- whose blocks this peer would fetch and merge (see the poisoning note in
+  -- the accept path).
+  , testCase "a status nobody asked for does not move the tree" $
+      useTree (statusUse StatusUnasked) @?= False
   ]
