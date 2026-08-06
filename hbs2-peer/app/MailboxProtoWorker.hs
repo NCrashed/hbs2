@@ -14,6 +14,7 @@ module MailboxProtoWorker ( mailboxProtoWorker
 
 import HBS2.Prelude.Plated
 import MailboxConfig
+import MailboxQueue
 import HBS2.OrDie
 import HBS2.Actors.Peer
 import HBS2.Data.Types.Refs
@@ -63,6 +64,7 @@ import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.Set qualified as Set
 import Data.Either
 import Data.List qualified as L
 import Data.Maybe
@@ -154,6 +156,22 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- everything ever seen: see 'mailboxAcceptMessage' for why it is exactly
     -- as long-lived as one batch.
   , inMessageQueueSeen    :: TVar (HashSet HashRef)
+    -- | How much of the queue each sender holds right now.
+    --
+    -- Cleared with the batch, like the set above, and for the same reason: it
+    -- is a fact about what is IN the queue, so it has to stop being true when
+    -- the queue empties. What it bounds is starvation -- one peer taking every
+    -- slot -- which is the half proof-of-work cannot reach, since most
+    -- mailboxes charge nothing.
+  , inMessageQueuePeers   :: TVar (HashMap (PubKey 'Sign s) Int)
+    -- | What this peer believes each mailbox charges, from the last time the
+    -- drain read its policy.
+    --
+    -- A CACHE and never an authority: the drain re-reads the signed policy for
+    -- every message it takes, and this only decides whether the message gets
+    -- as far as the drain. Missing means "let it through", so a cold peer
+    -- behaves exactly as it did before this existed.
+  , mpwPoWKnown           :: TVar (HashMap (PubKey 'Sign s) PoWDifficulty)
   , inMessageQueue        :: TBQueue ( Maybe (PubKey 'Sign s)
                                      , MessageOrigin s
                                      , Message s
@@ -251,27 +269,58 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
     -- queued again on the next copy, which is the property the marker was
     -- removed to get.
     let h = HashRef (hashObject (serialise m))
-    took <- atomically do
+
+    -- WHAT THE WORK PAYS FOR IS THE SLOT, and this is where it is charged.
+    --
+    -- The drain checks the signed policy ten seconds later and is the
+    -- authority; before this, that was the ONLY check, so a flood of distinct
+    -- unstamped messages to a mailbox charging (pow D) took a slot apiece and
+    -- the honest submissions behind them were dropped. Free to send, which is
+    -- the one thing proof-of-work exists to stop.
+    --
+    -- Against a CACHE, and it fails open in every direction (see 'paidFor'): a
+    -- mailbox this peer has not read a policy for pays, so a cold peer behaves
+    -- exactly as it did. Replication carries no stamp and is not charged here
+    -- either, for the reason the drain does not charge it: a co-host has none
+    -- to offer.
+    known <- readTVarIO mpwPoWKnown
+    let paid = case origin of
+          Replicated -> True
+          Submitted stamp ->
+            paidFor (`HM.lookup` known)
+                    (\d r -> maybe False (stampOk d r m) stamp)
+                    (Set.toList (messageRecipients c))
+
+    verdict <- atomically do
       inflight <- readTVar inMessageQueueSeen
-      if HS.member h inflight then pure True else do
-        full <- isFullTBQueue inMessageQueue
-        if full then do
-          modifyTVar inMessageQueueDropped succ
-          pure False
-        else do
-          writeTBQueue inMessageQueue (peer, origin, m, c)
-          modifyTVar   inMessageQueueInNum succ
-          writeTVar    inMessageQueueSeen (HS.insert h inflight)
-          pure True
+      if HS.member h inflight then pure (Right True) else do
+        queued <- readTVar inMessageQueueInNum
+        ps <- readTVar inMessageQueuePeers
+        -- Nothing for this node's own submission over its own RPC, which is not
+        -- somebody else's traffic and is not rationed against it.
+        let held = fmap (\p -> fromMaybe 0 (HM.lookup p ps)) peer
+        case admitTo queued held paid of
+          Left why -> do
+            modifyTVar inMessageQueueDropped succ
+            pure (Left why)
+          Right () -> do
+            writeTBQueue inMessageQueue (peer, origin, m, c)
+            modifyTVar   inMessageQueueInNum succ
+            writeTVar    inMessageQueueSeen (HS.insert h inflight)
+            for_ peer $ \p -> modifyTVar inMessageQueuePeers (HM.insertWith (+) p 1)
+            pure (Right True)
 
-    -- Said out loud. The counter above is published on the probe now, but a
-    -- drop is a message that will not arrive, and a peer's log is where somebody
-    -- looks when one did not.
-    unless took do
-      warn $ red "mailbox: input queue full, message dropped"
-               <+> pretty (HashRef (hashObject (serialise m)))
+    -- Said out loud, and said WHICH: the counter is published on the probe, but
+    -- a drop is a message that will not arrive, and the three reasons send an
+    -- operator to three different places -- this peer is behind, one neighbour
+    -- is flooding, or somebody is flooding without paying.
+    case verdict of
+      Right _ -> pure ()
+      Left why -> warn $ red "mailbox: message dropped at the queue"
+                          <+> viaShow why <+> pretty h
+                          <+> parens (pretty (fmap AsBase58 peer))
 
-    pure took
+    pure (either (const False) id verdict)
 
   mailboxAcceptDelete MailboxProtoWorker{..} mbox dmp box = do
     debug $ red "<<>> mailbox: mailboxAcceptDelete" <+> pretty mbox
@@ -426,6 +475,13 @@ instance ( s ~ Encryption e, e ~ L4Proto
       -- два ответа на вопрос «чья это полиси» -- на один больше, чем нужно.
       unless (sppMailboxKey spp == who) do
         throwError (MailboxAuthError "policy names a mailbox it is not signed for")
+
+      -- The door's cache of what this mailbox charges is now stale, and stale
+      -- HIGH is the direction that costs: a policy that lowered D would have
+      -- the queue refusing messages the mailbox has just started accepting.
+      -- Forgotten rather than updated, since forgetting fails open and the
+      -- drain fills it again from the policy it reads.
+      atomically $ modifyTVar mpwPoWKnown (HM.delete who)
 
       dbe <- readTVarIO mailboxDB
                 >>= orThrowError (MailboxSetPolicyFailed "database not ready")
@@ -813,18 +869,21 @@ createMailboxProtoWorker :: forall s e m . ( MonadIO m
                          -> AnyStorage
                          -> m (MailboxProtoWorker s e)
 createMailboxProtoWorker pc pe sto = do
-  -- FIXME: queue-size-hardcode
-  --   $class: hardcode
   MailboxProtoWorker pe sto pc
-    <$> newTVarIO mempty
+    <$> newTVarIO mempty            -- mpwFetchQ
     <*> newCheckNonces
-    <*> newTVarIO 0
-    <*> newTVarIO mempty
-    <*> newTVarIO mempty
-    <*> newTBQueueIO 8000
-    <*> newTVarIO mempty
-    <*> newTVarIO mempty
-    <*> newTVarIO mempty
+    <*> newTVarIO 0                 -- mpwPoWFloor
+    <*> newTVarIO mempty            -- mpwReplicateFrom
+    <*> newTVarIO mempty            -- inMessageQueueSeen
+    <*> newTVarIO mempty            -- inMessageQueuePeers
+    <*> newTVarIO mempty            -- mpwPoWKnown
+    -- The depth is 'inQueueDepth' and not a literal: the per-peer share is a
+    -- fraction of it, and a bound written against a number somewhere else is
+    -- a bound that drifts.
+    <*> newTBQueueIO (fromIntegral inQueueDepth)
+    <*> newTVarIO mempty            -- inMessageMergeQueue
+    <*> newTVarIO mempty            -- inPolicyDownloadQ
+    <*> newTVarIO mempty            -- inMailboxDownloadQ
     <*> newTVarIO 0
     <*> newTVarIO 0
     <*> newTVarIO 0
@@ -934,6 +993,10 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           -- set and still be in nobody's queue.
           xs <- STM.flushTBQueue inMessageQueue
           writeTVar inMessageQueueSeen mempty
+          -- With the batch, like the set: both are facts about what is IN the
+          -- queue, and a share held against an empty queue is a peer rationed
+          -- for something it no longer occupies.
+          writeTVar inMessageQueuePeers mempty
           pure xs
         for_ mess $ \(peer, origin, m, s) -> do
           atomically $ modifyTVar inMessageQueueInNum pred
@@ -1004,6 +1067,11 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             -- И только для того, что пришло госсипом: у сообщения, вынутого из
             -- чужого дерева, штампа нет и быть не может (см. 'MessageOrigin').
             powD <- policyPoW @s po
+
+            -- Remembered for the door. The check there runs on this and cannot
+            -- read a policy itself; writing it here costs nothing, since the
+            -- policy has just been read and parsed anyway.
+            atomically $ modifyTVar mpwPoWKnown (HM.insert rcpt powD)
 
             case origin of
               -- РЕПЛИКАЦИЯ ПЛАТИТ ДОВЕРИЕМ, раз не может заплатить работой.

@@ -298,9 +298,32 @@ only choice left is how wide the break is.
     else; the drain clears it as it takes the batch, so a message refused this
     round is queued again on the next copy.
 
-    What is still sized rather than priced is a flood of DISTINCT messages
-    below a mailbox's `(pow D)`: each costs a slot until the drain reads it and
-    the policy refuses it. Rate limiting is the answer this document defers.
+    A flood of DISTINCT messages below a mailbox's `(pow D)` used to be sized
+    rather than priced: each took a slot until the drain read the policy ten
+    seconds later and refused it, so the work was free to skip and the honest
+    submissions behind it were dropped. The check now runs at the door as well,
+    against a per-mailbox cache of D that the drain fills as it reads each
+    policy.
+
+    THE CACHE IS NEVER AN AUTHORITY and fails open in every direction: a mailbox
+    this peer has read no policy for pays, a mailbox charging zero pays, a
+    message naming no recipient pays, and one paid recipient out of several buys
+    the slot. The drain still decides each recipient separately with the signed
+    policy in hand. A message let through costs a slot and is then refused
+    properly; one refused at the door on stale information would be a message
+    lost to a policy that had changed, which is why `mailboxSetPolicy` forgets
+    the entry rather than updating it.
+
+    AND ONE SENDER MAY HOLD ONLY A SHARE of the queue -- an eighth -- whether or
+    not any work is asked for. That is the half proof-of-work cannot reach:
+    most mailboxes charge nothing, and for them the flood is free by design, so
+    what is bounded there is starvation rather than cost. It bounds ONE peer; a
+    flood from eight is a different attack, answered at the peer layer by who
+    may talk to this node at all.
+
+    Rate limiting proper -- counting per sender over a window -- is still the
+    answer this document defers, and it is now a refinement rather than the
+    only thing standing between an open inbox and a free flood.
   - Difficulty in policy. D is declared in the signed policy (`(pow D)`),
     versioned like the rest, so the owner tunes it. There is no per-tier PoW
     clause: a tier is already its own mailbox with its own policy (Trust
