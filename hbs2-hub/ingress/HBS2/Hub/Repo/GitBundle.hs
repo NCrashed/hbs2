@@ -39,6 +39,9 @@ module HBS2.Hub.Repo.GitBundle
   , takeCanon
   , Synced(..)
   , SyncedCanon(..)
+  , publishTo
+  , Published(..)
+  , PublishedCanon(..)
   , pullRef
   , Bundled(..)
   , BundleError(..)
@@ -445,6 +448,112 @@ syncFrom cwd remote = runExceptT do
          [ "fetch", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
 
   pure (Synced canon True)
+
+-- | What a publish did.
+data Published = Published
+  { pbCanon :: PublishedCanon
+    -- | Whether the staged proposals were pushed.
+    --
+    -- 'False' means there were none here to push, which is the ordinary state
+    -- of a repository nobody has proposed anything to. A failure is an error
+    -- rather than a 'False'.
+  , pbPulls :: Bool
+  }
+  deriving stock (Eq,Show)
+
+-- | What happened to the remote's copy of canon.
+data PublishedCanon =
+    -- | There is no canon in this clone: nothing has been folded here.
+    PublishedNone
+    -- | The remote already had exactly this.
+  | PublishedSame Text
+    -- | Pushed. What the remote now holds.
+  | PublishedMoved Text
+    -- | The remote holds canon this clone does not contain, so the push would
+    -- have replaced it. NOTHING WAS WRITTEN.
+    --
+    -- The mirror of 'CanonDiverged' and the reason this push is not forced: a
+    -- second maintainer's folds live only in their ref until somebody fetches
+    -- them, and a plus here would drop them on the floor. The answer is the
+    -- same as on the read side -- @hub sync@, which folds both and takes the
+    -- rewrite when it is one.
+  | PublishedRefused Text
+  deriving stock (Eq,Show)
+
+-- | Push canon and the staged proposals to a remote.
+--
+-- The counterpart of 'syncFrom', and it exists because until it did a
+-- maintainer could do a full day's correct work that nobody would ever see:
+-- @refs\/hbs2\/meta@ is an ordinary git ref in the repository they are standing
+-- in, every accept and merge and compaction writes it locally, and each of them
+-- exits zero having published nothing.
+--
+-- CANON IS NOT FORCED, for the reason 'syncFrom' does not force its fetch: a
+-- plus here replaces canon the remote holds and this clone has not seen, which
+-- is exactly what a second maintainer's folds look like. git refuses the
+-- non-fast-forward on its own; this asks first so the answer is a sentence
+-- rather than git's.
+--
+-- THE PULL REFS ARE FORCED, and the asymmetry is not an oversight. A staged
+-- proposal head moves when the contributor revises the pull request, which is
+-- a rewrite by construction and not a fast-forward, and 'syncFrom' already
+-- takes them with a plus -- so without one here a revised proposal could be
+-- staged locally and never published. They are also derived from canon rather
+-- than authored: the number comes from the fold, and PEP-21's A1 has one
+-- publisher holding the reflog key, so there is no second author for these to
+-- race with.
+publishTo :: MonadUnliftIO m
+          => Maybe FilePath -> Text -> m (Either BundleError Published)
+publishTo cwd remote = runExceptT do
+  checked "remote name" validRefName remote
+
+  here <- ExceptT (refTip cwd "refs/hbs2/meta")
+
+  canon <- case here of
+    Nothing -> pure PublishedNone
+    Just mine -> do
+      -- What the remote has, before anything is pushed. Asked rather than
+      -- inferred from the push failing, because "the remote is ahead" and "the
+      -- remote refused for some other reason" are two different sentences and
+      -- git says them both the same way.
+      probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
+                 ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
+
+      case theirTip probe of
+        Nothing -> push mine
+        Just theirs
+          | theirs == mine -> pure (PublishedSame mine)
+          | otherwise -> do
+              -- Contains, not equals: the remote's commit has to be an
+              -- ancestor of ours, which is the same question the fetch side
+              -- asks in the other direction.
+              ff <- ExceptT (isAncestor cwd theirs mine)
+              if ff then push mine else pure (PublishedRefused theirs)
+
+  -- And the staged proposals, when there are any. A push with no matching
+  -- source refspec is an error from git, and a repository nobody has proposed
+  -- anything to is not an error, so the question is asked first.
+  staged <- ExceptT $ call cwd smallSeconds "for-each-ref"
+              ["for-each-ref", "--format=%(refname)", "refs/hbs2/pulls/"]
+
+  let anyStaged = not (BS.null (BS.filter (not . isSpace8) staged))
+
+  when anyStaged $ void $ ExceptT $ call cwd fetchSeconds "push"
+    [ "push", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
+
+  pure (Published canon anyStaged)
+
+  where
+    push mine = do
+      _ <- ExceptT $ call cwd fetchSeconds "push"
+             [ "push", Text.unpack remote, "refs/hbs2/meta:refs/hbs2/meta" ]
+      pure (PublishedMoved mine)
+
+    -- ls-remote answers a line of "<sha>\t<ref>", or nothing at all.
+    theirTip bs = case BS.split 0x09 (BS.takeWhile (/= 0x0a) bs) of
+      (sha : _) | not (BS.null (BS.filter (not . isSpace8) sha)) ->
+        Just (Text.strip (Text.decodeUtf8Lenient sha))
+      _ -> Nothing
 
 -- | Move the canon ref, through what it currently holds.
 --

@@ -66,6 +66,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
+import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, manifestCode
                           ,codeMailboxUnknown, codePeerSilent)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
@@ -575,6 +576,8 @@ acceptEntries = do
                      acked
             ]
           for_ (omittedNote plan) print
+
+      liftIO (saying (notPublishedYet <> line))
 
     -- A commit message a human reading `git log refs/hbs2/meta` can act on.
     -- Not a place to put anything authoritative: everything that is signed is

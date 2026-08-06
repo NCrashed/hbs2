@@ -1,5 +1,42 @@
 # Unreleased
 
+## Added
+
+  - **`hbs2-hub publish`, and the line every canon-writing verb was missing.**
+    `refs/hbs2/meta` is an ordinary git ref in the repository the operator is
+    standing in. Every verb that writes canon -- accept, merge, close, label,
+    assign, redact, maintainer add, compact -- wrote it locally, printed the
+    commit, and exited zero, and nothing in the tool ever said the word push.
+    So a maintainer could triage a queue, fold six letters, close two issues
+    and record a merge, have every command succeed, and have the contributor's
+    `hub updates` still show nothing a week later, with `hub verify` and
+    `hub log` locally confirming, correctly, that everything was fine.
+
+    `hub publish` is the other half of `hub sync` and carries the same two
+    things: canon, and the staged proposals under `refs/hbs2/pulls/*` that
+    `hub pr checkout` reads. Without the second, a reviewer's clone has nothing
+    to check out.
+
+    CANON IS NOT FORCED, mirroring the fetch side. A remote holding canon this
+    clone does not contain is what a second maintainer's folds look like, and a
+    forced push would take them out of the ref every reader follows while their
+    events sat unreferenced in the object store. The push is refused, nothing
+    is written, and the report names the remedy (`hub sync --repo <key>`, which
+    folds both lineages and takes a rewrite when it is one). Exit code 45.
+
+    THE PROPOSAL REFS ARE FORCED, and the asymmetry is deliberate: a revised
+    pull request moves its head, which is a rewrite by construction, and
+    `hub sync` already fetches them with a plus. They are derived from canon
+    rather than authored, and PEP-21's A1 has one publisher, so there is no
+    second author to race with.
+
+    It signs nothing and checks no key: what gates publishing is who may push.
+    A delegate can bless events into canon and cannot publish them, and this
+    verb is where that stops being an abstraction.
+
+    Every canon-writing verb now ends with a note on stderr saying the commit
+    has not left the machine and naming the verb that sends it.
+
 ## Changed
 
   - **`hbs2-hub`: the repository key is spelled `--repo` everywhere.** It was

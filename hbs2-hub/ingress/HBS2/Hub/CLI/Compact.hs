@@ -38,7 +38,8 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Publish (notPublishedYet)
+import HBS2.Hub.CLI.Inbox (refuse,saying)
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -208,6 +209,8 @@ compactEntries = do
             <+> "folds both and takes it."
         , "To put it back: git update-ref refs/hbs2/meta" <+> pretty (stCommit st)
         ]
+
+      liftIO (saying (notPublishedYet <> line))
 
     numbersOf fr = numberIndexOf fr
 

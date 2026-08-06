@@ -50,7 +50,8 @@ import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.CLI.Publish (notPublishedYet)
+import HBS2.Hub.CLI.Inbox (refuse,saying,codePeerSilent,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
@@ -348,6 +349,8 @@ prEntries = do
         , "status is now merged; PEP-19 has the merge event set it, so no"
             <+> "second event was written"
         ]
+
+      liftIO (saying (notPublishedYet <> line))
 
     tshow :: Word64 -> Text
     tshow = fromString . show

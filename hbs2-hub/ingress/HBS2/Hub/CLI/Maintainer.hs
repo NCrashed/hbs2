@@ -34,7 +34,8 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
-import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Publish (notPublishedYet)
+import HBS2.Hub.CLI.Inbox (refuse,saying)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -171,6 +172,8 @@ maintainerEntries = do
       liftIO $ mapM_ print
         [ "  " <> pretty (AsBase58 k)
         | k <- sortOn (show . pretty . AsBase58) (HS.toList (cvMaintainers (acView acc))) ]
+
+      liftIO (saying (notPublishedYet <> line))
 
 -- Both values behind flags, for the reason every verb here has them: a repo
 -- key and a maintainer key are the same thirty-two bytes of base58, and the

@@ -135,6 +135,7 @@ library hub-ingress
       HBS2.Hub.CLI.Own
       HBS2.Hub.CLI.Policy
       HBS2.Hub.CLI.Pr
+      HBS2.Hub.CLI.Publish
       HBS2.Hub.CLI.Read
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
@@ -221,6 +222,7 @@ test-suite spec
       HBS2.Hub.OwnSpec
       HBS2.Hub.PolicySpec
       HBS2.Hub.PrSpec
+      HBS2.Hub.PublishSpec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
       HBS2.Hub.ReadSpec
