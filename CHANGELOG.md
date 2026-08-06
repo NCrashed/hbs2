@@ -2,6 +2,51 @@
 
 ## Security
 
+  - **`hbs2-peer`: a proof-of-work floor was bypassed by not carrying a
+    stamp.** `mailboxPoWFloor` -- what an operator sets with
+    `hbs2:mailbox:pow-min` to say how much work this peer is willing to
+    amplify -- was consulted only in the `SendMessageStamped` branch. A plain
+    `SendMessage` was relayed unconditionally, which is every message a peer
+    built before PEP-21 sends and every message an attacker chooses to send.
+
+    Relaying is `broadCastMessage` to every known peer, and the mailbox
+    protocol is registered independently of the mailbox worker, so a peer that
+    hosts no mailbox at all amplifies too. One throwaway keypair, a signed
+    `MessageContent` with an empty recipient set, and a byte varied per packet
+    was a network-wide broadcast storm that the one setting meant to bound it
+    did not touch.
+
+    An unstamped message now carries zero bits of work, which is what it
+    carries. A floor of zero -- the default -- forwards it exactly as before,
+    so nothing changes for anybody who has not asked for otherwise; any
+    non-zero floor now means what it says. Acceptance is unaffected, as in the
+    stamped branch: a message that will not be forwarded still reaches the
+    queue, where the mailbox's own signed policy decides it.
+
+  - **`hbs2-peer`: an unsolicited status could queue unbounded downloads,
+    including rows that survive a restart.** The download queue is keyed by the
+    `(policy version, tree hash)` pair, so the bound is one entry per ROOT
+    somebody names, and a root is a value the sender invents. The comment
+    beside it claimed the queue was bounded by the number of mailboxes this
+    peer holds; the check it describes bounds which KEY may be named, not how
+    many trees may be named for it, and nothing rate-limits the requests.
+
+    Each queued entry costs a poll every ten seconds with a `findMissedBlocks`
+    behind it, an entry in the block downloader's working set that its sweeper
+    removes only once the download completes -- so a root whose blocks never
+    arrive is never swept -- and a row in the brains database that is deleted
+    only when the block turns up. That last one outlives the process.
+
+    The queue is now capped at `maxMailboxDownloads`, and the download is asked
+    for after the slot is taken rather than before, so a refusal does not pay
+    for the fetch it refuses. Dropping an announcement is cheap to be wrong
+    about: a peer that really holds the tree re-announces it on the next
+    ten-minute check.
+
+    NOT fixed here: the brains rows and the downloader's working set are still
+    only cleared by a completed download. What changed is that the mailbox path
+    can no longer feed them without bound.
+
   - **`hbs2-peer`: a paid letter could be suppressed by re-sending it without
     its stamp.** The in-flight dedup at the mailbox queue's door was keyed on
     the hash of the `Message`, and a proof-of-work stamp is deliberately not

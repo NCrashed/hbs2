@@ -78,6 +78,21 @@ import Text.InterpolatedString.Perl6 (qc)
 import Streaming.Prelude qualified as S
 import UnliftIO
 
+-- | How many mailbox trees this peer will be trying to fetch at once.
+--
+-- A bound on what an ANNOUNCEMENT may cost, which is a different question from
+-- which mailbox may be announced: a status names a tree root, a root is a value
+-- the sender invents, and each one queued costs a poll every ten seconds, an
+-- entry in the downloader's working set, and a row in the brains database that
+-- outlives a restart.
+--
+-- The number is a judgement. An honest peer has one live root per mailbox it
+-- hosts, plus whatever is in flight while co-hosts converge, so this is far
+-- above any real steady state and small enough that the ten-second sweep over
+-- it stays a rounding error.
+maxMailboxDownloads :: Int
+maxMailboxDownloads = 256
+
 newtype PolicyHash = PolicyHash HashRef
                      deriving newtype (Eq,Ord,Show,Hashable,Pretty)
 
@@ -687,7 +702,10 @@ instance ( s ~ Encryption e, e ~ L4Proto
       -- переспрашиваемых каждые две секунды. Плюс сама policy пишется блоком до
       -- всякой проверки.
       --
-      -- Теперь очередь ограничена сверху числом ящиков, которые мы держим.
+      -- Теперь чужой ключ назвать нельзя. СКОЛЬКО деревьев можно назвать для
+      -- своего -- отдельный вопрос, и на него отвечает maxMailboxDownloads
+      -- ниже: ключ очереди это пара (версия, хеш), то есть запись на каждый
+      -- объявленный корень, а корень объявляющий выдумывает.
       t <- getMailboxType_ dbe ref
 
       when (isNothing t) do
@@ -713,11 +731,47 @@ instance ( s ~ Encryption e, e ~ L4Proto
       let downloadStatus v = do
             maybe1 mbsMailboxHash (okay ()) $ \h -> do
               when (s0 /= Just h && useTree (statusUse origin)) do
-                startDownloadStuff me h
                 -- one download per version per hash
                 let downKey = HashRef $ hashObject (serialise (v,h))
-                atomically $ modifyTVar inMailboxDownloadQ
-                  (HM.insert downKey (MailboxDownload ref h now v False who))
+
+                -- AND NO MORE THAN 'maxMailboxDownloads' OF THEM.
+                --
+                -- The key is the (version, hash) pair, so the bound is one
+                -- entry per ROOT somebody names, and a root is a value they
+                -- invent. The note above says the queue is bounded by the
+                -- number of mailboxes we hold, and the mailbox check it
+                -- describes does bound WHICH KEY may be named -- not how many
+                -- trees may be named for it.
+                --
+                -- What each entry costs while it sits there: a poll every ten
+                -- seconds, each a findMissedBlocks; an entry in the
+                -- downloader's `wip`, which its sweeper removes only once the
+                -- download completes, so a root whose blocks never arrive is
+                -- never swept; and a row in the brains database, deleted only
+                -- when the block turns up -- that one SURVIVES RESTARTS.
+                -- Nothing rate-limits the requests, so this was a line-rate
+                -- input to three unbounded stores at once.
+                --
+                -- Over the cap the announcement is dropped rather than
+                -- queued, and dropping it is cheap to be wrong about: a peer
+                -- that really holds a tree re-announces it on the next
+                -- 'mailboxCheckQ' round.
+                --
+                -- The download is asked for AFTER the slot is taken, not
+                -- before, or the refusal costs the same fetch it exists to
+                -- refuse.
+                taken <- atomically do
+                  q <- readTVar inMailboxDownloadQ
+                  if HM.member downKey q then pure False
+                    else if HM.size q >= maxMailboxDownloads then pure False
+                    else do
+                      writeTVar inMailboxDownloadQ
+                        (HM.insert downKey (MailboxDownload ref h now v False who) q)
+                      pure True
+
+                if taken then startDownloadStuff me h else
+                  debug $ red "mailbox: download queue full, status ignored"
+                            <+> pretty ref <+> pretty h
               okay ()
 
       case mbsMailboxPolicy of

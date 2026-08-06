@@ -315,8 +315,10 @@ mailboxProto inner adapter mess = deferred @p do
               --   с другой стороны -- мы не поддерживаем, а другие,
               --   может, поддерживают.
               --
-              -- ЧАСТИЧНО ЗАКРЫТО для сообщений со штампом: у них есть, что
-              -- проверить до рассылки, не зная ящика, и это mailboxPoWFloor.
+              -- ЧАСТИЧНО ЗАКРЫТО порогом mailboxPoWFloor, и теперь он
+              -- спрашивается на ОБЕИХ ветках. См. ветку SendMessage ниже:
+              -- сообщение без штампа несёт ноль бит работы, а не «столько,
+              -- сколько нужно».
 
           lift do
             let whoever = if inner then Nothing else Just pip
@@ -335,7 +337,30 @@ mailboxProto inner adapter mess = deferred @p do
         --   $workflow: backlog
         (_, content) <- unboxMessage msg
 
-        takeMessageWith True (Submitted Nothing) msg content
+        -- ПОРОГ СПРАШИВАЕТСЯ И ЗДЕСЬ, а раньше не спрашивался.
+        --
+        -- Он стоял только в ветке со штампом, то есть оператор, поставивший
+        -- себе hbs2:mailbox:pow-min, обходился ровно тем, что штамп не
+        -- прикладывают: сообщение без штампа ретранслировалось безусловно и
+        -- всеми. А ретрансляция -- это broadcastMessage ко ВСЕМ известным
+        -- пирам, и mailboxProto зарегистрирован независимо от воркера, так
+        -- что усиливает и тот пир, который не держит ни одного ящика.
+        --
+        -- Сообщение без штампа несёт НОЛЬ бит работы. Это не «неизвестно
+        -- сколько» и не «сколько попросят»: порог 0 (умолчание) такое
+        -- сообщение пропускает и ничего не меняет ни для кого, а любой
+        -- ненулевой порог означает ровно то, что оператор им сказал.
+        --
+        -- Приём это не гейтит, как и в ветке со штампом: слабый штамп значит
+        -- «дальше не понесу», письмо доходит до очереди, и судьбу его решает
+        -- policy ящика, у которой есть настоящее D.
+        floorD <- lift $ mailboxPoWFloor @s adapter
+
+        unless (floorD == 0) do
+          debug $ red "mailbox: unstamped message carries no work to forward"
+                    <+> parens ("floor is" <+> pretty floorD <+> "bits")
+
+        takeMessageWith (floorD == 0) (Submitted Nothing) msg content
           (hashObject @HbSync (serialise mess) & HashRef)
 
       -- То же сообщение, но с доказательством работы (PEP-21).
