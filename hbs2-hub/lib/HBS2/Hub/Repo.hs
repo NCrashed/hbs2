@@ -508,6 +508,12 @@ instance Pretty NameProblem where
 -- | What reading canon produced.
 data CanonState = CanonState
   { stCommit  :: Text
+    -- | Every event the tree held, with the path it held it at.
+    --
+    -- The fold below is what a reader wants; this is what a REWRITE wants, and
+    -- nothing else asks for it: a compaction keeps a subset of these files and
+    -- has to put them back under the names they had.
+  , stEvents  :: [(ByteString, Event)]
   , stVersion :: Maybe Word32
     -- ^ the tree's own rules version, absent when the tree has no @version@ file
   , stBad     :: [(ByteString, FileProblem)]
@@ -800,10 +806,11 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
 
               -- foldCanon and not foldEvents: the tree's version governs the
               -- admission rules, which is the whole reason it is a tree-level file.
-              pure $ case foldCanon (maybe assumedMetaVersion id declared) owner evs of
+              pure $ case foldCanon (maybe assumedMetaVersion id declared) owner (fmap snd evs) of
                 Left (MetaTooNew n) -> Left (CanonTooNewHere n)
                 Right fr -> Right CanonState
                   { stCommit  = commit
+                  , stEvents  = reverse evs
                   , stVersion = declared
                   , stBad     = bad
                   , stFileVersions = sortOn fst vers
@@ -862,7 +869,11 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
         -- same maxCanonBytes the read is, and worth saying rather than hiding.
         Right (v, ev) ->
           let !mis' = maybe mis (\np -> (p, np) : mis) (nameProblem p ev)
-          in Right (ev : evs, (p, v) : vers, bad, mis')
+          -- WITH ITS PATH, because a rewrite has to put it back where it was.
+          -- Deriving the path from the event instead would silently repair a
+          -- misnamed file, which is a finding this reader reports and not a
+          -- thing a compaction is entitled to fix.
+          in Right ((p, ev) : evs, (p, v) : vers, bad, mis')
 
 -- | What a commit to canon must put in the tree.
 --
@@ -1004,6 +1015,18 @@ data CanonSink m = CanonSink
   { skParent :: m (Either CanonUnwritable (Maybe Text))
     -- ^ what @refs\/hbs2\/meta@ points at, 'Nothing' when canon does not exist yet
   , skCommit :: CanonWrite -> m (Either CanonUnwritable Text)
+    -- | The same, writing a ROOT commit: the tree is exactly the files given
+    -- and the history before it is gone.
+    --
+    -- Its own method rather than a flag, because the two are different acts and
+    -- the type should say which one a caller performs. Everything else is
+    -- identical, 'cnParent' included -- it still names what the ref must hold,
+    -- since a rewrite that landed on a canon somebody has moved under it would
+    -- drop whatever they folded.
+    --
+    -- This is what a compaction publishes (PEP-19): a new lineage holding the
+    -- retained events, replacing one whose history is what it traded for size.
+  , skRewrite :: CanonWrite -> m (Either CanonUnwritable Text)
     -- ^ write the files, commit them, move the ref; the new commit
   , skClose  :: m ()
   }

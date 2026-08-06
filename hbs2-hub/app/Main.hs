@@ -10,6 +10,7 @@ import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Comment
+import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
@@ -115,6 +116,7 @@ main = do
         inboxEntries
         acceptEntries
         commentEntries
+        compactEntries
         composeEntries
         syncEntries
         updatesEntries
@@ -280,7 +282,7 @@ main = do
                     , "hub:maintainer:add", "hub:maintainer:remove"
                     , "hub:pr:merge", "hub:pr:checkout", "hub:sync"
                     , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
-                    , "hub:issue:assign"
+                    , "hub:issue:assign", "hub:compact"
                     , "hub:redact"
                     ] <> helpNames
 

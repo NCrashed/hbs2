@@ -126,6 +126,7 @@ library hub-ingress
       HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Ban
       HBS2.Hub.CLI.Comment
+      HBS2.Hub.CLI.Compact
       HBS2.Hub.CLI.Compose
       HBS2.Hub.CLI.Drop
       HBS2.Hub.CLI.Accept

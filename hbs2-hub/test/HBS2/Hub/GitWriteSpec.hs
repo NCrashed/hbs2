@@ -14,6 +14,7 @@ module HBS2.Hub.GitWriteSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
+import HBS2.Hub.Compact
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 import HBS2.Hub.Repo.GitWrite
@@ -26,9 +27,11 @@ import HBS2.Net.Auth.Credentials
 
 import Control.Monad (void,(>=>))
 import UnliftIO.Async (mapConcurrently)
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort,isInfixOf)
+import Data.List qualified as List
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -71,6 +74,24 @@ git cwd args = do
     ExitSuccess -> pure (takeWhile (`notElem` ("\n\r" :: String)) (LBS8.unpack out))
     _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
 
+-- The same, whole. 'git' above answers with the first line, which is what a
+-- rev-parse gives; a listing has many.
+gitAll :: FilePath -> [String] -> IO String
+gitAll cwd args = do
+  path <- fromMaybe "/usr/bin:/bin" <$> Env.lookupEnv "PATH"
+  let cfg = setEnv [ ("GIT_CONFIG_GLOBAL", "/dev/null")
+                   , ("GIT_CONFIG_SYSTEM", "/dev/null")
+                   , ("GIT_CONFIG_NOSYSTEM", "1")
+                   , ("HOME", cwd)
+                   , ("LC_ALL", "C")
+                   , ("PATH", path)
+                   ]
+              (setWorkingDir cwd (proc "git" args))
+  (code, out, errOut) <- readProcess (setStdin closed cfg)
+  case code of
+    ExitSuccess -> pure (LBS8.unpack out)
+    _ -> fail ("git " <> unwords args <> ": " <> LBS8.unpack errOut)
+
 withRepo :: (FilePath -> IO a) -> IO a
 withRepo act = withSystemTempDirectory "hub-write" $ \dir -> do
   void $ git dir ["init", "-q", "."]
@@ -100,7 +121,7 @@ anOpen alice owner sq title = do
   pure (ev, cw)
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
@@ -393,3 +414,97 @@ spec2 =
 
         length [ c | Right c <- rs ] `shouldBe` 1
         length [ () | Left RefMoved{} <- rs ] `shouldBe` length plans - 1
+
+-- The rewrite, end to end against real git: canon written, compacted, and read
+-- back. The rule is tested on its own in HBS2.Hub.CompactSpec; what is here is
+-- that a lineage written by 'skRewrite' is one the reader folds to the same
+-- state, which is the claim a clone checks before taking it.
+spec3 :: Spec
+spec3 =
+  describe "PEP-19 canon writer: a rewritten lineage" $ do
+
+    it "writes a root commit that keeps only the files it was given" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        (_, cw1) <- anOpen alice owner 1 "first"
+        first' <- commitOk dir Nothing cw1 1000
+        (_, cw2) <- anOpen alice owner 2 "second"
+        second <- commitOk dir (Just first') cw2 2000
+
+        -- A lineage holding only the first event, replacing a canon that has
+        -- two: this is what a compaction does, with the plan chosen by hand so
+        -- the test does not depend on the policy.
+        rewritten <- withGitSinkIn (Just dir) $ \sk ->
+          skRewrite sk (CanonWrite (Just second) (cwFiles cw1) "compacted" 3000)
+            >>= either (fail . show) pure
+
+        -- A ROOT: no parent, so the old lineage is not reachable from the new
+        -- ref and the size win is real.
+        parents <- git dir ["rev-list", "--parents", "-n", "1", Text.unpack rewritten]
+        words parents `shouldSatisfy` ((== 1) . length)
+
+        -- The tree holds the first event and not the second.
+        names <- gitAll dir ["ls-tree", "-r", "--name-only", Text.unpack rewritten]
+        length [ n | n <- lines names, "threads/" `isInfixOf` n ] `shouldBe` 1
+
+        -- And the ref moved onto it.
+        git dir ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` Text.unpack rewritten)
+
+    -- The swap is against the canon that was compacted, not against the
+    -- commit's (absent) parent: a letter folded between the read and the write
+    -- must lose the race rather than be replaced.
+    it "refuses to publish a rewrite onto a canon that moved" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        (_, cw1) <- anOpen alice owner 1 "first"
+        first' <- commitOk dir Nothing cw1 1000
+        (_, cw2) <- anOpen alice owner 2 "second"
+        _ <- commitOk dir (Just first') cw2 2000
+
+        r <- withGitSinkIn (Just dir) $ \sk ->
+               skRewrite sk (CanonWrite (Just first') (cwFiles cw1) "compacted" 3000)
+        case r of
+          Left (RefMoved want got) -> do
+            want `shouldBe` Just first'
+            got `shouldSatisfy` (/= Just first')
+          other -> expectationFailure ("expected RefMoved, got " <> show other)
+
+    it "produces a lineage the reader folds to the same state" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        let repo = fst owner
+
+        (e1, cw1) <- anOpen alice owner 1 "first"
+        c1 <- commitOk dir Nothing cw1 1000
+
+        -- Two sets on one attribute, the first superseded by the second.
+        let thr = eventId e1
+            s1 = mkEvent owner owner (ASet thr "labels" (encodeLabels ["a"]) 2000)
+                         (canonOf repo 2 Nothing)
+            s2 = mkEvent owner owner (ASet thr "labels" (encodeLabels ["b"]) 3000)
+                         (canonOf repo 3 Nothing)
+        cwBoth <- either (fail . show) pure
+                    (planCanon [ (threadDir thr <> "/" <> eventFileName 2 (eventId s1), s1)
+                               , (threadDir thr <> "/" <> eventFileName 3 (eventId s2), s2) ]
+                               [(1, thr)])
+        c2 <- commitOk dir (Just c1) cwBoth 3000
+
+        before <- readBack dir repo
+
+        -- Everything the tree holds, minus what the rule says may go.
+        let c = compactionOf (fmap snd (stEvents before))
+            held = [ (BS8.unpack p, e) | (p, e) <- stEvents before
+                                       , eventId e `elem` fmap eventId (cpKeep c) ]
+        length (cpDrop c) `shouldBe` 1
+
+        plan <- either (fail . show) pure
+                  (planCanon held (numberIndexOf (stFold before)))
+        _ <- withGitSinkIn (Just dir) $ \sk ->
+               skRewrite sk (CanonWrite (Just c2) (cwFiles plan) "compacted" 4000)
+                 >>= either (fail . show) pure
+
+        after <- readBack dir repo
+        equivalentTo (stFold before) (stFold after) `shouldBe` True

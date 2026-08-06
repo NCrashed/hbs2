@@ -181,6 +181,7 @@ and a tree full of forged events were the same event.
 | 39   | nothing was checked out, and this clone is as it was (`hub pr checkout`) |
 | 40   | canon here and canon there have diverged; nothing was written (`hub sync`) |
 | 41   | the repository declares no mailbox, or its manifest will not read |
+| 42   | there is nothing superseded to compact (`hub compact`)          |
 | 141  | a closed pipe: 128 plus SIGPIPE, e.g. piping into `head`  |
 
 3 to 16 are `hub verify`'s own; 17 and 18 belong to `hub inbox` and are added
@@ -581,7 +582,13 @@ hub delete <msg-predicate>         ; NOT BUILT as a verb: `hub inbox reject` del
                                    ;   one letter, and a predicate that matches more
                                    ;   than the caller read is a different decision
 hub maintainer add|remove <key>    ; delegate/revoke, OWNER key only (PEP-21)
-hub compact                        ; NOT BUILT: canon compaction (PEP-19/21)
+hub compact --repo <key> [--dry-run]
+                                   ; drop the superseded set events canon no
+                                   ;   longer needs, as a NEW lineage: the ref
+                                   ;   swings onto a root commit and the old one
+                                   ;   stays until git prunes it. Every clone
+                                   ;   then sees a divergence `hub sync --repo`
+                                   ;   resolves
 ```
 
 `(rate <key> <s>)` and `(quota <key> <n>)` were listed here and are not clauses

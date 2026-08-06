@@ -715,8 +715,9 @@ winning `set`) and deferred the policy here.
     also why an event this build cannot resolve, or one the fold dropped, is
     retained rather than tidied away: neither is a value the fold overwrote.
 
-  - What is built: the predicate, as `HBS2.Hub.Compact`. Not the runner, and
-    not the sync-side check above.
+  - What is built: all three. The predicate is `HBS2.Hub.Compact`, the runner
+    is `hub compact` (with `--dry-run`, which shows the plan from the same code
+    path that writes it), and the sync-side check is `hub sync --repo`.
 
 
 What exists today vs what must be built

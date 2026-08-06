@@ -11,13 +11,20 @@ module HBS2.Hub.CompactSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Compact
+import HBS2.Hub.CLI.Compact
+import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Hub.Fold (foldEvents,frThreads,tsAttrs)
 
 import HBS2.Net.Auth.Credentials
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Prelude.Plated (pretty)
 import HBS2.Hash (hashObject)
 
 import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Config.Suckless (Syntax,C)
+import Data.List (isInfixOf)
+import Data.Text qualified as Text
 import Data.HashMap.Strict qualified as HM
 import Data.Text (Text)
 import Data.Word (Word64)
@@ -42,6 +49,9 @@ anOpen :: KP -> Word64 -> Text -> Event
 anOpen owner sq t =
   mkEvent owner owner (AOpen (fst owner) HubIssue t [] (Just "body") Nothing Nothing 1000)
           (canonOf (fst owner) sq (Just sq))
+
+argv :: [String] -> [Syntax C]
+argv = fmap argvAtom
 
 kept, dropped :: Compaction -> [EventId]
 kept = fmap eventId . cpKeep
@@ -268,3 +278,48 @@ spec = do
           rd = ev owner 3 (ARedact repo (eventId cm) 3000)
       equivalentTo (foldEvents repo [o, cm, rd]) (foldEvents repo [o, cm])
         `shouldBe` False
+
+  describe "PEP-22 hub compact: arguments" $ do
+
+    it "reads the repository, and the dry run as a switch" $ do
+      repo <- kp
+      let k = show (pretty (AsBase58 (fst repo)))
+      compactArgs (argv ["--repo", k]) `shouldBe` Just (CompactArgs (fst repo) False)
+      compactArgs (argv ["--repo", k, "--dry-run"])
+        `shouldBe` Just (CompactArgs (fst repo) True)
+      -- A switch takes no value: given one, the line does not parse rather
+      -- than the value being swallowed as something else's.
+      compactArgs (argv ["--repo", k, "--dry-run", "yes"]) `shouldBe` Nothing
+
+    it "refuses a call with no repository, and an unknown flag" $ do
+      repo <- kp
+      let k = show (pretty (AsBase58 (fst repo)))
+      compactArgs (argv []) `shouldBe` Nothing
+      compactArgs (argv ["--repo", k, "--force"]) `shouldBe` Nothing
+
+  describe "PEP-22 hub compact: what it shows before it writes" $ do
+
+    -- The dropped events are listed because that is what a person approves;
+    -- the retained ones are everything else, and counting them says nothing.
+    it "names what would go and counts both halves" $ do
+      owner <- kp
+      let o = anOpen owner 1 "one"
+          thr = eventId o
+          s1 = ev owner 2 (ASet thr "a" "1" 2000)
+          s2 = ev owner 3 (ASet thr "a" "2" 3000)
+          out = unlines (fmap show (compactDoc "abc123" (compactionOf [o, s1, s2])))
+      out `shouldSatisfy` isInfixOf "abc123"
+      out `shouldSatisfy` isInfixOf "keeping 2 event(s), dropping 1"
+      out `shouldSatisfy` isInfixOf (show (pretty (eventId s1)))
+
+    -- Canon a stranger contributed to can hold a great many superseded sets,
+    -- and a report that listed all of them is a report a stranger sizes.
+    it "bounds the list and says how many it did not print" $ do
+      owner <- kp
+      let o = anOpen owner 1 "one"
+          thr = eventId o
+          many' = [ ev owner (n + 1) (ASet thr "a" (Text.pack (show n)) (n * 1000))
+                  | n <- [1 .. 80] ]
+          out = unlines (fmap show (compactDoc "abc123" (compactionOf (o : many'))))
+      length (lines out) `shouldSatisfy` (< 60)
+      out `shouldSatisfy` isInfixOf "more"

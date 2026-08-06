@@ -91,7 +91,14 @@ sink :: forall m . MonadUnliftIO m => Maybe FilePath -> FilePath -> CanonSink m
 sink cwd indexFile = CanonSink
   { skParent = parentOf
   , skClose = pure ()
-  , skCommit = \cw -> runExceptT do
+  , skCommit = \cw -> commitWith (cnParent cw) cw
+  -- The parent is NOT what the ref must hold here: a rewrite writes a root and
+  -- still swaps against the canon it compacted (PEP-19).
+  , skRewrite = commitWith Nothing
+  }
+  where
+
+  commitWith parent cw = runExceptT do
       -- The ref is re-read HERE and compared before anything is written, and
       -- again by update-ref at the end. The first check costs one rev-parse
       -- and turns the common case of a stale caller into a refusal that wrote
@@ -109,7 +116,7 @@ sink cwd indexFile = CanonSink
       -- how the new commit keeps every file the parent had. Without a parent
       -- there is nothing to seed from and the index starts empty, which is the
       -- orphan root PEP-19 asks for.
-      _ <- case cnParent cw of
+      _ <- case parent of
              Nothing -> pure ""
              Just p  -> ExceptT (run whenMs "read-tree" ["read-tree", Text.unpack p] mempty)
 
@@ -125,7 +132,7 @@ sink cwd indexFile = CanonSink
       commit <- ExceptT (run whenMs "commit-tree"
                              ( [ "-c", "commit.gpgsign=false", "commit-tree"
                                , Text.unpack tree ]
-                               <> concat [ ["-p", Text.unpack p] | Just p <- [cnParent cw] ] )
+                               <> concat [ ["-p", Text.unpack p] | Just p <- [parent] ] )
                              (LBS.fromStrict (Text.encodeUtf8 (cnMessage cw))))
                   <&> Text.strip . dec
 
@@ -159,8 +166,6 @@ sink cwd indexFile = CanonSink
             _                          -> throwError e
 
       pure commit
-  }
- where
 
   dec = Text.decodeUtf8Lenient
 

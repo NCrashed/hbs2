@@ -1581,11 +1581,12 @@ snapshot is the rebuildable cache. Compaction cadence and the "superseded"
 predicate are policy, deferred to PEP-21.
 
 WHAT IS BUILT: the rule, as `HBS2.Hub.Compact`, pure and tested one retain
-reason at a time. What is not: the verb that rewrites the ref. That needs two
-things this build does not have -- a reader that hands back the events rather
-than only the fold over them, and a sink that writes a root commit while
-comparing-and-swapping against the ref's CURRENT value, which are two different
-hashes for the first time.
+reason at a time; and `hub compact`, which applies it. The rewrite writes a ROOT
+commit holding the retained files under the names the tree had, and swings the
+ref onto it while comparing-and-swapping against the canon it compacted -- two
+different hashes for the first time, which is why the sink grew a second write
+method rather than a flag. Nothing is deleted: the old lineage stays in the
+object store until git prunes it, and the way back is one printed command.
 
 AND THE SYNC SIDE IS BUILT, which this section used to answer with one word. It
 said a clone follows a compaction with the forcing
