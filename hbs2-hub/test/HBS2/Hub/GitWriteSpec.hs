@@ -495,7 +495,7 @@ spec3 =
         before <- readBack dir repo
 
         -- Everything the tree holds, minus what the rule says may go.
-        let c = compactionOf (fmap snd (stEvents before))
+        let c = compactionOf (stFold before) (fmap snd (stEvents before))
             held = [ (BS8.unpack p, e) | (p, e) <- stEvents before
                                        , eventId e `elem` fmap eventId (cpKeep c) ]
         length (cpDrop c) `shouldBe` 1

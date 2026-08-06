@@ -13,7 +13,8 @@ import HBS2.Hub.Types
 import HBS2.Hub.Compact
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Argv (argvAtom)
-import HBS2.Hub.Fold (foldEvents,frThreads,tsAttrs)
+import HBS2.Hub.Fold ( foldEvents,frThreads,frAdmitted,frOrigins,frMaintainers
+                     , frMaxSeq,tsAttrs )
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -40,6 +41,20 @@ kp = do
 canonOf :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
 canonOf repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
 
+-- | The same, carrying the hash of the letter it folded.
+--
+-- Its own helper because that field is the difference between an event a
+-- compaction may take and one it may not, and a fixture that set it inline
+-- would bury the reason.
+canonWith :: RepoRef -> Word64 -> Maybe HashRef -> EventId -> CanonContent
+canonWith repo sq origin eid = CanonContent repo eid sq Nothing origin Nothing sq Nothing
+
+-- | Every thread's attributes, which is what a reader sees and what a
+-- compaction must not change.
+attrsOf :: RepoRef -> [Event] -> HM.HashMap ThreadId (HM.HashMap Text Text)
+attrsOf repo evs =
+  HM.fromList [ (t, tsAttrs s) | (t, s) <- HM.toList (frThreads (foldEvents repo evs)) ]
+
 -- One event at a seq, signed for real: 'compactionOf' resolves every box, so a
 -- fixture built by hand would be testing a shape the rule never sees.
 ev :: KP -> Word64 -> AuthorContent -> Event
@@ -57,6 +72,15 @@ kept, dropped :: Compaction -> [EventId]
 kept = fmap eventId . cpKeep
 dropped = fmap eventId . cpDrop
 
+-- | The plan over canon this owner's fold has seen.
+--
+-- The rule takes the fold, so every case here folds first; a test that passed
+-- a bare list would be asking a question the rule no longer answers. That is
+-- the point: the fold is what says which events are real, and the two cases
+-- that turn on it are below.
+planOf :: KP -> [Event] -> Compaction
+planOf owner evs = compactionOf (foldEvents (fst owner) evs) evs
+
 spec :: Spec
 spec = do
 
@@ -68,7 +92,7 @@ spec = do
           thr = eventId o
           s1 = ev owner 2 (ASet thr "labels" "a" 2000)
           s2 = ev owner 3 (ASet thr "labels" "b" 3000)
-          c = compactionOf [o, s1, s2]
+          c = planOf owner [o, s1, s2]
       dropped c `shouldBe` [eventId s1]
       kept c `shouldBe` [eventId o, eventId s2]
 
@@ -80,7 +104,7 @@ spec = do
           thr = eventId o
           a = ev owner 2 (ASet thr "labels" "a" 2000)
           b = ev owner 3 (ASet thr "milestone" "m" 3000)
-          c = compactionOf [o, a, b]
+          c = planOf owner [o, a, b]
       dropped c `shouldBe` []
 
     it "does not let one thread overwrite another" $ do
@@ -89,7 +113,7 @@ spec = do
           o2 = anOpen owner 2 "two"
           a = ev owner 3 (ASet (eventId o1) "labels" "a" 3000)
           b = ev owner 4 (ASet (eventId o2) "labels" "b" 4000)
-      dropped (compactionOf [o1, o2, a, b]) `shouldBe` []
+      dropped (planOf owner [o1, o2, a, b]) `shouldBe` []
 
     -- close and reopen write the status attribute without naming it, so they
     -- supersede a plain `set status` and are superseded by one. A rule that
@@ -101,7 +125,7 @@ spec = do
           closed = ev owner 2 (AClose thr Nothing 2000)
           reopened = ev owner 3 (AReopen thr Nothing 3000)
           set = ev owner 4 (ASet thr "status" "closed" 4000)
-          c = compactionOf [o, closed, reopened, set]
+          c = planOf owner [o, closed, reopened, set]
       dropped c `shouldBe` [eventId closed, eventId reopened]
       kept c `shouldBe` [eventId o, eventId set]
 
@@ -113,7 +137,7 @@ spec = do
           s2 = ev owner 3 (ASet thr "a" "2" 3000)
           s3 = ev owner 4 (ASet thr "b" "1" 4000)
           s4 = ev owner 5 (ASet thr "b" "2" 5000)
-          c = compactionOf [s4, s3, s2, s1, o]
+          c = planOf owner [s4, s3, s2, s1, o]
       dropped c `shouldBe` [eventId s3, eventId s1]
       kept c `shouldBe` [eventId s4, eventId s2, eventId o]
 
@@ -129,7 +153,7 @@ spec = do
           -- all rather than that it dropped nothing.
           s1 = ev owner 4 (ASet thr "a" "1" 4000)
           s2 = ev owner 5 (ASet thr "a" "2" 5000)
-          c = compactionOf [o, cm, mg, s1, s2]
+          c = planOf owner [o, cm, mg, s1, s2]
       dropped c `shouldBe` [eventId s1]
 
     -- The one that is not about the reader at all: admission of every event
@@ -141,7 +165,7 @@ spec = do
           d1 = ev owner 1 (ADelegate repo (fst bob) 1000)
           r1 = ev owner 2 (ARevoke repo (fst bob) 2000)
           d2 = ev owner 3 (ADelegate repo (fst bob) 3000)
-      dropped (compactionOf [d1, r1, d2]) `shouldBe` []
+      dropped (planOf owner [d1, r1, d2]) `shouldBe` []
 
     -- A note on a close is authored discussion even when the status it set was
     -- overwritten a minute later.
@@ -152,7 +176,7 @@ spec = do
           noted = ev owner 2 (AClose thr (Just "duplicate of #3") 2000)
           later = ev owner 3 (AReopen thr Nothing 3000)
           set = ev owner 4 (ASet thr "status" "closed" 4000)
-          c = compactionOf [o, noted, later, set]
+          c = planOf owner [o, noted, later, set]
       -- The bare reopen goes; the noted close stays despite being superseded
       -- twice over.
       dropped c `shouldBe` [eventId later]
@@ -167,7 +191,7 @@ spec = do
           s1 = ev owner 2 (ASet thr "a" "secret" 2000)
           s2 = ev owner 3 (ASet thr "a" "public" 3000)
           rd = ev owner 4 (ARedact (fst owner) (eventId s1) 4000)
-          c = compactionOf [o, s1, s2, rd]
+          c = planOf owner [o, s1, s2, rd]
       dropped c `shouldBe` []
       kept c `shouldSatisfy` (elem (eventId rd))
 
@@ -181,7 +205,7 @@ spec = do
           thr = eventId o
           a = ev owner 2 (ASet thr "a" "left" 2000)
           b = ev owner 2 (ASet thr "a" "right" 2001)
-      dropped (compactionOf [o, a, b]) `shouldBe` []
+      dropped (planOf owner [o, a, b]) `shouldBe` []
 
     -- Not this build's to remove: an event whose boxes will not resolve is
     -- what `hub verify` reports, and a compaction that quietly took it away
@@ -195,7 +219,66 @@ spec = do
           broken = Event (evAuthorBox (ev owner 2 (ASet thr "a" "1" 2000)))
                          (evCanonBox (ev other 3 (ASet thr "a" "2" 3000)))
           s2 = ev owner 4 (ASet thr "a" "3" 4000)
-      dropped (compactionOf [o, broken, s2]) `shouldBe` []
+      dropped (planOf owner [o, broken, s2]) `shouldBe` []
+
+    -- The one the previous rule got wrong, and it is not a hostile case: a
+    -- delegate minting from a view built before their revocation produces
+    -- exactly this shape, which the fold documents as ordinary. `resolve`
+    -- passes it -- two good signatures, matching id -- and only ADMISSION
+    -- refuses it, so a rule asking `resolve` alone let it win.
+    it "keeps a set the fold refused, though a later set overwrote it" $ do
+      owner <- kp ; stranger <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          -- Blessed under a canon key this repository never authorized.
+          refused = mkEvent stranger stranger (ASet thr "a" "1" 2000)
+                            (canonOf repo 2 Nothing)
+          s2 = ev owner 3 (ASet thr "a" "2" 3000)
+      -- It is genuinely refused, or the case below proves nothing.
+      HM.member (eventId refused) (frAdmitted (foldEvents repo [o, refused, s2]))
+        `shouldBe` False
+      dropped (planOf owner [o, refused, s2]) `shouldBe` []
+
+    -- The other half of the same mistake, and the expensive one: the refused
+    -- event was not merely dropped, it DECIDED. At a seq above the real value
+    -- it made the owner's own set droppable, so a compaction removed a value
+    -- from canon in favour of one no reader will ever see.
+    it "does not let a set the fold refused displace one it admitted" $ do
+      owner <- kp ; stranger <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          mine = ev owner 2 (ASet thr "a" "mine" 2000)
+          -- Higher seq, refused all the same.
+          refused = mkEvent stranger stranger (ASet thr "a" "theirs" 3000)
+                            (canonOf repo 3 Nothing)
+          c = planOf owner [o, mine, refused]
+      dropped c `shouldBe` []
+      -- Said as the property rather than as a list, since that is what breaks:
+      -- the attribute a reader sees must survive the rewrite.
+      attrsOf repo (cpKeep c) `shouldBe` attrsOf repo [o, mine, refused]
+
+    -- PEP-19 "Compaction": one letter folds to at most one event, and the check
+    -- that enforces it reads canon for the letter's hash as an origin. Drop the
+    -- event and the same letter, still sitting in a mailbox, folds again.
+    it "keeps an overwritten close that folded a letter" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          letterHash = HashRef (hashObject ("a letter" :: LBS.ByteString))
+          -- A note-less close, which is droppable by every other measure, but
+          -- honoured from somebody's request and therefore carrying its origin.
+          honoured = mkEvent owner owner (AClose thr Nothing 2000)
+                             (canonWith repo 2 (Just letterHash))
+          -- And overwritten.
+          reopened = ev owner 3 (AReopen thr Nothing 3000)
+          c = planOf owner [o, honoured, reopened]
+      dropped c `shouldBe` []
+      -- The property behind it: what stops the letter folding twice survives.
+      frOrigins (foldEvents repo (cpKeep c))
+        `shouldBe` frOrigins (foldEvents repo [o, honoured, reopened])
 
   describe "PEP-19 compaction: the property it exists to preserve" $ do
 
@@ -218,7 +301,7 @@ spec = do
                 , ev owner 8 (ASet t2 "labels" "d" 8000)
                 ]
           attrsOf es = fmap tsAttrs (HM.elems (frThreads (foldEvents repo es)))
-          c = compactionOf evs
+          c = planOf owner evs
 
       -- Something was actually dropped, or the assertion below is vacuous.
       dropped c `shouldSatisfy` (not . null)
@@ -244,7 +327,7 @@ spec = do
           evs = [ o
                 , ev owner 2 (ASet thr "labels" "a" 2000)
                 , ev owner 3 (ASet thr "labels" "b" 3000) ]
-          c = compactionOf evs
+          c = planOf owner evs
       dropped c `shouldSatisfy` (not . null)
       equivalentTo (foldEvents repo evs) (foldEvents repo (cpKeep c)) `shouldBe` True
 
@@ -279,6 +362,43 @@ spec = do
       equivalentTo (foldEvents repo [o, cm, rd]) (foldEvents repo [o, cm])
         `shouldBe` False
 
+    -- The same shape as the delegation case and for the same kind of reason:
+    -- what is missing is invisible in every thread, and it is what stops a
+    -- letter still sitting in a mailbox from being folded a second time.
+    it "says a lineage missing the record of a folded letter is not" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          letterHash = HashRef (hashObject ("a letter" :: LBS.ByteString))
+          honoured = mkEvent owner owner (AClose thr Nothing 2000)
+                             (canonWith repo 2 (Just letterHash))
+          plain    = ev owner 2 (AClose thr Nothing 2000)
+          withOrigin = foldEvents repo [o, honoured]
+          without    = foldEvents repo [o, plain]
+      -- Identical to a reader: same thread, same status, same seq.
+      frThreads withOrigin `shouldBe` frThreads without
+      equivalentTo withOrigin without `shouldBe` False
+
+    -- The conjunct that had no test at all. It is what stops a clone taking a
+    -- rewrite that lowers the cursor and hands the local bridge a seq already
+    -- spent; without it, deleting the line from 'equivalentTo' changed nothing
+    -- any test could see.
+    it "says a lineage that lost the high-water mark is not" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          -- A delegate and its revoke: the maintainer set and every thread end
+          -- up identical either way, so seq is the ONLY difference left.
+          d = ev owner 2 (ADelegate repo (fst bob) 2000)
+          r = ev owner 3 (ARevoke repo (fst bob) 3000)
+          full  = foldEvents repo [o, d, r]
+          short = foldEvents repo [o]
+      frThreads full `shouldBe` frThreads short
+      frMaintainers full `shouldBe` frMaintainers short
+      frMaxSeq full `shouldSatisfy` (> frMaxSeq short)
+      equivalentTo full short `shouldBe` False
+
   describe "PEP-22 hub compact: arguments" $ do
 
     it "reads the repository, and the dry run as a switch" $ do
@@ -307,7 +427,7 @@ spec = do
           thr = eventId o
           s1 = ev owner 2 (ASet thr "a" "1" 2000)
           s2 = ev owner 3 (ASet thr "a" "2" 3000)
-          out = unlines (fmap show (compactDoc "abc123" (compactionOf [o, s1, s2])))
+          out = unlines (fmap show (compactDoc "abc123" (planOf owner [o, s1, s2])))
       out `shouldSatisfy` isInfixOf "abc123"
       out `shouldSatisfy` isInfixOf "keeping 2 event(s), dropping 1"
       out `shouldSatisfy` isInfixOf (show (pretty (eventId s1)))
@@ -320,7 +440,7 @@ spec = do
           thr = eventId o
           many' = [ ev owner (n + 1) (ASet thr "a" (Text.pack (show n)) (n * 1000))
                   | n <- [1 .. 80] ]
-          out = unlines (fmap show (compactDoc "abc123" (compactionOf (o : many'))))
+          out = unlines (fmap show (compactDoc "abc123" (planOf owner (o : many'))))
       length (lines out) `shouldSatisfy` (< 60)
       out `shouldSatisfy` isInfixOf "more"
 

@@ -6,6 +6,7 @@ import HBS2.Hub.Letter hiding (classify)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Hub.Canon
+import HBS2.Hub.Compact (compactionOf,cpKeep,cpDrop,equivalentTo)
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef)
@@ -77,6 +78,17 @@ data Step =
     -- | Throw the accumulated view away and rebuild it from canon, which is
     -- what a restart is. Everything after this mints from the rebuilt one.
   | StepRestart
+    -- | Compact canon in place, and go on minting into what is left.
+    --
+    -- The one operation in this package that REMOVES from append-only canon,
+    -- and until this existed it was exercised only by hand-built logs of five
+    -- owner-blessed events. What it has to be run against is everything else in
+    -- this script: an intruder's file, a ghost, a delegation, an honoured
+    -- request, a redaction. Two of those are the reason the rule takes the fold
+    -- at all -- a refused event may neither be dropped nor displace an admitted
+    -- one -- and neither is reachable from a log where every event is the
+    -- owner's.
+  | StepCompact
   deriving stock (Show)
 
 -- | What the caller can say about an attachment, and what it costs to be
@@ -114,6 +126,7 @@ instance Arbitrary Step where
     , (1, StepIntruder <$> genTs)
     , (1, StepGhost <$> genTs)
     , (2, pure StepRestart)
+    , (2, pure StepCompact)
     ]
 
   -- Without a shrink a counterexample is the whole generated script with
@@ -140,6 +153,7 @@ instance Arbitrary Step where
     StepIntruder ts     -> [StepIntruder ts' | ts' <- shrinkTs ts]
     StepGhost ts        -> [StepGhost ts' | ts' <- shrinkTs ts]
     StepRestart         -> []
+    StepCompact         -> []
     StepRewrapped ts k  -> [StepRewrapped ts' k | ts' <- shrinkTs ts]
                         <> [StepRewrapped ts HubIssue | k /= HubIssue]
     StepSetLabels i ts ok -> [StepSetLabels i' ts ok | i' <- shrinkIx i]
@@ -202,6 +216,8 @@ data Tag =
   | TRestart         -- ^ the view was rebuilt from canon mid-run
   | TBigRefused      -- ^ an oversized body was refused rather than minted
   | TGhost           -- ^ an event from a newer schema spent a seq
+  | TCompact         -- ^ canon was compacted mid-run
+  | TCompactDropped  -- ^ ...and the compaction actually took something
   deriving stock (Eq,Show)
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
@@ -268,14 +284,37 @@ data St = St
   , stReqOrigins :: [HashRef]
   , stTags    :: [Tag]
   , stRefused :: [TriageError]
-    -- The seq of every event minted against a stale view and then discarded.
-  , stStale   :: [Word64]
+    -- For every event minted against a stale view and then discarded: whether
+    -- the seq it picked was already taken in canon AT THAT MOMENT. A Bool
+    -- rather than the seq, because the question is about a moment and canon is
+    -- no longer append-only from this test's point of view -- see the note at
+    -- 'StepStaleView'.
+  , stStale   :: [Bool]
     -- Events nobody authorized, written straight into the tree. They are canon
     -- in the sense that they are in it, and in no other sense.
   , stIntruders :: [EventId]
     -- Events from a newer schema, blessed by the owner: dropped like an
     -- intruder's and spent unlike one.
   , stGhosts :: [(EventId, HubKey, Word64)]
+    -- | Every compaction this run performed: the fold before, the fold after,
+    -- and how many events went. Kept rather than checked on the spot because
+    -- what is asserted about it is one property over all of them, and because a
+    -- compaction that dropped nothing proves nothing.
+  , stCompacted :: [(FoldResult, FoldResult, Int)]
+    -- | Every seq a compaction gave back.
+    --
+    -- Canon is append-only to everything except this one verb, and 'stStale'
+    -- is the invariant that noticed. A mint against an older view picks the
+    -- seq that view's cursor pointed at, which some later event then took --
+    -- so "that seq is occupied" is what makes discarding the stale mint
+    -- necessary. Compact away the event that took it and the seq is free
+    -- again, honestly and by design: 'frMaxSeq' does not move, so nothing
+    -- fresh will ever mint there, and the stale mint would simply have landed
+    -- early rather than on top of anything.
+    --
+    -- Kept rather than folded into the check, because the two are different
+    -- statements and only one of them is about a defect.
+  , stFreed :: [Word64]
   }
 
 -- | What one run produced.
@@ -295,6 +334,18 @@ data Run = Run
     -- Determinism had three hand-built logs of five events and no property, so
     -- the sort keys were exercised only where somebody thought to.
   , rOrderFree :: Bool
+    -- | Every compaction left canon saying the same thing.
+    --
+    -- 'equivalentTo' is the check a clone makes when a lineage diverges, and a
+    -- compaction is supposed to pass it BY CONSTRUCTION -- that is the whole
+    -- reason a non-forcing sync and a compaction can coexist. Asserting it here
+    -- is asserting that claim against canon nobody hand-picked.
+  , rCompactSame :: Bool
+    -- | And no compaction lost the record of a folded letter. Weaker than the
+    -- line above in principle and not in practice: it is checked apart because
+    -- it is the one an implementation gets wrong while every thread still
+    -- matches, and a named failure beats a general one.
+  , rCompactKeptOrigins :: Bool
   , rTags     :: [Tag]
   , rRefused  :: [TriageError]
   }
@@ -330,6 +381,8 @@ spec =
         monitor (cover 5 (TIntruder `elem` rTags r) "folded canon a stranger wrote into")
         monitor (cover 5 (TGhost `elem` rTags r) "spent the seq of an event from a newer schema")
         monitor (cover 5 (TRestart `elem` rTags r) "rebuilt the view from canon mid-run")
+        monitor (cover 5 (TCompact `elem` rTags r) "compacted canon mid-run")
+        monitor (cover 1 (TCompactDropped `elem` rTags r) "compacted canon and dropped something")
         monitor (cover 5 (TBigRefused `elem` rTags r) "refused an oversized body")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
@@ -359,6 +412,8 @@ spec =
               , ("an intruder's event was not refused as unauthorized", rIntruded r)
               , ("a ghost was not dropped as unreadable, or its seq was not spent", rGhosted r)
               , ("the fold is not independent of the order it reads", rOrderFree r)
+              , ("a compaction changed what canon says", rCompactSame r)
+              , ("a compaction lost the record of a folded letter", rCompactKeptOrigins r)
               ]
         monitor (counterexample (unlines [ "FAILED: " <> name | (name,ok) <- invariants, not ok ]))
         assert (all snd invariants)
@@ -390,7 +445,7 @@ runSteps steps = do
         , castMallory = mallory
         , castDelegKey = fst deleg
         }
-      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] [] []
+      st0 = St (emptyView repo) [] [] [] origins 0 reqOrigins [] [] [] [] [] [] []
       st  = foldl' (\s sp -> step cast s { stStep = stStep s + 1 } sp) st0 steps
       fr  = foldEvents repo (stEvents st)
       -- Everything a fold produces, so that a field added later is covered
@@ -412,14 +467,17 @@ runSteps steps = do
       notMine = HS.fromList (stIntruders st <> [ e | (e,_,_) <- stGhosts st ])
       mine  = [ e | e <- stEvents st, not (HS.member (eventId e) notMine) ]
       origs = mapMaybe (ccOrigin <=< canonOf) mine
-      live  = HS.fromList (mapMaybe (fmap ccSeq . canonOf) mine)
   pure Run
     { rDropped  = [ d | d <- frDropped fr, not (HS.member (drEvent d) notMine) ]
     , rAnoms    = frAnomalies fr
     , rAgrees   = stView st == viewOf fr
     , rOnePer   = length origs == HS.size (HS.fromList origs)
-    , rStaleDup = all (`HS.member` live) (stStale st)
+    , rStaleDup = and (stStale st)
     , rOrderFree = same fr && same (foldEvents repo (reverse (stEvents st)))
+    , rCompactSame = all (\(b,a,_) -> equivalentTo b a) (stCompacted st)
+    , rCompactKeptOrigins =
+        all (\(b,a,_) -> frOrigins b == frOrigins a && frHonoured b == frHonoured a)
+            (stCompacted st)
     , rIntruded = all (\eid -> [UnauthorizedCanon] ==
                                  [ drWhy d | d <- frDropped fr, drEvent d == eid ])
                       (stIntruders st)
@@ -469,6 +527,23 @@ clocks =
   , maxFoldedTs - 1      -- and one where the nudge cannot fit
   , 1700000000011
   ]
+
+-- | Is this seq spoken for -- occupied in canon as it stands, or given back by
+-- a compaction?
+--
+-- Over the events this run minted, so an intruder's file and a ghost do not
+-- count: they are in the tree and they are not what a stale mint would have
+-- collided WITH.
+--
+-- The second disjunct is what a compaction adds, and it is not a loosening to
+-- make a test pass: see 'stFreed'. Without it this reads "a stale mint always
+-- collides", which was true only while nothing could remove from canon.
+seqTaken :: St -> Word64 -> Bool
+seqTaken st sq = sq `elem` mapMaybe (fmap ccSeq . canonOf) mine
+              || sq `elem` stFreed st
+  where
+    notMine = HS.fromList (stIntruders st <> [ e | (e,_,_) <- stGhosts st ])
+    mine    = [ e | e <- stEvents st, not (HS.member (eventId e) notMine) ]
 
 step :: Cast -> St -> Step -> St
 step cast st = \case
@@ -687,6 +762,28 @@ step cast st = \case
           , stTags = TGhost : stTags st
           }
 
+  StepCompact ->
+    let repo'   = castRepo cast
+        before  = foldEvents repo' (stEvents st)
+        plan    = compactionOf before (stEvents st)
+        events' = cpKeep plan
+        after   = foldEvents repo' events'
+    in st { stEvents = events'
+            -- Like a restart, and for the same reason: the accumulated view is
+            -- a cache of the fold, and the fold has just changed underneath it.
+            -- Minting on against the old one would be minting against canon
+            -- that no longer exists.
+          , stView   = viewOf after
+          , stCompacted = (before, after, length (cpDrop plan)) : stCompacted st
+          , stFreed  = mapMaybe (fmap ccSeq . canonOf) (cpDrop plan) <> stFreed st
+            -- Two tags, because "a compaction ran" and "a compaction took
+            -- something" are different amounts of evidence, and the invariants
+            -- below are vacuous under the first alone.
+          , stTags   = [TCompact | True]
+                    <> [TCompactDropped | not (null (cpDrop plan))]
+                    <> stTags st
+          }
+
   StepRestart ->
     let rebuilt = viewOf (foldEvents (castRepo cast) (stEvents st))
     in if rebuilt /= stView st && null (stIntruders st)
@@ -707,7 +804,14 @@ step cast st = \case
            Left e    -> refuse e
            Right acc -> case canonOf (acEvent acc) of
              Nothing -> st
-             Just cc -> st { stStale = ccSeq cc : stStale st
+             -- Judged HERE, against canon as it is now, and not at the end
+             -- against canon as it ends up. The two were the same question
+             -- while canon only ever grew; a compaction can take the very
+             -- event this seq collides with back out, and then "the stale mint
+             -- would have collided" reads false about a moment when it was
+             -- true. Deciding it at the moment is also strictly the stronger
+             -- check, since nothing later can paper over it.
+             Just cc -> st { stStale = seqTaken st (ccSeq cc) : stStale st
                            , stTags  = TStaleDiscarded : stTags st
                            }
   where

@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- | Which events a compaction may drop (PEP-19 "Compaction", PEP-21 "Canon
 -- compaction policy").
 --
@@ -8,10 +9,22 @@
 -- and separate from the verb that will rewrite the ref, because what may be
 -- dropped from append-only canon is a decision worth reading on its own.
 --
--- WHAT IS DROPPABLE, exactly: a @set@-class event (a plain @set@, or a @close@
--- or @reopen@ carrying no note) for a @(thread, attribute)@ that a
--- higher-@seq@ event of the same class has already overwritten, and that no
--- @redact@ names.
+-- IT IS ASKED ABOUT THE FOLD, not only about the events. The rule takes a
+-- 'FoldResult' over the same canon, and that is not a convenience: an event the
+-- fold refused must neither be dropped nor be allowed to displace one it
+-- admitted. Both halves were wrong when this took a bare list. 'resolve' checks
+-- two signatures and an id binding and nothing else -- not the target, not the
+-- maintainer set -- so a self-signed @set@ at a high @seq@ that the fold refuses
+-- as @UnauthorizedCanon@ counted as the winner for its attribute, and the
+-- owner's real @set@ underneath it was dropped from canon while the event that
+-- displaced it was never admitted anywhere. That case is ORDINARY, not hostile:
+-- a delegate minting from a view built before their revocation produces exactly
+-- it, which "HBS2.Hub.Fold" documents as honest.
+--
+-- WHAT IS DROPPABLE, exactly: an ADMITTED @set@-class event (a plain @set@, or
+-- a @close@ or @reopen@ carrying no note) for a @(thread, attribute)@ that a
+-- higher-@seq@ admitted event of the same class has already overwritten, that
+-- no @redact@ names, and that folded no letter.
 --
 -- Everything else is retained, and the list is not a summary of the rule -- it
 -- is the rule, because each item is retained for its own reason:
@@ -26,6 +39,16 @@
 --     admits, which breaks the property compaction exists to preserve;
 --   * every @set@-class event carrying a body: a note on a @close@ is authored
 --     discussion even when the status it set was later overwritten;
+--   * every event that FOLDED A LETTER, meaning one carrying an @origin@ or an
+--     @honours@. One letter folds to at most one event, and the check that
+--     enforces it asks whether canon already holds an event with that letter's
+--     hash as its origin. Compacting an honoured @close@ away removes the only
+--     record that its letter was carried out, so the same letter honoured again
+--     after a restart mints a second event. PEP-19 allows keeping just the
+--     @origin@ field of an otherwise dropped event; keeping the event is
+--     strictly stronger and costs no format. It also costs little in practice,
+--     since the churn compaction exists for is owner-native and carries no
+--     origin at all;
 --   * the winning @set@ per @(thread, attribute)@.
 --
 -- AND EVERYTHING THIS MODULE DOES NOT UNDERSTAND. An event whose boxes will not
@@ -43,13 +66,15 @@ module HBS2.Hub.Compact
   ) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Fold (Resolved(..),resolve,FoldResult(..))
+import HBS2.Hub.Fold (Resolved(..),resolve,FoldResult(..),DropReason)
 
 import Data.Hashable (Hashable(..))
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.List (foldl')
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Word (Word64)
 
@@ -98,45 +123,75 @@ attrOf = \case
   ADelegate{}                 -> Nothing
   ARevoke{}                   -> Nothing
 
+-- | The attribute a @set@-class event writes, INCLUDING the ones with bodies.
+--
+-- 'attrOf' answers 'Nothing' for those because they are not droppable; the
+-- supersession map needs them anyway, since a note-carrying @close@ is retained
+-- AND still overwrites the plain @set@ under it.
+--
+-- Spelled out over every constructor rather than closed with a wildcard, and
+-- the module's @-Werror=incomplete-patterns@ is what keeps it that way: this is
+-- the second half of one rule whose halves must disagree in exactly one place,
+-- and under a wildcard a new @set@-class op silently gets the wrong one.
+attrWritten :: AuthorContent -> Maybe Attr
+attrWritten = \case
+  ASet thr a _ _  -> Just (Attr thr a)
+  AClose thr _ _  -> Just (Attr thr "status")
+  AReopen thr _ _ -> Just (Attr thr "status")
+  AOpen{}         -> Nothing
+  AComment{}      -> Nothing
+  ARevise{}       -> Nothing
+  AMerge{}        -> Nothing
+  ARedact{}       -> Nothing
+  ADelegate{}     -> Nothing
+  ARevoke{}       -> Nothing
+
 -- | The plan for one canon.
 --
--- Takes the events as canon holds them, in any order, and answers in that same
--- order. Nothing here reads a clock or a repository: two maintainers running a
--- compaction over the same canon produce the same two lists, which is what lets
--- a clone check one rather than trust it.
-compactionOf :: [Event] -> Compaction
-compactionOf evs = Compaction { cpKeep = keep, cpDrop = drop' }
+-- Takes the fold over this canon and the events as canon holds them, in any
+-- order, and answers in that same order. Nothing here reads a clock or a
+-- repository: two maintainers running a compaction over the same canon produce
+-- the same two lists, which is what lets a clone check one rather than trust
+-- it.
+compactionOf :: FoldResult -> [Event] -> Compaction
+compactionOf fr evs = Compaction { cpKeep = reverse keep, cpDrop = reverse drop' }
   where
-    (keep, drop') = foldr split ([], []) evs
+    -- ONE resolve per event, and it is two Ed25519 verifies. The previous
+    -- shape called it three times -- once for the winners, once for the
+    -- redactions, once inside the predicate -- over a list bounded by
+    -- 'maxCanonFiles'.
+    resolved = [ (e, resolve e) | e <- evs ]
 
-    split e (ks, ds)
-      | droppable winners redacted e = (ks, e : ds)
-      | otherwise                    = (e : ks, ds)
+    -- foldl' and a reverse, not foldr. The step pattern-matches its
+    -- accumulator, so a foldr is strict in it and builds the whole spine on
+    -- the stack before returning anything; "HBS2.Hub.Fold" records the same
+    -- fix for the same reason.
+    (keep, drop') = foldl' split ([], []) resolved
 
-    -- The highest seq per attribute, over EVERY set-class event including the
-    -- ones carrying bodies: a note-carrying close is retained and still
-    -- supersedes, so the plain set under it is droppable.
+    split (ks, ds) (e, r)
+      | droppable admitted winners redacted r = (ks, e : ds)
+      | otherwise                             = (e : ks, ds)
+
+    admitted = HM.keysSet (frAdmitted fr)
+
+    -- The highest seq per attribute, over every ADMITTED set-class event
+    -- including the ones carrying bodies. Admitted, because an event the fold
+    -- refused sets nothing, so letting it supersede would drop a value in
+    -- favour of one no reader will ever see.
     winners :: HashMap Attr Word64
     winners = HM.fromListWith max
                 [ (a, rSeq r)
-                | Right r <- fmap resolve evs
-                , Just a <- [attrOfResolved r]
+                | (_, Right r) <- resolved
+                , HS.member (rId r) admitted
+                , Just a <- [attrWritten (rContent r)]
                 ]
 
-    -- Every event any redact names. Every redact is retained, so "named by a
-    -- retained redact" and "named by a redact" are the same set.
+    -- Every event any redact names, admitted or not. Every redact is retained,
+    -- and a redact the fold refused still says what somebody meant to withhold,
+    -- so the conservative side is the right one here.
     redacted :: HashSet EventId
-    redacted = HS.fromList [ e' | Right r <- fmap resolve evs
+    redacted = HS.fromList [ e' | (_, Right r) <- resolved
                                 , ARedact _ e' _ <- [rContent r] ]
-
-    -- The attribute a set-class event writes, INCLUDING the ones with bodies:
-    -- 'attrOf' answers Nothing for those because they are not droppable, and
-    -- the supersession map needs them anyway.
-    attrOfResolved r = case rContent r of
-      ASet thr a _ _  -> Just (Attr thr a)
-      AClose thr _ _  -> Just (Attr thr "status")
-      AReopen thr _ _ -> Just (Attr thr "status")
-      _               -> Nothing
 
 -- | Whether two canons say the same thing.
 --
@@ -155,6 +210,11 @@ compactionOf evs = Compaction { cpKeep = keep, cpDrop = drop' }
 --     one hands the repository a maintainer set its owner did not write;
 --   * the redacted set, since a rewrite that dropped a @redact@ would leave
 --     every clone showing a body somebody withdrew;
+--   * the origins and the honoured set, which no reader sees either and which
+--     are what stop one letter folding twice. A rewrite that dropped them looks
+--     identical in every thread and lets every letter still in a mailbox be
+--     folded a second time. An honest compaction keeps them, because the rule
+--     above retains any event carrying one;
 --   * the highest seq, which the bridge mints against. A compaction cannot
 --     lower it -- what it drops is superseded, so something higher survives --
 --     and a rewrite that did lower it would hand the bridge a number already
@@ -174,27 +234,44 @@ equivalentTo a b =
      frThreads a == frThreads b
   && frMaintainers a == frMaintainers b
   && frRedacted a == frRedacted b
+  && frOrigins a == frOrigins b
+  && frHonoured a == frHonoured b
   && frMaxSeq a == frMaxSeq b
 
--- | Whether this one event may go, given what supersedes and what is redacted.
+-- | Whether this one event may go, given what the fold admitted, what
+-- supersedes and what is redacted.
 --
--- Exported so a test can drive the decision one event at a time, and so the
--- three conditions can be read as three conditions.
-droppable :: HashMap Attr Word64 -> HashSet EventId -> Event -> Bool
-droppable winners redacted e = case resolve e of
+-- Exported and taking the resolved form, so a test can drive the decision one
+-- event at a time without re-resolving it -- and so that the four conditions
+-- can be read as four conditions.
+droppable :: HashSet EventId          -- ^ admitted, from @frAdmitted@
+          -> HashMap Attr Word64      -- ^ highest admitted seq per attribute
+          -> HashSet EventId          -- ^ every event a redact names
+          -> Either DropReason Resolved
+          -> Bool
+droppable admitted winners redacted = \case
   -- An event this build cannot resolve is not this build's to remove.
   Left _ -> False
-  Right r -> case attrOf (rContent r) of
-    Nothing -> False
-    Just a ->
-         -- Superseded, STRICTLY: two events at one seq do not supersede each
-         -- other, and canon can hold a pair (the fold reports it as an anomaly
-         -- and orders them by canon-box hash). Dropping either would be
-         -- choosing between them on a tie this rule has no opinion about.
-         maybe False (> rSeq r) (HM.lookup a winners)
-         -- And nothing hides it. A redact that outlived its target names an
-         -- event the fold no longer sees, which lowers the highest admitted
-         -- seq and hands the bridge a number it has already spent. PEP-21:
-         -- reuse is tolerated and reported, and compaction should not
-         -- manufacture it.
-      && not (HS.member (rId r) redacted)
+  Right r
+    -- Nor is one the fold refused. It is what @hub verify@ reports, and taking
+    -- it away edits the audit rather than bounding the size.
+    | not (HS.member (rId r) admitted) -> False
+    -- Nor one that folded a letter: its origin is the only record that the
+    -- letter was carried out, and without it the same letter folds again.
+    | isJust (ccOrigin (rCanon r)) -> False
+    | isJust (ccHonours (rCanon r)) -> False
+    | otherwise -> case attrOf (rContent r) of
+        Nothing -> False
+        Just a ->
+             -- Superseded, STRICTLY: two events at one seq do not supersede
+             -- each other, and canon can hold a pair (the fold reports it as an
+             -- anomaly and orders them by canon-box hash). Dropping either
+             -- would be choosing between them on a tie this rule has no opinion
+             -- about.
+             maybe False (> rSeq r) (HM.lookup a winners)
+             -- And nothing hides it. A redact that outlived its target names an
+             -- event the fold no longer sees, which lowers the highest admitted
+             -- seq and hands the bridge a number it has already spent. PEP-21:
+             -- reuse is tolerated and reported, and compaction should not
+             -- manufacture it.
+          && not (HS.member (rId r) redacted)

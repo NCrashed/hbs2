@@ -47,6 +47,7 @@ import HBS2.CLI.Run.Internal
 
 import Data.ByteString.Char8 qualified as BS8
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 import Data.List qualified as List
 import System.Exit (die,exitSuccess)
 
@@ -162,11 +163,19 @@ compactEntries = do
                           <+> "to: nothing was written." ))
                codeNotThisCanon
 
-      let c = compactionOf (fmap snd (stEvents st))
+      -- The FOLD is handed to the rule, not just the events: an event the fold
+      -- refused must neither be dropped nor displace one it admitted. See the
+      -- header of "HBS2.Hub.Compact".
+      let c = compactionOf (stFold st) (fmap snd (stEvents st))
           -- Back under the names the tree had. The reader carried them for
           -- exactly this.
-          held = [ (p, e) | (p, e) <- stEvents st
-                          , eventId e `elem` fmap eventId (cpKeep c) ]
+          --
+          -- A HashSet, not `elem` over a list. The comment on 'sortCanon' in
+          -- "HBS2.Hub.Repo" measured the same shape at 0.3 s for 5000 files,
+          -- 4.6 s for 20000 and 20 s for 40000, against a bound of
+          -- 'maxCanonFiles'.
+          keptIds = HS.fromList (fmap eventId (cpKeep c))
+          held = [ (p, e) | (p, e) <- stEvents st, HS.member (eventId e) keptIds ]
 
       when (List.null (cpDrop c)) $ liftIO do
         print ("nothing to compact: canon holds no superseded event" :: Doc ())

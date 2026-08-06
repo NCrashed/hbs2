@@ -2,6 +2,41 @@
 
 ## Security
 
+  - **`hbs2-hub`: a compaction could delete a value canon was keeping, on the
+    word of an event the fold had refused.** `compactionOf` decided which
+    `set` events were superseded by asking `resolve`, which checks two
+    signatures and an id binding and NOTHING ELSE: not the target, not the
+    maintainer set. So an event the fold refuses still counted as the winner
+    for its attribute, and the owner's real `set` underneath it was dropped
+    from canon while the event that displaced it was never admitted anywhere.
+    After the rewrite the attribute reverts to whatever an earlier event said,
+    or disappears.
+
+    Reaching it needs no attacker. A delegate mints from a view built before
+    their revocation, the publisher writes the result, and the fold refuses it
+    as `UnauthorizedCanon` -- a case the fold documents as honest and
+    ordinary. The hostile version is worse only in aim: anyone who can put one
+    file into `refs/hbs2/meta` chooses which admitted events the owner's next
+    compaction deletes, by stamping a self-signed `set` at a high `seq`.
+
+    The rule now takes the `FoldResult` over the same canon. An event the fold
+    refused may neither be dropped nor supersede one it admitted -- the second
+    half is the one that lost data, and the module header had claimed the
+    first while implementing neither.
+
+    Two more retentions, both from PEP-19 "Compaction" and both invisible to a
+    reader. Any event carrying an `origin` or an `honours` is kept: one letter
+    folds to at most one event, and the check enforcing it asks canon for the
+    letter's hash, so compacting an honoured `close` away let the same letter,
+    still sitting in a mailbox, be honoured a second time. And `equivalentTo`
+    -- the check a clone makes before taking a rewrite over a fork -- now
+    compares the origin and honoured sets too, so a lineage that quietly lost
+    them is a fork rather than a compaction.
+
+    `hub compact` also stopped matching kept events with `elem` over a list.
+    The comment on `sortCanon` measured that same shape at 20 s for 40000
+    files against a bound of 200000.
+
   - **`hbs2-peer`: a stranger could suppress a chosen letter, permanently and
     silently.** "This entry is already merged into this mailbox" was the
     PRESENCE OF A BLOCK at `hashObject (serialise (MergedEntry mailbox
