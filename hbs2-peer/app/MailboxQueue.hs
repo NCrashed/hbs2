@@ -22,6 +22,7 @@ module MailboxQueue
   ( QueueRefusal(..)
   , paidFor
   , admitTo
+  , takesASlot
   , inQueueDepth
   , perPeerShare
   ) where
@@ -111,3 +112,29 @@ admitTo queued held paid
   | maybe False (>= perPeerShare) held = Left QueueShare
   | not paid = Left QueueUnpaid
   | otherwise = Right ()
+
+-- | Does this copy get a slot, given what is already in flight for the same
+-- message?
+--
+-- The third decision at the door, and the one that used to be a plain "have we
+-- seen this hash". A stamp is deliberately NOT part of the message it pays for
+-- -- it cannot be, since the sender signs the message and then grinds -- so a
+-- stamped copy and a stripped one hash alike, and the queue keeps whichever
+-- arrived first.
+--
+-- That made a paid letter suppressible by anyone who had seen it: re-send it
+-- stripped, land the plain copy first in each ten-second window, have the
+-- honest stamped one deduped away as a repeat, and let the drain refuse the
+-- queued copy for want of work. The sender paid 2^D hashes and gets no
+-- rejection to look at.
+--
+-- So: a copy that PAYS displaces nothing but is admitted once beside a copy
+-- that does not. One extra slot, once per message per batch -- after it the
+-- map says paid and every further copy is free again. Everything else is a
+-- repeat and costs nothing, which is what the dedup is for.
+takesASlot :: Maybe Bool   -- ^ whether a copy is in flight, and whether it pays
+           -> Bool         -- ^ whether THIS copy pays
+           -> Bool
+takesASlot inflight paid = case inflight of
+  Nothing              -> True
+  Just wasPaid         -> paid && not wasPaid

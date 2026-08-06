@@ -1,5 +1,45 @@
 # Unreleased
 
+## Security
+
+  - **`hbs2-peer`: a paid letter could be suppressed by re-sending it without
+    its stamp.** The in-flight dedup at the mailbox queue's door was keyed on
+    the hash of the `Message`, and a proof-of-work stamp is deliberately not
+    part of the message it pays for -- it cannot be, since the sender signs the
+    message and then grinds. So a stamped copy and a stripped one hash alike,
+    and the queued tuple kept whichever arrived first.
+
+    Anybody who had seen a paid letter on gossip could therefore re-send it
+    stripped: the plain copy lands first in each ten-second drain window, the
+    honest stamped one is deduped away as a repeat, and the drain refuses the
+    queued copy for want of work. The sender paid 2^D hashes and got no
+    rejection to look at. The door's own work check does not stop it -- it
+    fails open on a cold cache, which every peer has after a restart and after
+    any `mailbox set-policy`, and it is satisfied by ANY recipient, so a letter
+    naming one charging mailbox and one free one is admitted unpaid.
+
+    The dedup now records whether the queued copy pays, and a copy that pays is
+    admitted once beside one that does not. That is one extra slot per message
+    per batch; after it the map says paid and every further copy is free again,
+    which is what the dedup exists for. The drain handles the pair in either
+    order, since whichever is taken second finds the merge recorded and skips.
+
+  - **`hbs2-peer`: the mailbox queue could wedge shut permanently.**
+    `inMessageQueueInNum` is what the door gates on, and it was decremented one
+    message at a time inside the processing loop, outside any bracket, after
+    the whole batch had already been flushed out of the queue. Any exception in
+    that loop -- a busy SQLite, a storage error -- lost the decrements for the
+    rest of the batch. The worker restarts and the TVar does not: it is created
+    once, so the inflation accumulated across every failure, and once it reached
+    `inQueueDepth` the door answered `QueueFull` for everything, forever, with
+    an empty queue and nothing left to decrement. One `warn` line was the whole
+    symptom.
+
+    The depth is now set to zero in the same transaction as the flush, which is
+    not an optimisation but the value: the queue is empty at that point.
+    Writing the truth rather than adjusting towards it also repairs a counter
+    that has already drifted, which an increment can never do.
+
 ## Added
 
   - **`hbs2-hub publish`, and the line every canon-writing verb was missing.**

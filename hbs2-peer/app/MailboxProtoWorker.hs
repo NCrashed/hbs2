@@ -162,7 +162,10 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- | What is in the queue right now, by message hash. Not a dedup of
     -- everything ever seen: see 'mailboxAcceptMessage' for why it is exactly
     -- as long-lived as one batch.
-  , inMessageQueueSeen    :: TVar (HashSet HashRef)
+    -- The value is whether the QUEUED copy pays its way. A stamp is not part of
+    -- the message it pays for, so two copies of one letter hash alike and only
+    -- this tells them apart; see 'mailboxAcceptMessage'.
+  , inMessageQueueSeen    :: TVar (HashMap HashRef Bool)
     -- | How much of the queue each sender holds right now.
     --
     -- Cleared with the batch, like the set above, and for the same reason: it
@@ -302,22 +305,42 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
     verdict <- atomically do
       inflight <- readTVar inMessageQueueSeen
-      if HS.member h inflight then pure (Right True) else do
-        queued <- readTVar inMessageQueueInNum
-        ps <- readTVar inMessageQueuePeers
-        -- Nothing for this node's own submission over its own RPC, which is not
-        -- somebody else's traffic and is not rationed against it.
-        let held = fmap (\p -> fromMaybe 0 (HM.lookup p ps)) peer
-        case admitTo queued held paid of
-          Left why -> do
-            modifyTVar inMessageQueueDropped succ
-            pure (Left why)
-          Right () -> do
-            writeTBQueue inMessageQueue (peer, origin, m, c)
-            modifyTVar   inMessageQueueInNum succ
-            writeTVar    inMessageQueueSeen (HS.insert h inflight)
-            for_ peer $ \p -> modifyTVar inMessageQueuePeers (HM.insertWith (+) p 1)
-            pure (Right True)
+      -- WHAT IS IN FLIGHT IS A MESSAGE AND WHETHER THE QUEUED COPY PAYS, and
+      -- the second half is why this is a map rather than a set.
+      --
+      -- The stamp is deliberately outside 'Message' (it must not be inside what
+      -- the sender signs), so a stamped copy and a plain one of the same letter
+      -- hash alike -- and the tuple in the queue keeps whichever arrived first.
+      -- An attacker who has seen a paid letter on gossip could therefore
+      -- re-send it stripped, land the plain copy first in every drain window,
+      -- have the honest stamped copy deduped away as a repeat, and watch the
+      -- drain refuse the queued one ten seconds later for want of work. The
+      -- sender paid 2^D hashes and got no rejection to look at.
+      --
+      -- So a copy that PAYS is admitted once even when a copy that does not is
+      -- already queued. It costs one extra slot, once per message per batch:
+      -- after the upgrade the map says paid and every further copy is free
+      -- again. The drain handles the pair in either order -- whichever is taken
+      -- second finds the merge already recorded and skips.
+      if not (takesASlot (HM.lookup h inflight) paid)
+        -- Queued already, by a copy no worse than this one.
+        then pure (Right True)
+        else do
+          queued <- readTVar inMessageQueueInNum
+          ps <- readTVar inMessageQueuePeers
+          -- Nothing for this node's own submission over its own RPC, which is not
+          -- somebody else's traffic and is not rationed against it.
+          let held = fmap (\p -> fromMaybe 0 (HM.lookup p ps)) peer
+          case admitTo queued held paid of
+            Left why -> do
+              modifyTVar inMessageQueueDropped succ
+              pure (Left why)
+            Right () -> do
+              writeTBQueue inMessageQueue (peer, origin, m, c)
+              modifyTVar   inMessageQueueInNum succ
+              writeTVar    inMessageQueueSeen (HM.insert h paid inflight)
+              for_ peer $ \p -> modifyTVar inMessageQueuePeers (HM.insertWith (+) p 1)
+              pure (Right True)
 
     -- Said out loud, and said WHICH: the counter is published on the probe, but
     -- a drop is a message that will not arrive, and the three reasons send an
@@ -1012,9 +1035,25 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           -- queue, and a share held against an empty queue is a peer rationed
           -- for something it no longer occupies.
           writeTVar inMessageQueuePeers mempty
+          -- AND THE DEPTH, here rather than one message at a time below.
+          --
+          -- The queue is empty after the flush -- this is one transaction, so
+          -- nothing ran between them -- and the counter says how full it is, so
+          -- zero is not an optimisation but the value. It used to be decremented
+          -- per message inside the loop, outside any bracket, while `admitTo`
+          -- gates on it: one exception anywhere in the processing (a busy
+          -- SQLite, a storage error) lost the decrements for the whole rest of
+          -- the batch. The worker restarts and this TVar does not -- it is
+          -- created once, in `createMailboxProtoWorker` -- so the inflation
+          -- accumulated, and at `inQueueDepth` the door answered QueueFull
+          -- forever, with an empty queue and nothing left to decrement.
+          --
+          -- Writing the truth rather than adjusting towards it also repairs a
+          -- counter that has already drifted, which is the property an
+          -- increment can never have.
+          writeTVar inMessageQueueInNum 0
           pure xs
         for_ mess $ \(peer, origin, m, s) -> do
-          atomically $ modifyTVar inMessageQueueInNum pred
 
           -- TODO: process-with-policy
 

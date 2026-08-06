@@ -80,4 +80,30 @@ tests = testGroup "mailbox: what gets a queue slot"
           admitTo inQueueDepth (Just perPeerShare) False @?= Left QueueFull
           admitTo 0 (Just perPeerShare) False @?= Left QueueShare
       ]
+
+  , testGroup "the copy already in flight"
+      [ -- The dedup this replaced, and the half it still is: a repeat of what
+        -- is queued costs nothing.
+        testCase "a message nobody has queued takes a slot" $ do
+          takesASlot Nothing False @?= True
+          takesASlot Nothing True  @?= True
+
+      , testCase "a repeat of a queued copy takes none" $ do
+          takesASlot (Just False) False @?= False
+          takesASlot (Just True)  True  @?= False
+
+      -- THE ONE THIS EXISTS FOR. A stamp is not part of the message it pays
+      -- for, so a stripped copy and the paid one hash alike. Anybody who has
+      -- seen a paid letter on gossip can re-send it stripped, land the plain
+      -- copy first in each drain window, and have the honest one deduped away
+      -- -- after which the drain refuses the queued copy for want of work.
+      , testCase "a paid copy is admitted beside an unpaid one already queued" $ do
+          takesASlot (Just False) True @?= True
+
+      -- And only once: after the upgrade the map says paid, so the next copy
+      -- is a repeat like any other. One extra slot per message per batch is
+      -- the whole cost.
+      , testCase "an unpaid copy does not displace a paid one" $ do
+          takesASlot (Just True) False @?= False
+      ]
   ]
