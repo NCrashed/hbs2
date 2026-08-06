@@ -41,7 +41,7 @@ aHash :: String -> HashRef
 aHash s = HashRef (hashObject (LBS.pack s))
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
@@ -185,4 +185,44 @@ spec2 =
 
     it "has nothing to verify for a comment" $ do
       bundleOf (AComment (aHash "thread") Nothing (Just "hi") Nothing 1)
+        `shouldBe` Nothing
+
+spec3 :: Spec
+spec3 =
+  -- The other half of the same question, and the reason it is a separate
+  -- function: 'bundleOf' answers Nothing for an issue and for a fork-path pull
+  -- request alike, and those are not the same nothing. One proposes no objects;
+  -- the other proposes objects this build cannot fetch, verify or stage -- and
+  -- the accept used to print the same lines for both, so canon carried a signed
+  -- claim in every clone that nobody had checked and nothing said so.
+  describe "PEP-20 accept: the proposal nothing here can verify" $ do
+
+    it "finds the fork a pull request points at" $ do
+      repo <- aKey
+      let c = PRCoords (Just "hbs23://fork") "refs/heads/feature" "aa"
+                       "refs/heads/master" "bb" Nothing
+      forkOf (AOpen repo HubPR "t" [] Nothing Nothing (Just c) 1)
+        `shouldBe` Just ("hbs23://fork", "aa", "bb")
+
+    it "finds it on a revise too" $ do
+      let c = PRCoords (Just "hbs23://fork") "refs/heads/feature" "cc"
+                       "refs/heads/master" "bb" Nothing
+      forkOf (ARevise (aHash "thread") c 1)
+        `shouldBe` Just ("hbs23://fork", "cc", "bb")
+
+    -- A delta letter is a delta letter even when it also names a fork: the
+    -- bundle is what gets verified, so this must not report the proposal as
+    -- unchecked when it was checked.
+    it "says nothing about a proposal that carries a bundle" $ do
+      repo <- aKey
+      let c = PRCoords (Just "hbs23://fork") "refs/heads/feature" "aa"
+                       "refs/heads/master" "bb" (Just (unproven (aHash "b")))
+      forkOf (AOpen repo HubPR "t" [] Nothing Nothing (Just c) 1)
+        `shouldBe` Nothing
+
+    it "says nothing about an issue, or a comment" $ do
+      repo <- aKey
+      forkOf (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+        `shouldBe` Nothing
+      forkOf (AComment (aHash "thread") Nothing (Just "hi") Nothing 1)
         `shouldBe` Nothing

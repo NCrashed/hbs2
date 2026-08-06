@@ -53,6 +53,7 @@ module HBS2.Hub.CLI.Accept
   , codeCanonUnplannable
   , codeBundleUnusable
   , bundleOf
+  , forkOf
   ) where
 
 import HBS2.Hub.Types
@@ -164,6 +165,34 @@ bundleOf = \case
     fromCoords c = do
       part <- prBundle c
       pure (ptPart part, prSourceRef c, prSourceTip c, prBase c)
+
+-- | The FORK-PATH coordinates a letter proposes, when that is what it proposes.
+--
+-- The other half of 'bundleOf', and the reason it exists is that the two
+-- Nothings it returns are not the same nothing. An issue proposes no objects;
+-- a fork-path pull request proposes objects this build cannot fetch.
+--
+-- PEP-20 leaves fetching a fork to git3's remote helper, which has no
+-- fetch-one-ref path, so nothing here verifies that the tip exists, that the
+-- base is its ancestor, or that the fork key is a repository at all -- and
+-- nothing stages it, because there are no objects to stage. All of which is
+-- fine and none of which was SAID: the accept printed the same lines as for an
+-- issue, and canon then carried a signed claim in every clone that nobody had
+-- checked. The maintainer found out at @hub pr checkout@, which reported
+-- nothing staged.
+forkOf :: AuthorContent -> Maybe (Text, Text, Text)
+forkOf = \case
+  AOpen _ _ _ _ _ _ (Just c) _ -> fromCoords c
+  ARevise _ c _                -> fromCoords c
+  _                            -> Nothing
+  where
+    fromCoords c = do
+      src <- prSource c
+      -- A letter carrying both is a delta letter that also names a fork, and
+      -- the bundle is what gets verified. Only the bundle-less one is this.
+      case prBundle c of
+        Just{}  -> Nothing
+        Nothing -> pure (src, prSourceTip c, prBase c)
 
 -- | What one accept was asked to fold.
 --
@@ -576,6 +605,26 @@ acceptEntries = do
                      acked
             ]
           for_ (omittedNote plan) print
+
+      -- AND WHAT WAS NOT CHECKED, when nothing was.
+      --
+      -- A fork-path proposal passes through every step above without one of
+      -- them looking at it: 'bundleOf' answers Nothing, so the verify block
+      -- does not run, and there are no objects to stage. The event is in canon
+      -- and every clone reads coordinates nobody confirmed. Said here rather
+      -- than refused, because PEP-20 has the path and this build simply cannot
+      -- fetch it (git3's helper has no fetch-one-ref); what is wrong is a
+      -- report that looked exactly like a verified one.
+      for_ (forkOf (acContent acc)) $ \(src, tip, base) -> liftIO $ saying
+        ( "this is a FORK-PATH proposal and NOTHING ABOUT IT WAS VERIFIED."
+            <> line <> "  source" <+> pretty (safeText src)
+            <> line <> "  tip   " <+> pretty (safeText tip)
+            <> line <> "  base  " <+> pretty (safeText base)
+            <> line <> "  the tip was not fetched, the base was not shown to be its"
+            <+> "ancestor," <> line <> "  and nothing is staged, so `hub pr checkout`"
+            <+> "has nothing to check out." <> line
+            <> "  Fetch the fork yourself before you merge anything."
+            <> line )
 
       liftIO (saying (notPublishedYet <> line))
 

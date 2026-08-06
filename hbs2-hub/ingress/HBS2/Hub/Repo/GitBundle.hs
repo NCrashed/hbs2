@@ -399,8 +399,27 @@ syncFrom :: MonadUnliftIO m
 syncFrom cwd remote = runExceptT do
   checked "remote name" validRefName remote
 
+  -- FSCK ON, on all three fetches below.
+  --
+  -- The same flags 'acceptBundle' sets and for the same reason it sets them:
+  -- what arrives is a stranger's objects, git's own history has
+  -- malformed-object vulnerabilities in it, and fsck is off by default. This
+  -- path did not set them, which made it the one way into the object store
+  -- that skipped the check -- and its objects are the ones @hub pr checkout@
+  -- puts into a reviewer's WORKING TREE. A hostile upstream publishes both the
+  -- canon coordinates and the pull ref, so the mismatch check @prCheckout@ does
+  -- passes and only git's checkout-time defences are left.
+  --
+  -- Named once here rather than per call, since three fetches differing in
+  -- whether they verify what they take would be three chances to pick the
+  -- wrong one.
+  let fetch as = call cwd fetchSeconds "fetch"
+                   ( [ "-c", "transfer.fsckObjects=true"
+                     , "-c", "fetch.fsckObjects=true"
+                     , "fetch" ] <> as )
+
   -- The branches, by whatever refspec the remote is configured with.
-  _ <- ExceptT $ call cwd fetchSeconds "fetch" ["fetch", Text.unpack remote]
+  _ <- ExceptT $ fetch [Text.unpack remote]
 
   -- ASKED FOR FIRST, because git fails outright on a NAMED ref the remote does
   -- not have ("couldn't find remote ref"), and a repository where nobody has
@@ -415,8 +434,7 @@ syncFrom cwd remote = runExceptT do
   canon <- if BS.null (BS.filter (not . isSpace8) probe) then pure CanonNone else do
     -- Canon, into FETCH_HEAD only: a source-only refspec updates no local ref,
     -- which is what makes the comparison below possible at all.
-    _ <- ExceptT $ call cwd fetchSeconds "fetch"
-           ["fetch", Text.unpack remote, "refs/hbs2/meta"]
+    _ <- ExceptT $ fetch [Text.unpack remote, "refs/hbs2/meta"]
 
     there <- ExceptT (refTip cwd "FETCH_HEAD")
 
@@ -444,8 +462,7 @@ syncFrom cwd remote = runExceptT do
   -- And the staged proposals. A wildcard, so a remote with none is quiet
   -- rather than an error: git fails on a named ref it cannot find and says
   -- nothing about a pattern that matches nothing.
-  _ <- ExceptT $ call cwd fetchSeconds "fetch"
-         [ "fetch", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
+  _ <- ExceptT $ fetch [ Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
 
   pure (Synced canon True)
 

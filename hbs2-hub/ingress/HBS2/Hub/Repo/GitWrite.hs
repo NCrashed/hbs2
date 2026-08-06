@@ -44,6 +44,7 @@ import Control.Monad.Except (ExceptT(..),runExceptT,throwError)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.HashSet qualified as HS
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
@@ -124,6 +125,32 @@ sink cwd indexFile = CanonSink
                         (LBS.fromStrict (indexInfo (zip (fmap fst (cnFiles cw)) oids))))
 
       tree <- ExceptT (run whenMs "write-tree" ["write-tree"] mempty) <&> Text.strip . dec
+
+      -- WHAT WAS PLANNED EITHER LANDED OR NOTHING IS PUBLISHED.
+      --
+      -- update-index answers a path it will not take with "Ignoring path ..."
+      -- on stderr and EXIT ZERO, so everything below here succeeds on a tree
+      -- with the file missing and the verb reports the commit it made.
+      -- Reproduced on git 2.46 with `threads/../x`: the entry is dropped and
+      -- write-tree returns the empty tree.
+      --
+      -- The path does not have to be one this build chose. A compaction writes
+      -- back the names the tree already had, deliberately -- deriving them
+      -- instead would quietly rename a misnamed file -- so one file somebody
+      -- else put under such a name is enough, and what a compaction then
+      -- publishes is canon with an event gone and a success on stdout.
+      --
+      -- Asked of the TREE and not of the index, because the tree is what the
+      -- commit will hold. Inclusion and not equality: read-tree seeded the
+      -- index from the parent, so everything canon already had is in here too.
+      landed <- ExceptT (run whenMs "ls-tree"
+                             ["ls-tree", "-r", "--name-only", "-z", Text.unpack tree]
+                             mempty)
+                  <&> HS.fromList . filter (not . BS.null) . BS.split 0x00
+
+      for_ (fmap fst (cnFiles cw)) $ \p ->
+        unless (HS.member p landed) $
+          throwError (WriterDropped (length (cnFiles cw)) p)
 
       -- -c commit.gpgsign=false, because this machine's owner may well sign
       -- their own commits and a canon commit is not theirs to sign. Unattended

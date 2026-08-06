@@ -2,6 +2,52 @@
 
 ## Security
 
+  - **`hbs2-hub`: `hub compact` could publish canon with an event silently
+    gone.** `git update-index --index-info` answers a path it will not take
+    with `Ignoring path ...` on stderr and EXIT ZERO, so `write-tree`,
+    `commit-tree` and `update-ref` all succeed on a tree with the file missing
+    and the verb reports the commit it made and the way back. Reproduced on git
+    2.46 with `threads/../x`: the entry is dropped and `write-tree` returns the
+    empty tree.
+
+    The path does not have to be one this build chose. A compaction writes back
+    the names the tree already had, deliberately -- deriving them instead would
+    quietly rename a misnamed file, which `hub verify` reports and a compaction
+    is not entitled to repair -- so one file somebody else put under such a
+    name is enough.
+
+    Two independent halves now. The reader will not fold a path whose
+    components are not names, so `threads/../x` is not an event here rather
+    than a malformed one. And the writer lists the tree it built and refuses to
+    commit unless every planned file is in it, which does not depend on knowing
+    which paths are bad: what was planned either landed or nothing is
+    published.
+
+  - **`hbs2-hub`: `hub sync` was the one fetch with fsck off.** `acceptBundle`
+    sets `transfer.fsckObjects` and `fetch.fsckObjects` and says why -- the
+    objects are a stranger's and git's own history has malformed-object
+    vulnerabilities in it. `syncFrom` makes three fetches and set neither flag,
+    and its objects are the ones `hub pr checkout` puts into a reviewer's
+    working tree. A hostile upstream publishes both the canon coordinates and
+    the pull ref, so the mismatch check `prCheckout` does passes and only git's
+    checkout-time defences are left. All three fetches go through one helper
+    that sets both flags now.
+
+  - **`hbs2-hub`: a fork-path pull request entered canon with nothing checked
+    and nothing said.** PEP-20's second path names a fork to fetch over hbs2
+    instead of carrying a bundle, and this build cannot fetch one (git3's
+    remote helper has no fetch-one-ref). So `bundleOf` answered `Nothing`, the
+    whole verify block was skipped, `stagePull` was skipped, and the accept
+    printed exactly the lines it prints for a verified proposal. Canon then
+    carried, in every clone, a signed claim that the tip exists and the base is
+    its ancestor -- which nobody had established. The maintainer found out at
+    `hub pr checkout`, which reported nothing staged.
+
+    Not refused, since the path is in the spec and the fetch is what is
+    missing; said. The accept now names the source, the tip and the base, says
+    that none of them was verified and that nothing is staged, and tells the
+    maintainer to fetch the fork before merging anything.
+
   - **`hbs2-peer`: a proof-of-work floor was bypassed by not carrying a
     stamp.** `mailboxPoWFloor` -- what an operator sets with
     `hbs2:mailbox:pow-min` to say how much work this peer is willing to

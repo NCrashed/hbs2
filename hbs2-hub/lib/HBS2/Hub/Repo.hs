@@ -675,8 +675,25 @@ sortCanon entries = (evs, dups <> bad)
       where
         under pfx depth q =
           B8.pack pfx `B8.isPrefixOf` q
-            && length (Prelude.filter (not . B8.null)
-                        (B8.split '/' (B8.drop (length pfx) q))) == depth
+            && ( let cs = Prelude.filter (not . B8.null)
+                            (B8.split '/' (B8.drop (length pfx) q))
+                 in length cs == depth && all plain cs )
+
+        -- A COMPONENT IS A NAME, and @.@ and @..@ are not names.
+        --
+        -- Counting components was not enough: @threads/../x@ has two of them
+        -- and is not a path this layout has. What made that worth refusing
+        -- rather than reporting is the WRITE side -- a compaction puts back the
+        -- names the tree already had, and git's index answers a path like that
+        -- with "Ignoring path" and exit zero, so the event was dropped from the
+        -- rewrite and the verb said it had succeeded. That half is closed in
+        -- "HBS2.Hub.Repo.GitWrite" too, and independently: this one stops such
+        -- a file being an event, that one stops any planned file going missing
+        -- for any reason.
+        --
+        -- Not folded is not ignored: a path under these prefixes that is not an
+        -- event is reported by the reader like any other file it will not take.
+        plain c = c /= "." && c /= ".."
 
 -- | Read canon and fold it.
 --
@@ -1072,12 +1089,37 @@ data CanonUnwritable =
     -- lost and nothing is half-done: the caller folds again and re-mints,
     -- which is exactly what the bridge's @AlreadyInCanon@ is there to make
     -- safe.
+    -- | git built a tree that does not hold a file it was given, and nothing
+    -- was published.
+    --
+    -- Carries how many were asked for and one of the paths that did not land.
+    --
+    -- WHY THIS CAN HAPPEN AT ALL: @update-index --index-info@ answers a path it
+    -- will not take with @Ignoring path ...@ on stderr and EXIT ZERO, so
+    -- @write-tree@, @commit-tree@ and @update-ref@ all succeed on a tree with
+    -- the file missing, and the verb reports the commit it made. The path that
+    -- provoked it does not have to be this build's: a compaction writes back
+    -- the names the tree already had, so one file somebody else put under
+    -- @threads\/..\/x@ is enough, and what the compaction then publishes is
+    -- canon with an event silently gone.
+    --
+    -- The reader refuses to fold such a path (see 'isEvent'), which stops it
+    -- being an event here. This is the other half, and it is the one that does
+    -- not depend on knowing which paths are bad: what was planned either landed
+    -- or nothing is published.
+  | WriterDropped Int ByteString
   deriving stock (Eq,Show)
 
 instance Pretty CanonUnwritable where
   pretty = \case
     WriterFailed e  -> "could not run git:" <+> pretty e
     WriterStalled e -> "git did not finish:" <+> pretty e
+    WriterDropped n p ->
+      nest 2 $ vsep
+        [ "git did not take every file it was given"
+        , "planned" <+> pretty n <> ", and this one is not in the tree:"
+        , "  " <> pretty (pathText p)
+        , "nothing was published" ]
     WriterRefused what t ->
       nest 2 $ vsep [ "git" <+> pretty what <+> "refused", told t ]
     RefMoved want got ->

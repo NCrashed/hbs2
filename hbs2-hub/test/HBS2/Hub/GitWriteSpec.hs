@@ -128,6 +128,31 @@ spec1 = do
 
   describe "PEP-19 canon writer against git" $ do
 
+    -- git's index answers a path it will not take with "Ignoring path ..." on
+    -- STDERR AND EXIT ZERO, so write-tree, commit-tree and update-ref all
+    -- succeed on a tree with the file missing and the verb reports the commit
+    -- it made. Reproduced here rather than argued: this is what `hub compact`
+    -- would publish if one file in the tree it is rewriting is named like this,
+    -- and a compaction puts back the names the tree already had on purpose.
+    it "refuses to publish a commit git did not take every file into" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        (_, cw) <- anOpen alice owner 1 "an issue"
+
+        let bad = [ ("threads/../escaped.sexp", c) | (_, c) <- take 1 (cwFiles cw) ]
+
+        r <- withGitSinkIn (Just dir) $ \sk ->
+               skCommit sk (CanonWrite Nothing (cwFiles cw <> bad) "canon" 1000)
+        case r of
+          Left WriterDropped{} -> pure ()
+          other -> expectationFailure
+                     ("expected the write to be refused, got " <> show (fmap Text.unpack other))
+
+        -- And nothing was published: the ref is still where it was.
+        parent <- withGitSinkIn (Just dir) (skParent >=> either (fail . show) pure)
+        parent `shouldBe` Nothing
+
     it "creates canon the reader folds back" $ withRepo $ \dir -> do
       owner <- kp
       alice <- kp
