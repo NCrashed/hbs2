@@ -220,3 +220,51 @@ spec = do
         HM.fromList [ (t, tsAttrs s)
                     | (t, s) <- HM.toList (frThreads (foldEvents repo evs)) ]
       length (attrsOf (cpKeep c)) `shouldBe` length (attrsOf evs)
+
+  describe "PEP-19 compaction: telling a rewrite from a fork" $ do
+
+    -- The check a clone makes when canon diverges. A compaction passes it by
+    -- construction, which is the whole reason non-forcing sync and compaction
+    -- can coexist.
+    it "says a compacted lineage is the same canon" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          evs = [ o
+                , ev owner 2 (ASet thr "labels" "a" 2000)
+                , ev owner 3 (ASet thr "labels" "b" 3000) ]
+          c = compactionOf evs
+      dropped c `shouldSatisfy` (not . null)
+      equivalentTo (foldEvents repo evs) (foldEvents repo (cpKeep c)) `shouldBe` True
+
+    it "says a lineage missing a comment is not" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          cm = ev owner 2 (AComment (eventId o) Nothing (Just "said") Nothing 2000)
+      equivalentTo (foldEvents repo [o, cm]) (foldEvents repo [o]) `shouldBe` False
+
+    -- The one a state comparison alone would miss: two canons agree on every
+    -- thread while one of them quietly dropped a delegation nobody had used.
+    -- Taking that hands the repository a maintainer set its owner did not write.
+    it "says a lineage missing an unused delegation is not" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          d = ev owner 2 (ADelegate repo (fst bob) 2000)
+          withD = foldEvents repo [o, d]
+          without = foldEvents repo [o]
+      -- The threads really are identical, which is what makes this the case
+      -- worth testing rather than an obvious one.
+      frThreads withD `shouldBe` frThreads without
+      equivalentTo withD without `shouldBe` False
+
+    it "says a lineage missing a redact is not" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          cm = ev owner 2 (AComment (eventId o) Nothing (Just "said") Nothing 2000)
+          rd = ev owner 3 (ARedact repo (eventId cm) 3000)
+      equivalentTo (foldEvents repo [o, cm, rd]) (foldEvents repo [o, cm])
+        `shouldBe` False

@@ -36,6 +36,7 @@ module HBS2.Hub.Repo.GitBundle
   , refTip
   , checkoutBranch
   , syncFrom
+  , takeCanon
   , Synced(..)
   , SyncedCanon(..)
   , pullRef
@@ -444,6 +445,25 @@ syncFrom cwd remote = runExceptT do
          [ "fetch", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
 
   pure (Synced canon True)
+
+-- | Move the canon ref, through what it currently holds.
+--
+-- The one write 'hub sync' makes, and it is a compare-and-swap for the reason
+-- every other ref move in this package is: between deciding and writing,
+-- another process may have folded a letter here, and taking a remote lineage
+-- over that would drop it.
+--
+-- Named rather than folded into 'syncFrom', because the decision to take a
+-- rewritten lineage is not git's to make: it needs both canons folded, which
+-- happens a layer up.
+takeCanon :: MonadUnliftIO m
+          => Maybe FilePath -> Text -> Text -> m (Either BundleError ())
+takeCanon cwd new old = runExceptT do
+  checked "object name" validSha new
+  checked "object name" validSha old
+  _ <- ExceptT $ call cwd smallSeconds "update-ref"
+         ["update-ref", "refs/hbs2/meta", Text.unpack new, Text.unpack old]
+  pure ()
 
 -- | Stage a proposed tip where PEP-19 puts it.
 --

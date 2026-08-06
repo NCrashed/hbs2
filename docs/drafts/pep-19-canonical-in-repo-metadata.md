@@ -1587,8 +1587,8 @@ than only the fold over them, and a sink that writes a root commit while
 comparing-and-swapping against the ref's CURRENT value, which are two different
 hashes for the first time.
 
-AND THE SYNC SIDE HAS TO CHANGE FIRST, which this section used to answer with
-one word. It said a clone follows a compaction with the forcing
+AND THE SYNC SIDE IS BUILT, which this section used to answer with one word. It
+said a clone follows a compaction with the forcing
 `+refs/hbs2/meta:...` refspec; `hub sync` does not force, deliberately, because
 forcing also silently discards the canon of a maintainer who has just accepted
 letters and not yet pushed (PEP-22). So a compaction and a fork look alike from
@@ -1596,11 +1596,18 @@ a clone: both are "the remote's canon is not a descendant of mine".
 
 They are not alike, and the difference is checkable rather than a matter of
 trust: a compaction preserves the materialized state exactly, which is the
-property the rule above exists for and which the tests assert. A clone that
-folds both lineages and finds the same state is looking at a compaction and can
-take it; one that finds a different state is looking at a fork and must not.
-That check is what makes non-forcing sync and compaction compatible, and it is
-the piece to build before the verb, not after.
+property the rule above exists for and which the tests assert. `hub sync --repo`
+folds both lineages and compares four things -- the threads, the maintainer set,
+the redacted set and the highest seq -- and takes the remote only when all four
+agree.
+
+The maintainer set is in that list for a reason a state comparison alone would
+miss: two canons can agree on every thread while one of them has quietly dropped
+a `delegate` nobody had used yet, and taking that one hands the repository a
+maintainer set its owner did not write. The highest seq is there because
+lowering it hands the bridge a number already spent. What is NOT compared is the
+log, since losing the timeline of overwritten values is exactly what a
+compaction trades for size.
 
 
 What exists today vs what must be built

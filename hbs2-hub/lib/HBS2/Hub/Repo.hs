@@ -28,6 +28,7 @@ module HBS2.Hub.Repo
   , FileProblem(..)
   , TreeEntry(..)
   , readCanon
+  , readCanonAt
   , metaRef
   , sortCanon
   , maxCanonBytes
@@ -681,7 +682,20 @@ readCanon :: Monad m
           => CanonSource m -> RepoRef -> m (Either CanonUnreadable CanonState)
 readCanon cs owner = csCommit cs >>= \case
   Left e -> pure (Left e)
-  Right commit -> csEntries cs commit >>= \case
+  Right commit -> readCanonAt cs owner commit
+
+-- | The same, over a commit the caller names rather than the one the ref holds.
+--
+-- Split out when a second lineage had to be folded: `hub sync` fetches what a
+-- remote published into FETCH_HEAD and has to know whether it materializes the
+-- same state before it moves the ref onto it (PEP-19 compaction). Everything
+-- below is what 'readCanon' always did; only where the commit comes from is
+-- new, and it is deliberately NOT re-read from the ref, since the whole point
+-- is to fold something the ref does not point at.
+readCanonAt :: Monad m
+            => CanonSource m -> RepoRef -> Text
+            -> m (Either CanonUnreadable CanonState)
+readCanonAt cs owner commit = csEntries cs commit >>= \case
     Left e -> pure (Left e)
     -- The COUNT below is over the whole listing, and the bytes over the event
     -- files. Two different costs: every entry becomes a TreeEntry, is sorted and

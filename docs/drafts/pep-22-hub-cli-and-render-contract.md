@@ -64,10 +64,13 @@ Read (any clone; needs only the repo and its canon):
 hub clone   hbs23://<repo-key>      ; NOT BUILT: it is `git clone` and then
                                    ;   `hub sync`, and a verb for that would add
                                    ;   a directory argument and nothing else
-hub sync    [--remote <name>]       ; fetch code, canon and the staged proposals.
+hub sync    [--remote <name>] [--repo <key>]
+                                   ; fetch code, canon and the staged proposals.
                                    ;   Canon is NOT forced, though this document
                                    ;   used to spell the refspec with a plus: see
-                                   ;   below. --remote defaults to origin
+                                   ;   below. --remote defaults to origin; --repo
+                                   ;   buys the check that tells a compaction
+                                   ;   from a fork
 hub issue list [query]             ; folded issues; query DSL below
 hub issue show <n|thread-id>       ; thread with comments, status, labels, assignee
 hub pr    list [query]
@@ -94,6 +97,20 @@ only when the move is a fast-forward. A divergence is reported with both hashes
 and its own exit code (40), and nothing is written in either direction. The
 `git update-ref` that takes the remote's side is printed rather than run:
 choosing it is the operator's, and it is one command.
+
+EXCEPT WHEN THE DIVERGENCE IS A COMPACTION, which is a rewrite the owner is
+entitled to make (PEP-19) and which reaches every clone looking exactly like a
+fork. Given `--repo`, the verb folds both lineages and compares what they
+materialize: the threads, the maintainer set, the redacted set and the highest
+seq. A compaction preserves all four by construction -- that is what its retain
+list is for -- so a rewrite passes and is taken, with what it traded away named
+on stdout and the `update-ref` back beside it. Anything else does not pass, and
+nothing is written.
+
+The repository key is what the check costs, and it is not incidental: the owner
+key is the root of the fold's trust chain, so a canon that named its own owner
+would be one that could rename it. `hub verify` takes the same argument for the
+same reason. Without it the divergence is reported and left, as before.
 
 The staged proposals under `refs/hbs2/pulls/*` ARE forced, and the asymmetry is
 the point: they are a cache of what a maintainer published, nobody commits on

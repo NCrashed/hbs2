@@ -22,12 +22,17 @@ module HBS2.Hub.CLI.Sync
     -- * The parts that decide something
   , syncDoc
   , syncCode
+  , Settled(..)
   , SyncArgs(..)
   , syncArgs
   , codeDiverged
   ) where
 
-import HBS2.Hub.Repo.GitBundle (syncFrom,Synced(..),SyncedCanon(..))
+import HBS2.Hub.Types (RepoRef,safeText)
+import HBS2.Hub.Compact (equivalentTo)
+import HBS2.Hub.Repo (readCanonAt,stFold)
+import HBS2.Hub.Repo.Git (withGitCanon)
+import HBS2.Hub.Repo.GitBundle (syncFrom,takeCanon,Synced(..),SyncedCanon(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
 import HBS2.Hub.CLI.Inbox (refuse)
 import HBS2.Hub.CLI.Pr (codeBundleFailed)
@@ -49,7 +54,7 @@ codeDiverged :: Int
 codeDiverged = 40
 
 syncUsage :: Doc ()
-syncUsage = "usage: hbs2-hub sync [--remote <name>]"
+syncUsage = "usage: hbs2-hub sync [--remote <name>] [--repo <key>]"
 
 syncEntries :: forall c m . ( IsContext c
                             , MonadUnliftIO m
@@ -88,18 +93,74 @@ syncEntries = do
       r <- syncFrom Nothing remote
              >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
 
-      liftIO $ mapM_ print (syncDoc remote r)
+      -- A divergence is where a rewrite and a fork look alike, and folding both
+      -- is what tells them apart. Only with a repository key: the owner key is
+      -- the root of the fold's trust chain (PEP-19 rule 3), so a canon that
+      -- named its own owner would be one that could rename it, which is why
+      -- `hub verify` takes the same argument.
+      settled <- case (syCanon r, saRepo sa) of
+        (CanonDiverged here there, Just repo) -> resolve' repo here there
+        (c, _) -> pure (Left c)
 
-      liftIO $ case syncCode r of
+      liftIO $ mapM_ print (syncDoc remote r settled)
+
+      liftIO $ case syncCode r settled of
         0 -> pure ()
         n -> exitWith (ExitFailure n)
 
+    -- Fold both lineages and decide. A rewrite that materializes identically is
+    -- taken; anything else is left exactly as it was.
+    resolve' repo here there = do
+      a <- foldAt repo here
+      b <- foldAt repo there
+      case (a, b) of
+        (Just fa, Just fb)
+          | equivalentTo fa fb ->
+              -- Through what the ref currently holds: between the fold above
+              -- and this line another process may have accepted a letter, and
+              -- taking the remote over that would drop it.
+              takeCanon Nothing there here >>= \case
+                Right () -> pure (Right (Rewritten here there))
+                Left e -> pure (Right (NotTaken here there (Text.pack (show (pretty e)))))
+          | otherwise -> pure (Right (Forked here there))
+        _ -> pure (Right (Unreadable here there))
+
+    -- One lineage, folded, or nothing when this clone cannot read it. Nothing
+    -- is not a failure of the sync: the fetch worked, and a canon that will not
+    -- fold is a fact about the tree that `hub verify` reports properly.
+    foldAt repo commit =
+      withGitCanon (\cs -> readCanonAt cs repo commit) <&> \case
+        Right st -> Just (stFold st)
+        Left _   -> Nothing
+
+-- | What a divergence turned out to be, once both lineages were folded.
+--
+-- Four answers and not two, because they call for four different things: carry
+-- on, look at the two canons, install git or fetch the objects, and look at why
+-- the ref would not move.
+data Settled =
+    -- | The remote rewrote canon and it materializes identically: taken. Old,
+    -- then new.
+    Rewritten Text Text
+    -- | The two say different things. Nothing was written.
+  | Forked Text Text
+    -- | One of them would not fold here, so nothing can be said about the two.
+  | Unreadable Text Text
+    -- | It is a rewrite and the ref would not move: somebody folded a letter
+    -- between the decision and the write, or git refused.
+  | NotTaken Text Text Text
+  deriving stock (Eq,Show)
+
 -- | What one sync did, for stdout.
-syncDoc :: Text -> Synced -> [Doc ann]
-syncDoc remote r =
+syncDoc :: Text -> Synced -> Either SyncedCanon Settled -> [Doc ann]
+syncDoc remote r settled =
   [ "fetched from" <+> pretty remote ] <> canon <> pulls
   where
-    canon = case syCanon r of
+    canon = case settled of
+      Right s -> settledDoc s
+      Left c -> plain c
+
+    plain = \case
       CanonNone ->
         [ "canon: the remote has none, so nothing here folds yet" ]
       CanonSame ->
@@ -121,25 +182,77 @@ syncDoc remote r =
             <+> pretty there
         ]
 
+    settledDoc = \case
+      Rewritten from to ->
+        [ "canon: the remote rewrote it and it folds to the same state, so it"
+            <+> "was taken"
+        , "  was  " <+> pretty from
+        , "  now  " <+> pretty to
+        , "  what is gone is the timeline of overwritten values, which is what"
+            <+> "a compaction trades for size (PEP-21)."
+        , "  To put it back: git update-ref refs/hbs2/meta" <+> pretty from
+        ]
+      Forked here there ->
+        [ "canon: DIVERGED, and the two do not say the same thing"
+        , "  here " <+> pretty here
+        , "  there" <+> pretty there
+        , "  this is not a compaction: folding both gives different state, so"
+            <+> "taking either loses what the other holds."
+        , "  Nothing was written."
+        ]
+      Unreadable here there ->
+        [ "canon: DIVERGED, and one of the two will not fold in this clone"
+        , "  here " <+> pretty here
+        , "  there" <+> pretty there
+        , "  nothing can be said about them; `hub verify` says why one will not"
+            <+> "read. Nothing was written."
+        ]
+      NotTaken here there why ->
+        [ "canon: the remote rewrote it and the ref would not move"
+        , "  here " <+> pretty here
+        , "  there" <+> pretty there
+        , "  " <> pretty (safeText why)
+        , "  somebody folded a letter here between the check and the write."
+            <+> "Run it again."
+        ]
+
     pulls = [ "pulls: fetched" | syPulls r ]
 
 -- | 0, or what the caller has to act on.
 --
 -- A divergence is the only non-zero, and it is not a failure of the fetch: the
 -- code arrived, the pull refs arrived, and one ref was left alone on purpose.
-syncCode :: Synced -> Int
-syncCode r = case syCanon r of
-  CanonDiverged{} -> codeDiverged
-  _               -> 0
+--
+-- A rewrite that was TAKEN is zero: the ref moved, the state is what it was,
+-- and there is nothing for a caller to do. Everything else a divergence can
+-- turn out to be keeps the code, including a rewrite whose write lost a race:
+-- that one is a retry, and a caller that read it as success would carry on
+-- against canon it did not take.
+syncCode :: Synced -> Either SyncedCanon Settled -> Int
+syncCode r settled = case settled of
+  Right (Rewritten _ _) -> 0
+  Right _               -> codeDiverged
+  Left c -> case c of
+    CanonDiverged{} -> codeDiverged
+    _               -> 0
 
 -- | @[--remote <name>]@.
-newtype SyncArgs = SyncArgs { saRemote :: Maybe Text }
+data SyncArgs = SyncArgs
+  { saRemote :: Maybe Text
+    -- | The repository, for the divergence check alone.
+    --
+    -- Optional, and what it buys is named in the help: without it a rewrite
+    -- upstream and a fork are one answer, because telling them apart means
+    -- folding both lineages and the fold needs the owner key.
+  , saRepo   :: Maybe RepoRef
+  }
   deriving stock (Eq,Show)
 
 syncArgs :: forall c . IsContext c => [Syntax c] -> Maybe SyncArgs
 syncArgs syn = do
-  kvs <- flagsOf ["--remote"] syn
+  kvs <- flagsOf ["--remote","--repo"] syn
   -- Through 'flagText', so a remote somebody called 2026 is one. The shape git
   -- will accept is checked further in, by 'syncFrom'.
   r <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
-  pure (SyncArgs r)
+  repo <- flagMaybe kvs "--repo" (\case { SignPubKeyLike k -> Just k ; _ -> Nothing })
+  pure (SyncArgs r repo)

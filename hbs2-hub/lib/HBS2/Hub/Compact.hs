@@ -37,12 +37,13 @@ module HBS2.Hub.Compact
   ( Compaction(..)
   , compactionOf
   , droppable
+  , equivalentTo
   , Attr(..)
   , attrOf
   ) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Fold (Resolved(..),resolve)
+import HBS2.Hub.Fold (Resolved(..),resolve,FoldResult(..))
 
 import Data.Hashable (Hashable(..))
 import Data.HashMap.Strict (HashMap)
@@ -136,6 +137,44 @@ compactionOf evs = Compaction { cpKeep = keep, cpDrop = drop' }
       AClose thr _ _  -> Just (Attr thr "status")
       AReopen thr _ _ -> Just (Attr thr "status")
       _               -> Nothing
+
+-- | Whether two canons say the same thing.
+--
+-- The property compaction claims, written as a check rather than left as a
+-- promise, because a clone needs it: @hub sync@ does not force the canon ref,
+-- so a rewrite upstream arrives as a divergence and is indistinguishable from a
+-- fork until somebody folds both. This is what tells them apart.
+--
+-- WHAT IS COMPARED, and each for its own reason:
+--
+--   * the threads, which are the materialized state: every attribute, every
+--     comment, every PR coordinate. This is what a reader sees;
+--   * the maintainer set, which a reader does NOT see and which decides what
+--     canon will admit next. Two canons can agree on every thread while one of
+--     them quietly dropped a @delegate@ nobody had used yet, and taking that
+--     one hands the repository a maintainer set its owner did not write;
+--   * the redacted set, since a rewrite that dropped a @redact@ would leave
+--     every clone showing a body somebody withdrew;
+--   * the highest seq, which the bridge mints against. A compaction cannot
+--     lower it -- what it drops is superseded, so something higher survives --
+--     and a rewrite that did lower it would hand the bridge a number already
+--     spent.
+--
+-- WHAT IS NOT: the log. That is the timeline of overwritten values, and losing
+-- it is exactly what a compaction trades for size (PEP-21). Comparing it would
+-- make every compaction look like a fork.
+--
+-- NOR the drops. An event the fold refused is retained by 'droppable', so a
+-- HONEST compaction preserves them; but this predicate is asked about canon a
+-- stranger published, and reporting a difference in what somebody else's tree
+-- got wrong is not the question being asked -- whether the state is the same
+-- is.
+equivalentTo :: FoldResult -> FoldResult -> Bool
+equivalentTo a b =
+     frThreads a == frThreads b
+  && frMaintainers a == frMaintainers b
+  && frRedacted a == frRedacted b
+  && frMaxSeq a == frMaxSeq b
 
 -- | Whether this one event may go, given what supersedes and what is redacted.
 --
