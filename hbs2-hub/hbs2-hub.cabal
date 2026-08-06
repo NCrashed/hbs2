@@ -59,6 +59,7 @@ library
                     , hbs2-core
                     , serialise
                     , unordered-containers
+                    , hashable
                     , cborg
                     , bytestring
                     , text
@@ -72,6 +73,7 @@ library
       HBS2.Hub.Letter
       HBS2.Hub.Bridge
       HBS2.Hub.Canon
+      HBS2.Hub.Compact
       HBS2.Hub.Manifest
       HBS2.Hub.Repo
 
@@ -202,6 +204,7 @@ test-suite spec
       HBS2.Hub.AcceptSpec
       HBS2.Hub.ArgvSpec
       HBS2.Hub.CommentSpec
+      HBS2.Hub.CompactSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
       HBS2.Hub.SyncSpec

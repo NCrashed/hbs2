@@ -708,6 +708,16 @@ winning `set`) and deferred the policy here.
     trades that timeline for size; a repo that wants full activity history
     simply compacts less or not at all.
 
+    That identity is not only a promise, it is the CHECK a clone makes: `hub
+    sync` does not force the canon ref (PEP-22), so a compaction reaches a
+    clone as a divergence, and folding both lineages is how it tells one from
+    a fork. The predicate above is written to make that check pass -- which is
+    also why an event this build cannot resolve, or one the fold dropped, is
+    retained rather than tidied away: neither is a value the fold overwrote.
+
+  - What is built: the predicate, as `HBS2.Hub.Compact`. Not the runner, and
+    not the sync-side check above.
+
 
 What exists today vs what must be built
 ====================================

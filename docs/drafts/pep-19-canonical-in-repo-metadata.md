@@ -1577,10 +1577,30 @@ This preserves offline authorship verifiability for all discussion and
 thread roots while removing the bulk (the overwritten `set` events), so the
 size win is nearly the full churn. No materialized snapshot is ever written
 into canon as a substitute for events; canon stays events-only, and any
-snapshot is the rebuildable cache. Because compaction rewrites the ref
-lineage, `hub sync` must follow it with the forcing `+refs/hbs2/meta:...`
-refspec shown earlier. Compaction cadence and the "superseded" predicate are
-policy, deferred to PEP-21.
+snapshot is the rebuildable cache. Compaction cadence and the "superseded"
+predicate are policy, deferred to PEP-21.
+
+WHAT IS BUILT: the rule, as `HBS2.Hub.Compact`, pure and tested one retain
+reason at a time. What is not: the verb that rewrites the ref. That needs two
+things this build does not have -- a reader that hands back the events rather
+than only the fold over them, and a sink that writes a root commit while
+comparing-and-swapping against the ref's CURRENT value, which are two different
+hashes for the first time.
+
+AND THE SYNC SIDE HAS TO CHANGE FIRST, which this section used to answer with
+one word. It said a clone follows a compaction with the forcing
+`+refs/hbs2/meta:...` refspec; `hub sync` does not force, deliberately, because
+forcing also silently discards the canon of a maintainer who has just accepted
+letters and not yet pushed (PEP-22). So a compaction and a fork look alike from
+a clone: both are "the remote's canon is not a descendant of mine".
+
+They are not alike, and the difference is checkable rather than a matter of
+trust: a compaction preserves the materialized state exactly, which is the
+property the rule above exists for and which the tests assert. A clone that
+folds both lineages and finds the same state is looking at a compaction and can
+take it; one that finds a different state is looking at a fork and must not.
+That check is what makes non-forcing sync and compaction compatible, and it is
+the piece to build before the verb, not after.
 
 
 What exists today vs what must be built
