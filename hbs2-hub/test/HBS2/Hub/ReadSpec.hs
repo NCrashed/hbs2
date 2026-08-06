@@ -109,6 +109,44 @@ spec = do
       fmap tsNumber (threadsOf HubIssue (Filter Nothing (Just "bug")) fr)
         `shouldBe` [Just 2]
 
+  describe "PEP-22 read: who a thread is assigned to" $ do
+
+    it "shows the key an owner set, and nothing before that" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
+          before = foldEvents repo [e1]
+          after = foldEvents repo
+                    [ e1
+                    , mkEvent owner owner
+                        (ASet (eventId e1) "assignee"
+                              (Text.pack (show (pretty (AsBase58 (fst bob))))) 3000)
+                        (canonOf repo 2 Nothing) ]
+      fmap assigneeOf (threadsOf HubIssue noFilter before) `shouldBe` [Nothing]
+      fmap assigneeOf (threadsOf HubIssue noFilter after)
+        `shouldBe` [Just (Text.pack (show (pretty (AsBase58 (fst bob)))))]
+
+    -- Last-writer-wins like every attribute, so unassigning is an empty value
+    -- and not a removal: there is no op that takes an attribute away.
+    it "reads an empty value as assigned to nobody a reader should print" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
+          fr = foldEvents repo
+                 [ e1
+                 , mkEvent owner owner
+                     (ASet (eventId e1) "assignee"
+                           (Text.pack (show (pretty (AsBase58 (fst bob))))) 3000)
+                     (canonOf repo 2 Nothing)
+                 , mkEvent owner owner
+                     (ASet (eventId e1) "assignee" "" 4000)
+                     (canonOf repo 3 Nothing) ]
+      fmap assigneeOf (threadsOf HubIssue noFilter fr) `shouldBe` [Just ""]
+      -- And the report says nothing about it: an empty line reading
+      -- "assignee" is worse than no line.
+      unwords (fmap show (showDoc (head (threadsOf HubIssue noFilter fr))))
+        `shouldSatisfy` not . isInfixOf "assignee"
+
   describe "PEP-22 read: what is printed" $ do
 
     -- A title arrives in a letter anybody may send and is printed to a

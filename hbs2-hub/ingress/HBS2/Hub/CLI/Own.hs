@@ -1,4 +1,5 @@
--- | @hub issue close|reopen|label@ and @hub redact@ (PEP-19, PEP-22 "Maintain").
+-- | @hub issue close|reopen|label|assign@ and @hub redact@ (PEP-19, PEP-22
+-- "Maintain").
 --
 -- The owner-native ops on a thread that is already in canon. Everything they
 -- decide is decided elsewhere -- 'ownerEvent' says whether the key may sign,
@@ -52,13 +53,15 @@ import Data.Text qualified as Text
 import Data.Word (Word64)
 import System.Exit (die)
 
--- | What a close, reopen or label was asked to do.
+-- | What a close, reopen, label or assign was asked to do.
 data OwnArgs = OwnArgs
   { owRepo   :: RepoRef
   , owNumber :: Word64
   , owNote   :: Maybe Text     -- ^ close/reopen only
   , owLabels :: [Text]         -- ^ label only
-  , owClear  :: Bool           -- ^ label only: the empty set, said out loud
+  , owClear  :: Bool           -- ^ label and assign: the empty value, said out loud
+    -- | Whom to assign to. Assign only.
+  , owTo     :: Maybe HubKey
   , owAs     :: Maybe HubKey   -- ^ a delegate's key; defaults to the repo key
   }
   deriving stock (Eq,Show)
@@ -76,6 +79,7 @@ ownUsage =
   "usage: hbs2-hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]"
     <> line <> "       hbs2-hub issue label --repo <key> --number <n> --label <l>... [--as <key>]"
     <> line <> "       hbs2-hub issue label --repo <key> --number <n> --clear"
+    <> line <> "       hbs2-hub issue assign --repo <key> --number <n> --to <key> | --clear"
 
 redactUsage :: Doc ()
 redactUsage =
@@ -112,6 +116,29 @@ ownEntries = do
     $ entry $ bindMatch "hub:issue:label" $ nil_ \case
         (ownArgs -> Just ow)
           | owClear ow || not (List.null (owLabels ow)) -> lift (labelIt ow)
+        _ -> liftIO (die (show ownUsage))
+
+  brief "say who is looking at a thread that is in canon"
+    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+           , arg "string" "--to key" ]
+    $ desc ( "Writes an owner-signed set event on the assignee attribute,"
+             <> line <> "which is last-writer-wins like every other (PEP-19): one"
+             <> line <> "thread has one assignee, and assigning replaces."
+             <> line
+             <> line <> "A KEY AND NOT A NAME. A person here is a key; a name would"
+             <> line <> "be a second identity with nothing behind it, and canon has"
+             <> line <> "no notion of one. It is not checked against the maintainer"
+             <> line <> "set either: assigning somebody is a note about who is"
+             <> line <> "looking, not a grant of anything, and PEP-21 delegation is"
+             <> line <> "what grants."
+             <> line
+             <> line <> "--clear unassigns, and is spelled out for the reason it is"
+             <> line <> "on labels: a verb that unassigned because somebody forgot"
+             <> line <> "an argument would publish that into append-only canon." )
+    $ entry $ bindMatch "hub:issue:assign" $ nil_ \case
+        (ownArgs -> Just ow)
+          | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
+          | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
         _ -> liftIO (die (show ownUsage))
 
   brief "hide an event's content in every clone that folds this canon"
@@ -182,6 +209,16 @@ ownEntries = do
       writeOwn (owRepo ow) (owAs ow) parent fr
         (ASet thr "labels" value) "hub: labels"
 
+    assignIt ow = do
+      (parent, fr) <- canonOf (owRepo ow)
+      thr <- threadOfNumber fr (owNumber ow)
+      -- Base58, which is how every other key in canon is written, and empty for
+      -- a clear: the attribute is last-writer-wins and there is no way to
+      -- remove one, so an empty value IS the absence a reader shows as none.
+      let value = maybe "" (Text.pack . show . pretty . AsBase58) (owTo ow)
+      writeOwn (owRepo ow) (owAs ow) parent fr
+        (ASet thr "assignee" value) "hub: assignee"
+
     redactIt rd = do
       (parent, fr) <- canonOf (rdRepo rd)
       writeOwn (rdRepo rd) (rdAs rd) parent fr
@@ -230,7 +267,7 @@ ownEntries = do
 -- delegate key are the same thirty-two bytes of base58.
 ownArgs :: forall c . IsContext c => [Syntax c] -> Maybe OwnArgs
 ownArgs syn = do
-  kvs   <- flagsAndSwitches ["--repo","--number","--note","--label","--as"]
+  kvs   <- flagsAndSwitches ["--repo","--number","--note","--label","--to","--as"]
                             ["--clear"] syn
   repo  <- flagOnce kvs "--repo" >>= asKey
   n     <- flagOnce kvs "--number" >>= flagWord
@@ -239,7 +276,8 @@ ownArgs syn = do
   ls    <- traverse (fmap Text.pack . flagText) (flagEvery kvs "--label")
   -- A switch, so it takes no value and cannot swallow the next word.
   clear <- flagSwitch kvs "--clear"
-  pure (OwnArgs repo n note ls clear as)
+  to    <- flagMaybe kvs "--to" asKey
+  pure (OwnArgs repo n note ls clear to as)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
 

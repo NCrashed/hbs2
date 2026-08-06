@@ -38,6 +38,7 @@ module HBS2.Hub.CLI.Read
   , statusOf
   , listArgs
   , labelsOf
+  , assigneeOf
   , codeNoSuchThread
   ) where
 
@@ -113,6 +114,19 @@ statusDoc = pretty . safeText . statusOf
 labelsOf :: ThreadState -> [Text]
 labelsOf = maybe [] decodeLabels . HM.lookup "labels" . tsAttrs
 
+-- | Who a thread is assigned to, when an owner has said so.
+--
+-- An ordinary LWW attribute like the status, and read like one. It holds a key
+-- in base58 because a person here is a key: a name would be a second identity
+-- with nothing behind it, and the fold has no notion of one.
+--
+-- Kept as TEXT rather than parsed back into a key, and that is the same
+-- decision 'statusDoc' records: an attribute value is a stranger's bytes,
+-- whatever a set event carried, and a reader that insisted on parsing it would
+-- show nothing at all for a thread whose canon says something else.
+assigneeOf :: ThreadState -> Maybe Text
+assigneeOf = HM.lookup "assignee" . tsAttrs
+
 -- | The threads of one kind, filtered, in the order PEP-22 prints them.
 --
 -- Sorted by number, and by thread id where a thread has none. A thread has no
@@ -164,6 +178,12 @@ showDoc t =
   , "blessed-by" <+> keyDoc (tsCanonBy t)
   , "created" <+> pretty (tsCreated t) <+> "updated" <+> pretty (tsUpdated t)
   ]
+  -- Only when there is one: an assignee is cleared by setting the attribute
+  -- to the empty string (last-writer-wins has no way to remove one), and a
+  -- line reading "assignee" with nothing after it says the opposite of what
+  -- canon holds.
+  <> [ "assignee" <+> pretty (safeText a)
+     | Just a <- [assigneeOf t], not (Text.null a) ]
   <> [ "labels" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
      | ls <- [labelsOf t], not (null ls) ]
   -- Said only when there is something to say, and said as a REQUEST: the

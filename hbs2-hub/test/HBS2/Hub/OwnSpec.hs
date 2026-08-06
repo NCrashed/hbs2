@@ -37,7 +37,7 @@ spec = do
 
     it "reads a complete call, in any order" $ do
       repo <- aKey
-      let want = Just (OwnArgs repo 7 (Just "done") [] False Nothing)
+      let want = Just (OwnArgs repo 7 (Just "done") [] False Nothing Nothing)
       ownArgs (argv ["--repo", b58 repo, "--number", "7", "--note", "done"])
         `shouldBe` want
       ownArgs (argv ["--note", "done", "--number", "7", "--repo", b58 repo])
@@ -98,6 +98,31 @@ spec = do
       fmap owNote (ownArgs (argv [ "--repo", b58 repo, "--number", "1"
                                  , "--note", "2026" ]))
         `shouldBe` Just (Just "2026")
+
+  describe "PEP-22 hub issue assign: arguments" $ do
+
+    it "reads a key to assign to" $ do
+      repo <- aKey ; bob <- aKey
+      fmap owTo (ownArgs (argv [ "--repo", b58 repo, "--number", "7"
+                               , "--to", b58 bob ]))
+        `shouldBe` Just (Just bob)
+
+    -- The attribute is last-writer-wins and there is no way to remove one, so
+    -- an empty value IS the absence. Saying it out loud is the same rule the
+    -- labels follow: an unassign because somebody forgot an argument would be
+    -- published into append-only canon.
+    it "tells unassigning from forgetting the key" $ do
+      repo <- aKey
+      let base = ["--repo", b58 repo, "--number", "7"]
+      fmap (\a -> (owTo a, owClear a)) (ownArgs (argv base))
+        `shouldBe` Just (Nothing, False)
+      fmap (\a -> (owTo a, owClear a)) (ownArgs (argv (base <> ["--clear"])))
+        `shouldBe` Just (Nothing, True)
+
+    it "refuses a --to that is not a key rather than ignoring it" $ do
+      repo <- aKey
+      ownArgs (argv ["--repo", b58 repo, "--number", "7", "--to", "bob"])
+        `shouldBe` Nothing
 
   describe "PEP-19 hub redact: arguments" $ do
 

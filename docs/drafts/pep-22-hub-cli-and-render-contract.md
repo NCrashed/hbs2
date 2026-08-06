@@ -36,7 +36,7 @@ Three layers and how data flows
 ```
 compose (Tier B)          read (any clone)          maintain / moderate (Tier A)
   hub issue new             hub issue|pr list/show     hub inbox / accept / merge
-  hub pr new/revise    -->  hub log / verify      <--  hub issue close/label/redact
+  hub pr new/revise    -->  hub log / verify      <--  hub issue close/label/assign
         |                        ^                          hub policy / block / ban
         v                        |                          hub maintainer / compact
    PEP-18 letter            render contract                     |
@@ -69,7 +69,7 @@ hub sync    [--remote <name>]       ; fetch code, canon and the staged proposals
                                    ;   used to spell the refspec with a plus: see
                                    ;   below. --remote defaults to origin
 hub issue list [query]             ; folded issues; query DSL below
-hub issue show <n|thread-id>       ; thread with comments, status, labels
+hub issue show <n|thread-id>       ; thread with comments, status, labels, assignee
 hub pr    list [query]
 hub pr    show  <n|thread-id>      ; PR thread + coordinates + diff
 hub pr    checkout --repo <key> --number <n> [--branch <name>]
@@ -439,14 +439,23 @@ hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]
 hub issue label --repo <key> --number <n> --label <l>... | --clear
                                    ; owner-signed set; REPLACES the labels, and the
                                    ;   empty set has to be said (--clear), not implied
+hub issue assign --repo <key> --number <n> --to <key> | --clear
+                                   ; owner-signed set on the assignee attribute: a
+                                   ;   KEY, since a person here is a key, and not a
+                                   ;   grant of anything (PEP-21 delegation grants)
 hub redact --repo <key> --event <event-id>
                                    ; display-level hide (PEP-19): canon keeps the bytes
 hub pr   merge <n> [--strategy ...]           ; verify, integrate, merge event (PEP-20)
 ```
 
-`assign` was listed here and is not built: it would be an owner-signed set of an
-`assignee` attribute, which the fold already carries as an ordinary attribute,
-and nothing but the verb is missing.
+`assign` writes the `assignee` attribute, which the fold has always carried as
+an ordinary attribute and which `hub issue show` now prints. Two things about
+it are worth stating because they are not obvious from the verb: the value is a
+KEY, since a person in this system is a key and a name would be a second
+identity with nothing behind it; and unassigning is the attribute set to the
+empty string, because last-writer-wins has no way to remove one. A reader shows
+nothing for that, and a line reading `assignee` with nothing after it would say
+the opposite of what canon holds.
 
 Every value is behind a flag because a repository key, a delegate key and an
 event-id are all thirty-two bytes of base58, so position cannot tell them apart

@@ -192,6 +192,7 @@ test-suite spec
                  , typed-process
                  , prettyprinter
                  , unix
+                 , unliftio
                  -- For planting a loose object git would not write: one whose
                  -- header announces a size its body does not have. See
                  -- 'lyingObject' in HBS2.Hub.GitRepoSpec.

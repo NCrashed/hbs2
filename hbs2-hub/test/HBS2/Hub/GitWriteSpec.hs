@@ -25,6 +25,7 @@ import HBS2.Prelude.Plated (Pretty(..))
 import HBS2.Net.Auth.Credentials
 
 import Control.Monad (void,(>=>))
+import UnliftIO.Async (mapConcurrently)
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort,isInfixOf)
@@ -99,7 +100,10 @@ anOpen alice owner sq title = do
   pure (ev, cw)
 
 spec :: Spec
-spec = do
+spec = spec1 >> spec2
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-19 canon writer against git" $ do
 
@@ -318,3 +322,74 @@ spec = do
         removeFile (hooks <> "/reference-transaction")
         head' <- Text.pack <$> git dir ["rev-parse", Text.unpack metaRef]
         head' `shouldBe` first'
+
+-- The property the CAS exists for, run as a race rather than as a sequence.
+--
+-- The sibling test above proves the check FIRES when the ref has already moved,
+-- which is the easy half: it is one process observing another's finished work.
+-- What it does not exercise is the window this build actually runs in -- two
+-- accepts holding the same parent, both committing, neither having seen the
+-- other -- and the whole reason canon is published with `update-ref <new>
+-- <old>` rather than `update-ref <new>` is that git takes the ref lock and one
+-- of them loses.
+--
+-- A LOST WRITE HERE IS A LOST EVENT, permanently: the loser's commit is written
+-- and unreferenced, so canon simply does not have the letter its maintainer
+-- accepted, and the mailbox path has already dropped it.
+spec2 :: Spec
+spec2 =
+  describe "PEP-19 canon writer: two accepts at once" $ do
+
+    it "lets exactly one of a crowd publish, and refuses the rest" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+
+        -- A parent both sides hold: the state a queue is triaged from.
+        (_, cw0) <- anOpen alice owner 1 "first"
+        parent <- commitOk dir Nothing cw0 1000
+
+        -- Eight events, each a valid next commit onto that parent, all minted
+        -- against the same canon. This is a queue with eight letters in it and
+        -- a maintainer accepting them in parallel.
+        plans <- mapM (\n -> snd <$> anOpen alice owner n ("racer " <> Text.pack (show n)))
+                      [2 .. 9]
+
+        rs <- mapConcurrently
+                (\cw -> withGitSinkIn (Just dir) $ \sk ->
+                          skCommit sk (CanonWrite (Just parent) (cwFiles cw) "canon" 2000))
+                plans
+
+        let won = [ c | Right c <- rs ]
+            moved = [ () | Left RefMoved{} <- rs ]
+
+        length won `shouldBe` 1
+        -- Every other one is refused as what it is, and not as a git error:
+        -- an accept that cannot tell "somebody else got there" from "git is
+        -- broken" retries the wrong one of them.
+        length moved `shouldBe` length plans - 1
+
+        -- And the ref holds the winner, which is the part a count would miss:
+        -- one success plus seven refusals is also what "the last writer wins
+        -- and the ref is somebody else's" looks like.
+        head' <- git dir ["rev-parse", "refs/hbs2/meta"]
+        [head'] `shouldBe` map Text.unpack won
+
+    -- The same shape with the parent nobody holds: every one of them believes
+    -- canon does not exist yet, which is the FIRST accept in a repository and
+    -- the case where a lost write loses the whole thread rather than one event.
+    it "lets exactly one of a crowd create canon" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+
+        plans <- mapM (\n -> snd <$> anOpen alice owner n ("first " <> Text.pack (show n)))
+                      [1 .. 8]
+
+        rs <- mapConcurrently
+                (\cw -> withGitSinkIn (Just dir) $ \sk ->
+                          skCommit sk (CanonWrite Nothing (cwFiles cw) "canon" 1000))
+                plans
+
+        length [ c | Right c <- rs ] `shouldBe` 1
+        length [ () | Left RefMoved{} <- rs ] `shouldBe` length plans - 1

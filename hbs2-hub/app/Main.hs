@@ -280,6 +280,7 @@ main = do
                     , "hub:maintainer:add", "hub:maintainer:remove"
                     , "hub:pr:merge", "hub:pr:checkout", "hub:sync"
                     , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
+                    , "hub:issue:assign"
                     , "hub:redact"
                     ] <> helpNames
 
