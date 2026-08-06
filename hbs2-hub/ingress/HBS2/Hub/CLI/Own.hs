@@ -33,6 +33,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
+                         , repoFlags,flagRepo,flagRepoMaybe
                          , flagSwitch,flagText,flagWord )
 import HBS2.Hub.CLI.Inbox (refuse)
 import HBS2.Hub.CLI.Read (codeNoSuchThread)
@@ -267,9 +268,9 @@ ownEntries = do
 -- delegate key are the same thirty-two bytes of base58.
 ownArgs :: forall c . IsContext c => [Syntax c] -> Maybe OwnArgs
 ownArgs syn = do
-  kvs   <- flagsAndSwitches ["--repo","--number","--note","--label","--to","--as"]
+  kvs   <- flagsAndSwitches (repoFlags <> ["--number","--note","--label","--to","--as"])
                             ["--clear"] syn
-  repo  <- flagOnce kvs "--repo" >>= asKey
+  repo  <- flagRepo asKey kvs
   n     <- flagOnce kvs "--number" >>= flagWord
   note  <- flagMaybe kvs "--note" (fmap Text.pack . flagText)
   as    <- flagMaybe kvs "--as" asKey
@@ -283,8 +284,8 @@ ownArgs syn = do
 
 redactArgs :: forall c . IsContext c => [Syntax c] -> Maybe RedactArgs
 redactArgs syn = do
-  kvs  <- flagsOf ["--repo","--event","--as"] syn
-  repo <- flagOnce kvs "--repo" >>= asKey
+  kvs  <- flagsOf (repoFlags <> ["--event","--as"]) syn
+  repo <- flagRepo asKey kvs
   e    <- flagOnce kvs "--event" >>= asHash
   as   <- flagMaybe kvs "--as" asKey
   pure (RedactArgs repo e as)

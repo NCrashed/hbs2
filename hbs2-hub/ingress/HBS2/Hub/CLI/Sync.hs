@@ -33,7 +33,7 @@ import HBS2.Hub.Compact (equivalentTo)
 import HBS2.Hub.Repo (readCanonAt,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle (syncFrom,takeCanon,Synced(..),SyncedCanon(..))
-import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
+import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse)
 import HBS2.Hub.CLI.Pr (codeBundleFailed)
 
@@ -250,9 +250,9 @@ data SyncArgs = SyncArgs
 
 syncArgs :: forall c . IsContext c => [Syntax c] -> Maybe SyncArgs
 syncArgs syn = do
-  kvs <- flagsOf ["--remote","--repo"] syn
+  kvs <- flagsOf (repoFlags <> ["--remote"]) syn
   -- Through 'flagText', so a remote somebody called 2026 is one. The shape git
   -- will accept is checked further in, by 'syncFrom'.
   r <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
-  repo <- flagMaybe kvs "--repo" (\case { SignPubKeyLike k -> Just k ; _ -> Nothing })
+  repo <- flagRepoMaybe (\case { SignPubKeyLike k -> Just k ; _ -> Nothing }) kvs
   pure (SyncArgs r repo)

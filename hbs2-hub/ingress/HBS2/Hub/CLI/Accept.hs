@@ -71,7 +71,7 @@ import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, manifestCode
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch)
+import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
@@ -597,12 +597,12 @@ acceptEntries = do
 -- type, so a swap is a well-typed accept against the wrong repository.
 acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe AcceptArgs
 acceptArgs syn = do
-  kvs  <- flagsAndSwitches ["--mailbox","--repo","--message","--as"] ["--keep"] syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"]) ["--keep"] syn
   -- Optional, unlike the repository: without it the manifest is read. A
   -- caller who names it is not asking to be corrected, so it wins and costs
   -- no lookup.
   mbox <- flagMaybe kvs "--mailbox" asKey
-  repo <- flagOnce kvs "--repo"    >>= asKey
+  repo <- flagRepo asKey kvs
   h    <- flagOnce kvs "--message" >>= asHash
   -- 'flagMaybe' and not a lookup that swallows a bad value: --as names the key
   -- this event is BLESSED with, and answering "not given" for "given, and not a

@@ -33,7 +33,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
 import HBS2.Hub.Ingress (PeerSilent(..))
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -155,10 +155,10 @@ rejectEntries = do
 -- Every value behind a flag, and the two keys are one type again.
 rejectArgs :: forall c . IsContext c => [Syntax c] -> Maybe Reject
 rejectArgs syn = do
-  kvs  <- flagsOf ["--mailbox","--message","--repo"] syn
+  kvs  <- flagsOf (repoFlags <> ["--mailbox","--message"]) syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
-  repo <- flagMaybe kvs "--repo" asKey
+  repo <- flagRepoMaybe asKey kvs
   pure (Reject mbox h repo)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

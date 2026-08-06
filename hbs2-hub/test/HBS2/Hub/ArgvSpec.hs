@@ -172,6 +172,7 @@ spec = do
 
   argvFlags
   argvSwitches
+  argvRepoFlag
 
   describe "PEP-22 argv: which words are the verb" $ do
 
@@ -321,3 +322,41 @@ argvSwitches =
     it "is still refused when this verb does not know it" $ do
       no (flagsAndSwitches ["--a"] [] (fmap argvAtom ["--a","1","--x"]))
         `shouldBe` True
+
+argvRepoFlag :: Spec
+argvRepoFlag =
+  -- One value under two names is what this replaced. The compose verbs took
+  -- --target and everything else took --repo, one noun apart, and both are
+  -- thirty-two bytes of base58 -- so a reader handed the sibling's spelling
+  -- could only answer with a usage message about a flag the caller had just
+  -- supplied.
+  describe "PEP-22 argv: the repository key, however it was spelled" $ do
+
+    let kvs ws = flagsOf (repoFlags <> ["--other"]) (fmap argvAtom ws)
+        readIt ws = kvs ws >>= flagRepo flagText
+        readMay ws = kvs ws >>= flagRepoMaybe flagText
+
+    it "reads the name every verb now prints" $ do
+      readIt ["--repo","K"] `shouldBe` Just "K"
+
+    -- The alias, which is here for the release in which somebody's script
+    -- still has it. When it goes, this test is what says so out loud.
+    it "still reads the name four verbs used to print" $ do
+      readIt ["--target","K"] `shouldBe` Just "K"
+
+    -- Two spellings of one value, so a line carrying both is a line somebody
+    -- edited half way. Choosing between them is the guess flagOnce refuses.
+    it "refuses both spellings at once, even when they agree" $ do
+      readIt ["--repo","K","--target","K"] `shouldBe` Nothing
+      readIt ["--repo","K","--target","OTHER"] `shouldBe` Nothing
+
+    it "refuses a repeat of either spelling" $ do
+      readIt ["--repo","K","--repo","K2"] `shouldBe` Nothing
+      readIt ["--target","K","--target","K2"] `shouldBe` Nothing
+
+    -- Absent and wrong are not the same answer where the flag is optional:
+    -- a verb whose --repo may be left out still has to refuse two of them.
+    it "tells absent from given-twice where the flag is optional" $ do
+      readMay ["--other","x"] `shouldBe` Just Nothing
+      readMay ["--repo","K"] `shouldBe` Just (Just "K")
+      readMay ["--repo","K","--target","K"] `shouldBe` Nothing

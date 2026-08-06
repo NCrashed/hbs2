@@ -196,7 +196,7 @@ spec = do
       titleOf (titled (mkList @C [mkStr @C "a"])) `shouldBe` Nothing
 
     it "says what it takes, and why the names are worth typing" $ do
-      shown issueUsage `shouldSatisfy` isInfixOf "usage: hub issue new --target"
+      shown issueUsage `shouldSatisfy` isInfixOf "usage: hub issue new --repo"
       -- The consequence, not a fragment of the sentence carrying it: the whole
       -- reason to prefer the flags is that a positional swap is signed and gone.
       shown issueUsage `shouldSatisfy` isInfixOf "claiming the wrong author"

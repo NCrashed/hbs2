@@ -48,7 +48,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
@@ -101,7 +101,7 @@ data PrNew = PrNew
 
 prNewUsage :: Doc ()
 prNewUsage =
-  "usage: hbs2-hub pr new --target <repo-key> --sender <sigil> --recipient <sigil>"
+  "usage: hbs2-hub pr new --repo <repo-key> --sender <sigil> --recipient <sigil>"
     <> line <> "       --author <key> --title <text> --onto <ref> --from <ref> [--base <sha>]"
 
 prEntries :: forall c m . ( IsContext c
@@ -114,7 +114,7 @@ prEntries :: forall c m . ( IsContext c
 prEntries = do
 
   brief "propose a change: bundle a range and send it as a Tier B letter"
-    $ args [ arg "string" "--target repo-key", arg "string" "--sender sender-sigil"
+    $ args [ arg "string" "--repo repo-key", arg "string" "--sender sender-sigil"
            , arg "string" "--recipient recipient-sigil", arg "string" "--author author-key"
            , arg "string" "--title title", arg "string" "--onto ref"
            , arg "string" "--from ref" ]
@@ -531,7 +531,7 @@ prEntries = do
 prNewArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrNew
 prNewArgs syn = do
   kvs    <- flagsOf knownFlags syn
-  repo   <- flagOnce kvs "--target"    >>= asKey
+  repo   <- flagRepo asKey kvs
   sender <- flagOnce kvs "--sender"    >>= asHash
   rcpt   <- flagMaybe kvs "--recipient" asHash
   author <- flagOnce kvs "--author"    >>= asKey
@@ -548,7 +548,7 @@ prNewArgs syn = do
     -- and ask no more, so `--title --onto refs/heads/master` bound the title
     -- `--onto` and signed it into the event-id, and `--dry-run` was dropped on
     -- the floor. Both guards live in 'flagsOf' now.
-    knownFlags = [ "--target","--sender","--recipient","--author"
+    knownFlags = repoFlags <> [ "--sender","--recipient","--author"
                  , "--title","--onto","--from","--base","--body" ]
 
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
@@ -564,7 +564,7 @@ prNewArgs syn = do
 -- the title is not named because a revision does not change one.
 data PrRevise = PrRevise
   { pvSender :: HashRef
-    -- | The hub's sigil. Absent: read it from --target's manifest.
+    -- | The hub's sigil. Absent: read it from --repo's manifest.
   , pvRcpt   :: Maybe HashRef
     -- | Where to send it, for addressing only.
     --
@@ -585,15 +585,15 @@ prReviseUsage :: Doc ()
 prReviseUsage =
   "usage: hbs2-hub pr revise --sender <sigil> --author <key> --thread <thread-id>"
     <> line <> "       --onto <ref> --from <ref> [--base <sha>]"
-    <> line <> "       and one of --recipient <sigil> | --target <repo-key>"
+    <> line <> "       and one of --recipient <sigil> | --repo <repo-key>"
 
 prReviseArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrRevise
 prReviseArgs syn = do
-  kvs    <- flagsOf [ "--sender","--recipient","--target","--author","--thread"
-                    , "--onto","--from","--base" ] syn
+  kvs    <- flagsOf (repoFlags <> [ "--sender","--recipient","--author","--thread"
+                                  , "--onto","--from","--base" ]) syn
   sender <- flagOnce kvs "--sender"    >>= asHash
   rcpt   <- flagMaybe kvs "--recipient" asHash
-  target <- flagMaybe kvs "--target" asKey
+  target <- flagRepoMaybe asKey kvs
   author <- flagOnce kvs "--author"    >>= asKey
   thread <- flagOnce kvs "--thread"    >>= asHash
   onto   <- flagOnce kvs "--onto"      >>= asText
@@ -630,8 +630,8 @@ prCheckoutUsage =
 
 prCheckoutArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrCheckout
 prCheckoutArgs syn = do
-  kvs    <- flagsOf ["--repo","--number","--branch"] syn
-  repo   <- flagOnce kvs "--repo" >>= asKey
+  kvs    <- flagsOf (repoFlags <> ["--number","--branch"]) syn
+  repo   <- flagRepo asKey kvs
   n      <- flagOnce kvs "--number" >>= flagWord
   branch <- flagMaybe kvs "--branch" asText
   pure (PrCheckout repo n branch)
@@ -668,8 +668,8 @@ codeNotMerged = 30
 
 prMergeArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrMerge
 prMergeArgs syn = do
-  kvs  <- flagsOf ["--repo","--number","--commit","--into","--as"] syn
-  repo <- flagOnce kvs "--repo"   >>= asKey
+  kvs  <- flagsOf (repoFlags <> ["--number","--commit","--into","--as"]) syn
+  repo <- flagRepo asKey kvs
   -- A number, non-negative AND small enough to be the one that was typed:
   -- 'flagWord' owns both ends. `--number 18446744073709551617` used to wrap to
   -- 1 and record a merge against a pull request nobody named.

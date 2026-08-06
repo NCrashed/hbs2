@@ -1,5 +1,36 @@
 # Unreleased
 
+## Changed
+
+  - **`hbs2-hub`: the repository key is spelled `--repo` everywhere.** It was
+    one value under two names, one noun apart: `hub pr new --target K` beside
+    `hub pr merge --repo K`. Both are thirty-two bytes of base58, so neither
+    reader could tell it had been handed its sibling's spelling -- what it
+    produced was a usage message about a flag the caller had just supplied.
+    `--target` also collided with a second meaning: `target` is a field inside
+    the signed author box (PEP-19), which is a different thing from the flag
+    that used to fill it.
+
+    `--target` STILL WORKS on every verb and is printed by none. It is a hidden
+    alias for one release, so a script written against the old spelling keeps
+    running; the comment on `repoFlags` is the reminder to take it out.
+
+    Giving both spellings at once is refused rather than resolved, even when
+    they agree: two spellings of one value on one line is a line somebody
+    edited half way, and picking one is the guess `flagOnce` exists to refuse.
+
+    Both readers are one function now (`flagRepo`, `flagRepoMaybe`), used by
+    every verb that takes a repository, rather than a `flagOnce kvs "--repo"`
+    per verb.
+
+  - **`hbs2-hub`: `hub issue new`'s usage no longer denies reading the
+    manifest it reads.** The text said `--recipient` could not be resolved from
+    `--target` because "this verb does not read" the repository's manifest,
+    while the verb has read it -- that is what makes `--recipient` optional and
+    what saves a contributor from finding a 44-character sigil hash before they
+    can file anything. The paragraph now says which flag is optional and what
+    happens when both are given.
+
 ## Security
 
   - **`hbs2-hub`: three places where one stranger chose how much work this node

@@ -43,7 +43,7 @@ import HBS2.Hub.Repo (readCanon,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch)
+import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -300,11 +300,11 @@ data UpdatesArgs = UpdatesArgs
 
 updatesArgs :: forall c . IsContext c => [Syntax c] -> Maybe UpdatesArgs
 updatesArgs syn = do
-  kvs  <- flagsAndSwitches ["--mailbox","--repo"] ["--all"] syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox"]) ["--all"] syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   -- Required, unlike everywhere else this flag appears: it is what an ack is
   -- checked against, and an unchecked ack is not worth printing.
-  repo <- flagOnce kvs "--repo" >>= asKey
+  repo <- flagRepo asKey kvs
   showAll <- flagSwitch kvs "--all"
   pure (UpdatesArgs mbox repo showAll)
   where

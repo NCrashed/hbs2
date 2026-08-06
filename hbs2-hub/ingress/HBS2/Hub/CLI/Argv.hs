@@ -13,6 +13,9 @@ module HBS2.Hub.CLI.Argv
   , flagSwitch
   , flagOnce
   , flagEvery
+  , repoFlags
+  , flagRepo
+  , flagRepoMaybe
   , flagMaybe
   , flagText
   , flagWord
@@ -250,6 +253,51 @@ flagsAndSwitches known switches syn = do
 flagOnce :: [(String, Syntax c)] -> String -> Maybe (Syntax c)
 flagOnce kvs k = case flagEvery kvs k of
   [v] -> Just v
+  _   -> Nothing
+
+-- | The name every verb spells the repository key with, and the one four of
+-- them used to.
+--
+-- ONE NAME, because it was one value under two: the compose verbs took
+-- @--target@ and everything else took @--repo@, one noun apart -- @hub pr new
+-- --target K@ beside @hub pr merge --repo K@. Both are thirty-two bytes of
+-- base58, so neither reader could tell it had been handed the other one's
+-- spelling; what it produced was a usage message about a flag the caller had
+-- just supplied under its sibling's name.
+--
+-- @--target@ still WORKS and is no longer printed. A verb's own help, its
+-- synopsis and its usage line all say @--repo@; the old spelling is here for
+-- the release in which somebody's script still has it, and this comment is the
+-- reminder to take it out afterwards. It also collided with a second meaning:
+-- @target@ is a field inside the signed author box (PEP-19), which is a
+-- different thing from the flag that used to fill it.
+--
+-- BOTH AT ONCE IS A REFUSAL, not a preference. They are two spellings of one
+-- value, so a line carrying both is a line somebody edited half way, and
+-- choosing between them is the guess 'flagOnce' exists to refuse.
+repoFlags :: [String]
+repoFlags = ["--repo", "--target"]
+
+-- | Read it, whichever way it was spelled.
+--
+-- 'Nothing' for absent, for repeated, for both spellings at once, and for a
+-- value that is not a key -- which is every way the caller can be wrong, and
+-- they are one answer here because the verb's usage says the same thing about
+-- all of them.
+flagRepo :: (Syntax c -> Maybe a) -> [(String, Syntax c)] -> Maybe a
+flagRepo asKey kvs = case concatMap (flagEvery kvs) repoFlags of
+  [v] -> asKey v
+  _   -> Nothing
+
+-- | The same, for a verb where the repository is optional.
+--
+-- 'Just Nothing' is "not given", 'Nothing' is "given wrongly", and the two are
+-- not the same answer: a verb whose @--repo@ is optional still has to refuse a
+-- line that names two of them.
+flagRepoMaybe :: (Syntax c -> Maybe a) -> [(String, Syntax c)] -> Maybe (Maybe a)
+flagRepoMaybe asKey kvs = case concatMap (flagEvery kvs) repoFlags of
+  []  -> Just Nothing
+  [v] -> Just <$> asKey v
   _   -> Nothing
 
 -- | Whether a valueless flag was given.

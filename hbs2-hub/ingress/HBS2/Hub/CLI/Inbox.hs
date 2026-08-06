@@ -45,7 +45,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -520,12 +520,12 @@ silent what = maybe (throwIO (PeerSilent what)) pure
 -- Exported and pure, like every other argument reader here.
 inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe (Maybe HubKey, Maybe HubKey)
 inboxArgs syn = do
-  kvs  <- flagsOf ["--mailbox","--repo"] syn
+  kvs  <- flagsOf (repoFlags <> ["--mailbox"]) syn
   -- BOTH optional here and not in the verb: a queue named by repository alone
   -- resolves its mailbox from the manifest, and one named by neither is a
   -- usage error the verb reports with its own words.
   mbox <- flagMaybe kvs "--mailbox" asKey
-  repo <- flagMaybe kvs "--repo" asKey
+  repo <- flagRepoMaybe asKey kvs
   pure (mbox, repo)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

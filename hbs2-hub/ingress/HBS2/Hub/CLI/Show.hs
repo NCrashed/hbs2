@@ -43,7 +43,7 @@ import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,utcOf
                           ,codeMailboxUnknown,codePeerSilent)
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -429,10 +429,10 @@ data ShowArgs = ShowArgs
 
 showArgs :: forall c . IsContext c => [Syntax c] -> Maybe ShowArgs
 showArgs syn = do
-  kvs  <- flagsOf ["--mailbox","--message","--repo"] syn
+  kvs  <- flagsOf (repoFlags <> ["--mailbox","--message"]) syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
-  repo <- flagMaybe kvs "--repo" asKey
+  repo <- flagRepoMaybe asKey kvs
   pure (ShowArgs mbox h repo)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

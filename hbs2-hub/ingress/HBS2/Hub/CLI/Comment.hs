@@ -29,7 +29,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
@@ -56,7 +56,7 @@ import System.Exit (die)
 data CommentArgs = CommentArgs
   { cmSender :: HashRef        -- ^ the contributor's sigil
     -- | The hub's sigil, which is what picks the mailbox. Absent: read it from
-    -- --target's manifest.
+    -- --repo's manifest.
   , cmRcpt   :: Maybe HashRef
     -- | Where to send it, for addressing only.
     --
@@ -82,7 +82,7 @@ commentUsage :: Doc ()
 commentUsage =
   "usage: hbs2-hub issue|pr comment --sender <sigil> --author <key>"
     <> line <> "       --thread <thread-id> [--reply-to <event-id>] --body <text> | --body -"
-    <> line <> "       and one of --recipient <sigil> | --target <repo-key>"
+    <> line <> "       and one of --recipient <sigil> | --repo <repo-key>"
 
 commentEntries :: forall c m . ( IsContext c
                                , MonadUnliftIO m
@@ -216,11 +216,11 @@ commentEntries = do
 -- else's thread.
 commentArgs :: forall c . IsContext c => [Syntax c] -> Maybe CommentArgs
 commentArgs syn = do
-  kvs    <- flagsOf ["--sender","--recipient","--target","--author","--thread"
-                    ,"--reply-to","--body"] syn
+  kvs    <- flagsOf (repoFlags <> ["--sender","--recipient","--author","--thread"
+                                  ,"--reply-to","--body"]) syn
   sender <- flagOnce kvs "--sender"    >>= asHash
   rcpt   <- flagMaybe kvs "--recipient" asHash
-  target <- flagMaybe kvs "--target" asKey
+  target <- flagRepoMaybe asKey kvs
   author <- flagOnce kvs "--author"    >>= asKey
   thread <- flagOnce kvs "--thread"    >>= asHash
   replyTo <- flagMaybe kvs "--reply-to" asHash

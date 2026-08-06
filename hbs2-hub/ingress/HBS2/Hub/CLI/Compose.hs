@@ -32,7 +32,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,saying,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
@@ -350,7 +350,7 @@ composeEntries :: forall c m . ( IsContext c
 composeEntries = do
 
   brief "open an issue: compose a Tier B letter and send it to a hub mailbox"
-    $ args [ arg "string" "--target repo-key"
+    $ args [ arg "string" "--repo repo-key"
            , arg "string" "--sender sender-sigil"
            , arg "string" "--recipient recipient-sigil"
            , arg "string" "--author author-key", arg "string" "--title title" ]
@@ -539,9 +539,9 @@ issueArgs = \case
     -- has and what each value must be.
     named ss = do
       kvs    <- flagsOf knownFlags ss
-      repo   <- flagOnce kvs "--target"    >>= signKey
+      repo   <- flagRepo signKey kvs
       sender <- flagOnce kvs "--sender"    >>= hashOf
-      -- Optional: without it the --target repository is asked what sigil it
+      -- Optional: without it the --repo repository is asked what sigil it
       -- publishes for its ingress mailbox (PEP-18). Named by hand it wins and
       -- costs no lookup.
       rcpt   <- flagMaybe kvs "--recipient" hashOf
@@ -566,7 +566,7 @@ issueArgs = \case
       body   <- flagMaybe kvs "--body" titleOf
       pure (repo, sender, rcpt, author, title, labels, body)
 
-    knownFlags = [ "--target","--sender","--recipient","--author","--title"
+    knownFlags = repoFlags <> [ "--sender","--recipient","--author","--title"
                  , "--label","--body" ]
 
     signKey = \case
@@ -579,7 +579,7 @@ issueArgs = \case
 
 -- | What this verb takes, in the words somebody typing it would use.
 issueUsage :: Doc ann
-issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
+issueUsage = "usage: hub issue new --repo <repo-key> --sender <sender-sigil>"
           <> line <> "                     --recipient <recipient-sigil>"
           <> line <> "                     --author <author-key> --title <title>"
           <> line <> "                     [--label <label>]..."
@@ -594,13 +594,17 @@ issueUsage = "usage: hub issue new --target <repo-key> --sender <sender-sigil>"
           <> line <> "  when a value begins with a dash: `--title --draft` is a"
           <> line <> "  missing title, not a title of `--draft`, and is refused."
           <> line
-          <> line <> "  --target and --recipient are NOT cross-checked, and cannot"
-          <> line <> "  be here: the sigil says which mailbox the letter lands in,"
-          <> line <> "  --target says which repository it is about, and resolving"
-          <> line <> "  one from the other needs that repository's manifest, which"
-          <> line <> "  this verb does not read. A letter naming one repo and sent"
-          <> line <> "  to another's hub is signed, delivered and then dropped at"
-          <> line <> "  fold time as WrongTarget, with no reply path to tell you."
+          <> line <> "  --recipient is OPTIONAL. Left out, the sigil is read from"
+          <> line <> "  --repo's own manifest, which is the whole reason a"
+          <> line <> "  contributor does not have to go and find a 44-character"
+          <> line <> "  hash before they can file anything."
+          <> line
+          <> line <> "  Given BOTH, they are not cross-checked: the sigil says"
+          <> line <> "  which mailbox the letter lands in, --repo says which"
+          <> line <> "  repository it is about, and nothing here makes them agree."
+          <> line <> "  A letter naming one repo and sent to another's hub is"
+          <> line <> "  signed, delivered and then dropped at fold time as"
+          <> line <> "  WrongTarget, with no reply path to tell you."
           <> line
           <> line <> "  --body <text>, or --body - to read it from stdin."
           <> line <> "  Prefer the named form: the two keys and the two sigils are"

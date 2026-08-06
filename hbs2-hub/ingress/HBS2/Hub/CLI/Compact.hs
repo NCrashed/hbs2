@@ -37,7 +37,7 @@ import HBS2.Hub.Fold (FoldResult(..),frMaxSeq)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch)
+import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse)
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -247,8 +247,8 @@ maxListed = 50
 -- | @--repo <key> [--dry-run]@.
 compactArgs :: forall c . IsContext c => [Syntax c] -> Maybe CompactArgs
 compactArgs syn = do
-  kvs  <- flagsAndSwitches ["--repo"] ["--dry-run"] syn
-  repo <- flagOnce kvs "--repo" >>= asKey
+  kvs  <- flagsAndSwitches repoFlags ["--dry-run"] syn
+  repo <- flagRepo asKey kvs
   dry  <- flagSwitch kvs "--dry-run"
   pure (CompactArgs repo dry)
   where
