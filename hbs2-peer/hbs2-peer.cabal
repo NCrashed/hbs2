@@ -169,6 +169,7 @@ library
       HBS2.Peer.Proto.Mailbox.Entry
       HBS2.Peer.Proto.Mailbox.Merge
       HBS2.Peer.Proto.Mailbox.Nonce
+      HBS2.Peer.Proto.Mailbox.Relayed
       HBS2.Peer.Proto.Mailbox.Ref
       HBS2.Peer.Proto.Mailbox.Policy
       HBS2.Peer.Proto.Mailbox.Policy.Basic
@@ -214,6 +215,7 @@ test-suite test
         MailboxMergedSpec
         MailboxQueue
         MailboxQueueSpec
+        MailboxRelayedSpec
         MessageParts
         HttpListen
         -- from app/: HttpListen exercises the config resolution the peer

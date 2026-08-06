@@ -50,12 +50,15 @@ instance Hashable MailboxEntry where
     Exists p r -> hashWithSalt salt (0x177c1a3ad45b678e :: Word64, serialise (p,r))
     Deleted p r -> hashWithSalt salt (0xac3196b4809ea027 :: Word64, serialise (p,r))
 
-data RoutedEntry = RoutedEntry HashRef
-                   deriving stock (Eq,Ord,Show,Generic)
-
+-- ЗДЕСЬ БЫЛ RoutedEntry, и он ушёл вслед за mergedMarker и по той же причине:
+-- «этот пир уже переслал такое сообщение» -- факт про процесс, а он выражался
+-- наличием блока по хешу, который считается из хеша сообщения, видного на
+-- проводе. Чужой мог подсадить такой блок пирам между отправителем и хабом, и
+-- письмо переставало пересылаться. Плюс блок никогда не удалялся. Память о
+-- пересылке теперь в "HBS2.Peer.Proto.Mailbox.Relayed", в процессе и с
+-- ограничением по числу.
 
 instance Serialise MailboxEntry
-instance Serialise RoutedEntry
 instance Serialise ProofOfDelete
 instance Serialise ProofOfExist
 

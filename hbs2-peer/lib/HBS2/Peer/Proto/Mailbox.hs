@@ -60,6 +60,19 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- every mailbox that has no policy from ever syncing.
   mailboxGetPolicyMay   :: forall m . MonadIO m => a -> MailboxRefKey s -> m (Maybe (AnyPolicy s))
 
+  -- | Should this peer put this message back on the wire now?
+  --
+  -- Test and set: 'True' the first time a hash is offered and 'False' ever
+  -- after, for as long as this peer remembers it. Gossip hands the same message
+  -- to every neighbour, so without this a message circulates for as long as the
+  -- graph has cycles.
+  --
+  -- It answers a question about THIS PROCESS, which is why it is a method here
+  -- rather than a lookup in the block store, where it used to live and where a
+  -- stranger could plant the answer. See
+  -- "HBS2.Peer.Proto.Mailbox.Relayed".
+  mailboxRelayOnce      :: forall m . MonadIO m => a -> HashRef -> m Bool
+
   -- | Is this nonce one we issued for this mailbox, recently?
   --
   -- The requester's half of the 'CheckMailbox' challenge-response. See
@@ -195,6 +208,7 @@ instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxGetPolicy (AnyMailboxAdapter a) = mailboxGetPolicy @s a
   mailboxGetPolicyMay (AnyMailboxAdapter a) = mailboxGetPolicyMay @s a
   mailboxCheckNonce (AnyMailboxAdapter a) = mailboxCheckNonce @s a
+  mailboxRelayOnce (AnyMailboxAdapter a) = mailboxRelayOnce @s a
   mailboxGetStorage (AnyMailboxAdapter a) = mailboxGetStorage @s a
   mailboxPoWFloor (AnyMailboxAdapter a) = mailboxPoWFloor @s a
   mailboxReplicateFrom (AnyMailboxAdapter a) = mailboxReplicateFrom @s a
@@ -242,12 +256,7 @@ mailboxProto inner adapter mess = deferred @p do
     -- общее и обязано остаться общим.
     let takeMessageWith relay origin msg content h = do
 
-          let routed = serialise (RoutedEntry h)
-          let routedHash = hashObject routed
-
-          seen <- hasBlock sto routedHash <&> isJust
-
-          -- Маркер гейтит ТОЛЬКО пересылку, и это исправление.
+          -- Отметка гейтит ТОЛЬКО пересылку, и это исправление.
           --
           -- Раньше он гейтил и приём тоже, а приём -- это очередь, за которой
           -- через десять секунд идёт policy. Порядок был такой: пишем маркер,
@@ -281,24 +290,33 @@ mailboxProto inner adapter mess = deferred @p do
           -- Теперь слабый штамп означает ровно «дальше не понесу»: письмо
           -- доходит до очереди, и решает его судьбу policy ящика, у которой
           -- есть настоящее D.
-          unless (seen || not relay) $ lift do
-            gossip mess
+          -- Спрашивается ПАМЯТЬ ПИРА, а не наличие блока, и спрашивается только
+          -- когда пересылать вообще собираемся -- иначе ветка, которая не
+          -- пересылает, съедала бы первое появление и гасила следующую копию.
+          --
+          -- Блок тут был вдвойне неправ. Его адрес считается из хеша сообщения,
+          -- то есть из величины, которую видно на проводе, а хранилище блоков
+          -- качает по запросу -- значит чужой мог подсадить отметку на пиров
+          -- между отправителем и хабом, и выбранное письмо переставало
+          -- пересылаться, молча. И он никогда не удалялся, что и был соседний
+          -- $class: leak. См. заголовок "HBS2.Peer.Proto.Mailbox.Relayed".
+          when relay do
+            fresh <- lift $ mailboxRelayOnce @s adapter h
 
-            -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
-            --   сейчас policy проверяется для почтового ящика,
-            --   а тут мы еще не знаем, какой почтовый ящик и есть
-            --   ли он вообще. надо бы не рассылать, если пира
-            --   не поддерживаем.
-            --
-            --   с другой стороны -- мы не поддерживаем, а другие,
-            --   может, поддерживают.
-            --
-            -- ЧАСТИЧНО ЗАКРЫТО для сообщений со штампом: у них есть, что
-            -- проверить до рассылки, не зная ящика, и это mailboxPoWFloor.
+            when fresh $ lift do
+              gossip mess
 
-            -- TODO: expire-block-and-collect-garbage
-            --   $class: leak
-            void $ putBlock sto routed
+              -- TODO: maybe-dont-gossip-message-if-dropped-by-policy
+              --   сейчас policy проверяется для почтового ящика,
+              --   а тут мы еще не знаем, какой почтовый ящик и есть
+              --   ли он вообще. надо бы не рассылать, если пира
+              --   не поддерживаем.
+              --
+              --   с другой стороны -- мы не поддерживаем, а другие,
+              --   может, поддерживают.
+              --
+              -- ЧАСТИЧНО ЗАКРЫТО для сообщений со штампом: у них есть, что
+              -- проверить до рассылки, не зная ящика, и это mailboxPoWFloor.
 
           lift do
             let whoever = if inner then Nothing else Just pip
@@ -594,16 +612,11 @@ mailboxProto inner adapter mess = deferred @p do
 
         let h = hashObject @HbSync (serialise mess) & HashRef
 
-        let routed = serialise (RoutedEntry h)
-        let routedHash = hashObject routed
+        -- Память пира, не блок: тот же разбор, что и у сообщения выше.
+        fresh <- lift $ mailboxRelayOnce @s adapter h
 
-        seen <- hasBlock sto routedHash <&> isJust
-
-        unless seen $ lift do
+        when fresh $ lift do
           gossip mess
-          -- TODO: expire-block-and-collect-garbage
-          --   $class: leak
-          void $ putBlock sto routed
 
         mailboxAcceptDelete adapter (MailboxRefKey mbox) spp box
 

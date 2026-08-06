@@ -16,6 +16,7 @@ import MailboxEntry (mailboxEntryTests)
 import MailboxPoW (mailboxPoWTests, mailboxConfigTests)
 import MailboxMergedSpec qualified
 import MailboxQueueSpec qualified
+import MailboxRelayedSpec qualified
 import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 
@@ -159,6 +160,7 @@ main = do
       , mailboxConfigTests
       , MailboxQueueSpec.tests
       , MailboxMergedSpec.tests
+      , MailboxRelayedSpec.tests
       ]
 
 

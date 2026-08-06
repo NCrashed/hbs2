@@ -35,6 +35,7 @@ import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Merge
 import HBS2.Peer.Proto.Mailbox.Nonce
+import HBS2.Peer.Proto.Mailbox.Relayed
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Peer.Proto.Mailbox.PoW
@@ -146,6 +147,11 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- 'MailboxStatus' is an answer to one of ours or it is somebody talking
     -- unprompted; see "HBS2.Peer.Proto.Mailbox.Nonce".
   , mpwCheckNonces        :: CheckNonces (MailboxRefKey s)
+    -- | What this peer has already put back on the wire, so that gossip does
+    -- not circulate a message for as long as the graph has cycles. In memory
+    -- and bounded by count; it used to be a block whose address a stranger
+    -- could compute, see "HBS2.Peer.Proto.Mailbox.Relayed".
+  , mpwRelayed            :: Relayed
     -- | Least proof-of-work this peer will forward, from
     -- 'hbs2MailboxPoWMinOpt'. A TVar because it is read from the config after
     -- the worker exists, the way the database and the probe are.
@@ -247,6 +253,8 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
   mailboxCheckNonce MailboxProtoWorker{..} mbox nonce =
     acceptCheckNonce mpwCheckNonces mbox nonce
+
+  mailboxRelayOnce MailboxProtoWorker{..} = relayOnce mpwRelayed
 
   mailboxPoWFloor MailboxProtoWorker{..} = readTVarIO mpwPoWFloor
 
@@ -878,6 +886,7 @@ createMailboxProtoWorker pc pe sto = do
   MailboxProtoWorker pe sto pc
     <$> newTVarIO mempty            -- mpwFetchQ
     <*> newCheckNonces
+    <*> newRelayed
     <*> newTVarIO 0                 -- mpwPoWFloor
     <*> newTVarIO mempty            -- mpwReplicateFrom
     <*> newTVarIO mempty            -- inMessageQueueSeen
@@ -1019,9 +1028,9 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             -- Уже в этом ящике -- дальше делать нечего.
             --
             -- Дешёвый ранний выход, и он то, что делает повторный приём
-            -- доступным по цене: маркер RoutedEntry больше не гейтит приём (см.
-            -- ветку SendMessage в HBS2.Peer.Proto.Mailbox), поэтому одно и то же
-            -- сообщение приходит сюда при каждой повторной рассылке. Дорогое
+            -- доступным по цене: отметка о пересылке больше не гейтит приём
+            -- (см. ветку SendMessage в HBS2.Peer.Proto.Mailbox), поэтому одно и
+            -- то же сообщение приходит сюда при каждой повторной рассылке. Дорогое
             -- ниже -- проверка подписи на каждого получателя и чтение с разбором
             -- policy без всякого кэша -- платится теперь только за сообщение,
             -- которого в ящике ещё нет.
