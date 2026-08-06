@@ -203,6 +203,7 @@ test-suite spec
                  , cryptohash-sha1
   other-modules:
       HBS2.Hub.AcceptSpec
+      HBS2.Hub.AckSpec
       HBS2.Hub.ArgvSpec
       HBS2.Hub.CommentSpec
       HBS2.Hub.CompactSpec

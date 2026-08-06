@@ -623,6 +623,15 @@ openLetterAs allowed (EnvelopeSigner envelopeSigner) md =
     -- key can send N letters naming a stranger's mailbox and the hub becomes a
     -- reflector, turning each into a maintainer-signed ack delivered to
     -- someone who asked for none of it.
+    --
+    -- ONLY THE KEY IS CHECKED HERE, and that is a limit of this function rather
+    -- than the whole of the rule. A channel is a key and a SIGIL HASH, and the
+    -- sigil is what actually addresses the message -- resolveKeys takes the
+    -- recipient's sign key out of the sigil's own signed box, not from the key
+    -- beside it. Deciding whether the sigil belongs to the key means reading
+    -- the sigil, which needs a storage, which this cannot have. So the other
+    -- half is 'HBS2.Hub.CLI.Ack.sigilNames', applied where the ack is sent, and
+    -- a channel arriving from here is vetted only as far as its key.
     vetted author = \case
       ReplyTo k sig | k == author, k == envelopeSigner -> ReplyTo k sig
       _                                                -> NoReply

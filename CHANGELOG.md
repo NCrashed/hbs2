@@ -43,8 +43,64 @@
     the two derivations that remain there (`existsEntryHash`,
     `deletedEntryHash`) are unchanged and still golden-tested: those are entry
     names in a replicated tree, which is what a content-addressed hash is
-    for. `RoutedEntry`, the gossip dedup marker, has the same shape and is
-    not addressed here.
+    for. `RoutedEntry`, the gossip dedup marker, had the same shape; the
+    entry below is that one.
+
+  - **`hbs2-peer`: the same trick stopped a chosen letter from being
+    forwarded.** "This peer has already relayed this" was the presence of a
+    block at `hashObject (serialise (RoutedEntry h))`, where `h` is the hash of
+    a message anybody reads off the wire. Same store, same on-demand fetch,
+    same plantable answer: put the marker on the peers between a sender and a
+    hub and the letter is never forwarded, with nothing said at any log level.
+    Weaker than the merge marker, which suppressed storage outright, and it
+    reaches the same end when the target has no other route.
+
+    Relay memory now lives in the process, in
+    `HBS2.Peer.Proto.Mailbox.Relayed`, behind a new `mailboxRelayOnce` on the
+    protocol adapter. It is a test-and-set in one transaction rather than a
+    lookup and a later write, which also closes the window in which two
+    handlers meeting one message both forwarded it.
+
+    It is BOUNDED BY COUNT, in two generations of 65536: entries go into the
+    young one, both are consulted, and a full young one ages into the old.
+    That is the second thing wrong with the block, which was never collected
+    and grew by one per distinct message forever (the `$class: leak` that
+    stood beside it). What the bound trades is that suppression is no longer
+    permanent: after a generation of distinct messages an old one presented
+    again is forwarded again. That buys a flooder nothing, since re-sending a
+    message they already hold costs exactly what sending a new one costs.
+
+    `RoutedEntry` is gone from `HBS2.Peer.Proto.Mailbox.Entry`. The wire
+    format is untouched: it was never on the wire, only in the store.
+
+  - **`hbs2-hub`: a letter could have the hub mail a stranger, signed by the
+    repository.** PEP-18 honours a reply channel only when it names the inner
+    author's own mailbox and the envelope signer is that same key. A channel is
+    a key AND A SIGIL HASH, and only the key was checked: `openLetterAs` is
+    pure and reading a sigil needs a storage, so the sigil rode through
+    untouched. `sendAck` then discarded the key entirely and handed the sigil
+    to the message layer, where `resolveKeys` takes BOTH the recipient's sign
+    key and its encryption key out of the sigil's own signed box.
+
+    So the field that was checked decided nothing and the field that decided
+    everything was not checked. A letter naming its own author and a victim's
+    published sigil passed, and every `hub inbox accept` of one sealed an
+    `AckRecord` to the victim's encryption key and delivered it to the victim's
+    mailbox, signed by the repository's canon key. One accepted letter, one
+    unsolicited message, from an address the victim cannot easily ban because
+    it is the repo's. That is the reflector PEP-18 describes and the comments
+    above both functions claimed was closed.
+
+    The sigil is now loaded and refused unless it names the key that asked, as
+    a new `AckWrongSigil`. Refusing is not a failure of the accept: by the time
+    an ack is attempted the event is in canon, so this is a notification that
+    did not happen. A sigil that cannot be READ is deliberately not a refusal
+    -- the block may simply not have arrived, and the send reports that on its
+    own; only a sigil that resolves to another key is turned away.
+
+    Both halves of the decision are exported functions with tests, which is the
+    other half of the fix: the rule had nowhere to be asked, and the test that
+    existed passed one constant sigil into every case.
 
   - **`hbs2-core`: two versions of an encrypted file went out under one
     keystream.** An encrypted tree derives its content key from the group
