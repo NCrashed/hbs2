@@ -44,7 +44,7 @@ spec = do
     it "reads a complete call, in any order" $ do
       author <- aKey
       let s = mh "sender" ; r = mh "rcpt" ; t = mh "thread"
-          want = Just (CommentArgs s r author t Nothing (Just "hi"))
+          want = Just (CommentArgs s (Just r) Nothing author t Nothing (Just "hi"))
       commentArgs (argv [ "--sender", href s, "--recipient", href r
                         , "--author", b58 author, "--thread", href t
                         , "--body", "hi" ])
@@ -62,25 +62,37 @@ spec = do
                                         , "--reply-to", href e, "--body", "hi" ]))
         `shouldBe` Just (Just e)
 
-    -- No repository flag exists and none should: a comment names a thread, the
-    -- thread names the repository, and a --target here would be a second
-    -- answer to a question the fold already answers.
-    it "refuses a repository flag, since a thread already names one" $ do
+    -- --target says WHERE to send it and never enters the letter: a comment
+    -- names a thread and carries no repository (PEP-18), and the fold binds it
+    -- to one through the thread. It is here because a sigil has to come from
+    -- somewhere and the manifest is keyed by repository.
+    it "takes a target for addressing, which is not part of the letter" $ do
+      author <- aKey ; repo <- aKey
+      let s = mh "sender" ; t = mh "thread"
+      fmap (\a -> (cmTarget a, cmRcpt a))
+           (commentArgs (argv [ "--sender", href s, "--target", b58 repo
+                              , "--author", b58 author, "--thread", href t
+                              , "--body", "hi" ]))
+        `shouldBe` Just (Just repo, Nothing)
+
+    -- Either names where it goes; neither is a letter with no address, which
+    -- the verb refuses rather than the reader.
+    it "parses with neither address, which the verb then refuses" $ do
       author <- aKey
-      let s = mh "sender" ; r = mh "rcpt" ; t = mh "thread"
-      commentArgs (argv [ "--sender", href s, "--recipient", href r
-                        , "--author", b58 author, "--thread", href t
-                        , "--target", b58 author, "--body", "hi" ])
-        `shouldBe` Nothing
+      let s = mh "sender" ; t = mh "thread"
+      fmap cmRcpt (commentArgs (argv [ "--sender", href s
+                                     , "--author", b58 author, "--thread", href t
+                                     , "--body", "hi" ]))
+        `shouldBe` Just Nothing
 
     it "refuses a call missing any of the four it needs" $ do
       author <- aKey
       let s = mh "sender" ; r = mh "rcpt" ; t = mh "thread"
           full = [ "--sender", href s, "--recipient", href r
                  , "--author", b58 author, "--thread", href t ]
-      -- Each flag dropped in turn, with its value.
+      -- The sender, the author and the thread are required; the recipient is
+      -- the one that may be resolved instead.
       commentArgs (argv (drop 2 full)) `shouldBe` Nothing
-      commentArgs (argv (take 2 full <> drop 4 full)) `shouldBe` Nothing
       commentArgs (argv (take 4 full <> drop 6 full)) `shouldBe` Nothing
       commentArgs (argv (take 6 full)) `shouldBe` Nothing
 

@@ -57,7 +57,7 @@ spec1 = do
     it "reads a complete call, in any order" $ do
       repo <- aKey ; author <- aKey
       let sender = aHash "sender" ; rcpt = aHash "rcpt"
-          want = Just (PrNew repo sender rcpt author "make it work"
+          want = Just (PrNew repo sender (Just rcpt) author "make it work"
                              "refs/heads/master" "refs/heads/feature" Nothing Nothing)
       prNewArgs (argv (full repo sender rcpt author)) `shouldBe` want
       -- The same call with the flag PAIRS in the opposite order, which is what
@@ -73,14 +73,23 @@ spec1 = do
       fmap pnBase (prNewArgs (argv (full repo sender rcpt author <> ["--base", base])))
         `shouldBe` Just (Just (Text.pack base))
 
-    it "refuses a call missing any of the seven" $ do
+    it "refuses a call missing any but the recipient" $ do
       repo <- aKey ; author <- aKey
       let sender = aHash "sender" ; rcpt = aHash "rcpt"
           whole = full repo sender rcpt author
-      -- Drop each flag and its value in turn. Every one of them is required,
-      -- and a form this verb cannot fill in must not be acted on: it signs.
+      -- Drop each flag and its value in turn. All of them are required except
+      -- the recipient sigil, which the target repository's manifest can supply
+      -- (PEP-18), and a form this verb cannot fill in must not be acted on: it
+      -- signs.
       sequence_ [ prNewArgs (argv (dropPair i whole)) `shouldBe` Nothing
-                | i <- [0, 2 .. length whole - 2] ]
+                | i <- [0, 2 .. length whole - 2]
+                , whole !! i /= "--recipient" ]
+      -- And the one exception, said as itself rather than left as a hole in the
+      -- loop above: dropping the recipient leaves a form the manifest can
+      -- finish.
+      let without = [ w | (i, w) <- zip [0 :: Int ..] whole
+                        , whole !! (2 * (i `div` 2)) /= "--recipient" ]
+      fmap pnRcpt (prNewArgs (argv without)) `shouldBe` Just Nothing
 
     it "refuses a repeated flag rather than resolving it" $ do
       repo <- aKey ; author <- aKey ; other <- aKey
@@ -229,7 +238,7 @@ spec3 =
       prReviseArgs (argv [ "--sender", show (pretty s), "--recipient", show (pretty r)
                          , "--author", b58 author, "--thread", show (pretty t)
                          , "--onto", "master", "--from", "fix" ])
-        `shouldBe` Just (PrRevise s r author t "master" "fix" Nothing)
+        `shouldBe` Just (PrRevise s (Just r) Nothing author t "master" "fix" Nothing)
 
     -- No --target and no --title, because ARevise carries neither: a revision
     -- changes coordinates, and the thread it names already says which
@@ -241,7 +250,6 @@ spec3 =
                  , "--author", b58 author, "--thread", show (pretty t)
                  , "--onto", "master", "--from", "fix" ]
       prReviseArgs (argv (full <> ["--title", "new title"])) `shouldBe` Nothing
-      prReviseArgs (argv (full <> ["--target", b58 author])) `shouldBe` Nothing
       prReviseArgs (argv (full <> ["--body", "why"])) `shouldBe` Nothing
 
     it "refuses a call with no thread, which is the whole difference from pr new" $ do
@@ -263,6 +271,25 @@ spec3 =
                                , "--base", "1234567" ]))
         `shouldBe` Just ("2026", Just "1234567")
 
+
+    -- A revision names a thread and no repository, so a sigil has to come from
+    -- somewhere: --target says where to SEND it and never enters the letter.
+    it "takes a target for addressing instead of a recipient" $ do
+      author <- aKey ; repo <- aKey
+      let s = aHash "sender" ; t = aHash "thread"
+      fmap (\p -> (pvRcpt p, pvTarget p))
+           (prReviseArgs (argv [ "--sender", show (pretty s), "--target", b58 repo
+                               , "--author", b58 author, "--thread", show (pretty t)
+                               , "--onto", "master", "--from", "fix" ]))
+        `shouldBe` Just (Nothing, Just repo)
+
+    it "parses with neither address, which the verb then refuses" $ do
+      author <- aKey
+      let s = aHash "sender" ; t = aHash "thread"
+      fmap pvRcpt (prReviseArgs (argv [ "--sender", show (pretty s)
+                                      , "--author", b58 author, "--thread", show (pretty t)
+                                      , "--onto", "master", "--from", "fix" ]))
+        `shouldBe` Just Nothing
 
 spec4 :: Spec
 spec4 =

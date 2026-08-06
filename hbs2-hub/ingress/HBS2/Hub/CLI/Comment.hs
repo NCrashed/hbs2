@@ -30,7 +30,8 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
@@ -39,6 +40,7 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Net.Auth.Credentials (_peerSignSk)
+import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -53,7 +55,17 @@ import System.Exit (die)
 -- | What one comment was asked to say, and to whom.
 data CommentArgs = CommentArgs
   { cmSender :: HashRef        -- ^ the contributor's sigil
-  , cmRcpt   :: HashRef        -- ^ the hub's sigil; this is what picks the mailbox
+    -- | The hub's sigil, which is what picks the mailbox. Absent: read it from
+    -- --target's manifest.
+  , cmRcpt   :: Maybe HashRef
+    -- | Where to send it, for addressing only.
+    --
+    -- A comment names a thread and carries no repository (PEP-18), and this
+    -- flag does not change that: it never enters the letter, and the fold binds
+    -- the comment to a repository through the thread as it always did. It is
+    -- here because the manifest is keyed by repository and a sigil has to come
+    -- from somewhere; one of it and --recipient has to be given.
+  , cmTarget :: Maybe RepoRef
   , cmAuthor :: HubKey         -- ^ the key that signs the inner box
   , cmThread :: ThreadId       -- ^ the thread being replied to
     -- | The event this answers, when it answers one in particular.
@@ -68,14 +80,15 @@ data CommentArgs = CommentArgs
 
 commentUsage :: Doc ()
 commentUsage =
-  "usage: hbs2-hub issue|pr comment --sender <sigil> --recipient <sigil>"
-    <> line <> "       --author <key> --thread <thread-id> [--reply-to <event-id>]"
-    <> line <> "       --body <text> | --body -"
+  "usage: hbs2-hub issue|pr comment --sender <sigil> --author <key>"
+    <> line <> "       --thread <thread-id> [--reply-to <event-id>] --body <text> | --body -"
+    <> line <> "       and one of --recipient <sigil> | --target <repo-key>"
 
 commentEntries :: forall c m . ( IsContext c
                                , MonadUnliftIO m
                                , HasStorage m
                                , HasClientAPI MailboxAPI UNIX m
+                               , HasClientAPI LWWRefAPI UNIX m
                                , Exception (BadFormException c)
                                ) => MakeDictM c m ()
 commentEntries = do
@@ -133,6 +146,16 @@ commentEntries = do
                                   <> "  " <> commentUsage ))
                         1
 
+      rcpt <- case (cmRcpt cm, cmTarget cm) of
+                (Just h, _) -> pure h
+                -- Named by hand it wins and costs no lookup; otherwise the
+                -- repository is asked what sigil it publishes (PEP-18).
+                (Nothing, Just repo) ->
+                  sigilFor Nothing repo
+                    >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
+                               pure
+                (Nothing, Nothing) -> liftIO (die (show commentUsage))
+
       creds <- runKeymanClientRO (loadCredentials (cmAuthor cm))
                  >>= maybe (liftIO (refuse (show ("no signing key here for"
                                                    <+> pretty (AsBase58 (cmAuthor cm))))
@@ -158,7 +181,7 @@ commentEntries = do
       let ob = Outbound sto api rpcTimeout
           box = signAuthor (cmAuthor cm) (_peerSignSk creds) content
 
-      h <- sendLetter ob (cmSender cm) [cmRcpt cm] box
+      h <- sendLetter ob (cmSender cm) [rcpt] box
              (ReplyTo (cmAuthor cm) (cmSender cm))
              `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
              `catch` (\(e :: NotStored)  -> liftIO (refuse (show e) codeNotStored))
@@ -193,17 +216,18 @@ commentEntries = do
 -- else's thread.
 commentArgs :: forall c . IsContext c => [Syntax c] -> Maybe CommentArgs
 commentArgs syn = do
-  kvs    <- flagsOf ["--sender","--recipient","--author","--thread"
+  kvs    <- flagsOf ["--sender","--recipient","--target","--author","--thread"
                     ,"--reply-to","--body"] syn
   sender <- flagOnce kvs "--sender"    >>= asHash
-  rcpt   <- flagOnce kvs "--recipient" >>= asHash
+  rcpt   <- flagMaybe kvs "--recipient" asHash
+  target <- flagMaybe kvs "--target" asKey
   author <- flagOnce kvs "--author"    >>= asKey
   thread <- flagOnce kvs "--thread"    >>= asHash
   replyTo <- flagMaybe kvs "--reply-to" asHash
   -- Through 'flagText', so a body that spells a number is one: `--body 2026`
   -- is a body, and a StringLike pattern misses it.
   body   <- flagMaybe kvs "--body" (fmap Text.pack . flagText)
-  pure (CommentArgs sender rcpt author thread replyTo body)
+  pure (CommentArgs sender rcpt target author thread replyTo body)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }

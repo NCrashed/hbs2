@@ -45,7 +45,7 @@ spec = do
           r = href "rcpt"
           argv = [ keyWord repo, word (pretty s), word (pretty r), keyWord author
                  , mkStr @C "a title" ]
-      issueArgs argv `shouldBe` Just (repo, s, r, author, "a title", [], Nothing)
+      issueArgs argv `shouldBe` Just (repo, s, Just r, author, "a title", [], Nothing)
 
     it "reads them by name, in any order" $ do
       -- The reason the named form exists: FOUR base58 blobs in a row, and two
@@ -68,7 +68,7 @@ spec = do
                      , mkStr @C "--recipient", word (pretty r)
                      , mkStr @C "--sender", word (pretty s)
                      , mkStr @C "--target", keyWord repo ]
-      issueArgs named `shouldBe` Just (repo, s, r, author, "a title", [], Nothing)
+      issueArgs named `shouldBe` Just (repo, s, Just r, author, "a title", [], Nothing)
       -- The property, rather than two examples of it: order carries no meaning
       -- in the named form, which is the whole point of having it.
       issueArgs shuffled `shouldBe` issueArgs named
@@ -139,7 +139,7 @@ spec = do
                      , mkStr @C ("--title=" <> t)
                      , mkStr @C "--label=bug" ]
       issueArgs (argvEq "a title")
-        `shouldBe` Just (repo, href "s", href "r", author, "a title", ["bug"], Nothing)
+        `shouldBe` Just (repo, href "s", Just (href "r"), author, "a title", ["bug"], Nothing)
       -- A value may hold an '=' of its own: the split is on the first one only.
       fmap (\(_,_,_,_,t,_,_) -> t) (issueArgs (argvEq "a=b")) `shouldBe` Just "a=b"
       -- And the dash case the refusal above makes necessary.

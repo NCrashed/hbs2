@@ -332,20 +332,24 @@ silently dropped:
     reader that refused a misnamed file would show less than canon holds and
     disagree with every other clone over a byte nobody signed.
 
-Contribute (Tier B letters, PEP-18; needs the target mailbox + a sigil):
+Contribute (Tier B letters, PEP-18; needs a repository or the sigil it declares):
 
 ```
-hub issue new  --target <repo> --title ... [--label ...] [--body <text>|-]
+hub issue new  --target <repo> --sender <sigil> --author <key> --title ...
+                                   ; [--recipient <sigil>] -- without it the target
+                                   ;   manifest says which sigil to seal to
 hub issue|pr comment --thread <thread-id> [--reply-to <event-id>] --body <text>|-
                                                ; one verb under two names: the op
-                                               ;   carries no kind, and no --target
-                                               ;   because the thread names the repo
+                                               ;   carries no kind. --target here is
+                                               ;   ADDRESSING only and never enters the
+                                               ;   letter; one of it and --recipient
 hub issue close|reopen|label <thread-id> ...   ; NOT BUILT: the request letter (PEP-18
                                                ;   carries the ops; no verb composes one)
 hub pr new     --target <repo> --onto master --from <ref>   ; builds a bundle (PEP-20)
 hub pr revise  --thread <thread-id> --onto <ref> --from <ref>
                                                ; author-of-record (PEP-20): new
-                                               ;   coordinates, no title and no body
+                                               ;   coordinates, no title and no body.
+                                               ;   --target addresses it, like comment
 hub updates    --mailbox <own-key> --repo <repo-key> [--all]
                                                ; read your own mailbox: the acks a
                                                ;   hub sent back, checked against that
@@ -365,6 +369,18 @@ letter claiming the wrong author, or a reply in a stranger's thread, and a
 signed box cannot be taken back. A comment with no body is refused rather than
 sent: the body is the whole content of the op, so an empty one spends a seq to
 say nothing.
+
+THE RECIPIENT SIGIL COMES FROM THE MANIFEST when it is not named. `hub issue
+new` and `hub pr new` already carry the target repository, so they ask it what
+sigil it publishes for its ingress mailbox (PEP-18 puts both clauses there for
+exactly this: a mailbox is addressed by a sign key, and a letter is sealed to an
+encryption key, and no service resolves one to the other).
+
+`comment` and `pr revise` carry no repository -- their ops name a thread, and
+the fold binds the thread to a repository -- so they take `--target` for
+ADDRESSING alone. It never enters the letter and changes nothing about the
+event; it says where to put the envelope. One of `--target` and `--recipient`
+has to be given, and a sigil named by hand wins and costs no lookup.
 
 `hub pr new`/`revise` default to the delta-artifact path: they build a git
 bundle `base..<ref>` and attach it (PEP-20), computing `base`/`source-tip`

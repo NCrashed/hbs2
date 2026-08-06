@@ -33,7 +33,8 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,saying)
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,saying,manifestCode)
+import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
 import HBS2.CLI.Prelude
@@ -46,6 +47,7 @@ import HBS2.Net.Auth.Credentials.Sigil (Sigil)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
 import HBS2.Peer.Proto.Mailbox.PoW (solveStamp)
+import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -342,6 +344,7 @@ composeEntries :: forall c m . ( IsContext c
                                , MonadUnliftIO m
                                , HasStorage m
                                , HasClientAPI MailboxAPI UNIX m
+                               , HasClientAPI LWWRefAPI UNIX m
                                , Exception (BadFormException c)
                                ) => MakeDictM c m ()
 composeEntries = do
@@ -372,9 +375,16 @@ composeEntries = do
              <> line <> "everywhere else (the inbox lists it, a folded event carries"
              <> line <> "it as its origin), and the event-id the thread will have." )
     $ entry $ bindMatch "hub:issue:new" \case
-        (issueArgs -> Just (repo, senderSigil, rcptSigil, author, title, labels, mbody)) -> lift do
+        (issueArgs -> Just (repo, senderSigil, mrcpt, author, title, labels, mbody)) -> lift do
 
           body <- liftIO (readBody mbody)
+
+          -- Where it goes, before anything is signed: a letter this node cannot
+          -- address is one it must not mint an event-id for.
+          rcptSigil <- sigilFor mrcpt repo
+                         >>= either (\e -> liftIO (refuse (show (pretty e))
+                                                          (manifestCode e)))
+                                    pure
 
           creds <- runKeymanClientRO (loadCredentials author)
                      >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -499,13 +509,13 @@ letterBody s = case Text.dropWhileEnd isSpace (Text.pack s) of
 -- a peer, a keyman or a dictionary.
 issueArgs :: forall c . IsContext c
           => [Syntax c]
-          -> Maybe (RepoRef, HashRef, HashRef, HubKey, String, [String], Maybe String)
+          -> Maybe (RepoRef, HashRef, Maybe HashRef, HubKey, String, [String], Maybe String)
 issueArgs = \case
   [ SignPubKeyLike repo, HashLike sender, HashLike rcpt
     , SignPubKeyLike author, (titleOf -> Just title) ] ->
       -- No labels positionally: a repeatable value has no position, and the
       -- positional form stays only because it is what exists.
-      Just (repo, sender, rcpt, author, title, [], Nothing)
+      Just (repo, sender, Just rcpt, author, title, [], Nothing)
   ss -> named ss
   where
     -- A title is TEXT, and a person is allowed to call an issue "2026".
@@ -531,7 +541,10 @@ issueArgs = \case
       kvs    <- flagsOf knownFlags ss
       repo   <- flagOnce kvs "--target"    >>= signKey
       sender <- flagOnce kvs "--sender"    >>= hashOf
-      rcpt   <- flagOnce kvs "--recipient" >>= hashOf
+      -- Optional: without it the --target repository is asked what sigil it
+      -- publishes for its ingress mailbox (PEP-18). Named by hand it wins and
+      -- costs no lookup.
+      rcpt   <- flagMaybe kvs "--recipient" hashOf
       author <- flagOnce kvs "--author"    >>= signKey
       title  <- flagOnce kvs "--title"     >>= titleOf
       -- Repeatable, unlike every other flag here, and so read with 'flagEvery'

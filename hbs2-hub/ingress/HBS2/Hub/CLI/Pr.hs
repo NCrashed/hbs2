@@ -50,7 +50,8 @@ import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Verify (codeOf)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent)
+import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
@@ -59,6 +60,7 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Net.Auth.Credentials
+import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -86,7 +88,8 @@ codeBundleFailed = 27
 data PrNew = PrNew
   { pnRepo   :: RepoRef
   , pnSender :: HashRef       -- ^ the contributor's sigil
-  , pnRcpt   :: HashRef       -- ^ the hub's sigil
+  -- | The hub's sigil. Absent: read it from the target repository's manifest.
+  , pnRcpt   :: Maybe HashRef
   , pnAuthor :: HubKey        -- ^ the key that signs the inner box
   , pnTitle  :: Text
   , pnOnto   :: Text          -- ^ the branch being proposed into
@@ -105,6 +108,7 @@ prEntries :: forall c m . ( IsContext c
                           , MonadUnliftIO m
                           , HasStorage m
                           , HasClientAPI MailboxAPI UNIX m
+                          , HasClientAPI LWWRefAPI UNIX m
                           , Exception (BadFormException c)
                           ) => MakeDictM c m ()
 prEntries = do
@@ -363,7 +367,12 @@ prEntries = do
 
       creds <- signingKey (pnAuthor pn)
 
-      (b, base, part) <- propose (pnAuthor pn) (pnSender pn) (pnRcpt pn)
+      -- Where it goes, resolved before the bundle is built: building one is
+      -- minutes of git on a large repository, and a letter this node cannot
+      -- address is not going to be sent.
+      rcpt <- addressed (pnRcpt pn) (pnRepo pn)
+
+      (b, base, part) <- propose (pnAuthor pn) (pnSender pn) rcpt
                                  (pnOnto pn) (pnFrom pn) (pnBase pn)
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
@@ -379,7 +388,7 @@ prEntries = do
 
       box <- sealed (pnAuthor pn) creds content
 
-      h <- send (pnAuthor pn) (pnSender pn) (pnRcpt pn) part box
+      h <- send (pnAuthor pn) (pnSender pn) rcpt part box
 
       recordSent Sent { seThread = authorBoxId box
                       , seEvent = authorBoxId box
@@ -407,7 +416,12 @@ prEntries = do
     prRevise pr = do
       creds <- signingKey (pvAuthor pr)
 
-      (b, base, part) <- propose (pvAuthor pr) (pvSender pr) (pvRcpt pr)
+      rcpt <- case (pvRcpt pr, pvTarget pr) of
+                (Just h, _) -> pure h
+                (Nothing, Just repo) -> addressed Nothing repo
+                (Nothing, Nothing) -> liftIO (die (show prReviseUsage))
+
+      (b, base, part) <- propose (pvAuthor pr) (pvSender pr) rcpt
                                  (pvOnto pr) (pvFrom pr) (pvBase pr)
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
@@ -417,7 +431,7 @@ prEntries = do
 
       box <- sealed (pvAuthor pr) creds content
 
-      h <- send (pvAuthor pr) (pvSender pr) (pvRcpt pr) part box
+      h <- send (pvAuthor pr) (pvSender pr) rcpt part box
 
       -- The THREAD is the one being revised and the event is this letter own
       -- id: on an open the two coincide, and here they must not, or an ack
@@ -476,6 +490,11 @@ prEntries = do
 
       pure (b, base, part)
 
+    -- The recipient sigil, named or read out of the manifest (PEP-18).
+    addressed mrcpt repo =
+      sigilFor mrcpt repo
+        >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e))) pure
+
     signingKey k =
       runKeymanClientRO (loadCredentials k)
         >>= maybe (liftIO (refuse (show ("no signing key here for"
@@ -514,7 +533,7 @@ prNewArgs syn = do
   kvs    <- flagsOf knownFlags syn
   repo   <- flagOnce kvs "--target"    >>= asKey
   sender <- flagOnce kvs "--sender"    >>= asHash
-  rcpt   <- flagOnce kvs "--recipient" >>= asHash
+  rcpt   <- flagMaybe kvs "--recipient" asHash
   author <- flagOnce kvs "--author"    >>= asKey
   title  <- flagOnce kvs "--title"     >>= asText
   onto   <- flagOnce kvs "--onto"      >>= asText
@@ -545,7 +564,15 @@ prNewArgs syn = do
 -- the title is not named because a revision does not change one.
 data PrRevise = PrRevise
   { pvSender :: HashRef
-  , pvRcpt   :: HashRef
+    -- | The hub's sigil. Absent: read it from --target's manifest.
+  , pvRcpt   :: Maybe HashRef
+    -- | Where to send it, for addressing only.
+    --
+    -- A revision names a thread and carries no repository (PEP-20), and this
+    -- flag does not change that: it never enters the letter. It is here because
+    -- the manifest is keyed by repository and a sigil has to come from
+    -- somewhere; one of it and --recipient has to be given.
+  , pvTarget :: Maybe RepoRef
   , pvAuthor :: HubKey       -- ^ must be the thread's author of record
   , pvThread :: ThreadId
   , pvOnto   :: Text
@@ -556,21 +583,23 @@ data PrRevise = PrRevise
 
 prReviseUsage :: Doc ()
 prReviseUsage =
-  "usage: hbs2-hub pr revise --sender <sigil> --recipient <sigil> --author <key>"
-    <> line <> "       --thread <thread-id> --onto <ref> --from <ref> [--base <sha>]"
+  "usage: hbs2-hub pr revise --sender <sigil> --author <key> --thread <thread-id>"
+    <> line <> "       --onto <ref> --from <ref> [--base <sha>]"
+    <> line <> "       and one of --recipient <sigil> | --target <repo-key>"
 
 prReviseArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrRevise
 prReviseArgs syn = do
-  kvs    <- flagsOf [ "--sender","--recipient","--author","--thread"
+  kvs    <- flagsOf [ "--sender","--recipient","--target","--author","--thread"
                     , "--onto","--from","--base" ] syn
   sender <- flagOnce kvs "--sender"    >>= asHash
-  rcpt   <- flagOnce kvs "--recipient" >>= asHash
+  rcpt   <- flagMaybe kvs "--recipient" asHash
+  target <- flagMaybe kvs "--target" asKey
   author <- flagOnce kvs "--author"    >>= asKey
   thread <- flagOnce kvs "--thread"    >>= asHash
   onto   <- flagOnce kvs "--onto"      >>= asText
   from   <- flagOnce kvs "--from"      >>= asText
   base   <- flagMaybe kvs "--base" asText
-  pure (PrRevise sender rcpt author thread onto from base)
+  pure (PrRevise sender rcpt target author thread onto from base)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }

@@ -24,6 +24,7 @@ module HBS2.Hub.Repo.Manifest
   , ManifestGone(..)
   , codeNoManifest
   , mailboxFor
+  , sigilFor
   , mailboxOf
   , sigilOf
   ) where
@@ -68,6 +69,10 @@ data ManifestGone =
     -- yet: PEP-18 makes the mailbox optional, so this is a state and not a
     -- fault.
   | ManifestNoMailbox RepoRef
+    -- | It declares a mailbox and no sigil for it. A letter cannot be sealed to
+    -- a sign key, so this is a mailbox nobody outside can write to: the owner
+    -- published half the pair.
+  | ManifestNoSigil RepoRef HubKey
   deriving stock (Eq,Show)
 
 instance Pretty ManifestGone where
@@ -87,6 +92,12 @@ instance Pretty ManifestGone where
       pretty (AsBase58 k) <+> "declares no ingress mailbox" <> line
         <> "  it may not be a forge, or its owner may not have published the"
         <+> "clause. Naming --mailbox skips the lookup."
+    ManifestNoSigil k mbox ->
+      pretty (AsBase58 k) <+> "declares mailbox" <+> pretty (AsBase58 mbox)
+        <+> "and no sigil for it" <> line
+        <> "  a letter is sealed to an encryption key and a mailbox key is not"
+        <+> "one, so nothing can be sent there until the owner publishes the"
+        <> line <> "  sigil clause. Naming --recipient skips the lookup."
 
 -- | And what a verb that has nowhere else to go should exit with.
 --
@@ -149,6 +160,31 @@ mailboxFor :: forall m . ( MonadUnliftIO m
 mailboxFor (Just k) _ = pure (Right k)
 mailboxFor Nothing repo =
   readManifest repo <&> (>>= maybe (Left (ManifestNoMailbox repo)) Right . mailboxOf)
+
+-- | The sigil a letter should be sealed to: the one it was given, or the one
+-- the repository publishes for its ingress mailbox.
+--
+-- The compose side of 'mailboxFor', and it needs both clauses: the mailbox
+-- clause says WHERE a letter goes and the sigil clause carries the encryption
+-- key it must be sealed with (PEP-18 puts both in the manifest for exactly this
+-- reason -- a sign key is not an encryption key and no service resolves one to
+-- the other).
+--
+-- A repository that declares a mailbox and no sigil for it is reported as
+-- 'ManifestNoSigil' rather than as having no mailbox: the two are different
+-- mistakes by the owner, and only one of them is "this is not a forge".
+sigilFor :: forall m . ( MonadUnliftIO m
+                       , HasStorage m
+                       , HasClientAPI LWWRefAPI UNIX m
+                       )
+         => Maybe HashRef -> RepoRef -> m (Either ManifestGone HashRef)
+sigilFor (Just h) _ = pure (Right h)
+sigilFor Nothing repo =
+  readManifest repo <&> \case
+    Left e -> Left e
+    Right mf -> case mailboxOf mf of
+      Nothing -> Left (ManifestNoMailbox repo)
+      Just mbox -> maybe (Left (ManifestNoSigil repo mbox)) Right (sigilOf mbox mf)
 
 -- | The ingress mailbox a repository declares, if it declares one.
 --
