@@ -14,6 +14,7 @@ module MailboxProtoWorker ( mailboxProtoWorker
 
 import HBS2.Prelude.Plated
 import MailboxConfig
+import MailboxMerged
 import MailboxQueue
 import HBS2.OrDie
 import HBS2.Actors.Peer
@@ -382,7 +383,7 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
           entry  = deletedEntry boxH what
           entryH = deletedEntryHash boxH what
 
-      merged <- hasBlock sto (mergedMarker mbox entryH) <&> isJust
+      merged <- isMerged dbe mbox entryH
 
       void $ ContT $ maybe1 (guard (not merged) :: Maybe ()) (alreadyMerged entryH)
 
@@ -943,7 +944,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
     inq <- ContT $ withAsync (mailboxInQ dbe)
 
-    mergeQ <- ContT $ withAsync mailboxMergeQ
+    mergeQ <- ContT $ withAsync (mailboxMergeQ dbe)
 
     mCheckQ <- ContT $ withAsync (mailboxCheckQ dbe)
 
@@ -951,7 +952,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
     pDownQ <- ContT $ withAsync (policyDownloadQ dbe)
 
-    sDownQ <- ContT $ withAsync stateDownloadQ
+    sDownQ <- ContT $ withAsync (stateDownloadQ dbe)
 
     bs <- ContT $ withAsync do
 
@@ -1027,13 +1028,18 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             --
             -- Хеш записи -- функция одного лишь сообщения, поэтому его можно
             -- посчитать, ничего не сохраняя. Сообщение, отвергнутое политикой,
-            -- не сохранялось, значит и маркера у него нет: оно пройдёт дальше и
+            -- не сохранялось, значит и отметки о нём нет: оно пройдёт дальше и
             -- получит ещё одну попытку, когда у ящика появится политика. Ровно
             -- то, ради чего приём и был отвязан от маркера.
-            let ha0     = HashRef (hashObject (serialise m))
-                mergedH = mergedMarker theMailbox (existsEntryHash ha0)
+            --
+            -- Спрашивается СТРОКА В БАЗЕ ящика, а не наличие блока. Раньше это
+            -- было наличие блока по хешу, который считается из публичных
+            -- величин, то есть чужой мог его подсадить и заткнуть выбранное
+            -- письмо навсегда. Почему так делать нельзя вообще -- в заголовке
+            -- "MailboxMerged".
+            let ha0 = HashRef (hashObject (serialise m))
 
-            merged <- hasBlock sto mergedH <&> isJust
+            merged <- isMerged dbe theMailbox (existsEntryHash ha0)
 
             when merged do
               debug $ "mailbox: already merged, skip" <+> pretty theMailbox <+> pretty ha0
@@ -1139,7 +1145,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             either (startDownloadStuff me) dontHandle (messageGK0 s)
 
 
-    mailboxMergeQ = do
+    mailboxMergeQ dbe = do
       let sto = mpwStorage
       -- FIXME: poll-timeout-hardcode?
       let mboxes = readTVarIO inMessageMergeQueue
@@ -1174,7 +1180,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
               Left{} -> do
                 -- here, but lame
                 err $ red "mailbox (invalid block)"
-                void $ putBlock sto (serialise (MergedEntry r th))
+                markMerged dbe r th
 
               -- maybe to something more sophisticated
               Right (Exists{}) -> lift $ S.yield th
@@ -1273,15 +1279,12 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           updateRef sto r nref
           debug $ yellow "mailbox updated" <+> pretty r <+> pretty nref
 
-        -- Маркеры пишутся ПОСЛЕ обновления ref и в обеих ветках. После -- потому
-        -- что маркер, переживший падение до updateRef, объявил бы влитым то,
+        -- Отметки пишутся ПОСЛЕ обновления ref и в обеих ветках. После -- потому
+        -- что отметка, пережившая падение до updateRef, объявила бы влитым то,
         -- чего в дереве нет. В обеих -- потому что в ветке без изменений записи
-        -- в дереве уже лежат, и маркер там правду и говорит; без него запись
+        -- в дереве уже лежат, и отметка там правду и говорит; без неё запись
         -- возвращалась бы сюда на каждом опросе.
-        for_ newTxProven $ \t -> do
-          -- FIXME: use-bloom-filter-or-something
-          --  $class: leak
-          putBlock sto (serialise (MergedEntry r t))
+        for_ newTxProven $ \t -> markMerged dbe r t
 
     policyDownloadQ dbe = do
 
@@ -1327,7 +1330,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
           atomically $ modifyTVar inPolicyDownloadQ (HM.delete pk)
 
-    stateDownloadQ = do
+    stateDownloadQ dbe = do
 
       let mail = readTVarIO inMailboxDownloadQ
                         <&> HM.toList
@@ -1374,14 +1377,13 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
               for_ hs $ \h -> void $ runMaybeT do
                 debug $ red ">>>" <+> "MERGE MAILBOX ENTRY" <+> pretty h
 
-                -- FIXME: invent-better-filter
-                --  $class: leak
-                let mergedEntry = serialise (MergedEntry mailboxRef h)
-                let mergedH = mergedMarker mailboxRef h
+                -- Строка в базе, а не блок в хранилище. Здесь это стоило
+                -- дороже всего: подсаженный блок затыкал и репликацию с
+                -- честного со-хоста, то есть последний путь, по которому
+                -- заткнутое сообщение могло доехать. См. "MailboxMerged".
+                already <- isMerged dbe mailboxRef h
 
-                already <- getBlock mpwStorage mergedH
-
-                when (isJust already) do
+                when already do
                   debug $ red "!!!" <+> "skip already merged tx" <+> pretty h
                   mzero
 
@@ -1426,7 +1428,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                         case mess of
                           Left{} -> do
                             warn $ "malformed message" <+> pretty w
-                            void $ putBlock mpwStorage mergedEntry
+                            markMerged dbe mailboxRef h
 
                           Right normal -> do
                             let checked = unboxSignedBox0 (messageContent normal)
@@ -1434,7 +1436,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                             case checked of
                               Nothing -> do
                                 warn $ "invalid signature for message" <+> pretty w
-                                void $ putBlock mpwStorage mergedEntry
+                                markMerged dbe mailboxRef h
 
                               Just (_, content) -> do
                                 -- A full queue is a FAILURE of this download,
@@ -1556,16 +1558,15 @@ mailboxStateEvolve readConf MailboxProtoWorker{..}  = do
                     )
            |]
 
+    mergedDDL
+
   atomically $ writeTVar mailboxDB (Just dbe)
 
   pure dbe
 
 
-instance ForMailbox s => ToField (MailboxRefKey s) where
-  toField (MailboxRefKey a) = toField (show $ pretty (AsBase58 a))
-
-instance ForMailbox s => FromField (MailboxRefKey s) where
-  fromField w = fromField @String w <&> fromString @(MailboxRefKey s)
+-- The 'MailboxRefKey' field instances live in "MailboxMerged", which is the
+-- other module keying rows by one. See the note there.
 
 instance FromField MailboxType where
   fromField w = fromField @String w <&> fromString @MailboxType

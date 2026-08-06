@@ -21,31 +21,12 @@ module MailboxEntry (mailboxEntryTests) where
 import HBS2.Hash
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.Mailbox.Entry
-import HBS2.Peer.Proto.Mailbox.Ref
-import HBS2.Net.Auth.Schema (CryptoScheme(..))
-import HBS2.Net.Proto.Types (CryptoAction(..),PubKey)
-import HBS2.Prelude.Plated (fromStringMay,pretty)
+import HBS2.Prelude.Plated (pretty)
 
 import Data.ByteString (ByteString)
-import Data.Maybe (fromMaybe)
 
 import Test.Tasty
 import Test.Tasty.HUnit
-
-type S = 'HBS2Basic
-
--- A fixed mailbox, so the goldens below are reproducible.
-mbox :: MailboxRefKey S
-mbox = MailboxRefKey key
-  where
-    key = fromMaybe (error "bad fixture key")
-            (fromStringMay @(PubKey 'Sign S) "BTThPdHKF8XnEq4m6wzbKHKA6geLFK4ydYhBXAqBdHSP")
-
-other :: MailboxRefKey S
-other = MailboxRefKey key
-  where
-    key = fromMaybe (error "bad fixture key")
-            (fromStringMay @(PubKey 'Sign S) "EJgvBg9bL2yKXk3GvZaYJgqpHy5kvpXdtEnAgoi4B5DN")
 
 mh :: ByteString -> HashRef
 mh = HashRef . hashObject
@@ -60,14 +41,11 @@ mailboxEntryTests = testGroup "mailbox entry derivations"
       assertBool "different messages, different entries"
         (existsEntryHash (mh "a") /= existsEntryHash (mh "b"))
 
-  , testCase "a merged marker names the mailbox as well as the entry" $ do
-      -- The same message in two mailboxes is two separate facts, and merging it
-      -- into one must not make the other look done.
-      let e = existsEntryHash (mh "a")
-      assertBool "two mailboxes, two markers" (mergedMarker mbox e /= mergedMarker other e)
-      assertBool "two entries, two markers"
-        (mergedMarker mbox e /= mergedMarker mbox (existsEntryHash (mh "b")))
-      mergedMarker mbox e @?= mergedMarker mbox e
+    -- The merged marker used to be derived here too, and is now a row in the
+    -- mailbox database. "MailboxMergedSpec" holds the same three facts about it
+    -- (two mailboxes are two facts, two entries are two facts, asking twice
+    -- answers the same), plus the one that made it move: a stranger cannot
+    -- write it.
 
   , testCase "a deleted-entry is a function of the proof and the target" $ do
       -- Both halves matter and for different reasons. The TARGET is what issue
@@ -94,8 +72,6 @@ mailboxEntryTests = testGroup "mailbox entry derivations"
       -- Nothing breaks loudly, which is exactly why it is pinned.
       show (pretty (existsEntryHash (mh "a")))
         @?= "FsRJKCQewTby4JUgy57tLtJVNvTdr15frMKZMod9Hpxy"
-      show (pretty (mergedMarker mbox (existsEntryHash (mh "a"))))
-        @?= "4APUBZi1KgcUjmf9T3Yybk6kTyR6JK8yGfpffX7uJXVp"
       show (pretty (deletedEntryHash (mh "proof") (mh "target")))
         @?= "BJh8zGhawTtCqx5GCCA5AVvK119vY3PaQcJpAmZZkN7"
   ]

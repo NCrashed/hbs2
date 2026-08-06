@@ -60,11 +60,6 @@ instance Serialise ProofOfDelete
 instance Serialise ProofOfExist
 
 
-data MergedEntry s = MergedEntry (MailboxRefKey s) HashRef
-                   deriving stock (Generic)
-
-instance ForMailbox s => Serialise (MergedEntry s)
-
 -- | Запись, которой ящик говорит «это сообщение у меня есть».
 --
 -- Функция ОДНОГО сообщения: доказательство пустое, поэтому хеш записи можно
@@ -91,14 +86,12 @@ deletedEntry proof = Deleted (ProofOfDelete (Just proof))
 deletedEntryHash :: HashRef -> HashRef -> HashRef
 deletedEntryHash proof = HashRef . hashObject . serialise . deletedEntry proof
 
--- | Маркер «эта запись уже влита в этот ящик».
---
--- Именованная функция, а не три отдельных выражения, ровно по той причине, по
--- которой рядом живут admitDeleted и enqueueMerge: маркер выводят и путь
--- слияния, и приём, и разойдись они хоть на байт -- ранний выход перестанет
--- срабатывать, и никто об этом не узнает, потому что молча делать лишнюю работу
--- не больно. Тест держит вывод на месте.
-mergedMarker :: ForMailbox s => MailboxRefKey s -> HashRef -> Hash HbSync
-mergedMarker mbox entry = hashObject (serialise (MergedEntry mbox entry))
+-- ЗДЕСЬ БЫЛ mergedMarker, и его здесь больше нет. «Эта запись уже влита в этот
+-- ящик» было наличием блока по хешу, который считался из mailbox key и хеша
+-- записи -- то есть из величин, публичных обеих. Хранилище блоков адресуется
+-- содержимым и качает по запросу, так что посчитать этот хеш и подсадить блок
+-- мог кто угодно, а дальше выбранное письмо не принималось никогда и молча.
+-- Отметка переехала в базу самого ящика; причины целиком -- в заголовке
+-- "MailboxMerged" (hbs2-peer/app).
 
 

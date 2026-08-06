@@ -210,6 +210,8 @@ test-suite test
         MailboxEntry
         MailboxPoW
         MailboxConfig
+        MailboxMerged
+        MailboxMergedSpec
         MailboxQueue
         MailboxQueueSpec
         MessageParts
@@ -230,6 +232,7 @@ test-suite test
         , bytestring
         , cache
         , containers
+        , db-pipe
         , directory
         , hashable
         , microlens-platform
@@ -309,6 +312,7 @@ executable hbs2-peer
                     , RefChanNotifyLog
                     , LWWRef
                     , MailboxConfig
+                    , MailboxMerged
                     , MailboxQueue
                     , MailboxProtoWorker
                     , Multicast

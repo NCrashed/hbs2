@@ -2,6 +2,50 @@
 
 ## Security
 
+  - **`hbs2-peer`: a stranger could suppress a chosen letter, permanently and
+    silently.** "This entry is already merged into this mailbox" was the
+    PRESENCE OF A BLOCK at `hashObject (serialise (MergedEntry mailbox
+    entry))`. Every input to that hash is public: the mailbox key is
+    announced, and the entry hash is derived from a message anybody sees on
+    gossip. The block store it lived in is content addressed and fetches on
+    demand, which makes it writable by whoever wants something in it.
+
+    So: compute the marker hash for a message you want gone, send the host a
+    `MailboxStatus` for that mailbox naming the marker hash as the tree root,
+    answer the resulting request with the seventy-five bytes that hash to it,
+    and `putBlock` keeps them because the hash matches. From that moment the
+    message is refused at the door on every delivery, at `debug` level, with
+    no rejection reaching the sender. Replication does not repair it: the
+    walk over an honest co-host's tree consults the same marker and skips the
+    same entry. One packet and one served block, per message, chosen by hash.
+
+    The mailbox had to be one this peer hosts, which is public, and the
+    attacker had to pass `policyAcceptPeer`, which by default and under the
+    documented open-inbox recipe allows everybody.
+
+    Merge state now lives in the mailbox's own SQLite, in a `merged` table
+    keyed by mailbox and entry. The general rule, since it outlives this one
+    marker: the presence of a block in a GLOBAL content-addressed store cannot
+    carry a LOCAL decision, because any path that fetches blocks on demand is
+    a path by which a stranger chooses what that store holds. State meaning
+    "we did this" belongs where only we write.
+
+    Upgrading costs work and not correctness. Existing markers are blocks and
+    this reads rows, so every entry already in a mailbox is processed once
+    more: one signature check apiece and one tree rebuild per mailbox, after
+    which the rows exist and the early exit is back. It cannot lose an entry,
+    because the merge unions the new set with what the tree already holds. The
+    orphaned marker blocks stay in the store as garbage, which is the
+    pre-existing `$class: leak` and not made worse.
+
+    `mergedMarker` and `MergedEntry` are gone from
+    `HBS2.Peer.Proto.Mailbox.Entry`. Nothing outside the peer used them, and
+    the two derivations that remain there (`existsEntryHash`,
+    `deletedEntryHash`) are unchanged and still golden-tested: those are entry
+    names in a replicated tree, which is what a content-addressed hash is
+    for. `RoutedEntry`, the gossip dedup marker, has the same shape and is
+    not addressed here.
+
   - **`hbs2-core`: two versions of an encrypted file went out under one
     keystream.** An encrypted tree derives its content key from the group
     secret and a nonce that is a hash of the payload's first megabyte, and
