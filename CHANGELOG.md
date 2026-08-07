@@ -2,6 +2,51 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: a noun was not a help topic.** The top-level help prints
+    verbs as `issue new` and `pr list`; the search behind `hub help <word>`
+    matched the raw dictionary keys, every one of which begins `hub:`. So the
+    spelling the help printed could never match the search the help
+    advertised, and `hbs2-hub help issue` -- the first thing anybody types --
+    answered that no such entry exists. It now tries this tool's own spelling
+    first and what was typed second: `help issue`, `help pr` and `help
+    maintainer` list their families, and `help print` still finds the builtin.
+    Ordering matters and is why it is written down: with the other order,
+    `help pr` answers with `print`, `println` and `proc:pipe`.
+
+  - **`hbs2-hub`: `hub help unban`, `unblock`, `issue reopen` and `maintainer
+    remove` described their siblings.** Each pair is built from one helper with
+    one `desc`, so the help for the second verb opened with a paragraph about
+    what the first one does and never said what the second does. Each now
+    leads with its own sentence.
+
+  - **`hbs2-hub`: `hub help block` denied that `hub ban` exists.** It ended
+    "keeping an author out of canon is the triage layer, which this build does
+    not have" -- while `hub ban` is in the same binary and in the same listing,
+    and `hub policy pow`'s help fifty lines away points at it. The wrong one
+    was on the verb a maintainer reaches for first, so somebody being spammed
+    would block the envelope key, watch the spammer rewrap, and conclude the
+    tool could not stop it.
+
+  - **`hbs2-hub`: `--flag=value` on the last three verbs that refused it.**
+    `ban list`, `maintainer list` and `policy show` matched their arguments by
+    hand, in one fixed order. They go through `flagsOf` now, like every other
+    verb and like the spelling `hub issue new`'s usage advertises to everybody.
+
+  - **`hbs2-hub`: `--version`, and two exit codes that were not what they said.**
+    There was no way to ask which build was answering, though the exit codes
+    are a documented contract that may be added to: `--version` and `version`
+    were both "unknown verb". `codeNothingToCompact` (42) was defined,
+    exported, documented as the thing a scheduled compaction tells from a
+    refusal, and returned by no path -- the verb printed and exited zero.
+    And `hub sync` exited 27 on a git failure, which is documented as
+    belonging to `hub pr new`: a number naming a command nobody ran. It has
+    its own now, shared with `hub publish`, since those two are the ends of one
+    wire.
+
+  - **`hbs2-hub`: an unknown verb named the word that was right.** `hub issue
+    nwe` reported `unknown verb: issue`, pointing at the half that is a verb
+    and saying nothing about the half that is not. It prints the whole line.
+
   - **`hbs2-hub`: `hub issue list` took a flag as a filter value.** It was the
     last argument reader in the package not going through `flagsOf`, and it had
     the hole the shared reader exists to close: its check looked at

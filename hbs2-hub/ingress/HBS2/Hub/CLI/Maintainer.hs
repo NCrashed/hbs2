@@ -23,6 +23,7 @@ module HBS2.Hub.CLI.Maintainer
   ( maintainerEntries
   , maintainerUsage
   , maintainerArgs
+  , maintainerListArgs
   , Maintainer(..)
   , maintainerDoc
   , codeNotDelegated
@@ -36,7 +37,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Inbox (refuse,saying)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -48,6 +49,7 @@ import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
+import Data.List qualified as List
 import System.Exit (die)
 
 -- | The event was not written, and canon is unchanged.
@@ -94,7 +96,7 @@ maintainerEntries = do
              <> line <> "delegated and not since revoked, and the owner is in it"
              <> line <> "by definition rather than by any event." )
     $ entry $ bindMatch "hub:maintainer:list" $ nil_ \case
-        [ StringLike "--repo", SignPubKeyLike repo ] -> lift do
+        (maintainerListArgs -> Just repo) -> lift do
           fr <- snd <$> canonOf repo
           liftIO (mapM_ print (maintainerDoc repo fr))
         _ -> liftIO (die (show maintainerUsage))
@@ -104,7 +106,11 @@ maintainerEntries = do
     writeVerb name what mk =
       brief what
         $ args [arg "string" "--repo repo-key", arg "string" "--key maintainer-key"]
-        $ desc ( "Writes an owner-signed event onto canon."
+        $ desc ( (if "add" `List.isInfixOf` show name
+                    then "Lets a key bless canon events for this repository."
+                    else "Stops a key blessing them. Past events stay admitted.")
+                 <> line
+                 <> line <> "Writes an owner-signed event onto canon."
                  <> line
                  <> line <> "THE OWNER KEY SIGNS IT, and there is no --as. PEP-19"
                  <> line <> "rule 5 requires both signatures on a delegation to be"
@@ -185,5 +191,11 @@ maintainerArgs syn = do
   repo <- flagOnce kvs "--repo" >>= asKey
   k    <- flagOnce kvs "--key"  >>= asKey
   pure (Maintainer repo k)
+  where
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+
+-- | @--repo <key>@, and nothing else. See 'HBS2.Hub.CLI.Ban.banListArgs'.
+maintainerListArgs :: forall c . IsContext c => [Syntax c] -> Maybe RepoRef
+maintainerListArgs syn = flagsOf repoFlags syn >>= flagRepo asKey
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

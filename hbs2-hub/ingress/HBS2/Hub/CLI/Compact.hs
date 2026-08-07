@@ -37,7 +37,7 @@ import HBS2.Hub.Fold (FoldResult(..),frMaxSeq)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Inbox (refuse,saying)
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
@@ -50,7 +50,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.List qualified as List
-import System.Exit (die,exitSuccess)
+import System.Exit (die,exitSuccess,exitWith,ExitCode(..))
 
 -- | Does the key named own the canon about to be rewritten?
 --
@@ -178,9 +178,16 @@ compactEntries = do
           keptIds = HS.fromList (fmap eventId (cpKeep c))
           held = [ (p, e) | (p, e) <- stEvents st, HS.member (eventId e) keptIds ]
 
+      -- WITH THE CODE IT IS DOCUMENTED TO EXIT WITH. This printed and exited
+      -- zero, so 'codeNothingToCompact' was defined, exported, described as the
+      -- thing a scheduled run tells from a refusal -- and returned by nothing.
+      -- A hook branching on 42 never fired, and one reading 0 as "a compaction
+      -- happened" was wrong every time canon had nothing superseded in it,
+      -- which is the ordinary state of a young forge and of a well-behaved old
+      -- one.
       when (List.null (cpDrop c)) $ liftIO do
         print ("nothing to compact: canon holds no superseded event" :: Doc ())
-        exitSuccess
+        exitWith (ExitFailure codeNothingToCompact)
 
       liftIO $ mapM_ print (compactDoc (stCommit st) c)
 

@@ -152,6 +152,8 @@ executable hbs2-hub
     import:           shared-properties
     hs-source-dirs:   app
     main-is:          Main.hs
+    other-modules:    Paths_hbs2_hub
+    autogen-modules:  Paths_hbs2_hub
     ghc-options:
         -threaded
         -rtsopts

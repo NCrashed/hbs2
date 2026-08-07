@@ -26,6 +26,7 @@ module HBS2.Hub.CLI.Sync
   , SyncArgs(..)
   , syncArgs
   , codeDiverged
+  , codeSyncFailed
   ) where
 
 import HBS2.Hub.Types (RepoRef,safeText)
@@ -35,7 +36,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle (syncFrom,takeCanon,Synced(..),SyncedCanon(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse)
-import HBS2.Hub.CLI.Pr (codeBundleFailed)
+import HBS2.Hub.CLI.Publish (codePublishFailed)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -50,6 +51,16 @@ import System.Exit (die,exitWith,ExitCode(..))
 -- else this verb does either succeeded or failed as a git command. A script
 -- that treats it as a failure to retry will retry forever, and one that treats
 -- it as success will fold a canon that is missing what this clone holds.
+-- | git would not run, would not answer, or refused.
+--
+-- Its OWN code, and it used to be `pr new`'s. A fetch that failed exited 27,
+-- documented as "git would not build the bundle or would not answer (hub pr
+-- new)" -- a number naming a command nobody had run, on a verb that builds no
+-- bundle. It is the same value `hub publish` uses for the same thing, since
+-- they are the two ends of one wire and a git failure on either is one event.
+codeSyncFailed :: Int
+codeSyncFailed = codePublishFailed
+
 codeDiverged :: Int
 codeDiverged = 40
 
@@ -91,7 +102,7 @@ syncEntries = do
       let remote = fromMaybe "origin" (saRemote sa)
 
       r <- syncFrom Nothing remote
-             >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
+             >>= either (\e -> liftIO (refuse (show (pretty e)) codeSyncFailed)) pure
 
       -- A divergence is where a rewrite and a fork look alike, and folding both
       -- is what tells them apart. Only with a repository key: the owner key is

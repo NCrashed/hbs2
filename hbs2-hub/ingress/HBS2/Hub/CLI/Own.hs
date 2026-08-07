@@ -163,7 +163,11 @@ ownEntries = do
       brief what
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
                , arg "string" "--note text" ]
-        $ desc ( "Writes an owner-signed event onto canon. The status follows"
+        $ desc ( (if "close" `List.isInfixOf` show name
+                    then "Marks a thread closed."
+                    else "Marks a closed thread open again.")
+                 <> line
+                 <> line <> "Writes an owner-signed event onto canon. The status follows"
                  <> line <> "from the op itself (PEP-19), so no separate set is"
                  <> line <> "written and none should be: canon would claim the"
                  <> line <> "thread was open until the second event arrived."

@@ -33,9 +33,12 @@ import Data.Config.Suckless.Script.File qualified as SF
 
 import Data.HashMap.Strict qualified as HM
 import Data.List (isPrefixOf,sort)
+import Data.List qualified as List
 import Data.Text qualified as Text
 
 import System.Environment
+import Data.Version (showVersion)
+import Paths_hbs2_hub qualified as Version
 import System.Exit (die)
 import GHC.IO.Encoding qualified as Enc
 import System.IO qualified as IO
@@ -211,6 +214,16 @@ main = do
     -- is not taken here.
     ([], _) -> hubHelp dict
 
+    -- WHICH BUILD THIS IS, before anything else looks at the word.
+    --
+    -- The exit codes are a contract this tool documents and says may be added
+    -- to, and a script had no way to ask which contract it was talking to:
+    -- `--version` and `version` were both "unknown verb". Handled here rather
+    -- than as a dictionary entry so that it cannot be shadowed and needs no
+    -- peer, no repository and no arguments.
+    (w:_, _) | w `elem` ["--version","-V","version"] ->
+      putStrLn ("hbs2-hub " <> showVersion Version.version)
+
     -- Arguments that name nothing. Distinguished from the empty case, which it
     -- used to share: falling into the stdin branch made a typo exit zero after
     -- printing the help, and on a terminal or in a pipeline it waited for input
@@ -219,8 +232,14 @@ main = do
     -- argv is a stranger's bytes on the one path where nothing has looked at it
     -- yet: a verb with an ESC in it went straight to the terminal, and a verb
     -- with a newline and a plausible second line forged the advice under it.
-    (w:_, Nothing) -> die ( "unknown verb: " <> Text.unpack (safeText (Text.pack w))
-                              <> "\ntry: hbs2-hub --help" )
+    -- THE WHOLE LINE, not its first word. `hub issue nwe` reported
+    -- "unknown verb: issue", naming a word that IS a verb and saying nothing
+    -- about the one that is not, so the reader looks at the half that was
+    -- right.
+    -- THROUGH safeText, like every other stranger's bytes this program prints.
+    (ws, Nothing) -> die ( "unknown verb: "
+                             <> unwords [ Text.unpack (safeText (Text.pack w)) | w <- ws ]
+                             <> "\ntry: hbs2-hub --help" )
 
     -- recover is what probes for the peer socket and builds the RPC clients;
     -- without it every verb that talks to hbs2-peer fails as "not connected".
@@ -237,16 +256,41 @@ main = do
     -- an empty line. It is a prefix match on NAMES, not a search of the
     -- descriptions, which is worth being honest about: `--help mailbox` finds
     -- nothing though the mailbox verb is the one thing this tool is for.
-    found dict s = do
-      let named (Id t) = Text.unpack t
-      case sort [ n | k <- HM.keys dict, let n = named k, s `isPrefixOf` n ] of
+    found dict s =
+      -- A NOUN IS A HELP TOPIC, and it was the one thing that was not.
+      --
+      -- The top-level help prints verbs with the `hub:` stripped and the colons
+      -- turned into spaces -- `issue new`, `pr list` -- and this matched the
+      -- RAW dictionary keys, every one of which begins `hub:`. So the spelling
+      -- the help printed could never match the search the help advertised, and
+      -- `hbs2-hub help issue`, which is the first thing anybody types, answered
+      -- that no such entry exists. The comment beside the prefixing claimed the
+      -- two spellings could not drift because both go through `verbOf`; that is
+      -- true of a two-word verb and false of a bare noun, which is exactly the
+      -- case a person reaches first.
+      --
+      -- THIS TOOL'S OWN VERBS FIRST, then whatever else the dictionary holds.
+      -- Both, because this is also the search over the inherited builtins,
+      -- which carry no prefix at all; in that order, because `hub help pr`
+      -- otherwise answers with `print`, `println` and `proc:pipe` -- a bare
+      -- prefix match against a dictionary of two hundred builtins, on the noun
+      -- somebody typed to read about pull requests.
+      case [ p | p <- ["hub:" <> fmap colonise s, s], not (List.null (matching dict p)) ] of
+        (p:_) -> helpList False (Just p)
         -- On stderr and non-zero, like the unknown-verb branch thirty lines up.
         -- This printed the miss on STDOUT and exited 0, so `hub help "$v" || die`
         -- learned nothing and the diagnostic landed in the stream a caller was
         -- capturing as output.
-        [] -> liftIO $ refuse ("no entry name starts with " <> show s
-                                 <> " (this matches names, not descriptions)") 1
-        _  -> helpList False (Just s)
+        []    -> liftIO $ refuse ("no entry name starts with " <> show s
+                                    <> " (this matches names, not descriptions)") 1
+
+    -- The spelling the top-level help prints, back into the one the dictionary
+    -- holds: `issue new` is `hub:issue:new`.
+    colonise c = if c == ' ' then ':' else c
+
+    matching dict s =
+      let named (Id t) = Text.unpack t
+      in sort [ n | k <- HM.keys dict, let n = named k, s `isPrefixOf` n ]
 
     -- A dictionary name back to the word a user typed, so that `help` can route
     -- its argument through the same verbOf the command line does.

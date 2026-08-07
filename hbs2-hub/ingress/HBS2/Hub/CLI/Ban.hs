@@ -21,13 +21,14 @@
 module HBS2.Hub.CLI.Ban
   ( banEntries
   , banUsage
+  , banListArgs
   , banArgs
   , BanArgs(..)
   ) where
 
-import HBS2.Hub.Types (HubKey)
+import HBS2.Hub.Types (HubKey,RepoRef)
 import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Inbox (refuse)
 
 import HBS2.CLI.Prelude
@@ -74,7 +75,7 @@ banEntries = do
              <> line <> "author-content op and an admission rule, so two hubs"
              <> line <> "serving one repository may disagree about this list." )
     $ entry $ bindMatch "hub:ban:list" $ nil_ \case
-        [ StringLike "--repo", SignPubKeyLike repo ] -> lift do
+        (banListArgs -> Just repo) -> lift do
           bans <- readBans repo
           liftIO $ if HS.null bans
             then print ("nobody is banned here" :: Doc ())
@@ -88,7 +89,13 @@ banEntries = do
     banVerb name ban what =
       brief what
         $ args [arg "string" "--repo repo-key", arg "string" "--key author-key"]
-        $ desc ( "The INNER AUTHOR key, not the envelope. It is the identity"
+        -- The sibling's own sentence first. Both verbs shared one description
+        -- verbatim, so `hub help unban` opened with a paragraph about what a
+        -- ban is and never said what unbanning does.
+        $ desc ( (if ban then "Adds a key to this repository's deny-list."
+                         else "Takes a key off this repository's deny-list.")
+                 <> line
+                 <> line <> "The INNER AUTHOR key, not the envelope. It is the identity"
                  <> line <> "inside the signed box, so it survives a rewrap, which"
                  <> line <> "is what makes this the authoritative deny for canon."
                  <> line
@@ -134,5 +141,17 @@ banArgs syn = do
   repo <- flagOnce kvs "--repo" >>= asKey
   k    <- flagMaybe kvs "--key" asKey
   pure (BanArgs repo k)
+  where
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+
+-- | @--repo <key>@, and nothing else.
+--
+-- Its own reader rather than an inline pattern, for the reason every other verb
+-- here has one: a hand-matched @[StringLike "--repo", SignPubKeyLike k]@ takes
+-- the two words in that order and refuses everything else, including
+-- @--repo=<key>@ -- which 'issueUsage' tells every user is accepted and which
+-- five verbs, this among them, did not take.
+banListArgs :: forall c . IsContext c => [Syntax c] -> Maybe RepoRef
+banListArgs syn = flagsOf repoFlags syn >>= flagRepo asKey
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

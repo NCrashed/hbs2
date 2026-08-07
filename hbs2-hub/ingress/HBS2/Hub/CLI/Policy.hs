@@ -7,7 +7,8 @@
 -- what this peer STORES and relays. It does not bound what enters canon: a
 -- rewrapper re-sends somebody else's inner box under a fresh envelope, and the
 -- peer sees a key it has never denied. Banning an author for canon is the
--- triage layer, and this build does not have it yet.
+-- triage layer, and it is @hub ban@ ("HBS2.Hub.CLI.Ban"): it denies the key
+-- INSIDE the signed box, which a rewrap cannot change. A full stop is both.
 --
 -- ORDER IS IMPOSED on the file this writes. 'getAsSyntax' renders a policy
 -- from two HashMaps, so its clause order is hash order: rendering one policy
@@ -23,6 +24,7 @@ module HBS2.Hub.CLI.Policy
   ( policyEntries
   , policyUsage
   , policyArgs
+  , policyShowArgs
   , PolicyArgs(..)
   , denying
   , withPoW
@@ -278,7 +280,7 @@ policyEntries = do
              <> line <> "A mailbox with no policy is deny-all by default, which"
              <> line <> "is reported as such rather than as an empty policy." )
     $ entry $ bindMatch "hub:policy:show" $ nil_ \case
-        [ StringLike "--mailbox", SignPubKeyLike mbox ] -> lift do
+        (policyShowArgs -> Just mbox) -> lift do
           currentPolicy mbox >>= \case
             -- Said as the state it is, rather than as the deny/deny this used
             -- to print. Both halves matter to an operator deciding what to do
@@ -352,7 +354,12 @@ policyEntries = do
     denyVerb name deny what =
       brief what
         $ args [arg "string" "--mailbox mailbox-key", arg "string" "--key envelope-key"]
-        $ desc ( "Rewrites the mailbox's policy with one clause added or"
+        -- Each sibling's own sentence first: one shared description meant
+        -- `hub help unblock` never said what unblocking does.
+        $ desc ( (if deny then "Denies an envelope key at this mailbox."
+                          else "Removes a deny clause, restoring the default.")
+                 <> line
+                 <> line <> "Rewrites the mailbox's policy with one clause added or"
                  <> line <> "removed, under the next version. Re-running it when"
                  <> line <> "nothing would change writes nothing: a version bump"
                  <> line <> "republishes the file to every peer holding the mailbox."
@@ -361,9 +368,10 @@ policyEntries = do
                  <> line <> "what this peer stores, and it is evadable: anyone"
                  <> line <> "holding a decrypted letter can re-send it under a"
                  <> line <> "fresh envelope, and the peer sees a key nobody denied."
-                 <> line <> "Keeping an author out of canon is the triage layer,"
-                 <> line <> "which this build does not have; until it does, this is"
-                 <> line <> "a storage bound and not a ban." )
+                 <> line <> "Keeping an author out of canon is `hub ban`, which"
+                 <> line <> "denies the INNER key and therefore survives a rewrap."
+                 <> line <> "A full stop is both: this bounds the disk, that one"
+                 <> line <> "bounds canon." )
         $ entry $ bindMatch name $ nil_ \case
             (policyArgs -> Just pa) | Just who <- paKey pa -> lift (setDeny deny pa who)
             _ -> liftIO (die (show policyUsage))
@@ -536,3 +544,9 @@ defaultArgs syn = do
       "allow" -> Just Allow
       "deny"  -> Just Deny
       _       -> Nothing
+
+-- | @--mailbox <key>@, and nothing else. See 'HBS2.Hub.CLI.Ban.banListArgs'.
+policyShowArgs :: forall c . IsContext c => [Syntax c] -> Maybe HubKey
+policyShowArgs syn = do
+  kvs <- flagsOf ["--mailbox"] syn
+  flagOnce kvs "--mailbox" >>= \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
