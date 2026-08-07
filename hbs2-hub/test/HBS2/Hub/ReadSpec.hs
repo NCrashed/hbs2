@@ -158,7 +158,16 @@ spec = do
           fr = foldOf owner [(1, Just 1, anIssue repo nasty)]
           out = rendered (listDoc (threadsOf HubIssue noFilter fr))
       length (lines out) `shouldBe` 1
-      out `shouldSatisfy` (not . ("forged" `isInfixOf`) . drop 0 . unlines . drop 1 . lines)
+      -- The newline is ESCAPED, not dropped, and asserting that is the point.
+      --
+      -- What stood here was `not . isInfixOf "forged" . unlines . drop 1 . lines`,
+      -- which the line above had already made vacuous: with one line, `drop 1`
+      -- is empty and the predicate is constantly True. So the only real
+      -- assertion was the row count -- and a renderer that CLIPPED the title at
+      -- the newline would pass it while quietly throwing away what a stranger
+      -- wrote, which is a different bug and not one this test would have shown.
+      out `shouldSatisfy` ("forged" `isInfixOf`)
+      out `shouldSatisfy` (not . ("\n#2" `isInfixOf`))
 
     it "does not put an escape sequence on the terminal" $ do
       owner <- kp
@@ -278,3 +287,34 @@ spec = do
           key = argvAtom (show (pretty (AsBase58 repo)))
       fmap snd (listArgs @C [key, argvAtom "--label", argvAtom "2026"])
         `shouldBe` Just (Filter Nothing (Just "2026"))
+
+    -- THE ONE THE HAND-ROLLED READER LET THROUGH. Its `ok` looked at
+    -- even-indexed words only, so this passed -- index 0 is a known flag and
+    -- the length is even -- and the pairing then bound "--label" as the value
+    -- of --status. A listing filtered on a status nobody typed, exit zero.
+    it "refuses a flag standing where a value belongs" $ do
+      owner <- kp
+      let repo = fst owner
+          key = argvAtom (show (pretty (AsBase58 repo)))
+          call ws = listArgs @C (key : fmap argvAtom ws)
+      isJust (call ["--status","--label"]) `shouldBe` False
+      isJust (call ["--status"]) `shouldBe` False
+
+    -- And a word nobody claimed. Answering it with an unfiltered listing would
+    -- look exactly like a filter that ran.
+    it "refuses a stray word and an unknown flag" $ do
+      owner <- kp
+      let repo = fst owner
+          key = argvAtom (show (pretty (AsBase58 repo)))
+          call ws = listArgs @C (key : fmap argvAtom ws)
+      isJust (call ["--label","bug","extra"]) `shouldBe` False
+      isJust (call ["--kind","issue"]) `shouldBe` False
+
+    -- What `issueUsage` has been telling everybody is accepted, and what this
+    -- verb refused: the spelling to use when a value begins with a dash.
+    it "takes the equals spelling every other verb takes" $ do
+      owner <- kp
+      let repo = fst owner
+          key = argvAtom (show (pretty (AsBase58 repo)))
+      fmap snd (listArgs @C [key, argvAtom "--label=bug"])
+        `shouldBe` Just (Filter Nothing (Just "bug"))

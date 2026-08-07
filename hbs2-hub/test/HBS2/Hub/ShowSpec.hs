@@ -20,6 +20,7 @@ import HBS2.Prelude.Plated (Doc,pretty)
 
 import Data.Config.Suckless (Syntax,C)
 import Data.ByteString qualified as BS
+import Data.Foldable (for_)
 import Data.List (isInfixOf)
 import Data.Text qualified as Text
 import Test.Hspec
@@ -49,7 +50,10 @@ letter author ac disp =
         Nothing
 
 spec :: Spec
-spec = do
+spec = spec1 >> sanitised
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-22 hub inbox show: the report" $ do
 
@@ -232,3 +236,60 @@ spec = do
       showArgs (argv [ "--mailbox", b58 mbox, "--message", show (pretty h)
                      , "--verbose" ])
         `shouldBe` Nothing
+
+-- | Every op, through the renderer, with a stranger's bytes in every field.
+--
+-- WHY A TABLE. 'contentDoc' dispatches on all ten constructors of
+-- 'AuthorContent' and one test passed 'AOpen'. The other nine were rendered by
+-- nothing -- on the verb that prints a stranger's UNFOLDED letter, which is the
+-- surface that produced 054d4dd2 ("sanitise the status too") and is exactly
+-- what a maintainer reads while deciding whether to sign it into canon forever.
+--
+-- One escape in one field of one op is enough to rewrite the lines above it in
+-- that maintainer's terminal, and the arm carrying it is chosen by the
+-- attacker: they write the letter.
+sanitised :: Spec
+sanitised =
+  describe "PEP-22 show: a stranger's bytes in every field of every op" $ do
+
+    it "puts no escape on the terminal, whichever op the letter carries" $ do
+      repo <- aKey ; author <- aKey ; other <- aKey
+      let esc = "erase\ESC[2Kme"
+          thr = mh "thread"
+          coords = PRCoords (Just esc) esc esc esc esc Nothing
+          ops =
+            [ ("open",     AOpen repo HubIssue esc [esc,esc] (Just esc) Nothing Nothing 1)
+            , ("open/pr",  AOpen repo HubPR esc [] (Just esc) Nothing (Just coords) 1)
+            , ("comment",  AComment thr (Just (mh "r")) (Just esc) Nothing 1)
+            , ("revise",   ARevise thr coords 1)
+            , ("set",      ASet thr esc esc 1)
+            , ("close",    AClose thr (Just esc) 1)
+            , ("reopen",   AReopen thr (Just esc) 1)
+            , ("merge",    AMerge thr esc esc 1)
+            , ("redact",   ARedact repo (mh "e") 1)
+            , ("delegate", ADelegate repo other 1)
+            , ("revoke",   ARevoke repo other 1)
+            ]
+
+      -- Named in the failure, or a red table says only that one of eleven
+      -- rows is wrong.
+      for_ ops $ \(name, ac) -> do
+        let out = shown (showDoc (letter author ac FoldsToCanon))
+        (name, "\ESC" `isInfixOf` out) `shouldBe` (name, False)
+
+    -- The escape is ESCAPED, not dropped: what a stranger wrote is what a
+    -- maintainer has to be able to read before deciding about it.
+    it "keeps what the escape was made of" $ do
+      repo <- aKey ; author <- aKey
+      let ac = ASet (mh "thread") "attr" "erase\ESC[2Kme" 1
+          out = shown (showDoc (letter author ac FoldsToCanon))
+      out `shouldSatisfy` isInfixOf "erase"
+      out `shouldSatisfy` isInfixOf "me"
+
+    -- One line per line of the report, whatever a field holds. A newline in an
+    -- attribute value forges a field that was never in the letter.
+    it "cannot be made to forge a field of the report" $ do
+      repo <- aKey ; author <- aKey
+      let ac = ASet (mh "thread") "attr" "real\ntriage: would fold" 1
+          out = shown (showDoc (letter author ac FoldsToCanon))
+      out `shouldSatisfy` (not . isInfixOf "\ntriage: would fold")

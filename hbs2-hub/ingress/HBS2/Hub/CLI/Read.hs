@@ -46,7 +46,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.CLI.Argv (flagText)
+import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -370,31 +370,25 @@ readEntries = do
 -- route, since 'argvAtom' keeps a numeric word as a number and @StringLike@
 -- does not match one. A filter that silently does not run is worse than one
 -- that refuses: the caller reads the output as filtered.
-listArgs :: forall c . [Syntax c] -> Maybe (HubKey, Filter)
+-- THROUGH 'flagsOf', like every other reader in this package, and it was the
+-- last one that was not. The hand-rolled pairing had the hole the shared reader
+-- exists to close: @ok@ looked at even-indexed words only, so
+-- @hub issue list K --status --label@ passed it (index 0 is a known flag, the
+-- length is even) and @flag "--status"@ then zipped it against the word after,
+-- answering @Filter (Just "--label") Nothing@ -- a listing filtered on a status
+-- nobody typed, exit zero. That is exactly the "a flag where a value belongs"
+-- case @c40ed994@ removed from six other readers, and this one was missed.
+--
+-- It also brings @--flag=value@, which 'issueUsage' has been telling everybody
+-- is accepted and which five verbs refused.
+listArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Filter)
 listArgs syn = case syn of
-  (SignPubKeyLike repo : rest) | ok rest -> do
-    st <- flag "--status" rest
-    lb <- flag "--label" rest
+  (SignPubKeyLike repo : rest) -> do
+    kvs <- flagsOf ["--status","--label"] rest
+    -- Through 'flagText', the same reading the compose verbs use: a status or
+    -- a label that spells a number is the word that was typed, and 'argvAtom'
+    -- keeps a numeric word as a number.
+    st <- flagMaybe kvs "--status" (fmap Text.pack . flagText)
+    lb <- flagMaybe kvs "--label"  (fmap Text.pack . flagText)
     pure (repo, Filter st lb)
   _ -> Nothing
-  where
-    -- A refusal of the WHOLE form now, and not of the flag alone.
-    flag n xs = case [ v | (StringLike n', Just v) <- zip xs (fmap textOf (drop 1 xs))
-                         , n' == n ] of
-                  []  -> Just Nothing
-                  [v] -> Just (Just (Text.pack v))
-                  -- A repeated flag is refused rather than resolved:
-                  -- first-wins and last-wins are both a guess.
-                  _   -> Nothing
-
-    -- Through the same reading the compose verbs use: a status or a label that
-    -- spells a number is the word that was typed.
-    textOf :: Syntax c -> Maybe String
-    textOf = flagText
-
-    -- Every word after the key belongs to one of the two flags. Anything else
-    -- is a form this verb does not have, and answering it with an unfiltered
-    -- listing would look like the filter had run.
-    ok xs = and [ Text.pack n `elem` (["--status","--label"] :: [Text])
-                | (i, StringLike n) <- zip [0 :: Int ..] xs, even i ]
-              && even (length xs)

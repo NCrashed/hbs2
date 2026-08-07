@@ -2,6 +2,45 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: `hub issue list` took a flag as a filter value.** It was the
+    last argument reader in the package not going through `flagsOf`, and it had
+    the hole the shared reader exists to close: its check looked at
+    even-indexed words only, so `hub issue list K --status --label` passed it
+    (index 0 is a known flag, the length is even) and the pairing then bound
+    `--label` as the value of `--status`. A listing filtered on a status nobody
+    typed, exit zero, which is the worst shape a filter can fail in: the caller
+    reads the output as filtered. This is the same case `c40ed994` removed from
+    six other readers.
+
+    It goes through `flagsOf` now, which also brings `--flag=value` -- the
+    spelling `hub issue new`'s usage has been advertising to everybody and
+    which this verb refused -- and refuses a stray word and an unknown flag
+    instead of answering with an unfiltered listing.
+
+  - **`hbs2-hub`: nine of the ten ops were rendered by no test.**
+    `contentDoc` dispatches on every constructor of `AuthorContent` and one
+    test passed `AOpen`. The other nine were unreached on the verb that prints
+    a stranger's UNFOLDED letter -- the surface that produced `054d4dd2`, and
+    the thing a maintainer reads while deciding whether to sign it into canon
+    forever. One escape in one field of one op rewrites the lines above it in
+    that terminal, and which arm carries it is the attacker's choice: they
+    write the letter.
+
+    A table drives all eleven shapes with `\ESC[2K` in every text field. No
+    defect was found -- every arm was already correct -- and the point is that
+    nothing said so, and nothing would have said otherwise. Two more assert
+    what escaping is FOR: the bytes survive (a maintainer has to be able to
+    read what they are deciding about) and a newline cannot forge a field of
+    the report.
+
+  - **`hbs2-hub`: a test in `ReadSpec` that could not fail.** It asserted that
+    a forged row was absent from `unlines (drop 1 (lines out))` after the line
+    above it had established there was exactly one line -- so the predicate ran
+    against the empty string and was constantly true. The row count was the
+    only real assertion, and a renderer that CLIPPED a title at its newline
+    would have passed it while silently throwing away what a stranger wrote.
+    It now asserts that the newline is escaped rather than dropped.
+
   - **`hbs2-hub`: the step that chooses the attachment secret canon publishes
     forever was run by no test.** `igOpenPart` turns a fetched encrypted tree
     into the `PartSecret` the owner puts into canon, where it stays in every
