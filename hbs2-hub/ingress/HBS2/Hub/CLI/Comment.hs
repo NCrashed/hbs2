@@ -29,9 +29,13 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
+import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)
+import HBS2.Hub.CLI.Verify (codeOf)
+import HBS2.Hub.CLI.Read (codeNoSuchThread)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
@@ -49,6 +53,7 @@ import HBS2.Storage
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.Maybe (isNothing)
+import Data.Word (Word64)
 import Data.Text qualified as Text
 import System.Exit (die)
 
@@ -67,7 +72,18 @@ data CommentArgs = CommentArgs
     -- from somewhere; one of it and --recipient has to be given.
   , cmTarget :: Maybe RepoRef
   , cmAuthor :: HubKey         -- ^ the key that signs the inner box
-  , cmThread :: ThreadId       -- ^ the thread being replied to
+  -- | The thread being replied to, when the caller names it directly.
+  --
+  -- A thread-id is 44 characters of base58 that no listing prints: `hub issue
+  -- list` shows @#3@ and `hub issue show` has to be read to find the id. Every
+  -- other thread verb takes @--number@, and this one did not, so replying meant
+  -- pasting a hash the tool had made you go and look up.
+  , cmThread :: Maybe ThreadId
+  -- | ...or the number, resolved against @--repo@'s canon before anything is
+  -- signed. The letter still carries the thread-id and no repository: what a
+  -- comment names is a thread (PEP-18), and this is only how the caller spells
+  -- it.
+  , cmNumber :: Maybe Word64
     -- | The event this answers, when it answers one in particular.
     --
     -- Advisory: the fold records it and renders it, and admits a comment whose
@@ -81,7 +97,8 @@ data CommentArgs = CommentArgs
 commentUsage :: Doc ()
 commentUsage =
   "usage: hbs2-hub issue|pr comment --sender <sigil> --author <key>"
-    <> line <> "       --thread <thread-id> [--reply-to <event-id>] --body <text> | --body -"
+    <> line <> "       --body <text> | --body - [--reply-to <event-id>]"
+    <> line <> "       and one of --thread <thread-id> | --number <n> (with --repo)"
     <> line <> "       and one of --recipient <sigil> | --repo <repo-key>"
 
 commentEntries :: forall c m . ( IsContext c
@@ -98,13 +115,30 @@ commentEntries = do
 
   where
 
+    -- The number a listing prints, back into the thread-id a letter carries.
+    --
+    -- Out of the LOCAL fold, which is where every other verb gets it: canon is
+    -- a git ref in this repository, and a clone that has not synced has no
+    -- numbers to resolve against -- which is a refusal naming the number,
+    -- rather than a letter sent into nothing.
+    threadNumbered repo n = do
+      fr <- withGitCanon (\cs -> readCanon cs repo) >>= \case
+              Right st -> pure (stFold st)
+              Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      case [ t | (n', t) <- numberIndexOf fr, n' == n ] of
+        (t:_) -> pure t
+        [] -> liftIO (refuse (show ("canon here holds no thread numbered" <+> pretty n))
+                             codeNoSuchThread)
+
     commentVerb name =
       brief "reply in a thread: compose a Tier B letter and send it to a hub mailbox"
         $ args [ arg "string" "--sender sender-sigil"
-               , arg "string" "--recipient recipient-sigil"
                , arg "string" "--author author-key"
-               , arg "string" "--thread thread-id"
-               , arg "string" "--body text" ]
+               , arg "string" "--body text"
+               , arg "string" "--thread thread-id | --number n"
+               , arg "string" "[--repo repo-key]"
+               , arg "string" "[--recipient recipient-sigil]"
+               , arg "string" "[--reply-to event-id]" ]
         $ desc ( "Signs the comment with --author and seals it to --recipient,"
                  <> line <> "which is also what says which mailbox it lands in."
                  <> line
@@ -167,7 +201,15 @@ commentEntries = do
       -- event-id and the second is a duplicate nobody meant to send.
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let content = AComment (cmThread cm) (cmReplyTo cm) (letterBody body) Nothing now
+      -- Resolved BEFORE anything is signed: a number that names no thread is a
+      -- refusal, and a letter minted against a guess would be an event-id in
+      -- somebody else's thread.
+      thr <- case (cmThread cm, cmNumber cm, cmTarget cm) of
+               (Just t, _, _) -> pure t
+               (_, Just n, Just repo) -> threadNumbered repo n
+               _ -> liftIO (die (show commentUsage))
+
+      let content = AComment thr (cmReplyTo cm) (letterBody body) Nothing now
 
       -- The same bound the fold will apply, applied before anything is signed:
       -- an oversized field inside a signed box is a letter no hub will fold,
@@ -190,7 +232,7 @@ commentEntries = do
       -- "queued" and not "sent", like the sibling verbs: the peer's send RPC
       -- answers unit, so a zero exit says the peer took the message off our
       -- hands and nothing about any mailbox having accepted it.
-      recordSent Sent { seThread = cmThread cm
+      recordSent Sent { seThread = thr
                       , seEvent = authorBoxId box
                       , seMessage = h
                       -- A comment names a thread and nothing else (PEP-18), so
@@ -205,7 +247,7 @@ commentEntries = do
       liftIO $ print $ vcat
         [ "queued" <+> hashDoc h
         , "event" <+> hashDoc (authorBoxId box)
-        , "on" <+> hashDoc (cmThread cm)
+        , "on" <+> hashDoc thr
         ]
 
 -- | Every value behind a flag.
@@ -217,17 +259,25 @@ commentEntries = do
 commentArgs :: forall c . IsContext c => [Syntax c] -> Maybe CommentArgs
 commentArgs syn = do
   kvs    <- flagsOf (repoFlags <> ["--sender","--recipient","--author","--thread"
-                                  ,"--reply-to","--body"]) syn
+                                  ,"--number","--reply-to","--body"]) syn
   sender <- flagOnce kvs "--sender"    >>= asHash
   rcpt   <- flagMaybe kvs "--recipient" asHash
   target <- flagRepoMaybe asKey kvs
   author <- flagOnce kvs "--author"    >>= asKey
-  thread <- flagOnce kvs "--thread"    >>= asHash
+  thread <- flagMaybe kvs "--thread" asHash
+  number <- flagMaybe kvs "--number" flagWord
+  -- EXACTLY ONE WAY OF NAMING THE THREAD, and the number needs a repository to
+  -- resolve against. Both together is a line somebody edited half way, and
+  -- neither is a comment with nothing to attach to.
+  case (thread, number) of
+    (Just _, Nothing) -> pure ()
+    (Nothing, Just _) | Just _ <- target -> pure ()
+    _ -> Nothing
   replyTo <- flagMaybe kvs "--reply-to" asHash
   -- Through 'flagText', so a body that spells a number is one: `--body 2026`
   -- is a body, and a StringLike pattern misses it.
   body   <- flagMaybe kvs "--body" (fmap Text.pack . flagText)
-  pure (CommentArgs sender rcpt target author thread replyTo body)
+  pure (CommentArgs sender rcpt target author thread number replyTo body)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }

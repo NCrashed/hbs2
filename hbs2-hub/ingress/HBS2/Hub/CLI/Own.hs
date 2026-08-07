@@ -77,11 +77,13 @@ data RedactArgs = RedactArgs
   deriving stock (Eq,Show)
 
 ownUsage :: Doc ()
+-- Both nouns, because both are bound: a thread is an issue or a pull request
+-- and these ops care about neither.
 ownUsage =
-  "usage: hbs2-hub issue close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]"
-    <> line <> "       hbs2-hub issue label --repo <key> --number <n> --label <l>... [--as <key>]"
-    <> line <> "       hbs2-hub issue label --repo <key> --number <n> --clear"
-    <> line <> "       hbs2-hub issue assign --repo <key> --number <n> --to <key> | --clear"
+  "usage: hbs2-hub issue|pr close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]"
+    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --label <l>... [--as <key>]"
+    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --clear"
+    <> line <> "       hbs2-hub issue|pr assign --repo <key> --number <n> --to <key> | --clear"
 
 redactUsage :: Doc ()
 redactUsage =
@@ -93,55 +95,27 @@ ownEntries :: forall c m . ( IsContext c
                            ) => MakeDictM c m ()
 ownEntries = do
 
-  statusVerb "hub:issue:close" "close a thread that is in canon"
-    (\thr ow now -> AClose thr (owNote ow) now)
+  -- BOTH NOUNS, and it is the same verb under each.
+  --
+  -- A thread is an issue or a pull request and these ops care about neither:
+  -- they name a thread by number and write an attribute, and @AClose@ carries
+  -- no kind. Binding only @issue@ meant closing a pull request was spelled
+  -- `hub issue close --number <pr number>` -- which works, since the number
+  -- index does not filter on kind, and which nobody guesses. `hub pr comment`
+  -- was already bound both ways for exactly this reason; the other four were
+  -- not.
+  for_ ["issue","pr"] $ \noun -> do
 
-  statusVerb "hub:issue:reopen" "reopen a thread that is in canon"
-    (\thr ow now -> AReopen thr (owNote ow) now)
+    statusVerb (verb noun "close") "Marks a thread closed."
+      "close a thread that is in canon"
+      (\thr ow now -> AClose thr (owNote ow) now)
 
-  brief "set the labels of a thread that is in canon"
-    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-           , arg "string" "--label label" ]
-    $ desc ( "Writes an owner-signed set event. The labels REPLACE what the"
-             <> line <> "thread had: PEP-19 makes an attribute last-writer-wins,"
-             <> line <> "and labels are one value, so adding to a set means naming"
-             <> line <> "the whole set."
-             <> line
-             <> line <> "That is also why removing them all needs --clear rather"
-             <> line <> "than an omitted --label: a verb that cleared the labels"
-             <> line <> "because somebody forgot an argument would be a verb that"
-             <> line <> "publishes a mistake into append-only canon."
-             <> line
-             <> line <> "A LABEL AN AUTHOR ASKED FOR IS NOT A LABEL. A letter's"
-             <> line <> "labels are a request (PEP-18); this is the owner applying"
-             <> line <> "one, and it is the only thing a reader shows as a label." )
-    $ entry $ bindMatch "hub:issue:label" $ nil_ \case
-        (ownArgs -> Just ow)
-          | owClear ow || not (List.null (owLabels ow)) -> lift (labelIt ow)
-        _ -> liftIO (die (show ownUsage))
+    statusVerb (verb noun "reopen") "Marks a closed thread open again."
+      "reopen a thread that is in canon"
+      (\thr ow now -> AReopen thr (owNote ow) now)
 
-  brief "say who is looking at a thread that is in canon"
-    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-           , arg "string" "--to key" ]
-    $ desc ( "Writes an owner-signed set event on the assignee attribute,"
-             <> line <> "which is last-writer-wins like every other (PEP-19): one"
-             <> line <> "thread has one assignee, and assigning replaces."
-             <> line
-             <> line <> "A KEY AND NOT A NAME. A person here is a key; a name would"
-             <> line <> "be a second identity with nothing behind it, and canon has"
-             <> line <> "no notion of one. It is not checked against the maintainer"
-             <> line <> "set either: assigning somebody is a note about who is"
-             <> line <> "looking, not a grant of anything, and PEP-21 delegation is"
-             <> line <> "what grants."
-             <> line
-             <> line <> "--clear unassigns, and is spelled out for the reason it is"
-             <> line <> "on labels: a verb that unassigned because somebody forgot"
-             <> line <> "an argument would publish that into append-only canon." )
-    $ entry $ bindMatch "hub:issue:assign" $ nil_ \case
-        (ownArgs -> Just ow)
-          | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
-          | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
-        _ -> liftIO (die (show ownUsage))
+    labelVerb (verb noun "label")
+    assignVerb (verb noun "assign")
 
   brief "hide an event's content in every clone that folds this canon"
     $ args [ arg "string" "--repo repo-key", arg "string" "--event event-id" ]
@@ -159,13 +133,62 @@ ownEntries = do
 
   where
 
-    statusVerb name what mk =
+    -- `hub:<noun>:<op>`, built rather than written twice.
+    verb noun op = fromString ("hub:" <> noun <> ":" <> op)
+
+    labelVerb name =
+      brief "set the labels of a thread that is in canon"
+        $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+               , arg "string" "--label label | --clear"
+               , arg "string" "[--as canon-key]" ]
+        $ desc ( "Writes an owner-signed set event. The labels REPLACE what the"
+                 <> line <> "thread had: PEP-19 makes an attribute last-writer-wins,"
+                 <> line <> "and labels are one value, so adding to a set means naming"
+                 <> line <> "the whole set."
+                 <> line
+                 <> line <> "That is also why removing them all needs --clear rather"
+                 <> line <> "than an omitted --label: a verb that cleared the labels"
+                 <> line <> "because somebody forgot an argument would be a verb that"
+                 <> line <> "publishes a mistake into append-only canon."
+                 <> line
+                 <> line <> "A LABEL AN AUTHOR ASKED FOR IS NOT A LABEL. A letter's"
+                 <> line <> "labels are a request (PEP-18); this is the owner applying"
+                 <> line <> "one, and it is the only thing a reader shows as a label." )
+        $ entry $ bindMatch name $ nil_ \case
+            (ownArgs -> Just ow)
+              | owClear ow || not (List.null (owLabels ow)) -> lift (labelIt ow)
+            _ -> liftIO (die (show ownUsage))
+
+    assignVerb name =
+      brief "say who is looking at a thread that is in canon"
+        $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+               , arg "string" "--to key | --clear"
+               , arg "string" "[--as canon-key]" ]
+        $ desc ( "Writes an owner-signed set event on the assignee attribute,"
+                 <> line <> "which is last-writer-wins like every other (PEP-19): one"
+                 <> line <> "thread has one assignee, and assigning replaces."
+                 <> line
+                 <> line <> "A KEY AND NOT A NAME. A person here is a key; a name would"
+                 <> line <> "be a second identity with nothing behind it, and canon has"
+                 <> line <> "no notion of one. It is not checked against the maintainer"
+                 <> line <> "set either: assigning somebody is a note about who is"
+                 <> line <> "looking, not a grant of anything, and PEP-21 delegation is"
+                 <> line <> "what grants."
+                 <> line
+                 <> line <> "--clear unassigns, and is spelled out for the reason it is"
+                 <> line <> "on labels: a verb that unassigned because somebody forgot"
+                 <> line <> "an argument would publish that into append-only canon." )
+        $ entry $ bindMatch name $ nil_ \case
+            (ownArgs -> Just ow)
+              | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
+              | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
+            _ -> liftIO (die (show ownUsage))
+
+    statusVerb name lead what mk =
       brief what
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-               , arg "string" "--note text" ]
-        $ desc ( (if "close" `List.isInfixOf` show name
-                    then "Marks a thread closed."
-                    else "Marks a closed thread open again.")
+               , arg "string" "[--note text]", arg "string" "[--as canon-key]" ]
+        $ desc ( lead
                  <> line
                  <> line <> "Writes an owner-signed event onto canon. The status follows"
                  <> line <> "from the op itself (PEP-19), so no separate set is"

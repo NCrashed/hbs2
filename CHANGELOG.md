@@ -1,5 +1,24 @@
 # Unreleased
 
+## Changed
+
+  - **`hbs2-hub`: `pr` is a whole noun.** `close`, `reopen`, `label` and
+    `assign` were bound under `issue` only, so closing a pull request was
+    spelled `hub issue close --number <pr number>`. That WORKS -- the number
+    index does not filter on kind -- and nobody guesses it. All four are bound
+    under both nouns now, which is what `pr comment` had been doing since it
+    was written, for the same reason: a thread is an issue or a pull request
+    and these ops care about neither. `AClose` carries no kind.
+
+  - **`hbs2-hub`: `issue|pr comment` takes `--number`.** Every other thread
+    verb resolves a number against the local fold; this one required
+    `--thread` and 44 characters of base58 that no listing prints -- `hub issue
+    list` shows `#3` and `hub issue show` had to be read to find the id. It now
+    takes either, and refuses both at once, a number with no `--repo` to
+    resolve it against, and a comment naming no thread at all. The letter is
+    unchanged: it still carries a thread-id and no repository, which is what
+    PEP-18 says a comment names.
+
 ## Fixed
 
   - **`hbs2-hub`: a noun was not a help topic.** The top-level help prints
@@ -46,6 +65,20 @@
   - **`hbs2-hub`: an unknown verb named the word that was right.** `hub issue
     nwe` reported `unknown verb: issue`, pointing at the half that is a verb
     and saying nothing about the half that is not. It prints the whole line.
+
+  - **`hbs2-hub`: several synopses showed optional flags as required and left
+    others out entirely.** The SYNOPSIS line is rendered from each verb's
+    `args` list, which carries no optionality marker and had been filled
+    inconsistently. `hub help sync` never mentioned `--repo`, which is the flag
+    that turns a divergence into a resolved compaction, while `hub help
+    compact` tells you to run exactly that. `hub help compact` itself omitted
+    `--dry-run` -- the flag its own prose says to run first. `inbox accept`
+    omitted `--as` and `--keep`; `issue close` showed `--note` as required;
+    `comment` never mentioned how to name a thread. Optionals are bracketed
+    now and the missing flags are there.
+
+    Not fixed: these are still hand-written per verb rather than derived from
+    each reader's own flag list, so the next one added can drift the same way.
 
   - **`hbs2-hub`: `hub issue list` took a flag as a filter value.** It was the
     last argument reader in the package not going through `flagsOf`, and it had

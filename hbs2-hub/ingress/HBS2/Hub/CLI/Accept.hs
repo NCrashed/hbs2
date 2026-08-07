@@ -272,7 +272,9 @@ acceptEntries = do
   brief "fold one letter from the ingress mailbox into canon"
     $ args [ arg "string" "--mailbox mailbox-key"
            , arg "string" "--repo repo-key"
-           , arg "string" "--message message-hash" ]
+           , arg "string" "--message message-hash"
+           , arg "string" "[--as canon-key]"
+           , arg "string" "[--keep]" ]
     $ desc ( "Writes. Everything else in this tool reads."
              <> line
              <> line <> "Reads canon out of refs/hbs2/meta in this repository,"

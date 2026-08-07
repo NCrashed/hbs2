@@ -74,7 +74,7 @@ syncEntries :: forall c m . ( IsContext c
 syncEntries = do
 
   brief "fetch code, canon and staged proposals from a remote"
-    $ args [ arg "string" "--remote name" ]
+    $ args [ arg "string" "[--remote name]", arg "string" "[--repo repo-key]" ]
     $ desc ( "Talks to git and to no peer of its own: whatever the remote's"
              <> line <> "url names is what fetches it, which for hbs23:// is the"
              <> line <> "helper hbs2-git3 installs."

@@ -37,14 +37,17 @@ argv :: [String] -> [Syntax C]
 argv = fmap argvAtom
 
 spec :: Spec
-spec = do
+spec = spec1 >> byNumber
+
+spec1 :: Spec
+spec1 = do
 
   describe "PEP-22 hub issue|pr comment: arguments" $ do
 
     it "reads a complete call, in any order" $ do
       author <- aKey
       let s = mh "sender" ; r = mh "rcpt" ; t = mh "thread"
-          want = Just (CommentArgs s (Just r) Nothing author t Nothing (Just "hi"))
+          want = Just (CommentArgs s (Just r) Nothing author (Just t) Nothing Nothing (Just "hi"))
       commentArgs (argv [ "--sender", href s, "--recipient", href r
                         , "--author", b58 author, "--thread", href t
                         , "--body", "hi" ])
@@ -134,3 +137,50 @@ spec = do
                                 , "--author", b58 author, "--thread", href s
                                 , "--body", "hi" ]))
         `shouldBe` True
+
+-- | Naming the thread the way every listing prints it.
+--
+-- A thread-id is 44 characters of base58 that no listing shows: `hub issue
+-- list` prints `#3` and `hub issue show` has to be read to find the id. Every
+-- other thread verb takes --number and this one did not, so replying meant
+-- pasting a hash the tool had made you go and look up.
+byNumber :: Spec
+byNumber =
+  describe "PEP-22 comment: which thread, and how it is named" $ do
+
+    let s = mh "sender" ; r = mh "rcpt" ; t = mh "thread"
+        base k = ["--sender", href s, "--recipient", href r, "--author", k
+                 ,"--body", "hi"]
+
+    it "takes a thread-id, as it always did" $ do
+      author <- aKey
+      fmap cmThread (commentArgs (argv (base (b58 author) <> ["--thread", href t])))
+        `shouldBe` Just (Just t)
+
+    it "takes a number, against a repository" $ do
+      author <- aKey ; repo <- aKey
+      let r' = commentArgs (argv (base (b58 author)
+                                    <> ["--number","3","--repo", b58 repo]))
+      fmap cmNumber r' `shouldBe` Just (Just 3)
+      fmap cmThread r' `shouldBe` Just Nothing
+
+    -- A number with nothing to resolve it against. Refused at the reader
+    -- rather than at the fold, since the alternative is a verb that asks for a
+    -- repository it was never given.
+    it "refuses a number with no repository" $ do
+      author <- aKey
+      isJust (commentArgs (argv (base (b58 author) <> ["--number","3"])))
+        `shouldBe` False
+
+    -- Two ways of naming one thread on one line is a line somebody edited half
+    -- way, and picking one is the guess flagOnce refuses everywhere else.
+    it "refuses both spellings at once" $ do
+      author <- aKey ; repo <- aKey
+      isJust (commentArgs (argv (base (b58 author)
+                                   <> ["--thread", href t, "--number","3"
+                                      ,"--repo", b58 repo])))
+        `shouldBe` False
+
+    it "refuses a comment that names no thread at all" $ do
+      author <- aKey
+      isJust (commentArgs (argv (base (b58 author)))) `shouldBe` False

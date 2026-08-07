@@ -109,7 +109,7 @@ compactEntries :: forall c m . ( IsContext c
 compactEntries = do
 
   brief "drop the superseded events canon no longer needs"
-    $ args [ arg "string" "--repo repo-key" ]
+    $ args [ arg "string" "--repo repo-key", arg "string" "[--dry-run]" ]
     $ desc ( "Writes a new lineage for refs/hbs2/meta holding everything but"
              <> line <> "the set events a later one overwrote, and swings the ref"
              <> line <> "onto it. Nothing is deleted: the old commits stay until"

@@ -328,7 +328,10 @@ main = do
                     , "hub:maintainer:add", "hub:maintainer:remove"
                     , "hub:pr:merge", "hub:pr:checkout", "hub:sync", "hub:publish"
                     , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
-                    , "hub:issue:assign", "hub:compact"
+                    , "hub:issue:assign"
+                    , "hub:pr:close", "hub:pr:reopen", "hub:pr:label"
+                    , "hub:pr:assign"
+                    , "hub:compact"
                     , "hub:redact"
                     ] <> helpNames
 
