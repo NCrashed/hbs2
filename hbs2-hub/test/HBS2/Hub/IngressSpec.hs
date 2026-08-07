@@ -2,6 +2,9 @@ module HBS2.Hub.IngressSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Ingress
+import HBS2.Hub.Bridge (PartEvidence(..))
+import HBS2.Hub.CLI.Accept (partEvidence)
+import HBS2.Hub.Letter (maxPartBytes)
 import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel)
 
 import HBS2.Data.Types.Refs (HashRef(..))
@@ -26,6 +29,7 @@ import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
 import Crypto.Saltine.Core.SecretBox qualified as SK
+import Crypto.Saltine.Class qualified as Saltine
 import Data.IORef
 import System.Timeout (timeout)
 import Test.Hspec
@@ -82,7 +86,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3
+spec = spec1 >> spec2 >> spec3 >> partSeam
 
 spec1 :: Spec
 spec1 = do
@@ -534,3 +538,83 @@ spec3 =
           -- No attachments on this one, and that is the answer rather than an
           -- absence: the accept path measures every part this list names.
           lrParts raw `shouldBe` []
+
+-- | The seam between measuring a part and opening it.
+--
+-- 'igOpenPart' turns a fetched encrypted tree into the 'PartSecret' the owner
+-- publishes into canon FOREVER, and until this existed it was reached by
+-- nothing: the stub answers Left, so every PartOpened in the whole suite was a
+-- fixture literal. 'measurePart' was tested at one end and 'requireParts' at
+-- the other, and the thing that joins them was run by no test at all.
+partSeam :: Spec
+partSeam =
+  describe "PEP-18 attachments: what the accept learns about each part" $ do
+
+    let leafB = serialise (MLeaf [mh "d"] :: MTree [HashRef])
+        leafH = hashObject leafB
+        gkB   = "a group key, not a tree" :: LBS.ByteString
+        gkH   = hashObject gkB
+        root  = MTreeAnn NoMetaData
+                  (EncryptGroupNaClSymm1 gkH (B8.replicate 24 'n'))
+                  (newMNode 1 [leafH])
+        rootB = serialise (root :: MTreeAnn [HashRef])
+        part  = HashRef (hashObject rootB)
+        store = [ (part, rootB), (HashRef leafH, leafB), (HashRef gkH, gkB) ]
+        sized n = stub { igBlock = \h -> pure (lookup h store)
+                       , igSize  = const (pure (Just n))
+                       }
+
+    -- The arm nothing ran. A real secret comes back and has to arrive in the
+    -- evidence UNCHANGED: this is the value the owner publishes so that every
+    -- clone can decrypt the attachment, and canon is append-only.
+    it "carries the secret the part was opened with, and its measured size" $ do
+      key <- Encrypt.newKey
+      let ig = (sized 40) { igOpenPart = const (pure (Right ("plaintext", Saltine.encode key))) }
+      r <- partEvidence ig [part]
+      case r of
+        [(h, (PartOpened n s, Just bs))] -> do
+          h `shouldBe` part
+          -- 80: the leaf and the key block, which is what measurePart counts.
+          n `shouldBe` 80
+          Just s `shouldBe` mkPartSecret (Saltine.encode key)
+          bs `shouldBe` "plaintext"
+        other -> expectationFailure ("expected one opened part, got " <> show other)
+
+    -- A secret of the wrong length is not a key. Publishing it would put a
+    -- value in canon that opens nothing, permanently.
+    it "will not call a secret of the wrong length a secret" $ do
+      let ig = (sized 40) { igOpenPart = const (pure (Right ("plaintext", "short"))) }
+      r <- partEvidence ig [part]
+      fmap (fmap fst) r `shouldBe` [(part, PartLocked 80)]
+
+    -- Sealed to another maintainer: ordinary, and not a wait. The bridge turns
+    -- this into a refusal, not a Retry.
+    it "reports a part this node cannot open as locked" $ do
+      r <- partEvidence (sized 40) [part]
+      fmap (fmap fst) r `shouldBe` [(part, PartLocked 80)]
+
+    -- NOT OPENED AT ALL when the size is over the bound: opening means
+    -- decrypting, and decrypting what the gate is about to refuse is the spend
+    -- the gate exists to prevent.
+    it "does not open a part it is going to refuse for its size" $ do
+      touched <- newIORef (0 :: Int)
+      let ig = (sized (fromIntegral (maxPartBytes `div` 2 + 1)))
+                 { igOpenPart = \_ -> modifyIORef' touched succ
+                                        >> pure (Right ("plaintext", "short")) }
+      r <- partEvidence ig [part]
+      fmap (fmap fst) r `shouldBe` [(part, PartLocked (maxPartBytes + 2))]
+      readIORef touched >>= (`shouldBe` 0)
+
+    -- The distinction the accept turns into Retry rather than a refusal: a leaf
+    -- whose size nothing has answered yet is a part still arriving.
+    it "tells a part still arriving from one it will not take" $ do
+      -- The size is asked of the DATA HASHES the leaf lists, not of the leaf:
+      -- see the walk above. So this is one data block nothing has answered for.
+      let ig = stub { igBlock = \h -> pure (lookup h store)
+                    , igSize  = \h -> pure (if h == mh "d" then Nothing else Just 40)
+                    }
+      r <- partEvidence ig [part]
+      -- 40 and not 0: what WAS measured is reported. Zero is the other
+      -- pending, the one where the tree could not be measured at all, and the
+      -- accept turns both into a Retry rather than a refusal.
+      fmap (fmap fst) r `shouldBe` [(part, PartPending 40)]

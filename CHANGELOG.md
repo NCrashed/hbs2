@@ -1,5 +1,32 @@
 # Unreleased
 
+## Fixed
+
+  - **`hbs2-hub`: the step that chooses the attachment secret canon publishes
+    forever was run by no test.** `igOpenPart` turns a fetched encrypted tree
+    into the `PartSecret` the owner puts into canon, where it stays in every
+    clone that ever fetches the thread. It had four sites in the repository:
+    the declaration, the production wiring, one caller inside the accept verb,
+    and a stub in the test suite that answers `Left`. No test overrode the
+    stub, so every `PartOpened` in the whole suite was a fixture literal and
+    the arm that picks the published secret was reached by nothing.
+    `measurePart` was tested at one end and `requireParts` at the other; what
+    joins them was not.
+
+    The loop is now `partEvidence`, a named exported function rather than
+    fifteen lines inside a verb, and five tests drive it with an
+    `igOpenPart` that really returns bytes and a key. What they pin: the secret
+    arrives in the evidence unchanged, a secret of the wrong length is refused
+    rather than published, a part this node cannot open is locked, an
+    oversized part is NOT opened at all (opening is the spend the size gate
+    exists to prevent), and a part still arriving is told from one that will
+    not be taken.
+
+    That last one also closes a gap in the existing fixture, whose two
+    `igSize` branches returned the same value, so the "not all of it is here"
+    answer was never produced -- the case the accept turns into a retry rather
+    than a refusal.
+
 ## Security
 
   - **`hbs2-hub`: `hub compact` could publish canon with an event silently

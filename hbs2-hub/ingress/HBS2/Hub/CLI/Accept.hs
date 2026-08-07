@@ -54,6 +54,7 @@ module HBS2.Hub.CLI.Accept
   , codeBundleUnusable
   , bundleOf
   , forkOf
+  , partEvidence
   ) where
 
 import HBS2.Hub.Types
@@ -193,6 +194,46 @@ forkOf = \case
       case prBundle c of
         Just{}  -> Nothing
         Nothing -> pure (src, prSourceTip c, prBase c)
+
+-- | What is known about each attachment a message carries, gathered before the
+-- bridge is asked.
+--
+-- MEASURED FIRST AND OPENED SECOND, and only when the size is one this hub
+-- would carry: opening means decrypting, and decrypting a part the gate is
+-- about to refuse for its size is exactly the spend the gate exists to prevent
+-- (PEP-18). An oversized part is reported at its size and comes back from the
+-- bridge as @PartTooLarge@.
+--
+-- The BYTES are kept beside the evidence as well as the secret, because a pull
+-- request's bundle is verified further down and decrypting it twice for want of
+-- holding it once is the same spend the size gate is careful about.
+--
+-- TOP LEVEL AND EXPORTED, which is the point of it existing as a function.
+-- 'igOpenPart' is what turns a fetched encrypted tree into the 'PartSecret'
+-- the owner publishes into canon FOREVER, and while this loop was inside the
+-- verb nothing could reach it: the stub in the test suite answers @Left@, so
+-- every 'PartOpened' in the whole suite was a fixture literal and the arm that
+-- chooses the published secret was run by nothing at all.
+partEvidence :: MonadUnliftIO m
+             => Ingress m
+             -> [HashRef]
+             -> m [(HashRef, (PartEvidence, Maybe LBS.ByteString))]
+partEvidence ig hs = for hs $ \h -> do
+  facts <- measurePart ig h
+  (,) h <$> case facts of
+    -- Not measurable is not fetched: the size is unknown, and zero is the only
+    -- honest stand-in for a number nothing has said yet.
+    Left _ -> pure (PartPending 0, Nothing)
+    Right f
+      | not (pfHere f)          -> pure (PartPending (pfSize f), Nothing)
+      | pfSize f > maxPartBytes -> pure (PartLocked (pfSize f), Nothing)
+      | otherwise -> igOpenPart ig h >>= \case
+          Left _ -> pure (PartLocked (pfSize f), Nothing)
+          Right (bs, sec) -> case mkPartSecret sec of
+            Just s  -> pure (PartOpened (pfSize f) s, Just bs)
+            -- A secret of the wrong length is not a key, so this node cannot
+            -- open the part however the read went.
+            Nothing -> pure (PartLocked (pfSize f), Nothing)
 
 -- | What one accept was asked to fold.
 --
@@ -392,26 +433,7 @@ acceptEntries = do
                                 <> "  nothing was read: the letter is left where it is." ))
                         codePartsTooMany
 
-      opened <- for (lrParts raw) $ \h -> do
-        facts <- measurePart ig h
-        (,) h <$> case facts of
-          -- Not measurable is not fetched: the size is unknown, and zero is
-          -- the only honest stand-in for a number nothing has said yet.
-          Left _ -> pure (PartPending 0, Nothing)
-          Right f
-            | not (pfHere f)             -> pure (PartPending (pfSize f), Nothing)
-            | pfSize f > maxPartBytes    -> pure (PartLocked (pfSize f), Nothing)
-            | otherwise -> igOpenPart ig h >>= \case
-                Left _ -> pure (PartLocked (pfSize f), Nothing)
-                Right (bs, sec) -> case mkPartSecret sec of
-                  -- The BYTES are kept as well as the secret. A pull request's
-                  -- bundle is verified below, and decrypting it twice for want
-                  -- of holding it once is the same spend the size gate above
-                  -- is careful about.
-                  Just s  -> pure (PartOpened (pfSize f) s, Just bs)
-                  -- A secret of the wrong length is not a key, so this node
-                  -- cannot open the part however the read went.
-                  Nothing -> pure (PartLocked (pfSize f), Nothing)
+      opened <- partEvidence ig (lrParts raw)
 
       let evidence = [ (h, ev) | (h, (ev, _)) <- opened ]
 
