@@ -36,6 +36,7 @@ import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Merge
 import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Relayed
+import HBS2.Peer.Proto.Mailbox.PolicyCache
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Peer.Proto.Mailbox.PoW
@@ -167,6 +168,12 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- and bounded by count; it used to be a block whose address a stranger
     -- could compute, see "HBS2.Peer.Proto.Mailbox.Relayed".
   , mpwRelayed            :: Relayed
+    -- | The parsed policy for each hosted mailbox, keyed by the hash it was
+    -- parsed from, so a policy change invalidates it by not matching. Reading
+    -- one is a getBlock, a signature check, a merkle read and two parses, and
+    -- it sat on two paths a stranger drives at whatever rate they like; see
+    -- "HBS2.Peer.Proto.Mailbox.PolicyCache".
+  , mpwPolicyCache        :: PolicyCache (MailboxRefKey s) (BasicPolicy s)
     -- | Least proof-of-work this peer will forward, from
     -- 'hbs2MailboxPoWMinOpt'. A TVar because it is read from the config after
     -- the worker exists, the way the database and the probe are.
@@ -264,10 +271,17 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
   -- Один select, а не два: хеш, по которому проверяется наличие, он же и
   -- читается. Эта функция стоит под mailboxGetPolicy, то есть на пути приёма
   -- каждого сообщения для каждого получателя.
+  --
+  -- И под ней же -- ответ на CheckMailbox и приём чужого MailboxStatus, то есть
+  -- два пути, темп которых задаёт чужой пир. Select остаётся на каждом запросе:
+  -- он индексный и локальный, а его результат -- и признак «владелец что-то
+  -- сказал», и штамп годности кэша. Всё, что за ним (getBlock, проверка
+  -- подписи, обход merkle-дерева, два разбора), считается один раз на
+  -- (ящик, хеш). Подробности и границы -- в PolicyCache.
   mailboxGetPolicyMay MailboxProtoWorker{..} mbox = runMaybeT do
     dbe <- readTVarIO mailboxDB >>= toMPlus
     ha  <- policyHashFor dbe mbox >>= toMPlus
-    AnyPolicy <$> loadPolicyContentAt mpwStorage mbox ha
+    AnyPolicy <$> policyAt mpwPolicyCache mbox ha (loadPolicyContentAt mpwStorage mbox ha)
 
   mailboxCheckNonce MailboxProtoWorker{..} mbox nonce =
     acceptCheckNonce mpwCheckNonces mbox nonce
@@ -964,6 +978,7 @@ createMailboxProtoWorker pc pe sto = do
     <$> newTVarIO mempty            -- mpwFetchQ
     <*> newCheckNonces
     <*> newRelayed
+    <*> newPolicyCache
     <*> newTVarIO 0                 -- mpwPoWFloor
     <*> newTVarIO mempty            -- mpwReplicateFrom
     <*> newTVarIO mempty            -- inMessageQueueSeen

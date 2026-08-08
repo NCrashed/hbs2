@@ -17,6 +17,7 @@ import MailboxPoW (mailboxPoWTests, mailboxConfigTests)
 import MailboxMergedSpec qualified
 import MailboxQueueSpec qualified
 import MailboxRelayedSpec qualified
+import MailboxPolicyCacheSpec qualified
 import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 
@@ -161,6 +162,7 @@ main = do
       , MailboxQueueSpec.tests
       , MailboxMergedSpec.tests
       , MailboxRelayedSpec.tests
+      , MailboxPolicyCacheSpec.tests
       ]
 
 

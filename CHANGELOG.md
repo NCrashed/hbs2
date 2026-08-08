@@ -77,6 +77,29 @@
 
 ## Security
 
+  - **`hbs2-peer`: reading a mailbox policy no longer costs a merkle read and
+    two parses per inbound packet.** A `CheckMailbox` is forty bytes with any
+    key in the field, sent by any handshaken peer; answering one meant a
+    `getBlock`, a signature check, a merkle-tree read, a text parse and a clause
+    parse, with no cache. `MailboxStatus` paid the same on arrival, and so did
+    every (message, recipient) pair on the ingest path. None of the three is
+    rate-limited -- the mailbox verbs run under `NoLimit` -- and all of them run
+    on the deferred pool the other protocols share, so what a stranger bought
+    with one packet came out of everybody's budget.
+
+    It was filed in-tree as a performance note. That was the wrong
+    classification: unmetered work a stranger can ask for as often as they like
+    is a denial-of-service surface whatever the constant factor is.
+
+    The parse is now kept per mailbox, keyed by the hash it was parsed from.
+    Content addressing does the invalidating: the same hash is the same bytes,
+    a rewritten policy does not match and is re-read, and there is no
+    invalidation call to forget. One entry per hosted mailbox that has a policy,
+    replaced in place rather than accumulated, so nothing a stranger sends makes
+    the map grow. The hash lookup itself stays on every request -- one indexed
+    local select, and its result is what tells "the owner said nothing" from
+    "the owner said something this build could not read".
+
   - **`hbs2-peer`: the clock window made the mailbox status check decide
     nothing, and it is gone.** A status counted as fresh if it echoed a nonce
     this peer issued OR its timestamp was within ten seconds of the reader's
