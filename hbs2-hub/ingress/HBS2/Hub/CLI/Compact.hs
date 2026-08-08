@@ -195,7 +195,10 @@ compactEntries = do
       -- which is the ordinary state of a young forge and of a well-behaved old
       -- one.
       when (List.null (cpDrop c)) $ liftIO do
-        print ("nothing to compact: canon holds no superseded event" :: Doc ())
+        -- On stderr with the rest of the advice: what this verb PRODUCES on
+        -- stdout is the plan and the way back, and a scheduled run pipes that
+        -- somewhere. The exit code is what a hook branches on.
+        saying ("nothing to compact: canon holds no superseded event" <> line)
         exitWith (ExitFailure codeNothingToCompact)
 
       liftIO $ mapM_ print (compactDoc (stCommit st) c)

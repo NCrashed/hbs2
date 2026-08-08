@@ -2,6 +2,36 @@
 
 ## Added
 
+  - **`hbs2-hub issue|pr show --json`: the PEP-22 render contract.** There was
+    no machine-readable output at all, so a web layer had nothing to read and
+    any other consumer would have had to parse the columns meant for a person.
+    This is the thing PEP-22 calls the deliverable that keeps a web layer a
+    pure view: one thread as a versioned JSON object, derived purely from
+    canon, so two clones of a repository produce the same bytes.
+
+    It carries no `verified` flag and will not grow one. Everything in it has
+    already passed the PEP-19 admission check -- a bad signature or an
+    unauthorized canon key is dropped by the fold and never materialized -- so
+    presence in the document IS verification, and auditing what was dropped is
+    `hub verify`'s job.
+
+    A REDACTED ITEM CARRIES NO TEXT. It keeps `redacted: true` and its
+    identity, so a renderer can say something was withdrawn, and the title,
+    body and attachment are null rather than shipped with a flag beside them: a
+    body shipped that way has been published to every renderer that forgets to
+    read the flag, which is the exact failure a redaction exists to prevent.
+
+    For a pull request the diff is precomputed from `base..tip`, so a static
+    renderer needs no git, and its availability is three-state:
+    `reconstructable` is the objects being gone while the bundle attachment
+    that would rebuild them is still named by canon, so a renderer can offer to
+    rebuild rather than showing nothing.
+
+    Not implemented, and deliberately: the index and activity documents. PEP-22
+    leaves both schemas open, so pinning them now would be inventing a contract
+    rather than implementing one. Neither is `hub render` (static export) nor
+    `hub serve`.
+
   - **`hbs2-hub whoami`, and a refusal that stops the pair it checks from
     being sent.** A letter needs an author key, a sender sigil and a mailbox of
     your own; three tools make those three things, no verb produced any of
@@ -82,6 +112,15 @@
     text is pinned from both packages.
 
 ## Changed
+
+  - **`hbs2-hub`: three advisory lines moved off stdout.** `hub ban list` said
+    "nobody is banned here" into the stream a script reads keys from, so a
+    caller piping it into a loop got one iteration over those four words.
+    `hub ban`/`hub unban` said "nothing to change" and `hub compact` said
+    "nothing to compact" the same way, and `hub policy` likewise. All four are
+    advice about the command rather than its result, so they go to stderr with
+    the rest of it. The exit codes are unchanged and are still what a hook
+    branches on.
 
   - **`hbs2-hub`: a refused write says what the bridge said, in every verb.**
     Four verbs mint an event onto canon and three of them printed the derived

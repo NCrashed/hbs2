@@ -46,7 +46,7 @@ import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent)
+import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -453,7 +453,7 @@ policyEntries = do
       -- free: it republishes the file to every peer holding the mailbox.
       unchanged <- currentPolicy mbox <&> maybe False ((== p') . snd)
       when unchanged $ liftIO do
-        print ("nothing to change; the policy was not rewritten" :: Doc ())
+        saying ("nothing to change; the policy was not rewritten" <> line)
         exitSuccess
 
       creds <- runKeymanClientRO (loadCredentials mbox)

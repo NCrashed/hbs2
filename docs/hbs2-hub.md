@@ -356,6 +356,42 @@ The repository key is an argument rather than read from the tree,
 because canon that named its own owner would be canon that could rename
 it.
 
+## For a program rather than a person
+
+```
+hbs2-hub issue show <repo-key> 7 --json
+hbs2-hub pr show    <repo-key> 7 --json
+```
+
+This is PEP-22's render contract: one thread as a versioned JSON object
+that a web layer, a static export or a third-party renderer reads without
+touching hbs2, crypto or the event log. It is derived purely from canon,
+so two clones of one repository produce the same bytes.
+
+Check the `contract` field before anything else. Fields are added without
+a bump, so ignore what you do not know; the number moves when something
+changes meaning or goes away.
+
+There is no `verified` flag and there will not be one. Everything in the
+contract has already passed the admission check: a bad signature or an
+unauthorized key is dropped by the fold and never materialized, so being
+in the document IS being verified. Auditing what was dropped is
+`hbs2-hub verify`.
+
+A redacted item carries no text. It keeps its `redacted: true` and its
+identity, so a renderer can say that something was withdrawn, and the
+title, the body and the attachment are `null` in the document rather
+than present with a flag beside them.
+
+For a pull request the diff is precomputed from `base..tip`, so a static
+renderer needs no git. `diff.availability` is `available`, or
+`reconstructable` when the objects are gone but the bundle attachment
+that would rebuild them is still named by canon, or `unavailable`.
+
+What is NOT there: an index document for list views and an activity
+document for a timeline. PEP-22 leaves both schemas open, so pinning them
+here would be inventing a contract rather than implementing one.
+
 ## Scripting
 
 Exit codes are a contract: they may be added to and are never
@@ -379,9 +415,11 @@ Branch on the exit code, not on the absence of output.
 
 Worth knowing before you commit to this.
 
-- **No web interface.** The render contract PEP-22 describes, and with
-  it any machine-readable output beyond exit codes, is not implemented.
-  Everything prints for a person to read.
+- **No web interface.** The per-thread render contract exists (see
+  below) and nothing consumes it yet: there is no `hub render` static
+  export, no `hub serve`, and no index or activity document. PEP-22
+  leaves the schemas for those last two open, so they are not written
+  yet rather than written wrong.
 
 - **Queries are exact matches.** `--status` and `--label` filter, and
   that is all. There is no query language and no cache; every read folds

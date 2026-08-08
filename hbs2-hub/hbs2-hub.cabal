@@ -66,6 +66,8 @@ library
                     , prettyprinter
                     , saltine
                     , base64-bytestring
+                    , aeson
+                    , aeson-pretty
     exposed-modules:
       HBS2.Hub.Types
       HBS2.Hub.Fold
@@ -74,6 +76,7 @@ library
       HBS2.Hub.Canon
       HBS2.Hub.Compact
       HBS2.Hub.Manifest
+      HBS2.Hub.Render
       HBS2.Hub.Repo
 
 -- Everything that knows about the network, in a sublibrary rather than inside
@@ -199,6 +202,7 @@ test-suite spec
                  , typed-process
                  , prettyprinter
                  , unix
+                 , aeson
                  , unliftio
                  -- For planting a loose object git would not write: one whose
                  -- header announces a size its body does not have. See
@@ -231,6 +235,7 @@ test-suite spec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
       HBS2.Hub.ReadSpec
+      HBS2.Hub.RenderSpec
       HBS2.Hub.RejectSpec
       HBS2.Hub.RepoSpec
       HBS2.Hub.SentSpec

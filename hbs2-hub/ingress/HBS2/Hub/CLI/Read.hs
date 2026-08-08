@@ -43,9 +43,10 @@ module HBS2.Hub.CLI.Read
   ) where
 
 import HBS2.Hub.Types
+import HBS2.Hub.Render
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
-import HBS2.Hub.Repo.Git (withGitCanon)
+import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Common (withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
@@ -55,11 +56,14 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Data.Types.Refs (pattern HashLike)
 
+import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,isJust)
 import System.IO.Error (isResourceVanishedError)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
+import Data.Text.Encoding.Error qualified as Text
 import Data.Word (Word64)
 import System.Exit (die,exitWith,ExitCode(..))
 
@@ -252,6 +256,12 @@ logDoc mnum fr =
       ADelegate{} -> "delegate" ; ARevoke{}   -> "revoke"
 
 -- | The read verbs.
+-- | How a thread comes out: for a person, or for a program.
+--
+-- A constructor and not a Bool, because `pick kind True p` at the call site
+-- says nothing about which of the two True is.
+data Shape = AsDoc | AsJson
+
 readEntries :: forall c m . ( IsContext c
                             , MonadUnliftIO m
                             , Exception (BadFormException c)
@@ -312,7 +322,7 @@ readEntries = do
 
     showVerb name kind =
       brief "show one folded thread with its comments"
-        $ args [arg "string" "repo-key", arg "string" "number"]
+        $ args [arg "string" "repo-key", arg "string" "number", arg "string" "[--json]"]
         $ desc ( "Read-only and peerless."
                  <> line
                  <> line <> "Takes the number, or --thread with the thread-id. The id"
@@ -321,20 +331,35 @@ readEntries = do
                  <> line <> "them apart positionally."
                  <> line
                  <> line <> "A body shipped as an encrypted tree is named, not fetched:"
-                 <> line <> "this verb talks to no peer." )
+                 <> line <> "this verb talks to no peer."
+                 <> line
+                 <> line <> "--json prints the PEP-22 render contract instead: the"
+                 <> line <> "same thread as a versioned, documented JSON object that"
+                 <> line <> "a web layer or any other renderer reads without touching"
+                 <> line <> "hbs2, crypto or the event log. There is no diff in it"
+                 <> line <> "here, and it says so ('unavailable'), because building"
+                 <> line <> "one needs git and this verb needs nothing." )
         $ entry $ bindMatch name $ nil_ \case
             [ SignPubKeyLike repo, (flagWord -> Just n) ] ->
-              lift (withFold repo (pick kind (byNumber n)))
+              lift (withFold repo (pick kind AsDoc (byNumber n)))
+            [ SignPubKeyLike repo, (flagWord -> Just n), StringLike "--json" ] ->
+              lift (withFold repo (pick kind AsJson (byNumber n)))
             [ SignPubKeyLike repo, StringLike "--thread", HashLike h ] ->
-              lift (withFold repo (pick kind ((== h) . tsId)))
+              lift (withFold repo (pick kind AsDoc ((== h) . tsId)))
+            [ SignPubKeyLike repo, StringLike "--thread", HashLike h, StringLike "--json" ] ->
+              lift (withFold repo (pick kind AsJson ((== h) . tsId)))
             _ -> liftIO (die ("usage: hub " <> spelled name
-                                <> " <repo-key> (<number> | --thread <id>)"))
+                                <> " <repo-key> (<number> | --thread <id>) [--json]"))
 
     -- "hub:issue:list" as somebody types it.
     spelled n = fmap (\c -> if c == ':' then ' ' else c) (drop 4 (show (pretty n)))
 
-    pick kind p fr = case [ t | t <- HM.elems (frThreads fr), p t, tsKind t == kind ] of
-      (t:_) -> out (showDoc t)
+    pick kind how p fr = case [ t | t <- HM.elems (frThreads fr), p t, tsKind t == kind ] of
+      (t:_) -> case how of
+                 AsDoc  -> out (showDoc t)
+                 AsJson -> do
+                   d <- diffOf t
+                   liftIO (LBS.putStr (renderContract (threadContract t d)))
       -- Not an empty page. A thread that is not there and a thread with
       -- nothing in it are different answers, and only one of them is worth
       -- retrying.
@@ -343,6 +368,51 @@ readEntries = do
                  exitWith (ExitFailure codeNoSuchThread)
 
     byNumber n t = tsNumber t == Just n
+
+    -- | The diff of a pull request, so a static renderer needs no git.
+    --
+    -- PEP-22 puts this in the contract precisely so that whoever renders it
+    -- does not have to be standing in a repository. Computing it belongs HERE
+    -- and not in the serializer, which is pure and testable without one; this
+    -- is the layer that already has git.
+    --
+    -- THREE ANSWERS, and the middle one is the reason it is not a Maybe.
+    -- `available` is the objects being here. `reconstructable` is the objects
+    -- being gone while the bundle attachment that would rebuild them is still
+    -- named by canon, which is what a rejected pull request looks like after
+    -- its staged ref was dropped: a renderer can offer to rebuild rather than
+    -- pretending there was never anything to see. `unavailable` is neither.
+    --
+    -- Bounded, because a diff is a stranger's proposal and this is a byte
+    -- stream a web layer will embed. Over the bound it is truncated and SAYS
+    -- so, and a renderer that wants the whole thing has the two commits.
+    diffOf t = case tsPR t of
+      Nothing -> pure Nothing
+      Just pr -> do
+        let co = psCoords pr
+        r <- gitRun Nothing [] 30 "the diff of a proposal"
+               [ "diff", "--no-color"
+               , Text.unpack (prBase co) <> ".." <> Text.unpack (prSourceTip co) ] mempty
+        pure $ Just $ case r of
+          Right (ExitSuccess, o, _) ->
+            let txt = Text.decodeUtf8With Text.lenientDecode o
+            in if Text.length txt > maxDiffBytes
+                 then PRDiff DiffAvailable True (Text.take maxDiffBytes txt)
+                 else PRDiff DiffAvailable False txt
+          -- git could not answer, which here means the objects are not in this
+          -- clone. Whether they can be got back is what canon says: a bundle
+          -- part is a way, a fork pointer is not one this build can follow.
+          _ | Just{} <- prBundle co -> PRDiff DiffReconstructable False ""
+            | otherwise             -> PRDiff DiffUnavailable False ""
+
+    -- | What a diff is allowed to weigh in the contract.
+    --
+    -- A judgement, and on the generous side: this is one thread's JSON, read by
+    -- a renderer that asked for it, not something gossiped. What it bounds is a
+    -- contributor proposing a hundred megabytes of generated files and a web
+    -- layer embedding it in a page.
+    maxDiffBytes :: Int
+    maxDiffBytes = 256 * 1024
 
     -- Canon, or the same refusal and the same exit code `hub verify` gives.
     -- One table, so a script branches on one set of numbers whichever read

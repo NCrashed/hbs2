@@ -29,7 +29,7 @@ module HBS2.Hub.CLI.Ban
 import HBS2.Hub.Types (HubKey,RepoRef)
 import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo)
-import HBS2.Hub.CLI.Common (refuse)
+import HBS2.Hub.CLI.Common (refuse,saying)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -78,7 +78,12 @@ banEntries = do
         (banListArgs -> Just repo) -> lift do
           bans <- readBans repo
           liftIO $ if HS.null bans
-            then print ("nobody is banned here" :: Doc ())
+            -- On stderr, and it is the difference between a list and a
+            -- sentence. STDOUT here is a stream of keys a script reads; a
+            -- prose line in it is a key that parses as nothing, and a caller
+            -- that pipes this into a loop gets one iteration over the words
+            -- "nobody is banned here".
+            then saying ("nobody is banned here" <> line)
             else mapM_ (print . pretty . AsBase58) (sortKeys bans)
         _ -> liftIO (die (show banUsage))
 
@@ -121,7 +126,9 @@ banEntries = do
       let bans' = (if ban then HS.insert else HS.delete) who bans
 
       when (bans' == bans) $ liftIO do
-        print ("nothing to change" :: Doc ())
+        -- Advice, so stderr, like every other line in this package that is
+        -- about the command rather than its result.
+        saying ("nothing to change" <> line)
         exitSuccess
 
       p <- banPath (baRepo ba)
