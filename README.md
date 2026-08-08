@@ -19,6 +19,13 @@ across your devices.
   Syncthing, built on the same content-addressable substrate as the
   git layer.
 
+- **Issues and pull requests** - `hbs2-hub` keeps them inside the
+  repository they are about, as a signed append-only log every clone
+  can read offline. Contributors reach a project through an encrypted
+  mailbox rather than an account on a server. New in this release, and
+  command line only so far: see
+  [`docs/hbs2-hub.md`](docs/hbs2-hub.md).
+
 Both run on top of hbs2's core: a P2P CAS that handles peer discovery,
 block distribution, signature verification, and group-key encryption.
 
@@ -67,6 +74,8 @@ Cabal) see [`INSTALL.md`](INSTALL.md).
   comparisons with Syncthing, Radicle, and IPFS.
 - [`docs/COOKBOOK.md`](docs/COOKBOOK.md) - working recipes for common
   tasks beyond the git path.
+- [`docs/hbs2-hub.md`](docs/hbs2-hub.md) - the forge: issues, pull
+  requests and triage, and what is not built yet.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) - how to build, test, and
   submit changes.
 - [`HISTORY.md`](HISTORY.md) - origin of the project.

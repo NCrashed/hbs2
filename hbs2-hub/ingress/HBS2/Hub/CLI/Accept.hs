@@ -6,10 +6,14 @@
 -- "HBS2.Hub.Repo" turns that into files, and "HBS2.Hub.Repo.GitWrite" commits
 -- them. What is here is the order, the arguments and the refusals.
 --
--- IRREVERSIBLE, and the only verb in this build that is: an event minted into
--- canon is in every clone that ever fetches it. That is why the read verb next
--- door is read-only by construction and why this one re-reads canon rather
--- than trusting anything it was handed.
+-- IRREVERSIBLE: an event minted into canon is in every clone that ever fetches
+-- it. That is why the read verb next door is read-only by construction and why
+-- this one re-reads canon rather than trusting anything it was handed.
+--
+-- It said "and the only verb in this build that is", which was true when it was
+-- written and stopped being true six verbs later. What is still particular to
+-- this one is WHOSE bytes it publishes: the owner verbs commit what the owner
+-- typed, and this one commits what a stranger sent.
 --
 -- FOR A PULL REQUEST it also does the two steps PEP-20 puts either side of the
 -- fold. The bundle is verified BEFORE anything is published: minting writes
@@ -275,7 +279,11 @@ acceptEntries = do
            , arg "string" "--message message-hash"
            , arg "string" "[--as canon-key]"
            , arg "string" "[--keep]" ]
-    $ desc ( "Writes. Everything else in this tool reads."
+    -- It was "Writes. Everything else in this tool reads", and that was true
+    -- when accept was the only writer. Six more verbs write canon now, and a
+    -- sentence a reader can check against `hub --help` is a sentence that has
+    -- to stay true.
+    $ desc ( "The verb that turns a stranger's request into the record."
              <> line
              <> line <> "Reads canon out of refs/hbs2/meta in this repository,"
              <> line <> "opens the named letter, asks the bridge whether it may be"

@@ -167,5 +167,9 @@ SSH private keys: back them up where you would back up
   [`docs/encrypted-repos.md`](docs/encrypted-repos.md) for the full
   walkthrough.
 
+- **Issues and pull requests.** `hbs2-hub` keeps them in the repository
+  itself and takes contributions through an encrypted mailbox instead
+  of an account. See [`docs/hbs2-hub.md`](docs/hbs2-hub.md).
+
 - **Architecture.** See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a
   tour of the components involved in what you just did.

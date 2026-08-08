@@ -38,6 +38,7 @@ distributing the underlying blocks.
 | `hbs2-cli` | Primary command-line interface. Talks to a running `hbs2-peer` over its RPC socket. Handles keyring generation, refchan and lwwref inspection, storage operations, peer status. Replaces most subcommands of the legacy `hbs2` monolith. |
 | `hbs2-git3` | Git remote helper. Provides the `hbs23://` URL scheme for git (via `git-remote-hbs23`), the `git hbs2 ...` subcommand surface, and repository initialisation. Replaces the legacy `hbs2-git` package, which used the `hbs2://` scheme. |
 | `hbs2-sync` | Directory synchronization tool. Uses a refchan as the shared substrate for keeping a folder in sync between several machines. |
+| `hbs2-hub` | The forge. Issues, pull requests and triage, kept as a signed append-only log under `refs/hbs2/meta` in the repository itself and fed by letters delivered over the mailbox protocol in `hbs2-peer`. Depends on `hbs2-core` and on git; the read verbs need no peer at all. See [`docs/hbs2-hub.md`](docs/hbs2-hub.md). |
 | `hbs2-tests` | Test harness: integration tests, network probes, storage benchmarks. |
 | `miscellaneous/` | Vendored forks of upstream libraries with project-specific patches. Being de-vendored over time. |
 | `bf6/`, `scripts/` | Small bf6 (Scheme-like DSL) scripts and shell helpers used during development. `bf6/hbs2` and `hbs2-git3/bf6/git-hbs2` ship as user-facing wrappers around `hbs2-cli` and `hbs2-git3`. |
@@ -285,6 +286,12 @@ A few entry points for code reading:
 - `hbs2-sync/src/HBS2/Sync/Internal.hs` has the sync command surface.
   `State.hs` in the same directory holds the conflict-resolution
   logic.
+- `hbs2-hub/lib/HBS2/Hub/Fold.hs` is the forge's centre: the
+  deterministic fold that turns the event log into issue and pull
+  request state, and the admission rules that decide what counts.
+  `Bridge.hs` beside it is the only place a stranger's letter becomes
+  a canon event. `app/Main.hs` registers the verbs; each lives in its
+  own module under `ingress/HBS2/Hub/CLI/`.
 - `hbs2-core/lib/HBS2/Net/Proto/` has the protocol type machinery.
   Start with `Types.hs`.
 - `hbs2-storage-ncq/lib/HBS2/Storage/NCQ3.hs` is the entry point of

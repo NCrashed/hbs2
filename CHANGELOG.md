@@ -1,5 +1,43 @@
 # Unreleased
 
+## Added
+
+  - **`hbs2-hub`: a decentralized forge.** Issues, pull requests,
+    comments, labels and merge records live inside the git repository they
+    are about, as a signed append-only log under `refs/hbs2/meta` that
+    every clone folds offline. Contributors reach a project through an
+    encrypted mailbox rather than an account: they compose a letter, seal
+    it to the project's ingress mailbox, and a maintainer folds it into
+    the log or does not. A stranger's signature never writes the record by
+    itself.
+
+    Forty-one verbs, all of them documented by `hbs2-hub help <verb>`. The
+    read side (`issue list|show`, `pr list|show`, `log`, `verify`) needs
+    neither a peer nor a key, because the record is a git ref. The write
+    side is triage (`inbox`, `inbox show|accept|reject`), the owner ops
+    (`issue close|reopen|label|assign`, `redact`, `pr merge`, `maintainer
+    add|remove`), moderation (`ban`, `block`, `policy`) and housekeeping
+    (`compact`). Contributors get `issue new`, `pr new`, `pr revise`,
+    `issue|pr comment` and `updates`.
+
+    A pull request ships as a git bundle of the delta, so proposing a
+    change to a large repository does not transfer the repository. The
+    proposed tip and the fork point are signed and checked against the
+    objects that actually arrive; `pr checkout` puts the result on a
+    branch, and `pr merge` refuses to record a merge whose commit does not
+    contain the tip the contributor signed for.
+
+    Nothing publishes by itself: every verb that writes writes a git ref
+    in the repository you are standing in, and `hbs2-hub publish` sends
+    it. That is deliberate -- a delegate may bless events into the record
+    and cannot push them.
+
+    `docs/hbs2-hub.md` is the guide, and it ends with what is not built
+    yet. Two things worth reading before planning around this: there is no
+    web interface, and a repository cannot yet DECLARE its ingress mailbox
+    in its manifest, so the mailbox key and its sigil have to be published
+    out of band.
+
 ## Changed
 
   - **`hbs2-hub`: a refused write says what the bridge said, in every verb.**
