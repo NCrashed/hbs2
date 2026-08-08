@@ -4,7 +4,10 @@ import HBS2.Hub.Types
 import HBS2.Hub.Manifest
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Prelude.Plated (pretty)
+import HBS2.Prelude.Plated (pretty,fromStringMay)
+import HBS2.Data.Types.Refs (HashRef)
+import Data.Function ((&))
+import Data.Maybe (fromMaybe)
 
 import Data.Config.Suckless
 import Data.Either (isLeft)
@@ -161,3 +164,43 @@ spec = do
       -- And the round trip it protects: what a writer emits, a reader reads.
       let one = clauseOf (HubMailbox k hubRole (Just "known"))
       hubMailboxes [one] `shouldBe` [HubMailbox k hubRole (Just "known")]
+
+    -- THE BYTES THE OTHER PACKAGE WRITES.
+    --
+    -- `hbs2-git3 repo:mailbox:set` spells these clauses itself, in
+    -- HBS2.Git3.Repo.Mailbox, because the manifest is that package's file and a
+    -- writer here would mean the forge depending on the git remote helper --
+    -- which would drag a peer, a storage backend and a database into a library
+    -- whose point is that it needs none of them.
+    --
+    -- So one clause has two spellings in two packages, and what links them is
+    -- these literals. The same strings are asserted there as what is EMITTED
+    -- and here as what is ACCEPTED, so a drift on either side is a failing test
+    -- rather than a repository that declares an inbox nothing can find.
+    it "reads the clause hbs2-git3 writes, spelled out" $ do
+      let k = fromStringMay @HubKey "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
+                & fromMaybe (error "fixture is not a key")
+      case parseTop "(mailbox 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV hub)" of
+        Left e    -> expectationFailure (show e)
+        Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole Nothing]
+
+    it "reads the tiered clause hbs2-git3 writes, spelled out" $ do
+      let k = fromStringMay @HubKey "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
+                & fromMaybe (error "fixture is not a key")
+      case parseTop "(mailbox 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV hub public)" of
+        Left e    -> expectationFailure (show e)
+        Right syn -> hubMailboxes syn `shouldBe` [HubMailbox k hubRole (Just "public")]
+
+    it "reads the sigil clause hbs2-git3 writes, wrapped as it is stored" $ do
+      -- Wrapped on purpose: two base58 keys and a name are over eighty columns,
+      -- so the printer really does break this one across lines and that is what
+      -- the manifest holds. An S-expression spans lines; a reader that assumed
+      -- one clause per line would not.
+      let k = fromStringMay @HubKey "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV"
+                & fromMaybe (error "fixture is not a key")
+          h = fromStringMay @HashRef "8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ"
+                & fromMaybe (error "fixture is not a hash")
+      case parseTop ( "(mailbox-sigil\n 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV\n"
+                        <> " 8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ)" ) of
+        Left e    -> expectationFailure (show e)
+        Right syn -> sigils syn `shouldBe` [MailboxSigil k h]

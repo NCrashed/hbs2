@@ -11,9 +11,8 @@ There is no web interface yet. Everything below is the command line.
 
 Working and new. It ships for the first time in this release and has not
 been through a season of real use. Parts of the design are not built
-yet, including one that affects how contributors find a project at all:
-read [What is missing](#what-is-missing) before you plan a migration
-onto it.
+yet; read [What is missing](#what-is-missing) before you plan a
+migration onto it.
 
 The design is written up in `docs/drafts/pep-17` through `pep-22`.
 Those are working notes and will be removed as their reasoning moves
@@ -75,8 +74,8 @@ and the staged proposals in one go.
 
 ## Opening a project to contributors
 
-You need a mailbox on your peer, a policy on it, and a way for
-contributors to learn both.
+You need a mailbox on your peer, a policy on it, and the repository
+saying where it is.
 
 **1. Create the mailbox.** Pick or generate a sign keypair; its public
 key is the mailbox's address.
@@ -106,22 +105,43 @@ hbs2-hub policy pow --mailbox <mailbox-key> --bits 20
 hbs2-hub policy show --mailbox <mailbox-key>
 ```
 
-**4. Publish a sigil for the mailbox** so contributors can seal letters
-to it, and tell people the repository key and that sigil.
+**4. Declare it in the repository**, so a contributor who has the
+repository does not have to be told anything else:
 
-At this point a contributor with those two values can file an issue.
+```
+hbs2-git3 repo:mailbox:set   <repo-key> --key <mailbox-key>
+hbs2-git3 repo:mailbox:sigil <repo-key> --key <mailbox-key> --sigil <hash>
+```
+
+The first writes `(mailbox <key> hub)` into the repository manifest,
+which is what `hbs2-hub` reads whenever it is given `--repo` and no
+mailbox. The second publishes a sigil for it: a mailbox is addressed by
+a SIGN key, and sealing a letter to it needs the matching encryption
+key, which lives in a sigil, and nothing resolves one from the other.
+
+Both publish as they go: the manifest is signed and posted to your peer,
+so there is no separate step. `hbs2-git3 repo:mailbox:list <repo-key>`
+shows what a contributor will find, and `repo:mailbox:drop` takes it
+back.
+
+From here on a contributor needs the repository key and nothing else:
+every verb that composes a letter falls back to what the manifest
+declares, and so does `hbs2-hub inbox --repo <repo-key>` on your side.
 
 ## Filing an issue
 
 ```
 hbs2-hub issue new \
-  --repo      <repo-key> \
-  --sender    <your-sigil> \
-  --recipient <hub-sigil> \
-  --author    <your-sign-key> \
-  --title     "the tests hang on aarch64" \
+  --repo   <repo-key> \
+  --sender <your-sigil> \
+  --author <your-sign-key> \
+  --title  "the tests hang on aarch64" \
   --body -
 ```
+
+There is no `--recipient` here because the repository declares one. Give
+`--recipient <sigil-hash>` when it does not, or when you mean a mailbox
+other than the one it publishes.
 
 `--body -` reads the body from stdin. Nothing is read from stdin
 otherwise, deliberately: git hands a hook `<old> <new> <ref-name>` there,
@@ -135,13 +155,12 @@ else, and the event-id the thread will have once folded.
 
 ```
 hbs2-hub pr new \
-  --repo      <repo-key> \
-  --sender    <your-sigil> \
-  --recipient <hub-sigil> \
-  --author    <your-sign-key> \
-  --title     "fix the aarch64 hang" \
-  --onto      master \
-  --from      my-branch
+  --repo   <repo-key> \
+  --sender <your-sigil> \
+  --author <your-sign-key> \
+  --title  "fix the aarch64 hang" \
+  --onto   master \
+  --from   my-branch
 ```
 
 This builds a git bundle of the range in your own clone and ships it as
@@ -337,16 +356,6 @@ Branch on the exit code, not on the absence of output.
 ## What is missing
 
 Worth knowing before you commit to this.
-
-- **A repository cannot yet declare its ingress mailbox.** PEP-18 gives
-  the manifest a `(mailbox <key> hub)` clause so a contributor who knows
-  the repository can discover where to send a letter. `hbs2-hub` reads
-  that clause: `inbox`, `inbox accept` and the composing verbs all fall
-  back to `--repo` when the mailbox or the recipient sigil is not named.
-  Nothing writes it. `hbs2-git3` has no verb that edits a manifest
-  beyond group keys, so the clause can only get there by hand. Until
-  that is fixed, publish the mailbox key and its sigil the way you would
-  publish anything else, in the README or on a page.
 
 - **No web interface.** The render contract PEP-22 describes, and with
   it any machine-readable output beyond exit codes, is not implemented.

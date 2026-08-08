@@ -129,6 +129,7 @@ library
       HBS2.Git3.Import
       HBS2.Git3.Repo.Init
       HBS2.Git3.Repo.Tools
+      HBS2.Git3.Repo.Mailbox
       HBS2.Git3.Repo.Types
       HBS2.Git3.Repo
       HBS2.Git3.Run
@@ -193,7 +194,8 @@ test-suite spec
   type: exitcode-stdio-1.0
   main-is: Spec.hs
 
-  -- other-modules:
+  other-modules:
+      HBS2.Git3.Repo.MailboxSpec
       -- HBS2.Git3.Git.PackSpec
       -- Data.Config.Suckless.KeyValueSpec
       -- Data.Config.Suckless.AesonSpec
@@ -209,6 +211,9 @@ test-suite spec
       hspec-discover:hspec-discover
 
   build-depends:      base, hbs2-git3
+                    , hbs2-core
+                    , suckless-conf
+                    , text
                     , hspec
                     , tasty-hunit
                     , tasty-quickcheck

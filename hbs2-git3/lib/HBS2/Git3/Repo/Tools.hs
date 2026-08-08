@@ -205,3 +205,34 @@ updateGroupKey repo new = do
       updateRepoHead repo newManifest newKeys
       updateRepoKey repo
 
+
+-- | Read the repository manifest, change it, and publish the change.
+--
+-- The three steps every clause-editing verb repeats, and the one of them that
+-- is easy to leave out is the last: 'updateRepoHead' signs the LWWRef and posts
+-- it, so a verb that forgets it edits a value nobody will ever see.
+--
+-- NOTHING IS WRITTEN WHEN NOTHING CHANGED, compared on the rendered bytes and
+-- not on the value. A write bumps the ref and republishes the manifest to every
+-- peer holding the repository, so re-running a verb that declares what is
+-- already declared should cost nothing, and this is where that is decided
+-- rather than in each verb. Returns whether it wrote.
+withManifest :: HBS2GitPerks m
+             => GitRepoKey
+             -> ([Syntax C] -> Git3 m [Syntax C])
+             -> Git3 m Bool
+withManifest repo f = do
+  setGitRepoKey repo
+  waitRepo (Just 10) =<< getGitRepoKeyThrow
+
+  RepoManifest mf <- getRepoManifest
+  mf' <- f mf
+
+  let rendered = show . vcat . fmap pretty
+
+  if rendered mf' == rendered mf
+    then pure False
+    -- mempty and not the current keys: 'updateRepoHead' unions what it is given
+    -- with the group keys already in the log, so a manifest edit that named
+    -- none is an edit that keeps all of them.
+    else True <$ updateRepoHead repo mf' mempty

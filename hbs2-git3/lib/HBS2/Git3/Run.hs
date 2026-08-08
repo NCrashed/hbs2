@@ -13,6 +13,7 @@ import HBS2.Git3.Import
 import HBS2.Git3.State
 import HBS2.Git3.Repo qualified as Repo
 import HBS2.Git3.Repo
+import HBS2.Git3.Repo.Mailbox
 import HBS2.Git3.Logger
 import HBS2.Git3.Man
 import HBS2.Net.Auth.GroupKeySymm
@@ -35,6 +36,7 @@ import Network.ByteOrder qualified as N
 import Text.InterpolatedString.Perl6 (qc)
 import Data.HashSet qualified as HS
 import Data.HashSet (HashSet)
+import Data.Text qualified as Text
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.Fixed
@@ -534,6 +536,141 @@ compression      ;  prints compression level
 
           _ -> throwIO $ BadFormException @C nil
 
+
+        -- WHERE A REPOSITORY TAKES CONTRIBUTIONS (PEP-18).
+        --
+        -- These four are the write side of clauses `hbs2-hub` has always been
+        -- able to read. Without them a maintainer could not declare an ingress
+        -- mailbox, so a contributor could not discover one, so the discovery
+        -- half of PEP-18 was a reader with nothing to read: every hub verb that
+        -- falls back to `--repo` fell back to nothing, and the mailbox key and
+        -- its sigil had to be published on a web page.
+        --
+        -- Every one of them ends in 'updateRepoHead', which is what signs the
+        -- LWWRef and posts it, so this publishes: there is no separate step and
+        -- no local-only state.
+
+        brief "declare the mailbox this repository takes contributions through" $
+          args [arg "string" "repo", arg "string" "--key mailbox-key"
+               , arg "string" "[--tier tier]" ] $
+          desc ( "Writes (mailbox <key> hub) into the repository manifest, which"
+                 <> line <> "is where hbs2-hub looks when it is given --repo and no"
+                 <> line <> "mailbox. Re-running edits the clause rather than adding"
+                 <> line <> "a second one for the same key."
+                 <> line
+                 <> line <> "The mailbox key is a SIGN key, the one the mailbox was"
+                 <> line <> "created under with `hbs2-peer mailbox create`. It is not"
+                 <> line <> "this repository's key, and naming that is refused: they"
+                 <> line <> "are the same thirty-two bytes of base58 and the swap"
+                 <> line <> "would publish an inbox nobody is reading."
+                 <> line
+                 <> line <> "A tier is PEP-21's trust tag. Leave it off for the inbox"
+                 <> line <> "a stranger should use; that one is the answer when no"
+                 <> line <> "tier is asked for." ) $
+          entry $ bindMatch "repo:mailbox:set" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [("--key",1),("--tier",1)] syn
+
+            -- THE ARGUMENTS FIRST, the repository after. Resolving first meant
+            -- a forgotten --key was reported as a repository this directory
+            -- has no remote for: a true sentence about the wrong problem.
+            mbox <- headMay [ k | ListVal [StringLike "--key", SignPubKeyLike k] <- opts ]
+                      & orThrowUser "repo:mailbox:set needs --key <mailbox-sign-key>"
+
+            repo <- resolveRepoKeyThrow argz
+
+            -- A repo key and a mailbox key are the same thirty-two bytes of
+            -- base58, so the swap is well-typed and publishes an inbox nobody
+            -- is reading.
+            when (mbox == repo) $
+              throwIO (userError ( "--key is this repository's own key; a mailbox is a"
+                                     <> " separate key, made with `hbs2-peer mailbox create`" ))
+
+            let tier = headMay [ fromString t
+                               | ListVal [StringLike "--tier", StringLike t] <- opts ]
+
+            wrote <- withManifest repo $ \mf -> do
+              mf' <- setMailbox mbox tier mf & either (throwIO . userError . Text.unpack) pure
+              -- Checked before anything is stored: the clause is spelled in this
+              -- package and read in another, and this is the only link between
+              -- the two spellings there is.
+              unless (writesBackAsMailbox mbox tier mf') $
+                throwIO (userError "the clause would not read back; nothing was written")
+              pure mf'
+
+            liftIO $ print $ (if wrote then "declared" else "already declared")
+                               <+> pretty (mkForm @C "mailbox"
+                                     [ mkSym (show (pretty (AsBase58 mbox)))
+                                     , mkSym (Text.unpack hubRole) ])
+
+        brief "publish a sigil so contributors can seal letters to a mailbox" $
+          args [arg "string" "repo", arg "string" "--key mailbox-key"
+               , arg "string" "--sigil hash | --del hash" ] $
+          desc ( "A mailbox is addressed by a sign key, and sealing a letter to"
+                 <> line <> "it needs the matching encryption key, which lives in a"
+                 <> line <> "sigil. Nothing resolves one from the other, so the hash"
+                 <> line <> "goes here and a fresh clone can compose with no lookup."
+                 <> line
+                 <> line <> "Added and not replaced: one mailbox read by several"
+                 <> line <> "maintainers gets several sigils, since a sigil binds"
+                 <> line <> "exactly one encryption key. --del takes one out." ) $
+          entry $ bindMatch "repo:mailbox:sigil" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [("--key",1),("--sigil",1),("--del",1)] syn
+            -- Every argument decided before the repository is touched, for the
+            -- reason the verb above gives: which of these is missing is not a
+            -- fact about the repository and must not be reported as one.
+            mbox <- headMay [ k | ListVal [StringLike "--key", SignPubKeyLike k] <- opts ]
+                      & orThrowUser "repo:mailbox:sigil needs --key <mailbox-sign-key>"
+
+            what <- case ( headMay [ h | ListVal [StringLike "--sigil", HashLike h] <- opts ]
+                         , headMay [ h | ListVal [StringLike "--del",   HashLike h] <- opts ] ) of
+                      (Just h, Nothing) -> pure (Right h)
+                      (Nothing, Just h) -> pure (Left h)
+                      _ -> throwIO (userError "give exactly one of --sigil <hash> and --del <hash>")
+
+            repo <- resolveRepoKeyThrow argz
+
+            wrote <- withManifest repo $ \mf -> case what of
+              Right h -> do
+                let mf' = addMailboxSigil mbox h mf
+                unless (writesBackAsSigil mbox h mf') $
+                  throwIO (userError "the clause would not read back; nothing was written")
+                pure mf'
+              Left h -> pure (dropMailboxSigil mbox h mf)
+
+            liftIO $ print $ case what of
+              Right h -> (if wrote then "published sigil" else "already published") <+> pretty h
+              Left h  -> (if wrote then "withdrawn" else "not declared here") <+> pretty h
+
+        brief "stop declaring a mailbox, and its sigils with it" $
+          args [arg "string" "repo", arg "string" "--key mailbox-key" ] $
+          desc ( "Takes the mailbox clause out, and every sigil clause naming it."
+                 <> line <> "Both, because a sigil left behind describes an inbox the"
+                 <> line <> "repository no longer declares: nobody would read it, and"
+                 <> line <> "it would still be a published key with no stated purpose."
+                 <> line
+                 <> line <> "The mailbox itself is untouched. Letters already in it"
+                 <> line <> "are still there and `hbs2-hub inbox --mailbox <key>`"
+                 <> line <> "still lists them; what stops is discovery." ) $
+          entry $ bindMatch "repo:mailbox:drop" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [("--key",1)] syn
+            mbox <- headMay [ k | ListVal [StringLike "--key", SignPubKeyLike k] <- opts ]
+                      & orThrowUser "repo:mailbox:drop needs --key <mailbox-sign-key>"
+            repo <- resolveRepoKeyThrow argz
+            wrote <- withManifest repo (pure . dropMailbox mbox)
+            liftIO $ print $ (if wrote then "withdrawn" else "was not declared")
+                               <+> pretty (AsBase58 mbox)
+
+        brief "show the mailboxes and sigils this repository declares" $
+          args [arg "string" "repo"] $
+          entry $ bindMatch "repo:mailbox:list" $ nil_ $ \syn -> lift $ connectedDo do
+            repo <- resolveRepoKeyThrow syn
+            setGitRepoKey repo
+            RepoManifest mf <- getRepoManifest
+            liftIO $ for_ (declaredMailboxes mf) $ \(k, role, tier) ->
+              print $ pretty (AsBase58 k) <+> pretty role
+                        <+> maybe mempty (\t -> pretty (t :: Text)) tier
+            liftIO $ for_ (declaredSigils mf) $ \(k, h) ->
+              print $ "sigil" <+> pretty (AsBase58 k) <+> pretty h
 
         -- FIXME: maybe-add-default-remote
         entry $ bindMatch "repo:head" $ nil_ $ \syn -> lift $ connectedDo $ do

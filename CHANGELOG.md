@@ -33,10 +33,30 @@
     and cannot push them.
 
     `docs/hbs2-hub.md` is the guide, and it ends with what is not built
-    yet. Two things worth reading before planning around this: there is no
-    web interface, and a repository cannot yet DECLARE its ingress mailbox
-    in its manifest, so the mailbox key and its sigil have to be published
-    out of band.
+    yet. The largest of those is that there is no web interface.
+
+  - **`hbs2-git3 repo:mailbox:set|sigil|drop|list`: a repository can say
+    where it takes contributions.** PEP-18 gives the manifest a
+    `(mailbox <key> hub)` clause and a `(mailbox-sigil <key> <hash>)` beside
+    it, so a contributor who has the repository can discover where to send a
+    letter and which key to seal it to. `hbs2-hub` has always read them --
+    `inbox`, `inbox accept` and every composing verb fall back to `--repo`
+    when a mailbox or a recipient sigil is not named -- and nothing wrote
+    them: this package had no verb that edited a manifest at all. So the
+    discovery half of PEP-18 was a reader with nothing to read, and the
+    mailbox key had to be published on a web page.
+
+    A mailbox is a SIGN key and sealing to it needs the matching ENCRYPTION
+    key, which lives in a sigil, and nothing resolves one from the other; so
+    both clauses matter and both are written here. Each publishes as it goes,
+    since the manifest is signed into the repository's LWWRef.
+
+    The clause is spelled in this package and read in the other one, which is
+    the thing to be careful about. It is checked before anything is stored:
+    the manifest is rendered to the exact bytes that will be saved, parsed
+    back, and the clause looked for with the same pattern the forge matches.
+    A drift on either side is a refusal, or a failing test -- the literal
+    text is pinned from both packages.
 
 ## Changed
 
