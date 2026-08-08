@@ -1,5 +1,40 @@
 # Unreleased
 
+## Security
+
+  - **`hbs2-peer`: the clock window made the mailbox status check decide
+    nothing, and it is gone.** A status counted as fresh if it echoed a nonce
+    this peer issued OR its timestamp was within ten seconds of the reader's
+    clock. The timestamp is written by whoever sends the status, so the second
+    half was satisfied by any peer with a working clock -- which made the first
+    half unreachable. `StatusUnasked` was never produced, `useTree` was true for
+    everybody, and the status/tree split shipped in `9c3822af` never applied
+    once.
+
+    What that was worth to an attacker: a forged status makes the reader fetch
+    and MERGE a tree the announcer built. The `Replicated` branch of the drain
+    checks the peer policy and the sender policy, and checks no work at all
+    under `(pow 0)`, which is the default. Against the open-inbox recipe PEP-18
+    gives (`(sender allow all)`, `(peer allow all)`) that is unbounded free
+    writing into somebody else's mailbox, around the queue and around the work
+    an honest sender pays for.
+
+    Freshness is now the nonce and nothing else.
+
+    **THIS BREAKS SYNC WITH EVERY RELEASED PEER, in one direction.** The echo
+    landed after 0.25.5.0, so no released version answers with one, and a peer
+    on this build will not take a tree from one that does not. The other
+    direction still works: an older requester puts its own clock in the nonce
+    field, this build echoes that back, and the old peer's own window check
+    passes -- so an un-upgraded host still pulls from an upgraded one. Policy
+    propagates either way, since an unsolicited status carries it. What stops
+    is upgraded-pulls-from-old, and the accept path says so at `warn` rather
+    than `debug`, naming the peer.
+
+    Taken deliberately rather than deferred: there is no compatibility promise
+    across 0.25.x, and the network this is reviving has no co-hosting to
+    preserve.
+
 ## Fixed
 
   - **`hbs2-hub`: the deny-list was rewritten in place.** A torn write leaves a

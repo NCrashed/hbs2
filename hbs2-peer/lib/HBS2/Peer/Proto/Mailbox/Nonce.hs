@@ -36,8 +36,6 @@ module HBS2.Peer.Proto.Mailbox.Nonce
   , insertCheckNonce
   , lookupCheckNonce
   , pruneCheckNonces
-  , statusFreshWindow
-  , statusIsFresh
   , StatusUse(..)
   , StatusOrigin(..)
   , statusUse
@@ -138,27 +136,30 @@ lookupCheckNonce :: (Eq k, Hashable k)
 lookupCheckNonce now k nonce =
   maybe False (\issued -> clockSkew now issued < checkNonceTTL) . HM.lookup (k, nonce)
 
--- | The clock window the transitional fallback still allows, in seconds.
+-- THE CLOCK WINDOW IS GONE, and so is the rule that used it.
 --
--- The old rule, unchanged, kept only so that the two peers below can still be
--- talked to. It is a hardcoded ten seconds because it always was.
-statusFreshWindow :: Word64
-statusFreshWindow = 10
-
--- | May a status be treated as a fresh answer?
+-- What stood here: a status counted as fresh if the nonce came back OR its
+-- timestamp was within ten seconds of the reader's clock. The second half was
+-- transitional, written for a responder that does not echo, and it made the
+-- first half decide nothing -- the timestamp is written by whoever sends the
+-- status, so any peer with a working clock satisfied it. 'StatusUnasked' was
+-- unreachable, 'useTree' was true for everybody, and the split shipped in
+-- 9c3822af never applied once.
 --
--- Accept-either, and the second half is transitional. Two things need it: a
--- responder on an older build echoes nothing, and @mailboxSetPolicy@ gossips a
--- status NOBODY ASKED FOR so that a new policy propagates without waiting for
--- the next poll, for which no nonce exists at any protocol version. So this is
--- deliberately a superset of the rule it replaces, and while the second half is
--- here the gain is correctness rather than strength: a plausible timestamp is
--- something anybody can write.
-statusIsFresh :: Bool   -- ^ the nonce came back and we are the ones who issued it
-              -> Word64 -- ^ now
-              -> Word64 -- ^ the nonce field as it arrived
-              -> Bool
-statusIsFresh nonceOk now nonce = nonceOk || clockSkew now nonce < statusFreshWindow
+-- What that cost is in the accept path: a forged status makes the reader fetch
+-- and MERGE a tree the announcer built, and the @Replicated@ branch of the
+-- drain checks no work at all under @(pow 0)@, which is the default. For an
+-- open inbox that is free writing into somebody else's mailbox, around the
+-- queue and around the work an honest sender pays.
+--
+-- What it breaks: a peer will not take a tree from one that does not echo,
+-- which is every released version -- the echo landed after 0.25.5.0. Deliberate
+-- (owner, 2026-08-08): there is no compatibility promise across 0.25.x, and the
+-- network being revived has no co-hosting to preserve. Policy still propagates,
+-- since an unsolicited status carries it; what stops is tree sync, and the
+-- accept path says so at 'warn'.
+--
+-- 'clockSkew' stays: the nonce map still expires by it.
 
 -- | What a peer may act on from one status it has been sent.
 --

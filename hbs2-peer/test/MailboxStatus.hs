@@ -46,7 +46,6 @@ mailboxStatusTests = testGroup "mailbox status"
   [ mailboxStatusClockTests
   , mailboxStatusNonceTests
   , mailboxStatusStoreTests
-  , mailboxStatusFreshTests
   , mailboxStatusUseTests
   ]
 
@@ -102,36 +101,19 @@ mailboxStatusStoreTests = testGroup "mailbox status nonce store"
 
 -- | The accept-either rule the handler applies, as one function.
 --
--- Both halves are tested apart in the groups above; this is the only thing that
--- asserts they are combined with @||@. Flipping that to @&&@ breaks sync with
--- every peer on an older build, and until this group existed the suite stayed
--- green through it.
+-- THE RULE THIS TESTED IS GONE. It was @nonceOk || clockSkew now nonce < 10@,
+-- and the second half made the first decide nothing: the timestamp is written
+-- by whoever sends the status. What the group asserted, therefore, was that a
+-- forged status is admitted -- correctly, since that was the code.
 --
--- It no longer breaks the unsolicited policy broadcast, and that is the point
--- of the group below: the broadcast stopped depending on this rule at all.
-mailboxStatusFreshTests :: TestTree
-mailboxStatusFreshTests = testGroup "mailbox status freshness rule"
-  [ testCase "our own nonce is enough, whatever the clock says" $ do
-      assertBool "matching nonce, absurd clock"  (statusIsFresh True 1000 999999999)
-      assertBool "matching nonce, equal clock"   (statusIsFresh True 1000 1000)
-      assertBool "matching nonce, clock at zero" (statusIsFresh True 1000 0)
-
-  , testCase "without a nonce of ours the old clock window still admits a status" $ do
-      -- The transitional half. It is what an un-upgraded responder and the
-      -- unsolicited policy broadcast both land on.
-      assertBool "one second apart"    (statusIsFresh False 1000 1001)
-      assertBool "nine seconds apart"  (statusIsFresh False 1000 1009)
-      assertBool "nine the other way"  (statusIsFresh False 1009 1000)
-
-  , testCase "without a nonce and outside the window, a status is refused" $ do
-      assertBool "ten seconds apart is out" (not (statusIsFresh False 1000 1010))
-      assertBool "the other direction too"  (not (statusIsFresh False 1010 1000))
-      assertBool "a random-looking value is out"
-        (not (statusIsFresh False 1000 17324509382145098234))
-
-  , testCase "the window is the one the rule says it is" $
-      statusFreshWindow @?= 10
-  ]
+-- Freshness is now the nonce store alone, which the group below has always
+-- tested. Nothing replaces this one: there is no second rule left to combine.
+--
+-- The property it was really guarding -- that the split in 9c3822af APPLIES --
+-- is not assertable here, because it lives at the call site in the accept path
+-- and this suite has no harness for that. Recorded rather than quietly dropped:
+-- 'statusUse' says what an origin entitles a peer to, and nothing in this suite
+-- says which origin a real status gets.
 
 -- | The nonce store, which is what freshness now means.
 --
