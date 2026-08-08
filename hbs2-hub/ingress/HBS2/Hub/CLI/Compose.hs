@@ -26,6 +26,7 @@ module HBS2.Hub.CLI.Compose
   , codeNotStored
   , PoWTooHard(..)
   , codeNoWork
+  , codeWrongSigil
   ) where
 
 import HBS2.Hub.Types
@@ -43,7 +44,7 @@ import HBS2.CLI.Run.Internal
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.SignedBox (SignedBox,unboxSignedBox0)
 import HBS2.Net.Auth.Credentials
-import HBS2.Net.Auth.Credentials.Sigil (Sigil)
+import HBS2.Net.Auth.Credentials.Sigil (Sigil,loadSigil)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
 import HBS2.Peer.Proto.Mailbox.PoW (solveStamp)
@@ -136,9 +137,54 @@ sendLetterWith
   -> SignedBox AuthorContent HubScheme
   -> ReplyChannel
   -> m HashRef
-sendLetterWith ob sender rcpts parts box reply =
+sendLetterWith ob sender rcpts parts box reply = do
+  checkReplyChannel ob reply
   sendPayload ob (Left sender) rcpts parts
     (MessageData hubMsgVersion (Letter box reply))
+
+-- | Refuse a letter whose answer could never reach whoever sent it.
+--
+-- The reply channel is an author key and a sigil, and a sigil that names
+-- SOMEBODY ELSE's key is the one combination that fails invisibly: the letter
+-- is well-formed, the maintainer folds it, and the hub then declines to ack
+-- because it will not seal a maintainer's word to a key the sender does not
+-- hold ('ackTarget'). Every one of those steps is correct and none of them
+-- happens where the person who can fix it is standing.
+--
+-- So the same rule is asked here, at the last moment it is cheap: the sender's
+-- own machine, before anything is signed, sent or charged for. It is one block
+-- read, and the sigil is about to be read anyway to seal the message.
+--
+-- HERE AND NOT IN THE FOUR VERBS. `issue new`, `pr new`, `pr revise` and the
+-- comment verbs all arrive through this function, and a check per verb is four
+-- chances for the fifth verb to skip it.
+--
+-- 'Nothing' PROCEEDS, matching 'ackTarget' on the other side: a sigil this node
+-- cannot read is not evidence of anything, and the send fails on its own if the
+-- bytes are really missing, which is a better answer than an accusation.
+checkReplyChannel :: MonadUnliftIO m => Outbound -> ReplyChannel -> m ()
+checkReplyChannel _ NoReply = pure ()
+checkReplyChannel ob (ReplyTo k href) = do
+  named <- sigilNames k <$> loadSigil @HubScheme (obStorage ob) href
+  when (named == Just False) $ liftIO $ refuse
+    ( show ( "the sender sigil does not name the author key" <> line
+               <> "  --author" <+> pretty (AsBase58 k) <> line
+               <> "  --sender" <+> pretty href <> line
+               <> "  That pair is what an acknowledgement is sealed to, so this"
+               <+> "letter would be" <> line
+               <> "  folded and never answered. `hub whoami --author <key>"
+               <+> "--sender <hash>`" <> line <> "  says which of the two is"
+               <+> "the odd one." <> line
+               <> "  Nothing was sent." ) )
+    codeWrongSigil
+
+-- | What a letter whose reply channel cannot work exits with.
+--
+-- Its own code, because it is the one refusal on this path that is neither the
+-- peer's fault nor the letter's content: two arguments that are each valid and
+-- do not go together.
+codeWrongSigil :: Int
+codeWrongSigil = 47
 
 -- | Seal any hub payload and hand it to the peer.
 --

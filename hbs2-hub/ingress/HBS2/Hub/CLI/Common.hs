@@ -71,6 +71,11 @@ import System.IO.Error (isResourceVanishedError)
 -- they were added to be told apart from.
 refuse :: String -> Int -> IO a
 refuse msg n = do
+  -- STDOUT FIRST, so the refusal does not jump ahead of the report it belongs
+  -- to. The two streams are buffered differently, and a verb that printed three
+  -- lines and then refused showed the refusal above them: `hub whoami --author
+  -- K --sender H` accused the pair before saying what either of them was.
+  hFlush stdout
   saying ("hbs2-hub:" <+> pretty msg <> line)
   exitWith (ExitFailure n)
 

@@ -14,8 +14,8 @@
 -- passed one constant sigil into every case.
 module HBS2.Hub.AckSpec (spec) where
 
-import HBS2.Hub.CLI.Ack (sigilNames,ackTarget,AckTrouble(..))
-import HBS2.Hub.Letter (ReplyChannel(..))
+import HBS2.Hub.CLI.Ack (ackTarget,AckTrouble(..))
+import HBS2.Hub.Letter (sigilNames,ReplyChannel(..))
 import HBS2.Hash (hashObject)
 import HBS2.Data.Types.Refs (HashRef(..))
 

@@ -24,6 +24,7 @@ import HBS2.Hub.CLI.Reject
 import HBS2.Hub.CLI.Updates
 import HBS2.Hub.CLI.Sync
 import HBS2.Hub.CLI.Verify
+import HBS2.Hub.CLI.Whoami
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run
@@ -92,6 +93,7 @@ peerFulNames =
   , "hub:updates"
   , "hub:policy:show", "hub:policy:pow", "hub:policy:default"
   , "hub:block", "hub:unblock"
+  , "hub:whoami"
   ]
 
 main :: IO ()
@@ -162,6 +164,7 @@ main = do
         syncEntries
         updatesEntries
         verifyEntries
+        whoamiEntries
         readEntries
         showEntries
         prEntries

@@ -52,6 +52,28 @@ disk rather than truth.
   published record naming an encryption key. `hbs2-cli
   hbs2:sigil:create:from-keyring <keyring-file>` makes one.
 
+If you are not sure you have those, ask:
+
+```
+hbs2-hub whoami
+```
+
+It lists the signing keys this machine holds and names the tool that
+makes each of the other two. It creates nothing.
+
+Before your first letter, check that your author key and your sender
+sigil are actually the same identity:
+
+```
+hbs2-hub whoami --author <your-sign-key> --sender <your-sigil-hash>
+```
+
+They are separate values and they have to agree. A sigil naming somebody
+else's key produces a letter that is signed correctly, folds correctly,
+and can never be answered: a hub will not seal a maintainer's reply to a
+key you do not hold. The composing verbs refuse that pair outright, but
+it is cheaper to find out before you have written the issue.
+
 Read verbs need none of this beyond the repository key. They fold a git
 ref and talk to no peer:
 
@@ -360,9 +382,6 @@ Worth knowing before you commit to this.
 - **No web interface.** The render contract PEP-22 describes, and with
   it any machine-readable output beyond exit codes, is not implemented.
   Everything prints for a person to read.
-
-- **No `whoami`.** A contributor has no verb that tells them which of
-  their keys is which, or which sigil they are sending under.
 
 - **Queries are exact matches.** `--status` and `--label` filter, and
   that is all. There is no query language and no cache; every read folds

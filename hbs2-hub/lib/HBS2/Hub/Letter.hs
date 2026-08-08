@@ -49,6 +49,7 @@ module HBS2.Hub.Letter
   , oversizedField
   , malformedRef
   , noReplyChannel
+  , sigilNames
   , makeLetter
   , makeAck
   , letterPayload
@@ -73,6 +74,7 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.Credentials.Sigil (Sigil(..))
 import HBS2.Prelude.Plated (Pretty(..),(<+>))
 
 import Data.Config.Suckless.Syntax
@@ -392,6 +394,31 @@ instance Serialise ReplyChannel
 
 noReplyChannel :: ReplyChannel
 noReplyChannel = NoReply
+
+-- | Does this sigil name this key?
+--
+-- Three answers. 'Just True' is the sigil a reply channel claims; 'Just False'
+-- is a sigil that resolves and names somebody else, which is the one worth
+-- refusing; 'Nothing' is a sigil this node cannot read at all, either because
+-- the block has not arrived or because it is not a sigil, and those two are the
+-- same event -- nothing about the channel has been established either way.
+--
+-- HERE AND NOT BESIDE ITS CALLERS, because there are two of them on opposite
+-- sides of the exchange and one rule between them. The hub asks it before
+-- acking, so a maintainer's ack cannot be reflected at somebody the contributor
+-- named; the contributor asks it before SENDING, because a mismatch is a letter
+-- that folds perfectly and whose answer can never arrive, and the only machine
+-- that can say so cheaply is the one composing it. It used to live in the hub's
+-- half only, so the sender learned nothing and the send exited 0.
+--
+-- Pure, and takes the sigil rather than its hash, so the rule can be asked
+-- questions without a storage. That is why it could not live next to
+-- 'openLetterAs', which is where it belongs by subject.
+sigilNames :: HubKey -> Maybe (Sigil HubScheme) -> Maybe Bool
+sigilNames k msi = do
+  si <- msi
+  (owner, _) <- unboxSignedBox0 (sigilData si)
+  pure (owner == k)
 
 -- | A courtesy notification from the owner to a contributor: the number and
 -- status the contributor could not compute themselves. Not canon, carries no

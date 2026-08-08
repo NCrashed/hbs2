@@ -38,7 +38,6 @@
 -- ack is the envelope signer, which travels with the message.
 module HBS2.Hub.CLI.Ack
   ( sendAck
-  , sigilNames
   , ackTarget
   , AckTrouble(..)
   ) where
@@ -52,9 +51,8 @@ import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef)
-import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Net.Auth.Credentials
-import HBS2.Net.Auth.Credentials.Sigil (Sigil(..),loadSigil,makeSigilFromCredentials)
+import HBS2.Net.Auth.Credentials.Sigil (loadSigil,makeSigilFromCredentials)
 
 import Data.Text qualified as Text
 
@@ -97,24 +95,6 @@ instance Pretty AckTrouble where
       "no encryption key for" <+> pretty (AsBase58 k) <> line
         <> "  an ack is sealed to its reader, so the signer needs one too"
     AckNotSent e -> "the acknowledgement was not sent:" <+> pretty (safeText e)
-
--- | Does this sigil name this key?
---
--- Three answers. 'Just True' is the sigil the reply channel claims; 'Just
--- False' is a sigil that resolves and names somebody else, which is the one
--- worth refusing; 'Nothing' is a sigil this node cannot read at all, either
--- because the block has not arrived or because it is not a sigil, and those two
--- are the same event here -- nothing about the channel has been established
--- either way.
---
--- Pure, and takes the sigil rather than its hash, so that the rule can be
--- asked questions without a storage: the reason this check did not exist is
--- that its natural home ('openLetterAs') is pure and could not load one.
-sigilNames :: HubKey -> Maybe (Sigil HubScheme) -> Maybe Bool
-sigilNames k msi = do
-  si <- msi
-  (owner, _) <- unboxSignedBox0 (sigilData si)
-  pure (owner == k)
 
 -- | Where an ack goes, given a vetted channel and what reading its sigil said.
 --

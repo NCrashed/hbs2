@@ -2,6 +2,29 @@
 
 ## Added
 
+  - **`hbs2-hub whoami`, and a refusal that stops the pair it checks from
+    being sent.** A letter needs an author key, a sender sigil and a mailbox of
+    your own; three tools make those three things, no verb produced any of
+    them, and no help text named a tool that did. `whoami` lists the signing
+    keys this machine holds and names the tool for each of the other two. It
+    creates nothing: making a key, a sigil or a mailbox belongs to
+    `hbs2-keyman`, `hbs2-cli` and `hbs2-peer`, and a fourth tool that also made
+    them would be a fourth place for them to disagree about where they live.
+
+    The author key and the sender sigil are separate values that have to agree,
+    and the way they disagree was invisible. A sigil naming somebody else's key
+    produces a letter that is signed correctly and folds correctly, and the hub
+    then declines to acknowledge it, because it will not seal a maintainer's
+    reply to a key the sender does not hold. Every step correct, and none of
+    them anywhere near the person who could fix it, whose `issue new` had
+    exited 0.
+
+    `hbs2-hub whoami --author <key> --sender <hash>` answers that before it
+    matters, and the composing verbs now refuse the pair outright: `issue new`,
+    `pr new`, `pr revise` and the comment verbs all check it before anything is
+    signed or sent, and exit `47` naming both values. It is the same rule the
+    hub applies before acknowledging, asked on the machine that can act on it.
+
   - **`hbs2-hub`: a decentralized forge.** Issues, pull requests,
     comments, labels and merge records live inside the git repository they
     are about, as a signed append-only log under `refs/hbs2/meta` that

@@ -142,6 +142,7 @@ library hub-ingress
       HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
+      HBS2.Hub.CLI.Whoami
 
 -- The CLI itself.
 --
@@ -226,6 +227,7 @@ test-suite spec
       HBS2.Hub.PolicySpec
       HBS2.Hub.PrSpec
       HBS2.Hub.PublishSpec
+      HBS2.Hub.WhoamiSpec
       HBS2.Hub.PropertySpec
       HBS2.Hub.IngressSpec
       HBS2.Hub.ReadSpec
