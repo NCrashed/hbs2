@@ -23,6 +23,8 @@ module HBS2.Hub.CLI.Own
   , redactUsage
   , OwnArgs(..)
   , ownArgs
+  , ownArgsFor
+
   , RedactArgs(..)
   , redactArgs
   ) where
@@ -37,7 +39,7 @@ import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair)
-import HBS2.Hub.CLI.Read (codeNoSuchThread)
+import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 
 import HBS2.CLI.Prelude
@@ -152,8 +154,16 @@ ownEntries = do
                  <> line <> "labels are a request (PEP-18); this is the owner applying"
                  <> line <> "one, and it is the only thing a reader shows as a label." )
         $ entry $ bindMatch name $ nil_ \case
-            (ownArgs -> Just ow)
-              | owClear ow || not (List.null (owLabels ow)) -> lift (labelIt ow)
+            -- BOTH AT ONCE IS REFUSED, and it used not to be: this admitted the
+            -- pair and 'labelIt' then resolved it in favour of the clear, so
+            -- `issue label --label bug --clear` published an owner-signed event
+            -- that REMOVED every label when the operator had asked to add one,
+            -- into canon that cannot take it back. The sibling verb refuses the
+            -- same shape two functions down, and the paragraph above says the
+            -- whole reason --clear is spelled out is not to publish a mistake.
+            (ownArgsFor ["--label"] ["--clear"] -> Just ow)
+              | owClear ow, List.null (owLabels ow) -> lift (labelIt ow)
+              | not (owClear ow), not (List.null (owLabels ow)) -> lift (labelIt ow)
             _ -> liftIO (die (show ownUsage))
 
     assignVerb name =
@@ -176,7 +186,7 @@ ownEntries = do
                  <> line <> "on labels: a verb that unassigned because somebody forgot"
                  <> line <> "an argument would publish that into append-only canon." )
         $ entry $ bindMatch name $ nil_ \case
-            (ownArgs -> Just ow)
+            (ownArgsFor ["--to"] ["--clear"] -> Just ow)
               | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
               | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
             _ -> liftIO (die (show ownUsage))
@@ -200,7 +210,7 @@ ownEntries = do
                  <> line <> "--as names a delegate's key (PEP-21); it defaults to"
                  <> line <> "the repository key." )
         $ entry $ bindMatch name $ nil_ \case
-            (ownArgs -> Just ow) -> lift (statusIt mk ow)
+            (ownArgsFor ["--note"] [] -> Just ow) -> lift (statusIt mk ow)
             _ -> liftIO (die (show ownUsage))
 
     canonOf repo =
@@ -209,16 +219,12 @@ ownEntries = do
       -- empty, because a delegation CAN be the first event canon holds.
       withCanon Refuse repo withGitCanon
 
-    -- The number to the thread it names, through the fold's own index. A
-    -- number nobody minted is a refusal and not an event: minting against a
-    -- thread canon does not hold is exactly what the fold drops as BadThread,
-    -- with the seq already spent.
-    threadOfNumber fr n =
-      listToMaybe [ t | (n', t) <- numberIndexOf fr, n' == n ]
-        & maybe (liftIO (refuse (show ("canon holds no thread numbered"
-                                         <+> pretty n))
-                                codeNoSuchThread))
-                pure
+    -- The number to the thread it names, through 'oneNumbered'. A number
+    -- nobody minted is a refusal and not an event: minting against a thread
+    -- canon does not hold is exactly what the fold drops as BadThread, with the
+    -- seq already spent. A number canon gives TWICE is a refusal for a sharper
+    -- reason, which is on 'oneNumbered'.
+    threadOfNumber fr n = oneNumbered n fr
 
     statusIt mk ow = do
       (parent, fr) <- canonOf (owRepo ow)
@@ -234,17 +240,30 @@ ownEntries = do
       -- same labels in a different order must produce the same event.
       let value = encodeLabels (if owClear ow then [] else owLabels ow)
       writeOwn (owRepo ow) (owAs ow) parent fr
-        (ASet thr "labels" value) "hub: labels"
+        (ASet thr attrLabels value) "hub: labels"
 
     assignIt ow = do
       (parent, fr) <- canonOf (owRepo ow)
       thr <- threadOfNumber fr (owNumber ow)
-      -- Base58, which is how every other key in canon is written, and empty for
-      -- a clear: the attribute is last-writer-wins and there is no way to
-      -- remove one, so an empty value IS the absence a reader shows as none.
-      let value = maybe "" (Text.pack . show . pretty . AsBase58) (owTo ow)
+      -- PLURAL, and through 'encodeLabels' like every other set-valued
+      -- attribute. PEP-19 states the rule and states why: "an attribute that
+      -- can hold a set is spelled as one everywhere, so nothing has to remember
+      -- which spelling normalizes". This verb wrote the singular, so the name it
+      -- wrote was in no reader's vocabulary but its own: 'multiValued' lists the
+      -- plural, so 'normalizeAttr' left the value alone and `hub verify` raised
+      -- no UnnormalizedAttr; and the PEP-22 render contract reads the plural, so
+      -- every thread this verb ever assigned came out of `--json` with
+      -- "assignees": [] while the terminal showed an assignee. Canon is
+      -- append-only, which is why this had to move before anybody published one.
+      --
+      -- One key still, and the empty set is a clear: last-writer-wins has no way
+      -- to remove an attribute, so the empty value IS the absence a reader shows
+      -- as none. The shape leaves room for --to to become repeatable, which is
+      -- additive; the singular name would not have.
+      let value = encodeLabels
+                    (maybe [] (pure . Text.pack . show . pretty . AsBase58) (owTo ow))
       writeOwn (owRepo ow) (owAs ow) parent fr
-        (ASet thr "assignee" value) "hub: assignee"
+        (ASet thr attrAssignees value) "hub: assignees"
 
     redactIt rd = do
       (parent, fr) <- canonOf (rdRepo rd)
@@ -291,9 +310,23 @@ ownEntries = do
 -- behind a flag for the reason the whole package's are: a repo key and a
 -- delegate key are the same thirty-two bytes of base58.
 ownArgs :: forall c . IsContext c => [Syntax c] -> Maybe OwnArgs
-ownArgs syn = do
-  kvs   <- flagsAndSwitches (repoFlags <> ["--number","--note","--label","--to","--as"])
-                            ["--clear"] syn
+ownArgs = ownArgsFor ["--note","--label","--to"] ["--clear"]
+
+-- | The same, told which optional flags THIS verb has.
+--
+-- WHY THE UNION WAS WRONG. One reader served four verbs and its known set was
+-- everything any of them takes, so a flag the verb in hand does not use was not
+-- refused -- it was dropped. `issue close --to <key>` was accepted and the
+-- assignment discarded; so was `issue close --label bug`. "HBS2.Hub.CLI.Argv"
+-- states the rule this broke: nothing here can tell an operator's mistake from
+-- an intention, so the only safe answer to a word nobody claimed is to stop.
+--
+-- Which matters most for the pair that used to be resolved silently in favour
+-- of the destructive one: see 'labelVerb'.
+ownArgsFor :: forall c . IsContext c
+           => [String] -> [String] -> [Syntax c] -> Maybe OwnArgs
+ownArgsFor extra switches syn = do
+  kvs   <- flagsAndSwitches (repoFlags <> ["--number","--as"] <> extra) switches syn
   repo  <- flagRepo asKey kvs
   n     <- flagOnce kvs "--number" >>= flagWord
   note  <- flagMaybe kvs "--note" (fmap Text.pack . flagText)

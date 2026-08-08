@@ -49,6 +49,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
+import HBS2.Hub.CLI.Read (oneNumbered)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
                            ,signerFor,signingPair
                            ,blessed,committing,oneStop)
@@ -343,11 +344,21 @@ prEntries = do
     -- The thread by its number, which is what a person has in front of them.
     -- Canon is the only place that maps one to the other, and it is the map the
     -- fold rebuilt rather than the convenience index in the tree.
-    numbered fr n =
-      case [ x | x <- HM.elems (frThreads fr), tsNumber x == Just n ] of
-        (x:_) -> pure x
-        []    -> liftIO $ refuse (show ("canon holds no thread numbered" <+> pretty n))
-                                 codeNoSuchPr
+    --
+    -- The id comes from 'oneNumbered', which refuses a number canon gives twice
+    -- rather than taking the head of an unordered traversal: `hub pr merge`
+    -- against an arbitrary one of two threads is an owner-signed merge record
+    -- in append-only canon.
+    numbered fr n = do
+      t <- oneNumbered n fr
+      case HM.lookup t (frThreads fr) of
+        Just x  -> pure x
+        -- Unreachable: the id came out of this fold's own number index. Answered
+        -- rather than asserted, and with this verb's own code, because the
+        -- alternative is a partial pattern in a verb that writes canon.
+        Nothing -> liftIO $ refuse
+                     (show ("canon holds no thread numbered" <+> pretty n))
+                     codeNoSuchPr
 
     prNew pn = do
 

@@ -219,6 +219,58 @@
 
 ## Security
 
+  - **`hbs2-hub`: three verbs wrote the wrong thing into append-only canon.**
+
+    **The assignee attribute was spelled two ways and nobody agreed.**
+    `hub issue|pr assign` wrote `assignee`, singular and scalar, and the
+    terminal reader read it back, so those two agreed with each other and with
+    nothing else. `multiValued` lists the plural, so `normalizeAttr` never
+    touched the value and `hub verify` raised no `UnnormalizedAttr`; and the
+    PEP-22 render contract reads the plural, so every thread the shipped verb
+    ever assigned came out of `--json` as `"assignees": []` while
+    `hub issue show` printed an assignee. PEP-19 settles the spelling and says
+    why: an attribute that can hold a set is spelled as one everywhere, so
+    nothing has to remember which spelling normalizes. Canon is append-only,
+    which is why this had to move before anybody published an assignment. The
+    value now goes through `encodeLabels` like every other set-valued
+    attribute, and `--to` has room to become repeatable, which the singular
+    name did not.
+
+    The spelling is now a constant the writer and both readers take from one
+    place (`attrLabels`, `attrAssignees`, next to `multiValued`), so the drift
+    is not a thing a test catches but a thing that cannot be written. The
+    vocabulary was string literals in eight files, which is why each side could
+    be self-consistent, have a test, and be wrong.
+
+    **`--clear` silently beat `--label`.** One reader served four verbs and its
+    known-flag set was the union of all four, so a flag the verb in hand does
+    not use was not refused but dropped: `issue close --to <key>` was accepted
+    and the assignment discarded. Worse, `label` admitted `--label` and
+    `--clear` together and resolved the pair in favour of the clear, so
+    `issue label --label bug --clear` published an owner-signed event REMOVING
+    every label when the operator had asked to add one. The sibling verb refuses
+    the same shape two functions away, and this verb's own help spends a
+    paragraph saying that `--clear` is spelled out so as not to publish a
+    mistake. Each verb now declares its own flags, and the pair is refused.
+
+    **A duplicate number was resolved by hash order.** `DupNumber` is an anomaly
+    the fold reports and does not drop, so canon can legitimately hold two
+    threads numbered alike -- two maintainers minting from one view is the case
+    PEP-19 leaves open. All four resolvers took the head of an unordered
+    traversal. For a reader that is an arbitrary answer; for a writer it is
+    worse, since `hub issue close --number 42` minted an owner-signed close
+    against whichever thread the HAMT yielded first and said nothing about the
+    other. One resolver now, `oneNumbered`, which refuses and names both
+    thread-ids (new code 49): choosing between two threads to sign against is
+    not a decision a tool makes for a maintainer.
+
+    Related, and the same root: `numberIndexOf` sorted on the number alone, and
+    `sortOn` is stable, so a tie fell back on `HashMap` order -- two clones
+    folding one canon wrote different `index/number.sexp` bytes and so different
+    tree and commit ids for it. Nothing materialized differently, since the
+    index is a hint no signature covers, but two honest rewrites of one canon
+    should not look like different objects.
+
   - **`hbs2-hub compact` refuses a canon holding a file it cannot read.** The
     rule this verb implements is about EVENTS, and `stEvents` is only the files
     that read, parsed and became one. Everything else -- a blob a shallow or

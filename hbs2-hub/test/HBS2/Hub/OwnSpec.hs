@@ -145,3 +145,52 @@ spec = do
       repo <- aKey
       isJust (redactArgs (argv ["--repo", b58 repo, "--event", b58 repo]))
         `shouldBe` True
+
+  -- EACH VERB'S OWN FLAGS, and this is the half that was silently permissive.
+  -- One reader served four verbs with the union of everything any of them
+  -- takes, so a flag the verb in hand does not use was not refused but DROPPED:
+  -- `issue close --to <key>` was accepted and the assignment discarded.
+  -- "HBS2.Hub.CLI.Argv" states the rule that broke -- nothing here can tell an
+  -- operator's mistake from an intention, so the only safe answer to a word
+  -- nobody claimed is to stop.
+  describe "PEP-22 hub issue: a verb refuses a flag it does not have" $ do
+
+    it "close takes --note and refuses the other two verbs' flags" $ do
+      repo <- aKey ; bob <- aKey
+      let close = ownArgsFor ["--note"] []
+          base = ["--repo", b58 repo, "--number", "7"]
+      isJust (close (argv (base <> ["--note","done"]))) `shouldBe` True
+      close (argv (base <> ["--to", b58 bob])) `shouldBe` Nothing
+      close (argv (base <> ["--label","bug"])) `shouldBe` Nothing
+      close (argv (base <> ["--clear"])) `shouldBe` Nothing
+
+    it "label takes --label and --clear and refuses --to and --note" $ do
+      repo <- aKey ; bob <- aKey
+      let label = ownArgsFor ["--label"] ["--clear"]
+          base = ["--repo", b58 repo, "--number", "7"]
+      isJust (label (argv (base <> ["--label","bug"]))) `shouldBe` True
+      isJust (label (argv (base <> ["--clear"]))) `shouldBe` True
+      label (argv (base <> ["--to", b58 bob])) `shouldBe` Nothing
+      label (argv (base <> ["--note","done"])) `shouldBe` Nothing
+
+    it "assign takes --to and --clear and refuses --label and --note" $ do
+      repo <- aKey ; bob <- aKey
+      let assign = ownArgsFor ["--to"] ["--clear"]
+          base = ["--repo", b58 repo, "--number", "7"]
+      isJust (assign (argv (base <> ["--to", b58 bob]))) `shouldBe` True
+      assign (argv (base <> ["--label","bug"])) `shouldBe` Nothing
+      assign (argv (base <> ["--note","done"])) `shouldBe` Nothing
+
+    -- The pair the label verb used to admit and then resolve in favour of the
+    -- destructive one, publishing a clear when the operator asked to add. The
+    -- READER still accepts it, because both flags are that verb's; what refuses
+    -- it is the verb's own guard, which no test can reach (the bindMatch body
+    -- is not linked into this suite). Recorded here so that whoever makes it
+    -- reachable knows what to assert.
+    it "reads --label with --clear, which the verb is what refuses" $ do
+      repo <- aKey
+      let label = ownArgsFor ["--label"] ["--clear"]
+          got = label (argv ["--repo", b58 repo, "--number", "7"
+                            ,"--label","bug","--clear"])
+      fmap owClear got `shouldBe` Just True
+      fmap owLabels got `shouldBe` Just ["bug"]

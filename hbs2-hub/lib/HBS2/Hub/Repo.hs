@@ -43,6 +43,7 @@ module HBS2.Hub.Repo
   , told
   , planCanon
   , numberIndexOf
+  , threadsNumbered
   , CanonCommit(..)
   , WriteRefused(..)
   , CanonSink(..)
@@ -958,9 +959,33 @@ instance Pretty WriteRefused where
 -- Derived from the fold and never from a previous index, because the index is
 -- the one file in the tree that no signature covers: regenerating it is what
 -- keeps it from drifting, and PEP-19 requires exactly that.
+-- SORTED ON THE WHOLE PAIR, not on the number. 'DupNumber' is an anomaly the
+-- fold reports and does not drop, so canon can legitimately hold two threads
+-- numbered alike -- two maintainers minting from one view is the case PEP-19
+-- leaves open. 'sortOn' is stable, so on the number alone a tie fell back on
+-- 'HM.toList', which is hash order: two clones folding one canon then wrote
+-- different index bytes and so different tree and commit ids for it. Nothing
+-- materializes differently, since the index is a hint no signature covers and
+-- the opens are the truth, but two honest rewrites of one canon should not look
+-- like different objects.
 numberIndexOf :: FoldResult -> [(Word64, ThreadId)]
 numberIndexOf fr =
-  sortOn fst [ (n, t) | (t, ts) <- HM.toList (frThreads fr), Just n <- [tsNumber ts] ]
+  sortOn id [ (n, t) | (t, ts) <- HM.toList (frThreads fr), Just n <- [tsNumber ts] ]
+
+-- | Every thread canon gives that number, lowest id first.
+--
+-- A LIST, because the answer is not always one. 'DupNumber' is reported and not
+-- dropped, so two threads can carry one number; every resolver in the package
+-- took the head of an unordered traversal, which for a reader is an arbitrary
+-- answer and for a writer is worse -- `hub issue close --number 42` minted an
+-- owner-signed close against whichever thread the HAMT yielded first and said
+-- nothing about the other. Choosing between two threads to sign against is not
+-- a decision a tool makes for a maintainer.
+--
+-- The order is the index's own, so a reader that shows the first shows the same
+-- one everywhere.
+threadsNumbered :: Word64 -> FoldResult -> [ThreadId]
+threadsNumbered n fr = [ t | (n', t) <- numberIndexOf fr, n' == n ]
 
 -- | The files that put these events in canon (PEP-19 "Tree layout").
 --

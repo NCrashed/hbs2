@@ -52,6 +52,8 @@ module HBS2.Hub.Types
   , decodeLabels
   , validLabel
   , multiValued
+  , attrLabels
+  , attrAssignees
   , normalizeAttr
   , normalizedAttr
   , validAttrName
@@ -446,6 +448,26 @@ decodeLabels t
 validLabel :: Text -> Bool
 validLabel l = not (Text.null l) && not (Text.isInfixOf "," l)
 
+-- | The attribute names the writer, the fold and every reader must agree on.
+--
+-- WHY THESE ARE NAMED AND NOT SPELLED. The vocabulary was string literals in
+-- eight files, and it drifted exactly where a drift is invisible: the verb that
+-- assigns a thread wrote @assignee@ and the terminal reader read @assignee@, so
+-- those two agreed with each other and with nothing else. 'multiValued' lists
+-- the plural, so 'normalizeAttr' never touched the value and @hub verify@
+-- raised no unnormalized-attribute anomaly; the PEP-22 render contract reads
+-- the plural, so every thread the shipped verb assigned came out of @--json@
+-- unassigned. Each side was self-consistent, each side had a test, and both
+-- were green.
+--
+-- PEP-19 states the rule these encode: an attribute that can hold a set is
+-- spelled as a plural EVERYWHERE, so that nothing has to remember which
+-- spelling normalizes. Canon is append-only, so the spelling is frozen the
+-- moment somebody publishes one.
+attrLabels, attrAssignees :: Text
+attrLabels    = "labels"
+attrAssignees = "assignees"
+
 -- | Attribute names whose value is a set, not a scalar.
 --
 -- The canonical rendering of a set ('encodeLabels') is what makes two
@@ -455,7 +477,7 @@ validLabel l = not (Text.null l) && not (Text.isInfixOf "," l)
 -- (PEP-22) reports a value in canon that is not normalized, since the fold
 -- cannot fix one (the author box is signed) and must not drop it either.
 multiValued :: [Text]
-multiValued = ["labels","assignees"]
+multiValued = [attrLabels, attrAssignees]
 
 -- | Normalize an attribute value for signing: canonical for a set-valued
 -- name, untouched otherwise.

@@ -36,7 +36,7 @@ import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Verify (codeOf)
-import HBS2.Hub.CLI.Read (codeNoSuchThread)
+import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
@@ -120,12 +120,12 @@ commentEntries = do
     -- a git ref in this repository, and a clone that has not synced has no
     -- numbers to resolve against -- which is a refusal naming the number,
     -- rather than a letter sent into nothing.
+    -- Through 'oneNumbered', which refuses a number canon gives twice rather
+    -- than taking the head of an unordered traversal: this letter names a
+    -- thread and a letter names it forever.
     threadNumbered repo n = do
       fr <- snd <$> withCanon Refuse repo withGitCanon
-      case [ t | (n', t) <- numberIndexOf fr, n' == n ] of
-        (t:_) -> pure t
-        [] -> liftIO (refuse (show ("canon here holds no thread numbered" <+> pretty n))
-                             codeNoSuchThread)
+      oneNumbered n fr
 
     commentVerb name =
       brief "reply in a thread: compose a Tier B letter and send it to a hub mailbox"

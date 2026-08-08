@@ -38,9 +38,11 @@ module HBS2.Hub.CLI.Read
   , statusOf
   , listArgs
   , labelsOf
-  , assigneeOf
+  , assigneesOf
   , diffArgv
   , codeNoSuchThread
+  , codeAmbiguousNumber
+  , oneNumbered
   ) where
 
 import HBS2.Hub.Types
@@ -51,7 +53,7 @@ import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
 import HBS2.Hub.Canon (utf8Length,takeBytes)
 import HBS2.Hub.Repo.GitBundle (validSha)
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
-import HBS2.Hub.CLI.Common (withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),refuse)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -76,6 +78,43 @@ import System.Exit (die,exitWith,ExitCode(..))
 -- and a script that polls an issue until it appears has to tell the two apart.
 codeNoSuchThread :: Int
 codeNoSuchThread = 26
+
+-- | Canon holds more than one thread with the number given.
+--
+-- Its own code because the remedy is not 'codeNoSuchThread''s: the number is
+-- real and names two threads, and what resolves it is naming the thread by id.
+-- @hub verify@ reports the same state as a @DupNumber@ anomaly.
+codeAmbiguousNumber :: Int
+codeAmbiguousNumber = 49
+
+-- | The one thread canon gives that number, or a refusal saying which way.
+--
+-- HERE AND NOT IN FOUR VERBS. `DupNumber` is an anomaly the fold reports and
+-- does not drop, so canon can legitimately hold two threads numbered alike --
+-- two maintainers minting from one view is the case PEP-19 leaves open. Every
+-- resolver in the package took the head of an unordered traversal: for a reader
+-- that is an arbitrary answer, and for a writer it is worse, since
+-- `hub issue close --number 42` minted an owner-signed close against whichever
+-- thread the HAMT yielded first, said nothing about the other, and put it in
+-- append-only canon. Choosing between two threads to sign against is not a
+-- decision a tool makes for a maintainer.
+--
+-- Four verbs asked this question and each spelled its own answer, which is how
+-- three of them came to spell it wrong.
+oneNumbered :: MonadUnliftIO m => Word64 -> FoldResult -> m ThreadId
+oneNumbered n fr = case threadsNumbered n fr of
+  [t] -> pure t
+  []  -> liftIO (refuse (show ("canon holds no thread numbered" <+> pretty n))
+                        codeNoSuchThread)
+  ts  -> liftIO $ refuse
+           (show ( "canon holds" <+> pretty (length ts) <+> "threads numbered"
+                     <+> pretty n <> ", so this cannot say which you mean:"
+                   <> line
+                   <> indent 2 (vcat (fmap hashDoc ts))
+                   <> line
+                   <> "  `hbs2-hub verify <repo-key>` reports it as a duplicate"
+                     <+> "number." ))
+           codeAmbiguousNumber
 
 -- | What a listing was narrowed to.
 --
@@ -120,7 +159,7 @@ statusDoc = pretty . safeText . statusOf
 -- applying a label an owner-signed @set@, and printing the two as one would
 -- let a stranger label their own issue.
 labelsOf :: ThreadState -> [Text]
-labelsOf = maybe [] decodeLabels . HM.lookup "labels" . tsAttrs
+labelsOf = maybe [] decodeLabels . HM.lookup attrLabels . tsAttrs
 
 -- | Who a thread is assigned to, when an owner has said so.
 --
@@ -132,8 +171,14 @@ labelsOf = maybe [] decodeLabels . HM.lookup "labels" . tsAttrs
 -- decision 'statusDoc' records: an attribute value is a stranger's bytes,
 -- whatever a set event carried, and a reader that insisted on parsing it would
 -- show nothing at all for a thread whose canon says something else.
-assigneeOf :: ThreadState -> Maybe Text
-assigneeOf = HM.lookup "assignee" . tsAttrs
+--
+-- PLURAL and set-valued, like 'labelsOf' and for the same reason: PEP-19 spells
+-- an attribute that can hold a set as one everywhere. This read the singular,
+-- which the writing verb also wrote and which nothing else in the package knew
+-- -- not 'multiValued', so no value was ever normalized, and not the PEP-22
+-- contract, so `--json` reported every assignment as none.
+assigneesOf :: ThreadState -> [Text]
+assigneesOf = maybe [] decodeLabels . HM.lookup attrAssignees . tsAttrs
 
 -- | What git may be asked for the diff of these coordinates, if anything.
 --
@@ -216,12 +261,12 @@ showDoc t =
   , "blessed-by" <+> keyDoc (tsCanonBy t)
   , "created" <+> pretty (tsCreated t) <+> "updated" <+> pretty (tsUpdated t)
   ]
-  -- Only when there is one: an assignee is cleared by setting the attribute
-  -- to the empty string (last-writer-wins has no way to remove one), and a
-  -- line reading "assignee" with nothing after it says the opposite of what
-  -- canon holds.
-  <> [ "assignee" <+> pretty (safeText a)
-     | Just a <- [assigneeOf t], not (Text.null a) ]
+  -- Only when there is one: an assignment is cleared by setting the attribute
+  -- to the empty set (last-writer-wins has no way to remove one), and a line
+  -- reading "assignees" with nothing after it says the opposite of what canon
+  -- holds.
+  <> [ "assignees" <+> hsep (punctuate comma (fmap (pretty . safeText) as))
+     | as@(_:_) <- [assigneesOf t] ]
   <> [ "labels" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
      | ls <- [labelsOf t], not (null ls) ]
   -- Said only when there is something to say, and said as a REQUEST: the

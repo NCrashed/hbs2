@@ -9,6 +9,8 @@ module HBS2.Hub.ReadSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.CLI.Read
+import HBS2.Hub.Render (threadContract,renderContract)
+import HBS2.Hub.Repo (threadsNumbered,numberIndexOf)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Net.Auth.Credentials
@@ -17,6 +19,7 @@ import HBS2.Data.Types.Refs (HashRef(..))
 
 import Data.Config.Suckless (C)
 import Data.List (isInfixOf)
+import Data.List qualified as List
 import Data.Maybe (isJust)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -152,43 +155,126 @@ spec = do
       diffArgv (coords "abc1234" (sha "b")) `shouldBe` Nothing
       diffArgv (coords (sha "a") "") `shouldBe` Nothing
 
+  -- PLURAL, and the name is the whole of the finding. This verb wrote
+  -- "assignee" and read it back, so the terminal was right and nothing else in
+  -- the package knew the name: `multiValued` lists the plural, so no value was
+  -- ever normalized and `hub verify` raised no UnnormalizedAttr, and the PEP-22
+  -- contract reads the plural, so every thread the shipped verb assigned came
+  -- out of --json as unassigned. PEP-19 settles the spelling and says why: an
+  -- attribute that can hold a set is spelled as one everywhere.
   describe "PEP-22 read: who a thread is assigned to" $ do
 
     it "shows the key an owner set, and nothing before that" $ do
       owner <- kp ; bob <- kp
       let repo = fst owner
+          key = Text.pack (show (pretty (AsBase58 (fst bob))))
           e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
           before = foldEvents repo [e1]
           after = foldEvents repo
                     [ e1
                     , mkEvent owner owner
-                        (ASet (eventId e1) "assignee"
-                              (Text.pack (show (pretty (AsBase58 (fst bob))))) 3000)
+                        (ASet (eventId e1) "assignees" (encodeLabels [key]) 3000)
                         (canonOf repo 2 Nothing) ]
-      fmap assigneeOf (threadsOf HubIssue noFilter before) `shouldBe` [Nothing]
-      fmap assigneeOf (threadsOf HubIssue noFilter after)
-        `shouldBe` [Just (Text.pack (show (pretty (AsBase58 (fst bob)))))]
+      fmap assigneesOf (threadsOf HubIssue noFilter before) `shouldBe` [[]]
+      fmap assigneesOf (threadsOf HubIssue noFilter after) `shouldBe` [[key]]
 
-    -- Last-writer-wins like every attribute, so unassigning is an empty value
+    -- Last-writer-wins like every attribute, so unassigning is the empty set
     -- and not a removal: there is no op that takes an attribute away.
     it "reads an empty value as assigned to nobody a reader should print" $ do
       owner <- kp ; bob <- kp
       let repo = fst owner
+          key = Text.pack (show (pretty (AsBase58 (fst bob))))
           e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
           fr = foldEvents repo
                  [ e1
                  , mkEvent owner owner
-                     (ASet (eventId e1) "assignee"
-                           (Text.pack (show (pretty (AsBase58 (fst bob))))) 3000)
+                     (ASet (eventId e1) "assignees" (encodeLabels [key]) 3000)
                      (canonOf repo 2 Nothing)
                  , mkEvent owner owner
-                     (ASet (eventId e1) "assignee" "" 4000)
+                     (ASet (eventId e1) "assignees" (encodeLabels []) 4000)
                      (canonOf repo 3 Nothing) ]
-      fmap assigneeOf (threadsOf HubIssue noFilter fr) `shouldBe` [Just ""]
+      fmap assigneesOf (threadsOf HubIssue noFilter fr) `shouldBe` [[]]
       -- And the report says nothing about it: an empty line reading
-      -- "assignee" is worse than no line.
+      -- "assignees" is worse than no line.
       unwords (fmap show (showDoc (head (threadsOf HubIssue noFilter fr))))
-        `shouldSatisfy` not . isInfixOf "assignee"
+        `shouldSatisfy` not . isInfixOf "assignees"
+
+    -- THE CROSSING TEST, which is what nothing did: the name the shipped verb
+    -- writes, read by the PEP-22 contract. Both sides invented their own
+    -- spelling, each was self-consistent, each had a test, and both were green
+    -- -- so this one goes through 'attrAssignees', the constant `issue assign`
+    -- writes with, rather than through a literal of its own. A test that spells
+    -- the name itself is the shape that let this happen.
+    it "writes the name the render contract reads" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          key = Text.pack (show (pretty (AsBase58 (fst bob))))
+          e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
+          fr = foldEvents repo
+                 [ e1
+                 , mkEvent owner owner
+                     (ASet (eventId e1) attrAssignees (encodeLabels [key]) 3000)
+                     (canonOf repo 2 Nothing) ]
+          t = head (threadsOf HubIssue noFilter fr)
+          json = show (renderContract (threadContract t Nothing))
+      json `shouldSatisfy` isInfixOf (Text.unpack key)
+      -- And the terminal reader agrees with both.
+      assigneesOf t `shouldBe` [key]
+
+    -- The half that made the drift invisible: an attribute the writer spells
+    -- one way and 'multiValued' another is never normalized, so `hub verify`
+    -- has nothing to report about it either.
+    it "is a name the canonicalizer knows" $ do
+      attrAssignees `shouldSatisfy` (`elem` multiValued)
+      attrLabels `shouldSatisfy` (`elem` multiValued)
+
+  -- A NUMBER THAT NAMES TWO THREADS. `DupNumber` is an anomaly the fold reports
+  -- and does not drop, so canon can hold both -- two maintainers minting from
+  -- one view is the case PEP-19 leaves open. Every resolver took the head of an
+  -- unordered traversal, which for a writer means an owner-signed event against
+  -- whichever the HAMT yielded first, silently, into append-only canon.
+  describe "PEP-22 read: resolving a number canon gives twice" $ do
+
+    let twoAt n owner =
+          let repo = fst owner
+              a = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just n))
+              b = mkEvent owner owner (anIssue repo "two") (canonOf repo 2 (Just n))
+          in (foldEvents repo [a, b], eventId a, eventId b)
+
+    it "answers with every thread that carries the number" $ do
+      owner <- kp
+      let (fr, a, b) = twoAt 42 owner
+      length (threadsNumbered 42 fr) `shouldBe` 2
+      threadsNumbered 42 fr `shouldSatisfy` (\ts -> a `elem` ts && b `elem` ts)
+
+    it "answers with one when canon holds one, and none when it holds none" $ do
+      owner <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 7))
+          fr = foldEvents repo [e1]
+      threadsNumbered 7 fr `shouldBe` [eventId e1]
+      threadsNumbered 8 fr `shouldBe` []
+
+    -- And the order is the index's, not the HashMap's: two clones folding one
+    -- canon wrote different index/number.sexp bytes, and so different tree and
+    -- commit ids, because `sortOn` is stable and the tie fell through to hash
+    -- order.
+    --
+    -- FIVE AND NOT TWO. The keys are random, so under the old sort the hash
+    -- order coincides with the sorted one about half the time with two threads
+    -- -- a guard that catches a regression on a coin flip is not a guard. With
+    -- five it is one permutation in 120.
+    it "orders a tie by thread-id, so the index is a function of canon" $ do
+      owner <- kp
+      let repo = fst owner
+          fr = foldEvents repo
+                 [ mkEvent owner owner (anIssue repo (Text.pack (show i)))
+                           (canonOf repo i (Just 42))
+                 | i <- [1 .. 5] ]
+          ids = threadsNumbered 42 fr
+      length ids `shouldBe` 5
+      ids `shouldBe` List.sort ids
+      fmap snd (numberIndexOf fr) `shouldBe` ids
 
   describe "PEP-22 read: what is printed" $ do
 
