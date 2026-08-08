@@ -1385,24 +1385,46 @@ not one this log counts: a number recorded off a stranger's file becomes a
 duplicate reported against the next honest `open`, with the honest maintainer's
 key beside it.
 
-Who may spend one is then three-valued. A key authorized at that point in the
-log spends its stamp outright. A key the log never authorized spends nothing, and
-that exclusion is the load-bearing one: counting a stranger would let anyone who
-can write one file into one clone strand the cursor at the top of its range,
-with the owner unable to mint even the `revoke` that would answer it. A key
-whose delegation has been WITHDRAWN spends a stamp only if its `seq` is within a
-small window of the cursor.
+Who may spend one is then two-valued, and bounded in both. A key the log never
+authorized spends nothing, and that exclusion is the load-bearing one: counting
+a stranger would let anyone who can write one file into one clone strand the
+cursor at the top of its range, with the owner unable to mint even the `revoke`
+that would answer it. A key the log HAS authorized, whether or not its
+delegation still stands, spends its stamp only if that stamp is within a window
+of the mark below it.
 
-That middle case is not a compromise, it is the shape of the problem. The honest
-case it exists for is a delegate who minted from a view built before the
-revocation, whose event the publisher then wrote: that leaves a refused file at
-a `seq` that is nonetheless taken, handing it out again puts two events there,
-and no ill intent is needed. Such a `seq` came from a cursor, so it is always
-within a step or two of one. Counting a withdrawn key WITHOUT that bound is what
-makes `revoke` stop being a remedy: the same key can then stamp `maxBound - 1`
-and pin `folded-ts` at the ceiling, and the owner has no answer but compaction.
-With the bound, a run of such files can creep the cursor by the window each
-time and no further. This implementation uses sixteen.
+The honest case the window exists for is a delegate who minted from a view built
+before a revocation, whose event the publisher then wrote: that leaves a refused
+file at a `seq` that is nonetheless taken, handing it out again puts two events
+there, and no ill intent is needed. Such a `seq` came from a cursor, so it is
+always within a step or two of one.
+
+Applying the window ONLY to a withdrawn key, which is what `hub-meta 2` did,
+bounds the case where the owner has already noticed and leaves the one where
+they have not: a delegate whose delegation still stands needs a single file at
+`maxBound - 1` to strand the cursor for good, and the entry point the owner
+would answer it with is gated on the same cursor. Under `hub-meta 3` the window
+applies to every authorized key. A bound that only takes effect after the harm
+is noticed is not a bound.
+
+The two counters take different windows, because their honest gaps differ.
+Numbers are handed out one per `open` and compaction never drops an `open`, so
+the surviving numbers are dense and the window can be tight; this implementation
+uses sixteen, and a `number` outside it is REFUSED, since a number is a label a
+reader is shown and an `open` carrying one the fold will not honour is better
+refused than kept with a label nothing agrees with. Sequence numbers are not
+dense: compaction drops superseded events out of the tree, so the gap between
+two survivors is however many were dropped between them. That window is
+therefore generous (this implementation uses 2^24), and a `seq` outside it is
+ADMITTED and simply does not move the mark. Refusing it instead would let a
+legitimately compacted canon become unfoldable, which is a repository bricked by
+its own maintenance; leaving it admitted costs at most a later duplicate `seq`,
+which is reported and ordered deterministically.
+
+A generous window is still a bound: reaching the top of a 2^64 range through a
+2^24 window takes 2^40 files, each one an object the publisher writes and every
+reader folds, at which point flooding canon is the cheaper attack and the cursor
+is no longer the weak link.
 
 What stays restricted to admitted events, besides the number, is the `origin`
 set: an event that was not applied folded no letter.

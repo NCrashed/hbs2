@@ -313,7 +313,7 @@ acceptEntries = do
              <> line <> "This node's triage deny-list IS applied (see hub ban):"
              <> line <> "a letter whose INNER author is denied here is refused"
              <> line <> "before anything is minted. That list is local and"
-             <> line <> "unsigned; PEP-21 defers a published ban to hub-meta 2." )
+             <> line <> "unsigned; PEP-21 defers a published ban to a later hub-meta." )
     $ entry $ bindMatch "hub:inbox:accept" $ nil_ \case
         (acceptArgs -> Just a) -> lift (accept a)
         _ -> liftIO (die (show acceptUsage))
@@ -354,7 +354,8 @@ acceptEntries = do
       api <- getClientAPI @MailboxAPI @UNIX
 
       -- This node's triage deny-list (PEP-21). Local and unsigned, because a
-      -- published ban needs a consensus change the spec defers to hub-meta 2,
+      -- published ban needs a consensus change the spec defers to a later
+      -- hub-meta,
       -- so what it does is refuse to FOLD a banned author rather than claim
       -- anything about them in canon.
       --

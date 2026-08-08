@@ -8,11 +8,12 @@
 -- fresh envelope. A full ban is both.
 --
 -- LOCAL STATE, and that is PEP-21's decision rather than an omission here:
--- "the deny-list stays loop state, and the earliest a public ban can appear is
--- hub-meta 2". Publishing one into canon needs a new author-content
--- constructor and an admission rule saying who may sign it and what it does,
--- which is a consensus change. So this list does not travel, is not signed,
--- and two hubs serving one repository can disagree about it.
+-- "the deny-list stays loop state until some hub-meta bump carries one".
+-- Publishing one into canon needs a new author-content constructor and an
+-- admission rule saying who may sign it and what it does, which is a consensus
+-- change. So this list does not travel, is not signed, and two hubs serving one
+-- repository can disagree about it. The spec used to name the next version and
+-- two of those have shipped for other reasons since, which is why it names none.
 --
 -- OUTSIDE THE WORKING TREE for that reason. A file under the repository would
 -- look like something that travels, and would eventually be committed by
@@ -71,7 +72,7 @@ banEntries = do
              <> line <> "inside the signed box, which a rewrapper cannot change."
              <> line
              <> line <> "Local to this node and unsigned. PEP-21 defers publishing"
-             <> line <> "a ban into canon to hub-meta 2, because it needs a new"
+             <> line <> "a ban into canon to some later hub-meta: it needs a new"
              <> line <> "author-content op and an admission rule, so two hubs"
              <> line <> "serving one repository may disagree about this list." )
     $ entry $ bindMatch "hub:ban:list" $ nil_ \case
@@ -110,7 +111,7 @@ banEntries = do
                  <> line <> "key. A full ban is both."
                  <> line
                  <> line <> "Local and unsigned, and it does not travel: PEP-21"
-                 <> line <> "defers a published ban to hub-meta 2. Past events stay"
+                 <> line <> "defers a published ban to a later hub-meta. Past events stay"
                  <> line <> "in canon; this refuses future ones." )
         $ entry $ bindMatch name $ nil_ \case
             (banArgs -> Just ba) | Just who <- baKey ba -> lift (setBan ban ba who)

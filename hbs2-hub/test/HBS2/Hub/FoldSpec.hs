@@ -817,14 +817,18 @@ spec = do
       HS.member (fst bob) (frMaintainers (foldEvents repo [here, revElsewhere]))
         `shouldBe` True
 
-    it "spends a withdrawn delegate's stamp only next to the cursor" $ do
+    it "spends an authorized key's stamp only within the window" $ do
       owner <- kp
       bob <- kp
       alice <- kp
-      -- The window is a constant that decides whether a revocation is a remedy,
-      -- and nothing tested it: raising it to a million left every test green,
+      -- The window is a constant that decides whether the cursor can be
+      -- stranded, and nothing tested it: raising it left every test green,
       -- because the mutinous fixture sat at the top of the range and the honest
       -- one sat next to the cursor. These two stand on either side of the line.
+      --
+      -- The key here is a WITHDRAWN delegate, which used to be the only case
+      -- the window applied to. It applies to every authorized key now, so the
+      -- boundary is the same one a live maintainer meets.
       let repo = fst owner
           eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
           eOpen = mkEvent alice bob (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
@@ -834,9 +838,32 @@ spec = do
                      (AComment (eventId eOpen) Nothing (Just "late") Nothing 4)
                      (canonAt repo n Nothing 4)
           upTo n = cursorFrom (foldEvents repo [eDel, eOpen, eRev, late n])
-      -- the cursor is at 3 when the late file is reached, and the window is 16
-      upTo 19 `shouldBe` CanonCursor 20 2
-      upTo 20 `shouldBe` CanonCursor 4 2
+      -- the mark is at 3 when the late file is reached
+      upTo (3 + seqStampWindow) `shouldBe` CanonCursor (4 + seqStampWindow) 2
+      upTo (4 + seqStampWindow) `shouldBe` CanonCursor 4 2
+
+    -- THE ONE FILE THAT USED TO END A REPOSITORY. A key whose delegation still
+    -- stands got its stamp outright, so one canon box near the top of the range
+    -- put the cursor at 'maxBound' and every entry point in the bridge -- the
+    -- owner's own revoke among them -- answered 'CursorExhausted' from then on.
+    it "does not let a live delegate strand the cursor" $ do
+      owner <- kp
+      bob <- kp
+      alice <- kp
+      let repo = fst owner
+          eDel = mkEvent owner owner (ADelegate repo (fst bob) 1) (canon repo 1 Nothing)
+          mutiny = mkEvent alice bob
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)
+                     (canonAt repo (maxBound - 1) (Just 2) 2)
+          fr = foldEvents repo [eDel, mutiny]
+      -- the mark did not follow it, so the next mint is the seq after the
+      -- delegation and not the top of the range
+      ccrNextSeq (cursorFrom fr) `shouldBe` 2
+      -- and it is admitted, not refused: a compacted canon's survivors can sit
+      -- past the window too, and refusing them would make maintenance fatal
+      reasons fr `shouldBe` []
+      -- what makes it visible instead
+      fmap anWhat (frAnomalies fr) `shouldBe` [SeqTooFarAhead 1 (maxBound - 1)]
 
     it "does not spend a number on an event it refused" $ do
       owner <- kp
@@ -844,20 +871,34 @@ spec = do
       other <- kp
       -- An open aimed at another repository, blessed by a maintainer of this
       -- one: refused, and it never showed anyone a number, so burning one would
-      -- leave a gap nothing explains. At the top of the range it would strand
-      -- the counter and abort every later triage run.
-      --
-      -- 'maxCanonNumber' and not maxBound: the top of the range is now itself a
-      -- drop ('NumberAtTopOfRange'), so a fixture there would be refused for the
-      -- number rather than for the target and would stop testing what it says.
+      -- leave a gap nothing explains.
       let repo = fst owner
           foreign' = mkEvent alice owner
                        (AOpen (fst other) HubIssue "elsewhere" [] Nothing Nothing Nothing 1)
-                       (canon repo 1 (Just maxCanonNumber))
+                       (canon repo 1 (Just 1))
           fr = foldEvents repo [foreign']
       reasons fr `shouldBe` [WrongTarget]
       -- the seq is spent, since the file sits at it; the number is not
       cursorFrom fr `shouldBe` CanonCursor 2 1
+
+    -- The number's own window, which is tight where the seq's is not: numbers
+    -- are handed out one per open and compaction never drops an open, so there
+    -- is no sparse-survivor case to make room for. And it is the cheaper
+    -- counter to strand: 'maxCanonNumber' is reachable by one admitted event.
+    it "refuses a number far above the ones canon holds" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          leap = mkEvent alice owner
+                   (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                   (canon repo 1 (Just (numberStampWindow + 1)))
+          ok = mkEvent alice owner
+                 (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon repo 1 (Just numberStampWindow))
+      reasons (foldEvents repo [leap]) `shouldBe` [NumberTooFarAhead]
+      reasons (foldEvents repo [ok]) `shouldBe` []
+      -- and the refusal is the number's, not the target's or the ceiling's
+      frMaxNumber (foldEvents repo [leap]) `shouldBe` 0
 
     it "still counts a seq a maintainer took before their revocation landed" $ do
       owner <- kp

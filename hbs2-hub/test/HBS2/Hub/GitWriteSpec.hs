@@ -164,8 +164,9 @@ spec1 = do
       void $ commitOk dir Nothing cw 1000
 
       st <- readBack dir (fst owner)
-      -- 1: the fixture's events name no part, so a version 1 reader folds them.
-      stVersion st `shouldBe` Just 1
+      -- The floor, not 1: the fixture's events name no part, so nothing here
+      -- raises the version above the lowest a tree may declare.
+      stVersion st `shouldBe` Just hubMetaMin
       stBad st `shouldBe` []
       stMisnamed st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -280,15 +281,16 @@ spec1 = do
       (_, cw) <- anOpen alice owner 1 "an issue"
       void $ commitOk dir Nothing cw 1000
       v <- git dir ["cat-file", "-p", "refs/hbs2/meta:version"]
-      -- 1, not this build's constant: the fixture's event names no part, so a
-      -- version 1 reader can fold it. The version a commit declares is a
-      -- function of what it holds, which is what stops a newer build shutting
-      -- older clones out of a tree it added nothing new to.
+      -- The FLOOR, not this build's constant: the fixture's event names no
+      -- part, so nothing in it raises the version above the lowest a tree may
+      -- declare. The version a commit declares is a function of what it holds
+      -- and of that floor, which is what stops a newer build shutting older
+      -- clones out of a tree it added nothing new to.
       --
       -- The FIRST LINE, because the fixture's git helper keeps one and the file
       -- now has two clauses: the rules version and the floor a reader is gated
       -- on. That the two round-trip is CanonSpec's job.
-      v `shouldBe` "(hub-meta 1)"
+      v `shouldBe` ("(hub-meta " <> show hubMetaMin <> ")")
 
     -- The whole chain in one assertion: mint, plan, commit to a real git ref,
     -- read it back with the reader, and render it with the verb's own

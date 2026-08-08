@@ -536,16 +536,23 @@ versionPath = "version"
 
 -- | What version a tree with no version file is folded as.
 --
--- The OLDEST this build knows, not the newest. Today they are the same number,
--- and the day hub-meta becomes 2 they stop being: taken as "whatever this build
--- implements", deleting one unsigned file would be a way to have canon folded
--- under newer rules. A tree that does not say cannot claim newer.
+-- The OLDEST this build knows, not the newest, because taken as "whatever this
+-- build implements" deleting one unsigned file would be a way to have canon
+-- folded under newer rules. A tree that does not say cannot claim newer.
 --
 -- What this number DOES, exactly, is decide the gate: it is compared against
--- 'hubMetaVersion' and nothing else looks at it. The fold itself does not take a
--- version and does not vary with one, so this is not yet a choice of rules; it is
--- the placeholder that becomes one the first time the rules fork, and the value
--- is chosen now so that the fork does not have to remember to choose it.
+-- 'hubMetaVersion' and nothing else looks at it.
+--
+-- AND THE FOLD IS NOT PARAMETERIZED BY IT, which this used to say was merely
+-- not yet true. The rules have forked since ('seqStampWindow' at @hub-meta 3@)
+-- and the fold still takes no version: a tree declaring 1 is folded under the
+-- rules this build implements, not the ones it was written under. That is the
+-- deliberate direction. The two rule sets differ only on a canon box stamped
+-- far above the log it sits in, which is a file nobody should have written, and
+-- a build that answered such a file by the older rules would strand its own
+-- cursor to be faithful to them. Reading strictly is not a downgrade; folding
+-- an old tree under old rules WOULD be, since the older rules are the ones with
+-- the hole in them.
 assumedMetaVersion :: Word32
 assumedMetaVersion = 1
 
@@ -1055,7 +1062,15 @@ planCanon declared evs numbers = do
     -- verbatim, which is how compaction retains what it does not understand)
     -- contributes nothing and is covered by the declared floor, which is the
     -- version under which it arrived.
-    version = maximum (maybe 1 id declared : fmap metaVersionFor readable)
+    -- 'hubMetaMin' is the FLOOR, and it belongs in this maximum rather than
+    -- beside it: it is the lowest reader that can be trusted with any tree at
+    -- all, so no tree may declare below it. Without the term, a tree holding
+    -- nothing but events every version can decode would declare 1 while being
+    -- written under rules that a version 1 reader disagrees with about
+    -- 'frMaxSeq' -- which is the cursor, so the two would fork rather than one
+    -- lag. A later bump that only adds a shape older readers cannot decode
+    -- leaves that constant alone and this term with it.
+    version = maximum (hubMetaMin : maybe 1 id declared : fmap metaVersionFor readable)
 
     -- Only the events this build can read. One whose author box will not decode
     -- is from the future or is damaged, and either way its own requirement

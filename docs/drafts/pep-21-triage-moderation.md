@@ -494,11 +494,14 @@ strength of a Right is how a contributor's submission disappears without anyone
 seeing an error.
 
 Publishing a triage ban into canon, which this document leaves as an open
-question, is deferred past `hub-meta 1`. It would need a new author-content
-constructor and an admission rule saying who may sign one and what it does,
-which is a consensus change: the deny-list stays loop state, and the earliest a
-public ban can appear is `hub-meta 2`. Recorded here so that nothing plans
-around a clause that does not exist.
+question, is deferred. It would need a new author-content constructor and an
+admission rule saying who may sign one and what it does, which is a consensus
+change: the deny-list stays loop state until some `hub-meta` bump carries one.
+This was once written as "the earliest is `hub-meta 2`", and 2 and 3 have both
+come and gone without it, which is the argument for naming no number: a
+deferral pinned to the next version reads as a plan the moment that version
+ships for another reason. Recorded here so that nothing plans around a clause
+that does not exist.
 
 Which of the five a refusal gets depends on WHERE it was raised, not on what it
 says. Honouring a request runs every check twice, once over what the letter

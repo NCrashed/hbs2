@@ -42,6 +42,8 @@ module HBS2.Hub.Fold
   , eventParts
   , eventPartRefs
   , metaVersionFor
+  , seqStampWindow
+  , numberStampWindow
   , referencesPart
   ) where
 
@@ -111,6 +113,11 @@ data DropReason =
   | NumberOnNonOpen       -- ^ a @number@ on anything but an @open@
   | SeqAtTopOfRange       -- ^ the next mint would wrap to zero
   | NumberAtTopOfRange
+    -- | A @number@ more than 'numberStampWindow' above the highest one canon
+    -- holds. Numbers are dense (compaction never drops an @open@), so a leap is
+    -- not something an honest cursor produces, and the counter it would strand
+    -- is the cheap one to strand.
+  | NumberTooFarAhead
   | FoldedTsAboveCeiling  -- ^ past 'maxFoldedTs'
     -- | The canon box publishes a part-secret the author never proved they
     -- knew (PEP-18 'PartRef'). A drop and not an anomaly: an event whose
@@ -138,6 +145,17 @@ data Anomaly =
     DupSeq Word64
   | DupNumber Word64          -- ^ two threads with one human number
   | NumberWentBack Word64 Word64
+    -- | An admitted event whose @seq@ is more than 'seqStampWindow' above the
+    -- mark below it, carrying the mark and the seq. The event is kept and the
+    -- mark did not follow it, so this is the ONLY trace of it: without this,
+    -- the rule that keeps a canon box from stranding the cursor would work in
+    -- silence, and PEP-19's promise that the situation is noticed before the
+    -- counter runs out would stay unkept.
+    --
+    -- Two honest readings besides the hostile one, and a report has to allow
+    -- for both: a tree that lost files, and a compaction that dropped more
+    -- consecutive events between two survivors than the window allows.
+  | SeqTooFarAhead Word64 Word64
     -- | @folded-ts@ decreasing as @seq@ increases. Load-bearing, since the
     -- render contract's times come from it, and asserted by whoever signs the
     -- canon box (PEP-22).
@@ -476,6 +494,7 @@ instance Pretty DropReason where
     NumberOnNonOpen       -> "a number on something that is not an open"
     SeqAtTopOfRange       -> "seq at the top of its range"
     NumberAtTopOfRange    -> "number at the top of its range"
+    NumberTooFarAhead     -> "number too far above the ones canon holds"
     FoldedTsAboveCeiling  -> "folded-ts above the ceiling canon admits"
     PartNotProven         -> "a part-secret its author never proved they knew"
     where
@@ -495,6 +514,10 @@ instance Pretty Anomaly where
     DupSeq n            -> "two events at seq" <+> pretty n
     DupNumber n         -> "two threads numbered" <+> pretty n
     NumberWentBack a b  -> "number went from" <+> pretty a <+> "to" <+> pretty b
+    SeqTooFarAhead a b  ->
+      "seq jumped from" <+> pretty a <+> "to" <+> pretty b
+        <+> "(the mark did not follow; canon lost files, was compacted"
+        <+> "hard, or somebody stamped past the log)"
     FoldedTsWentBack a b -> "folded-ts went from" <+> pretty a <+> "to" <+> pretty b
     DupOrigin h         -> "two events folded from message" <+> hashDoc h
     DupHonours h        -> "two events carrying out request" <+> hashDoc h
@@ -637,6 +660,7 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
             , sLastNumber = 0
             , sLastFolded = 0
             , sPrevFolded = 0
+            , sSeqFloor   = 0
             , sAnoms      = []
             , sLog        = []
             , sParts      = HS.empty
@@ -718,9 +742,19 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       -- sends the cursor to maxBound and stops the repository for good.
       | HM.member (rId r) (sSeen s0) = go rest (dropE r DupId s0)
       | Just why <- unusable r        = go rest (dropE r why s)
+      -- After 'unusable', so that a number on something that is not an @open@,
+      -- or one above the ceiling, still reports the deeper fact. Here rather
+      -- than inside it because this is the one stamp rule that is relative to
+      -- the log so far, and 'unusable' is a function of the event alone.
+      | numberTooFar                 = go rest (dropE r NumberTooFarAhead s)
       | otherwise                    = go rest (apply r s)
       where
         s = stamp (stampOf r) s0
+        -- Against the mark BEFORE this event, like every other stamp rule: the
+        -- question is what the log could reach, and the log is what came below.
+        numberTooFar = case ccNumber (rCanon r) of
+          Just n  -> not (withinWindow numberStampWindow (sMaxNumber s0) n)
+          Nothing -> False
 
     -- The stamped values must be usable. A number belongs to an open and
     -- nothing else, and neither counter may sit at the top of its range: the
@@ -728,12 +762,12 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
     -- the cursor to zero and send every later event to the front of the
     -- order.
     --
-    -- The counters are the top of the range only, not a monotonicity rule: a
-    -- maintainer who stamps maxBound-1 still strands the cursor one mint
-    -- later, at which point every open is refused as 'CursorExhausted'.
-    -- Closing that needs an admission rule about what a stamp may be
-    -- relative to the ones before it, and one that a partial clone can
-    -- evaluate at that; PEP-19 records it as a known bound.
+    -- The counters here are the top of the range ONLY. What a stamp may be
+    -- relative to the ones below it is a separate rule and a separate place:
+    -- the seq window lives in 'spendable' (out of window is admitted and does
+    -- not move the mark) and the number window is the guard below this one (out
+    -- of window is refused). Both are @hub-meta 3@; before it, this comment
+    -- said the gap was a known bound PEP-19 recorded and nothing closed.
     unusable r
       | not numberOK          = Just NumberOnNonOpen
       | ccSeq cc == maxBound  = Just SeqAtTopOfRange
@@ -810,13 +844,31 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
     -- the answer was compaction. The window keeps the honest case and takes the
     -- mutiny back out, since a run of files can only creep the cursor by the
     -- window each time.
+    --
+    -- AND SO DOES A KEY AUTHORIZED RIGHT NOW, which is the whole of what
+    -- @hub-meta 3@ changed. This branch used to answer 'True' outright, and the
+    -- window above was reasoned about as a remedy for a delegation somebody had
+    -- already withdrawn -- which is the case where the owner has ALREADY
+    -- noticed. A live delegate needed one file at @maxBound - 1@ to strand the
+    -- cursor for good, and the entry point the owner would answer it with is
+    -- gated on the same cursor. The two windows differ ('seqStampWindow' is
+    -- 2^24 and 'numberStampWindow' is 16) because compaction leaves gaps in one
+    -- and cannot in the other; that they exist at all no longer depends on
+    -- whether the key is still trusted, because a bound that only applies after
+    -- the harm is noticed is not a bound.
     stamp sp s
-      | not (spendable sp s) = s
-      | otherwise = s
+      | not (spendable sp s) = floored s
+      | otherwise = (floored s)
           { sMaxSeq = if spSeq sp == maxBound
                         then sMaxSeq s
                         else max (sMaxSeq s) (spSeq sp)
           }
+      where
+        -- What the mark was BEFORE this event, kept for the one reader that
+        -- needs it: 'keep' runs after the stamp and so cannot ask. Set on both
+        -- branches, since the anomaly it feeds is precisely about the branch
+        -- that did not spend.
+        floored t = t { sSeqFloor = sMaxSeq s }
 
     -- One predicate, because two callers ask it and one of them (the ghost
     -- path, which also records the number) got it wrong by asking differently.
@@ -824,10 +876,9 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       -- This repository's blessing, before anything about the key. A maintainer
       -- of two repositories is authorized in both, so their stamp from the
       -- other one would otherwise pass every check below it.
-      | spTarget sp /= owner            = False
-      | HS.member (spKey sp) (sMaint s) = True
-      | HS.member (spKey sp) (sEver s)  = spSeq sp <= sMaxSeq s + staleStampWindow
-      | otherwise                       = False
+      | spTarget sp /= owner           = False
+      | HS.member (spKey sp) (sEver s) = withinWindow seqStampWindow (sMaxSeq s) (spSeq sp)
+      | otherwise                      = False
 
     -- A resolved event's own stamp.
     stampOf r = Stamp
@@ -1005,6 +1056,11 @@ data St = S
     -- admitted raise the bar for the anomaly, so a strictly increasing log of
     -- admitted events reported itself as going backwards.
   , sPrevFolded :: !Word64
+    -- The @seq@ high-water mark as it stood BEFORE the current event's stamp,
+    -- so that 'keep' can say how far that event reached. A field for the same
+    -- reason 'sPrevFolded' is one: the value is gone by the time anything wants
+    -- to compare against it, and recomputing it would mean a second pass.
+  , sSeqFloor   :: !Word64
     -- Newest first while accumulating. No sort key alongside, unlike
     -- 'sDropped': the pass runs in (seq, event-id, canon-box hash) order and
     -- appends, so reversing at the end is already the log's own order. A drop
@@ -1017,12 +1073,60 @@ data St = S
   , sParts      :: !(HashSet HashRef)
   }
 
--- | How far past the cursor a stamp from a withdrawn delegation may still
--- reach. Small on purpose: a mint from a stale view sits a step or two behind
--- the cursor, never a leap, so every file such a key writes can creep the
--- cursor by at most this much and a revocation stays a remedy.
-staleStampWindow :: Word64
-staleStampWindow = 16
+-- | How far above the log's own high-water mark a canon box may stamp its
+-- @seq@ and still move it (PEP-19).
+--
+-- WHY THERE IS A BOUND AT ALL. The cursor is @frMaxSeq + 1@, so a single file
+-- stamped near the top of the range strands it: every later mint is refused as
+-- @CursorExhausted@, including the @revoke@ that would answer the key that
+-- wrote it. Bounding the step turns that from one file into
+-- @2^64 / seqStampWindow@ = 2^40 of them, each one an object the publisher has
+-- to write and every reader has to fold -- at which point flooding canon is the
+-- cheaper attack and the cursor is no longer the weak link.
+--
+-- WHY IT IS THIS LARGE, when the honest gap is 1. Compaction drops superseded
+-- @set@-class events out of the tree and keeps their seqs spent nowhere, so the
+-- survivors are sparse, and the gap between two of them is however many events
+-- were dropped between them. A tight window would refuse a legitimately
+-- compacted canon, which is a repository bricked by its own maintenance -- the
+-- worse failure of the two. 16 million consecutive superseded events between
+-- two survivors is past what a tracker holds; 2^40 files is past what anyone
+-- writes.
+--
+-- OUT OF WINDOW IS NOT A DROP, deliberately. The event is admitted and its seq
+-- simply does not move the mark, so a compacted tree that somehow does exceed
+-- this still folds, and the only cost is that the cursor may later hand out a
+-- seq that file already holds -- a 'DupSeq', which the fold reports and orders
+-- deterministically. Refusing instead would trade a reported collision for an
+-- unreadable repository. What makes it visible is 'SeqTooFarAhead'.
+seqStampWindow :: Word64
+seqStampWindow = 2 ^ (24 :: Int)
+
+-- | And the same for the human @number@, which is tight because it can be.
+--
+-- Numbers are handed out one per @open@ and compaction never drops an @open@
+-- ('attrOf' answers 'Nothing' for them), so the surviving numbers are dense in
+-- a way seqs are not and no legitimate gap exists to make room for. A mint from
+-- a stale view sits a step or two behind the cursor, never a leap.
+--
+-- THIS ONE IS A DROP, and the asymmetry is the point: a number is a label a
+-- reader is shown, so an @open@ carrying one the fold will not honour should be
+-- refused rather than kept with a label nothing else agrees with. There is no
+-- compaction case to spare, so nothing is lost by refusing. And it is the
+-- cheaper counter to strand of the two: 'maxCanonNumber' is 2^53-1, which one
+-- admitted @open@ could reach.
+numberStampWindow :: Word64
+numberStampWindow = 16
+
+-- | Is @hi@ within @w@ of @lo@, where being below @lo@ always is.
+--
+-- SUBTRACTION RATHER THAN @lo + w@, because the addition overflows: a mark near
+-- the top of the range would wrap and then refuse every stamp beneath it, which
+-- is the failure this whole rule exists to prevent, arriving through the rule
+-- itself. Canon written by an older build can hold such a mark, and this build
+-- has to fold it rather than seize.
+withinWindow :: Word64 -> Word64 -> Word64 -> Bool
+withinWindow w lo hi = hi <= lo || hi - lo <= w
 
 -- | What canon remembers about an admitted event.
 --
@@ -1117,6 +1221,12 @@ keep scope r s = s
 
     anoms = concat
       [ [ DupSeq (rSeq r) | HS.member (rSeq r) (sSeqSeen s) ]
+        -- The stamp that did not move the mark. 'sSeqFloor' is what the mark
+        -- was before 'stamp' ran, so this is the same comparison 'spendable'
+        -- made, asked again where an anomaly can be recorded against an
+        -- admitted event.
+      , [ SeqTooFarAhead (sSeqFloor s) (rSeq r)
+        | not (withinWindow seqStampWindow (sSeqFloor s) (rSeq r)) ]
       , [ DupNumber n | Just n <- [num], HS.member n (sNumbers s) ]
         -- Numbers are assigned in open order, so one that does not advance is
         -- either a duplicate publisher or a hand-written stamp.

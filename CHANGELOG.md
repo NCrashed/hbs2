@@ -627,6 +627,44 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: one canon file could end a repository, and `hub-meta` is 3.**
+    A key whose delegation was current spent its stamp outright, so a single
+    canon box at `seq = maxBound - 1` put the cursor at the top of its range,
+    and every entry point in the bridge is gated on that cursor -- including the
+    `revoke` the owner would answer it with. PEP-19 promised a recovery
+    (compaction re-stamping the retained events) that was never implemented, and
+    promised that `hub verify` would notice beforehand, which it did not.
+
+    A window existed and applied only to a key whose delegation had ALREADY been
+    withdrawn: it bounded the case where the owner has noticed and left the one
+    where they have not. It applies to every authorized key now. A bound that
+    only takes effect after the harm is visible is not a bound.
+
+    THE TWO COUNTERS TAKE DIFFERENT WINDOWS, because their honest gaps differ.
+    Numbers are handed out one per `open` and compaction never drops an `open`,
+    so the surviving numbers are dense and the window is 16; a number outside it
+    is REFUSED, since a number is a label a reader is shown. Sequence numbers
+    are not dense -- compaction drops superseded events out of the tree, so the
+    gap between two survivors is however many went between them -- so that
+    window is 2^24 and a seq outside it is ADMITTED and simply does not move the
+    mark. Refusing it would let a legitimately compacted canon become
+    unfoldable, which is a repository bricked by its own maintenance; leaving it
+    admitted costs at most a later duplicate seq, which is reported and ordered
+    deterministically. A generous window is still a bound: reaching the top of a
+    2^64 range through a 2^24 one takes 2^40 files, at which point flooding
+    canon is the cheaper attack.
+
+    `hub verify` reports the stamp that did not move the mark
+    (`SeqTooFarAhead`), which is the only trace such an event leaves and is what
+    PEP-19 asked for. A tree that lost files and a hard compaction produce it
+    too, and the report says so.
+
+    This is a consensus change and it raises `hub-min` with it, which no bump
+    has needed before: `frMaxSeq` IS the cursor, so two maintainers on either
+    side of the change would mint from different positions and fork rather than
+    one of them lagging. Free today because nothing has been published, and
+    impossible later, which is the whole reason it is being done now.
+
   - **`hbs2-hub updates`: an ack was checked against the wrong repository's
     maintainers.** The `RepoRef` an ack names was passed into the predicate and
     then discarded, so membership was asked of the set belonging to the

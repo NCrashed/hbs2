@@ -243,9 +243,9 @@ spec = do
 
     it "answers with every thread that carries the number" $ do
       owner <- kp
-      let (fr, a, b) = twoAt 42 owner
-      length (threadsNumbered 42 fr) `shouldBe` 2
-      threadsNumbered 42 fr `shouldSatisfy` (\ts -> a `elem` ts && b `elem` ts)
+      let (fr, a, b) = twoAt 3 owner
+      length (threadsNumbered 3 fr) `shouldBe` 2
+      threadsNumbered 3 fr `shouldSatisfy` (\ts -> a `elem` ts && b `elem` ts)
 
     it "answers with one when canon holds one, and none when it holds none" $ do
       owner <- kp
@@ -269,9 +269,9 @@ spec = do
       let repo = fst owner
           fr = foldEvents repo
                  [ mkEvent owner owner (anIssue repo (Text.pack (show i)))
-                           (canonOf repo i (Just 42))
+                           (canonOf repo i (Just 3))
                  | i <- [1 .. 5] ]
-          ids = threadsNumbered 42 fr
+          ids = threadsNumbered 3 fr
       length ids `shouldBe` 5
       ids `shouldBe` List.sort ids
       fmap snd (numberIndexOf fr) `shouldBe` ids

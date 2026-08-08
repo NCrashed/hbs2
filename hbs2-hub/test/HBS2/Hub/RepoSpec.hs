@@ -729,8 +729,8 @@ spec = do
       cwIndexOmitted cw `shouldBe` 0
 
       st <- readOk (inMemory (asFiles cw)) repo
-      -- 1: nothing here names a part, so a version 1 reader can fold it.
-      stVersion st `shouldBe` Just 1
+      -- The floor: nothing here names a part, so nothing raises it further.
+      stVersion st `shouldBe` Just hubMetaMin
       stBad st `shouldBe` []
       stMisnamed st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -770,7 +770,7 @@ spec = do
 
       let verOf cw = [ Text.decodeUtf8 b | (p, b) <- cwFiles cw, p == versionPath ]
 
-      it "declares 1 for events a version 1 build can read" $ do
+      it "declares the floor for events every reader above it can fold" $ do
         owner <- kp
         alice <- kp
         let repo = fst owner
@@ -779,42 +779,53 @@ spec = do
                    (canon repo 1 (Just 1))
             p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
         cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [])
-        verOf cw `shouldBe` [renderMeta (metaAt 1)]
+        verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
-      -- 2 is what a PartRef costs, and it costs it per event: a version 1
-      -- reader would admit an event this one drops and compute a different
-      -- event-id for the same letter.
-      it "declares 2 for an event that names a part" $ do
+      -- What each EVENT needs is still a per-event question, and the floor
+      -- masking it in the tree is not the same as it having gone away: the next
+      -- rules bump above the floor is read off exactly this function. 2 is what
+      -- a PartRef costs, because a version 1 reader would admit an event a
+      -- version 2 reader drops and compute a different event-id for one letter.
+      it "still reads a part-naming event as needing more than one" $ do
         owner <- kp
         alice <- kp
         let repo = fst owner
             part = PartRef (HashRef (hashObject (LBS.pack "part")))
                            (PartProof (HashRef (hashObject (LBS.pack "proof"))))
-            ev = mkEvent alice owner
-                   (AOpen repo HubIssue "an issue" [] Nothing (Just part) Nothing 1000)
-                   (canon repo 1 (Just 1))
-            p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-        cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [])
-        verOf cw `shouldBe` [renderMeta (metaAt 2)]
+            plain = AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000
+            named = AOpen repo HubIssue "an issue" [] Nothing (Just part) Nothing 1000
+        metaVersionFor plain `shouldBe` 1
+        metaVersionFor named `shouldBe` 2
 
       -- And NEVER below what the tree already said: a version is a floor a
-      -- reader has to meet, so lowering it would tell a version 1 build it may
-      -- fold a tree holding version 2 events. Reachable through compaction,
+      -- reader has to meet, so lowering it would tell an older build it may
+      -- fold a tree holding events it cannot. Reachable through compaction,
       -- whose retained set may no longer hold the event that raised it.
       it "never lowers a version the tree already declared" $ do
         owner <- kp
         alice <- kp
         let repo = fst owner
+            ahead = hubMetaVersion + 1
             ev = mkEvent alice owner
                    (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
                    (canon repo 1 (Just 1))
             p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-        cw <- either (fail . show) pure (planCanon (Just 2) [(p, ev)] [])
-        verOf cw `shouldBe` [renderMeta (metaAt 2)]
+        cw <- either (fail . show) pure (planCanon (Just ahead) [(p, ev)] [])
+        verOf cw `shouldBe` [renderMeta (metaAt ahead)]
 
-      it "declares 1 for an empty canon nobody has written to" $ do
+      -- The floor in the other direction, which is what @hub-meta 3@ needed: a
+      -- rule that is tree-wide rather than per-event means no reader below it
+      -- can be trusted with ANY tree, so a declaration below it is raised
+      -- rather than kept. Without this a tree holding nothing but events every
+      -- version can decode would go on declaring 1 while being written under
+      -- rules a version 1 reader disagrees with about 'frMaxSeq'.
+      it "raises a declaration that sits below the floor" $ do
+        cw <- either (fail . show) pure (planCanon (Just 1) [] [])
+        verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
+
+      it "declares the floor for an empty canon nobody has written to" $ do
         cw <- either (fail . show) pure (planCanon Nothing [] [])
-        verOf cw `shouldBe` [renderMeta (metaAt 1)]
+        verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
     it "refuses two events that claim one path" $ do
       owner <- kp

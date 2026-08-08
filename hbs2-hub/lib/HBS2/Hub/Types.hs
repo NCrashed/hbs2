@@ -828,8 +828,14 @@ usablePartSecret (PartSecret bs) = BS.length bs == (typicalKeyLength :: Int)
 -- @body-part@ and @bundle-part@. A reader of version 1 canon would admit an
 -- event this one drops and compute a different event-id for the same letter, so
 -- the two cannot be told apart by anything smaller than this number.
+--
+-- 3 is the stamp window ('seqStampWindow', 'numberStampWindow'): a canon box
+-- may no longer claim a position arbitrarily far above the log it sits in. That
+-- one is TREE-WIDE rather than per-event, which is why it also raises
+-- 'hubMetaMin' -- see there for why a reader that disagrees about it does not
+-- merely lag behind, it forks.
 hubMetaVersion :: Word32
-hubMetaVersion = 2
+hubMetaVersion = 3
 
 -- | The lowest reader that still produces a SOUND view of what this build
 -- writes: the @(hub-min M)@ of the @version@ file.
@@ -855,8 +861,21 @@ hubMetaVersion = 2
 -- does not know, while a clause of the wrong arity is refused, so
 -- @(hub-meta 3 2)@ would make the tree unreadable to every build that exists.
 -- Free to add now, impossible to retrofit into readers that have shipped.
+--
+-- 3, and the 2-to-3 step is the first one that had to raise it. The stamp
+-- window changes @frMaxSeq@ for a tree holding a canon box stamped far above
+-- its neighbours, and @frMaxSeq@ IS the cursor: two maintainers on either side
+-- of the change would mint from different positions and their canons would not
+-- be equivalent. That is not one reader lagging, it is a fork, and a fork is
+-- what this number exists to refuse.
+--
+-- ALSO THE FLOOR ON WHAT MAY BE WRITTEN, which is the same fact from the other
+-- side and is why 'planCanon' reads this rather than a constant of its own: if
+-- no reader below M can be trusted with any tree, then no tree may declare
+-- below M. A later bump that only adds a shape older readers cannot decode
+-- leaves this alone and the floor with it.
 hubMetaMin :: Word32
-hubMetaMin = 1
+hubMetaMin = 3
 
 -- | The version of a single event file: the @(hub-event N)@ of PEP-19.
 hubEventVersion :: Word32
