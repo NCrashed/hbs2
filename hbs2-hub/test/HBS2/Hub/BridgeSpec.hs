@@ -7,12 +7,13 @@ import HBS2.Hub.Fold
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Prelude.Plated (pretty)
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise (serialise)
 import Data.HashMap.Strict qualified as HM
-import Data.List (isInfixOf)
+import Data.List (isInfixOf,nub)
 import Data.Char qualified as Char
 import Data.String (fromString)
 import Data.Text qualified as Text
@@ -371,9 +372,9 @@ spec = do
           issueWithCoords = makeLetter (fst alice) (snd alice)
                               (AOpen repo HubIssue "i" [] Nothing Nothing (Just coords) 1)
                               noReplyChannel
-      expectErr BadContent
+      expectErr (BadContent PROpenWithoutCoords)
         (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts prNoCoords)
-      expectErr BadContent
+      expectErr (BadContent IssueOpenWithCoords)
         (acceptLetter (ctxOf owner) (EnvelopeSigner env) (emptyView repo) 1 origin noParts issueWithCoords)
 
     it "refuses a revise from anyone but the author of record" $ do
@@ -562,7 +563,7 @@ spec = do
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       let rev = makeLetter (fst alice) (snd alice)
                   (ARevise (scopeOf aOpen) coords 2) noReplyChannel
-      expectErr BadContent
+      expectErr (BadContent PROnlyOnIssue)
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 noParts rev)
 
     it "reports seq, author and content for the writer" $ do
@@ -612,7 +613,7 @@ spec = do
                      (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1) noReplyChannel
       aOpen <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
-      expectOwn BadContent
+      expectOwn (BadContent PROnlyOnIssue)
         (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments
            (AMerge (scopeOf aOpen) "cafe" "refs/heads/master" 2))
 
@@ -1345,17 +1346,17 @@ spec = do
       let repo = fst owner
           nowhere = coords { prSource = Nothing, prBundle = Nothing }
           content = AOpen repo HubPR "pr" [] Nothing Nothing (Just nowhere) 1
-      expectErr BadContent
+      expectErr (BadContent CoordsUnreachable)
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin
            noParts (makeLetter (fst alice) (snd alice) content noReplyChannel))
-      expectOwn BadContent
+      expectOwn (BadContent CoordsUnreachable)
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments content)
       -- and the other two guards on the same op, which the owner path checks
       -- for the same reason: the fold drops all three.
-      expectOwn BadContent
+      expectOwn (BadContent PROpenWithoutCoords)
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubPR "pr" [] Nothing Nothing Nothing 1))
-      expectOwn BadContent
+      expectOwn (BadContent IssueOpenWithCoords)
         (ownerEvent (ctxOf owner) (emptyView repo) 1 noOwnAttachments
            (AOpen repo HubIssue "i" [] Nothing Nothing (Just coords) 1))
       expectOwn WrongRepo
@@ -1907,7 +1908,18 @@ spec = do
       -- sender fails on its payload, not on the tag.
       outcome (BadLetter (UndecodableContent (fst alice) WrongDomain)) `shouldBe` Discard
       outcome NotAuthorOfRecord `shouldBe` Discard
-      outcome BadContent `shouldBe` Discard
+      -- All four payload reasons, because the reason is now a field and a
+      -- Discard that held for one of them would say nothing about the others.
+      -- The letter is what it is: no state of this node makes any of these
+      -- foldable later.
+      outcome (BadContent PROpenWithoutCoords) `shouldBe` Discard
+      outcome (BadContent IssueOpenWithCoords) `shouldBe` Discard
+      outcome (BadContent CoordsUnreachable)   `shouldBe` Discard
+      outcome (BadContent PROnlyOnIssue)       `shouldBe` Discard
+      -- The caller's content, not the letter's, so it stops the loop -- and it
+      -- means that bare as well as inside Composed.
+      outcome NotOnAThread `shouldBe` Abort
+      outcome (Composed NotOnAThread) `shouldBe` Abort
       outcome ThreadMismatch `shouldBe` Discard
       outcome AlreadyHonoured `shouldBe` Discard
       -- A dead reference in a letter anyone can send, so not a stop: one
@@ -1941,6 +1953,24 @@ spec = do
       outcome (BadPartSecret thr) `shouldBe` Abort
       outcome (UnnormalizedValue "labels") `shouldBe` Discard
 
+    it "names which disagreement, in the fold's own words" $ do
+      -- Pairwise distinct, because carrying the reason is worth nothing if
+      -- every reason prints the same sentence -- which is what this was: one
+      -- nullary constructor and "kind and payload disagree" for all four.
+      let says   = show . pretty . BadContent
+          four   = [PROpenWithoutCoords, IssueOpenWithCoords, CoordsUnreachable, PROnlyOnIssue]
+          said   = fmap says four
+      nub said `shouldBe` said
+      -- And the fold's words, not a second set of them. The bridge refuses
+      -- because the fold would drop, so an operator who reads both must not be
+      -- handed two vocabularies for one decision.
+      said `shouldBe` fmap (show . pretty) four
+      -- The sentence they used to share, kept here so it cannot come back:
+      -- under it, "the pull request arrived with nothing to fetch" -- the one
+      -- of the four a SENDER can fix -- was indistinguishable from three
+      -- refusals they can do nothing about.
+      said `shouldSatisfy` notElem "kind and payload disagree"
+
     it "remembers a thread's number, so a reply can be acknowledged" $ do
       alice <- kp
       owner <- kp
@@ -1973,7 +2003,7 @@ spec = do
       aPR <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let nowhere = coords { prSource = Nothing, prBundle = Nothing }
-      expectOwn BadContent
+      expectOwn (BadContent CoordsUnreachable)
         (ownerEvent (ctxOf owner) (acView aPR) 2 noOwnAttachments (ARevise (scopeOf aPR) nowhere 2))
       -- a revise that keeps a way to fetch is fine
       _ <- expectRight

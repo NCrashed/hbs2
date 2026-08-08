@@ -42,7 +42,10 @@
 --     @UnauthorizedDelegate@, and the four payload refusals
 --     (@PROpenWithoutCoords@, @IssueOpenWithCoords@, @CoordsUnreachable@,
 --     @PROnlyOnIssue@): refused by the gate, on both the letter path and the
---     owner-native one.
+--     owner-native one. Those four are decided by 'openTrouble' and
+--     'threadOpTrouble', which the fold uses too, and 'BadContent' carries
+--     which of them it was -- so the promise is not only documented here, it
+--     is what the refusal says out loud.
 --   * @UnauthorizedCanon@: refused by checking this folder's own key against
 --     the maintainer set canon reports, which is why 'CanonView' carries it.
 --   * The four stamp refusals. @NumberOnNonOpen@ cannot happen because a
@@ -284,10 +287,22 @@ data TriageError =
     -- | A revise from someone other than the thread's author of record, or
     -- on a thread that is not a PR.
   | NotAuthorOfRecord
-    -- | Kind and payload disagree: a PR without coordinates, an issue
-    -- carrying them, or a PR-only op on an issue thread. The fold would drop
-    -- it, so it is refused before minting.
-  | BadContent
+    -- | The fold would drop this on its payload, so it is refused before
+    -- minting -- and it carries WHICH of the fold's reasons, because the five
+    -- are not one thing said five ways.
+    --
+    -- They were one thing: this was nullary and printed "kind and payload
+    -- disagree" for all of them, including the one where nothing disagrees.
+    -- 'CoordsUnreachable' means a pull request arrived with neither a bundle
+    -- nor a fork to pull, which is the only one of the five a SENDER can fix,
+    -- and the sentence a maintainer read gave them nothing to say back.
+    --
+    -- The reason is a 'DropReason' rather than a taxonomy of its own because
+    -- that is exactly the claim being made: this module's documented promise
+    -- is that it never mints what the fold would drop, and a refusal that
+    -- names the fold's own reason is that promise written in the type. The
+    -- render below is the fold's own words for it, for the same reason.
+  | BadContent DropReason
     -- | This key may not bless events for this repo: either it was never a
     -- maintainer, its delegation has been revoked, or it is not the owner
     -- key and the op is delegate/revoke (PEP-19 rule 5).
@@ -312,6 +327,15 @@ data TriageError =
     -- request being honoured. Editing what was asked for is fine; moving it
     -- elsewhere is not honouring it.
   | ThreadMismatch
+    -- | The content the owner composed names no thread at all, so there is
+    -- nothing for it to be an answer to.
+    --
+    -- Unreachable, and named anyway for the reason 'CursorExhausted' is:
+    -- 'classify' has already established that this is a close, reopen or set,
+    -- and all three name a thread. It would take those two facts drifting
+    -- apart. Its predecessor was a nullary 'BadContent', which now says
+    -- something specific and would be a lie here.
+  | NotOnAThread
     -- | This Mailbox message has already been folded into canon. Distinct
     -- from 'AlreadyInCanon', which is about the event: honouring a request
     -- re-authors it under the owner's clock, so the same letter honoured
@@ -491,7 +515,10 @@ instance Pretty TriageError where
     UnknownThread         -> "names a thread canon does not hold yet"
     AlreadyInCanon        -> "already in canon"
     NotAuthorOfRecord     -> "a revise from someone other than the author of record"
-    BadContent            -> "kind and payload disagree"
+    -- The fold's own words: this refusal exists because the fold would drop
+    -- it, so the two must not describe it differently.
+    BadContent why        -> pretty why
+    NotOnAThread          -> "names no thread to answer"
     UnauthorizedForRepo   -> "this folding key may not bless events here"
     UnknownTarget         -> "redacts an event canon does not hold"
     CursorExhausted       -> "the cursor has no room left"
@@ -570,8 +597,11 @@ outcome = \case
   WrongRepo         -> Discard
   AlreadyInCanon    -> Discard
   NotAuthorOfRecord -> Discard
-  BadContent        -> Discard
+  BadContent _      -> Discard
   ThreadMismatch    -> Discard
+  -- Only ever raised inside 'Composed', whose own answer is Abort. Given bare
+  -- it means the same thing: the content came from the caller, not the letter.
+  NotOnAThread      -> Abort
   AlreadyHonoured   -> Discard
   -- A dead reference in a letter anyone can send. Discard, because the caller
   -- has already supplied its evidence about the message by this point and
@@ -1087,7 +1117,7 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   thread <- case content of
     AOpen target kind _ _ _ _ coords _
       | target /= repo                    -> Left WrongRepo
-      | Just _ <- openTrouble kind coords -> Left BadContent
+      | Just why <- openTrouble kind coords -> Left (BadContent why)
       | otherwise                         -> Right (authorBoxId box)
 
     AComment thr _ _ _ _ -> known thr
@@ -1098,15 +1128,26 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
         Just tf
           -- Kind and payload first: those are about the shape of the
           -- request, not about who signed it.
-          | Just _ <- threadOpTrouble (tfKind tf) content -> Left BadContent
+          | Just why <- threadOpTrouble (tfKind tf) content -> Left (BadContent why)
           | tfAuthor tf == author                         -> Right thr
           -- Stricter than the fold on purpose: the fold also lets a
           -- maintainer revise, but a maintainer doing that through the
           -- letter path would be acting as someone else.
           | otherwise                                     -> Left NotAuthorOfRecord
 
-    -- classify has already restricted this to the three ops above.
-    _ -> Left BadContent
+    -- Unreachable: 'classify' above admitted only FoldsToCanon, which is the
+    -- three ops named. Spelled out rather than left to a wildcard, and not
+    -- only for the header pragma's sake -- a wildcard here swallows a NEW
+    -- FoldsToCanon op, which is the one class of op that must have a case
+    -- above. It would have been refused as bad content on the letter path
+    -- while classify called it foldable, and no build would have said so.
+    ASet{}      -> Left (NotAcceptable (classify content))
+    AClose{}    -> Left (NotAcceptable (classify content))
+    AReopen{}   -> Left (NotAcceptable (classify content))
+    AMerge{}    -> Left (NotAcceptable (classify content))
+    ARedact{}   -> Left (NotAcceptable (classify content))
+    ADelegate{} -> Left (NotAcceptable (classify content))
+    ARevoke{}   -> Left (NotAcceptable (classify content))
 
   -- Last, because this one is about what the caller supplied rather than about
   -- the letter: a shape error should be reported as such rather than as a
@@ -1260,7 +1301,7 @@ honourOpened path canonKp@(pk,sk) repo view folded origin askedBox asked content
   thread <- case authorThread content0 of
     Just thr | HM.member thr (cvThreads view) -> Right thr
              | otherwise                      -> Left UnknownThread
-    Nothing -> Left (Composed BadContent)
+    Nothing -> Left (Composed NotOnAThread)
 
   -- Re-author: a new box signed by the owner, carrying the owner's clock.
   -- No requireStamp here: a RequestOnly op never mints a number, which
@@ -1379,13 +1420,17 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
 
     AOpen target kind _ _ _ _ coords _
       | target /= repo                    -> Left WrongRepo
-      | Just _ <- openTrouble kind coords -> Left BadContent
+      | Just why <- openTrouble kind coords -> Left (BadContent why)
       | otherwise                         -> Right (ThreadScope eid)
 
     -- The remaining ops are thread ops; the fold checks kind for the PR-only
     -- ones, so the bridge checks it too rather than minting a doomed event.
+    --
+    -- A wildcard here and not above, because this one decides nothing: it asks
+    -- 'authorThread', which is total, and a new op that names no thread gets
+    -- the answer that says exactly that.
     _ -> case authorThread content of
-           Nothing -> Left BadContent
+           Nothing -> Left NotOnAThread
            Just thr -> case HM.lookup thr (cvThreads view) of
              Nothing -> Left UnknownThread
              Just tf
@@ -1394,7 +1439,7 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
                -- lets a maintainer author one, so without this a maintainer
                -- mints an event the fold then drops, burning a seq and losing
                -- the action silently.
-               | Just _ <- threadOpTrouble (tfKind tf) content -> Left BadContent
+               | Just why <- threadOpTrouble (tfKind tf) content -> Left (BadContent why)
                | otherwise                                     -> Right (ThreadScope thr)
 
   secret <- requireParts pk parts content

@@ -2,6 +2,21 @@
 
 ## Changed
 
+  - **`hbs2-hub`: a refused submission says which of five things was wrong with
+    it.** Triage printed "kind and payload disagree" for all five, one of which
+    is not a disagreement at all: a pull request that arrived with neither a
+    bundle attached nor a fork to pull from. The kind and the payload agree
+    there and the change is simply missing -- and it is the ONE of the five a
+    sender can fix, so it was the one the maintainer most needed to be able to
+    quote back. The other four are "a pull request with no coordinates", "an
+    issue carrying pull request coordinates", "a pull-request-only op on an
+    issue" and a revise whose new coordinates fetch nothing.
+
+    The words are the fold's own, not a second set written for triage. Refusing
+    exactly what the fold would drop is this module's whole promise, so an
+    operator comparing a triage refusal against a `hub verify` report now reads
+    one vocabulary rather than two.
+
   - **`hbs2-hub`: the list of verbs that need a running peer is now the list of
     verbs that need one.** It used to be the other way round: the 26 verbs that
     need NOTHING but the local repository were named, against the 15 that talk
