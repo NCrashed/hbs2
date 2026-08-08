@@ -2,6 +2,28 @@
 
 ## Changed
 
+  - **`hbs2-hub`: the list of verbs that need a running peer is now the list of
+    verbs that need one.** It used to be the other way round: the 26 verbs that
+    need NOTHING but the local repository were named, against the 15 that talk
+    to `hbs2-peer`. That put the hand-maintained list on the side that keeps
+    growing, and on the side whose mistake is silent -- a verb absent from it,
+    or misspelled in it, quietly paid a `hbs2-peer poke` with no timeout:
+    1.55 s against a live peer, 6.0 s against a stub, and against a WEDGED peer
+    it hung. Which is the peer an operator has when they reach for exactly
+    these verbs.
+
+    Named the other way round, both mistakes become loud. A new peer-free verb
+    needs no edit at all. A new peer-ful verb left off the list now fails on
+    its first run with a message that names the verb and says it is a bug in
+    the build rather than in the reader's setup -- because "can't locate
+    hbs2-peer rpc", which is what it used to print, is advice for a problem
+    they do not have, about a daemon that may be running perfectly well. And a
+    name in the list that is not a verb at all is caught at startup, before
+    anything dispatches, since a name the dictionary does not hold is a name
+    nothing else would ever have examined.
+
+    No verb changes which side it is on.
+
   - **`hbs2-hub`: what a verb does when a repository has no canon yet is one
     rule, written down.** Eleven verbs read canon and each spelled its own
     answer to a missing `refs/hbs2/meta`. Two answers were in the tree, both

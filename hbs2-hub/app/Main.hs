@@ -57,6 +57,43 @@ silence = do
   setLoggingOff @WARN
   setLoggingOff @NOTICE
 
+-- | The verbs that NEED an @hbs2-peer@, which is the shorter list and the one
+-- whose omissions are audible.
+--
+-- It used to be the other way round: the peer-FREE verbs were named, 26 of them
+-- against these 15. That put the hand-maintained list on the side that keeps
+-- growing, and on the side whose mistake is silent. Absent from the peer-free
+-- list, or misspelled in it (the same thing, since a name the dictionary does
+-- not hold is examined by nothing), a verb went through 'recover' and paid a
+-- `hbs2-peer poke` with no timeout: measured at 1.55 s against a live peer and
+-- 6.0 s against a stub, and against a WEDGED peer it hung -- which is the peer
+-- an operator has when they reach for the verbs that were supposed not to need
+-- one.
+--
+-- Named this way round the two mistakes swap places, and both become loud:
+--
+--   * a new peer-free verb needs no edit here at all;
+--   * a new peer-ful verb left out of this list is caught by the
+--     PeerNotConnectedException handler at its dispatch, which says which verb
+--     and says it is a build bug;
+--   * a name that is not a verb is caught before dispatch, by the check in
+--     'main' that every name here is one the dictionary holds.
+--
+-- Derived from the constraints instead? Not from these modules: the constraint
+-- sits on the module, and @prEntries@ carries @HasStorage@ for `pr new` while
+-- also holding `pr merge` and `pr checkout`, which reach only git, the keyman
+-- and canon. Splitting @Pr@ by peer-need would split it on an axis it is not
+-- organised by.
+peerFulNames :: [Id]
+peerFulNames =
+  [ "hub:inbox", "hub:inbox:show", "hub:inbox:accept", "hub:inbox:reject"
+  , "hub:issue:new", "hub:issue:comment"
+  , "hub:pr:new", "hub:pr:revise", "hub:pr:comment"
+  , "hub:updates"
+  , "hub:policy:show", "hub:policy:pow", "hub:policy:default"
+  , "hub:block", "hub:unblock"
+  ]
+
 main :: IO ()
 main = do
   setupLogger
@@ -179,7 +216,26 @@ main = do
              | [StringLike s] <- ws -> found dict s
              | otherwise -> liftIO (hubHelp dict)
 
+  -- EVERY NAME IN 'peerFulNames' IS A NAME THE DICTIONARY HOLDS, checked before
+  -- anything is dispatched.
+  --
+  -- A misspelled entry is invisible on its own: 'peerFree' examines only names
+  -- the dictionary holds, so a typo means the real verb is not listed and runs
+  -- without the RPC clients -- which is a "not connected" a user reads as their
+  -- own configuration. Two lines here, twenty microseconds, and the build cannot
+  -- ship the typo.
+  --
+  -- die and not a warning: a wrong list is a wrong build, and the person who
+  -- would see a warning is not the person who can fix it.
+  case [ k | k <- peerFulNames, not (HM.member k dict) ] of
+    [] -> pure ()
+    ks -> die ( "hbs2-hub is built wrong: peerFulNames names "
+                  <> show (length ks) <> " verb(s) the dictionary does not hold: "
+                  <> unwords (fmap (show . pretty) ks)
+                  <> "\nThis is a bug in this build, not in your setup." )
+
   case (argv, verbOf (bound dict) argv) of
+
     -- No arguments: the help, and NOTHING ELSE. This branch used to read stdin
     -- and run it as a script, and that was arbitrary code execution from any
     -- byte source that happened to land on stdin.
@@ -236,7 +292,6 @@ main = do
     -- "unknown verb: issue", naming a word that IS a verb and saying nothing
     -- about the one that is not, so the reader looks at the half that was
     -- right.
-    -- THROUGH safeText, like every other stranger's bytes this program prints.
     (ws, Nothing) -> die ( "unknown verb: "
                              <> unwords [ Text.unpack (safeText (Text.pack w)) | w <- ws ]
                              <> "\ntry: hbs2-hub --help" )
@@ -248,7 +303,18 @@ main = do
     -- to be runnable without one. Measured at 1.55 s with a live peer and 6.0 s
     -- against a stub, for a verb that needs neither.
     (_, Just form)
-      | peerFree dict form -> runHBS2Cli (run dict [form] >>= eatNil display >> silence)
+      -- A VERB THAT ASKS FOR A PEER HERE IS A CLASSIFICATION BUG, and it says so.
+      --
+      -- This is the one mistake 'peerFulNames' cannot catch by inspection: the
+      -- name is a real verb, it is simply not listed, so it runs with no RPC
+      -- clients and the first thing it asks for throws. What the user saw was
+      -- "can't locate hbs2-peer rpc" -- advice for a problem they do not have,
+      -- pointing at a daemon that may be running perfectly well, and no way to
+      -- tell that from the real thing. Whoever reads this cannot fix it, so the
+      -- message spends its words saying that and naming what to add.
+      | peerFree dict form ->
+          handle (\PeerNotConnectedException -> die (notListed form)) $
+            runHBS2Cli (run dict [form] >>= eatNil display >> silence)
       | otherwise -> runHBS2Cli (recover (run dict [form] >>= eatNil display) >> silence)
 
   where
@@ -299,41 +365,18 @@ main = do
       LitStrVal t      -> Text.unpack t
       x                -> show (pretty x)
 
-    -- Verbs that reach nothing but the local repository. Named here rather than
-    -- declared per verb, because the list is short and a wrong entry fails loudly
-    -- (the verb reports "not connected" the first time anybody runs it), whereas a
-    -- verb wrongly absent from it fails quietly by being slow.
-    peerFreeNames :: [Id]
-    -- help too, and measured: `--help` took 1.553 s against `verify`'s 0.012 s,
-    -- all of it the peer probe, which is readProcess of `hbs2-peer poke` with no
-    -- timeout. Against a wedged peer the two commands that hang are the two you
-    -- would run to find out how to audit without one.
-    -- Every read verb, and they are peerless for the same reason `verify` is:
-    -- canon is a git ref in this repository and the fold over it needs nothing
-    -- else. Measured on the same wedged-peer case the note above describes,
-    -- this is the difference between a listing and a hang.
-    -- The WRITE verbs that reach nothing but this repository are here too, and
-    -- they were the ones the list most needed. Their constraints say so:
-    -- `banEntries` and `maintainerEntries` ask for neither HasStorage nor
-    -- HasClientAPI, so they cannot call a peer, and `pr merge` reaches only the
-    -- keyman, git and canon. Going through `recover` for them cost a
-    -- `hbs2-peer poke` with no timeout, so against a wedged peer the verbs that
-    -- hang were the ones an operator reaches for when things are going wrong,
-    -- with `ban list` beside them answering instantly.
-    peerFreeNames = [ "hub:verify"
-                    , "hub:issue:list", "hub:issue:show"
-                    , "hub:pr:list", "hub:pr:show"
-                    , "hub:log", "hub:maintainer:list", "hub:ban:list"
-                    , "hub:ban", "hub:unban"
-                    , "hub:maintainer:add", "hub:maintainer:remove"
-                    , "hub:pr:merge", "hub:pr:checkout", "hub:sync", "hub:publish"
-                    , "hub:issue:close", "hub:issue:reopen", "hub:issue:label"
-                    , "hub:issue:assign"
-                    , "hub:pr:close", "hub:pr:reopen", "hub:pr:label"
-                    , "hub:pr:assign"
-                    , "hub:compact"
-                    , "hub:redact"
-                    ] <> helpNames
+    -- The verb NAME, for the message above, or the whole form when the head is
+    -- not a name -- which cannot happen from `verbOf`, but this is the failure
+    -- path and it is not the place to add a way to fail.
+    notListed form =
+      let named = case form of
+                    ListVal (SymbolVal k : _) -> show (pretty k)
+                    x                         -> show (pretty x)
+      in "hbs2-hub is built wrong: " <> named <> " needs hbs2-peer but is not\n"
+           <> "listed in peerFulNames, so it ran without an RPC connection.\n"
+           <> "\nThis is a bug in this build, not in your setup: your peer may be\n"
+           <> "running and this command would still fail.\n"
+           <> "\nPlease report it. The fix is one line in hbs2-hub/app/Main.hs."
 
     helpNames :: [Id]
     helpNames = ["help", "--help"]
@@ -361,7 +404,7 @@ main = do
       where
         go = \case
           ListVal xs -> all go xs
-          SymbolVal k | HM.member k dict -> k `elem` peerFreeNames
+          SymbolVal k | HM.member k dict -> k `notElem` peerFulNames
           _ -> True
 
         -- An atom. A form here is a call, and a call is not a name.
