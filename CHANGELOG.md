@@ -219,6 +219,151 @@
 
 ## Security
 
+  - **`hbs2-hub compact` refuses a canon holding a file it cannot read.** The
+    rule this verb implements is about EVENTS, and `stEvents` is only the files
+    that read, parsed and became one. Everything else -- a blob a shallow or
+    partial clone does not have, a file over the reader's bound, a path the
+    layout does not have, a duplicate -- is in `stBad`, which the verb never
+    looked at; and the writer commits the plan and nothing else, with no
+    `read-tree`, so nothing outside the plan survives. A compaction over such a
+    tree therefore DELETED those files, reported only the events it had dropped,
+    and exited 0.
+
+    Two ways in, neither exotic. A partial clone classifies event blobs as
+    absent and `hub verify` there exits 2 without refusing, so compacting
+    publishes a canon those events are gone from. And a hostile upstream puts
+    one file this reader will not take into its own canon, so that a maintainer
+    who compacts launders the finding out of their lineage while it stays in
+    everybody else's.
+
+    Refused rather than normalised, and the whole tree rather than the file:
+    what a compaction may drop is written down, and a file it cannot read is not
+    on that list. New code 48, and the refusal names the files and points at
+    `hub verify`, through the same `pathDoc` that verb uses.
+
+  - **`hbs2-hub sync` stops when fetching the code moved canon.** The first
+    thing the verb does is fetch the branches, by whatever refspec the remote is
+    configured with -- which it does not choose. A remote configured
+    `+refs/hbs2/*:refs/hbs2/*`, which is what somebody does after reading our own
+    advice to fetch canon that way, has canon inside that refspec. So the
+    careful never-force logic underneath ran against a ref the fetch had already
+    forced, and reported `CanonSame` about a rollback; with `fetch.prune` and no
+    canon on the remote the ref was DELETED and the verb said "the remote has
+    none, so nothing here folds yet" having just removed the only copy.
+
+    Canon is now read before that fetch and checked after it. A fast-forward is
+    left alone, because on a mirror that fetch is how canon legitimately arrives
+    and refusing it would make the verb useless there; anything else is a
+    refusal naming both commits and the `git update-ref` that puts it back. The
+    objects are never lost, only the ref.
+
+  - **`hbs2-peer`: a delete is no longer relayed at any floor.**
+    `DeleteMessages` recovers the mailbox key FROM the signature, so "signed by
+    the mailbox key" is satisfied by any freshly generated keypair, and the
+    check that this peer hosts that mailbox is downstream of the relay. One
+    attacker-side signature therefore bought a network-wide broadcast at fan-out
+    per hop, reaching peers that host no mailbox at all. The TODO above the code
+    named this and named the remedy.
+
+    The relay stays ahead of the ownership check, and deliberately: a transit
+    peer holds no mailbox and must forward, or delivery through intermediate
+    hops breaks (PEP-21). What was missing is the gate its two sibling branches
+    have -- the peer's own PoW floor, which answers "how much work am I willing
+    to amplify". A delete carries no stamp, so it carries zero bits: at the
+    default floor of 0 nothing changes for anybody, and any floor an operator
+    set now means what they said. The relay memory is consulted only when
+    forwarding is intended, for the reason the sibling records: a branch that
+    does not forward would otherwise eat a message's first appearance and
+    suppress the honest copy everywhere it had not yet reached.
+
+    What this does NOT close, plainly: at floor 0 the amplification is still
+    there, and bounding it needs a field for a stamp that the wire does not
+    have. That is the same open question as an unstamped `SendMessage` and it is
+    answered by a protocol version, not here.
+
+  - **`hbs2-hub`: reading a stranger's pull request no longer hands their text
+    to git as an option.** `hub issue|pr show <repo> <n> --json` builds the
+    diff of a proposal, and it built the rev range by concatenating two
+    coordinates out of canon: `prBase <> ".." <> prSourceTip`, one argv word, no
+    shape check and no `--`. Both halves are a contributor's, bounded by size
+    and by nothing else, and a fork-path proposal reaches canon with nothing
+    verified about it at all -- the accept says so out loud.
+
+    So `--output=sub/` and `/victim.txt` meet through the range's own `..` to
+    make `--output=sub/../victim.txt`, and `git diff` truncates whatever that
+    resolves to, exits 0 and prints nothing. The path is fully attacker-chosen,
+    absolute paths included, and the contract then reports the diff as
+    `available` with empty text, so the document lies about it as well.
+    Reproduced on git 2.46.
+
+    `validSha` and `validRefName` exist for this and are applied to every other
+    coordinate this package hands git; this was the one call that skipped them.
+    The coordinates now go as two separate words with a `--` after them, and
+    coordinates that are not object names are not asked for at all -- the diff
+    is reported unavailable, which is what it is. The decision is
+    `Read.diffArgv`, exported and tested, because this module's own rule is that
+    what decides something does not live in a `where` clause.
+
+    Also there: `maxDiffBytes` was applied with `Text.length` against a constant
+    named for bytes, so a diff of multibyte text reached four times the stated
+    bound in the JSON a web layer embeds. It is measured with `utf8Length` and
+    cut with `takeBytes`, which cuts between code points.
+
+  - **`hbs2-hub`: a pull request must carry the objects it proposes.**
+    `acceptBundle` checked that the fetched tip is the signed one and called
+    that proof that the objects are the contributor's, because git's hashing
+    binds content to a commit id. It is not proof. The quarantine keeps the
+    repository's own object store as an ALTERNATE, so `FETCH_HEAD^{commit}`
+    resolves through it, and a bundle with an empty pack -- a v2 header naming
+    any commit the maintainer already holds, 106 bytes in total -- passes
+    `git bundle verify` ("records a complete history"), fetches with exit 0, and
+    produces exactly the signed tip having transferred nothing.
+
+    What that buys is attribution: any tip already in canon, including another
+    contributor's accepted `source-tip` or a recorded `merge-commit`, can be
+    re-proposed as the attacker's own, and every clone's canon says so. And
+    publication: `hub publish` force-pushes `refs/hbs2/pulls/*`, and pushing a
+    ref sends everything reachable from it, so a maintainer who merged locally
+    and recorded `hub pr merge --commit <sha>` before pushing the branch
+    publishes that history on their next publish.
+
+    The question is now asked of the quarantine ALONE, with no alternate: is the
+    signed tip an object this fetch wrote. An honest bundle always answers yes,
+    since git packs `base..ref` and refuses to build an empty bundle at all. The
+    refusal is `BundleNoObjects` and says which commit and why it matters. Tested
+    against real git with a hand-built bundle, because `git bundle create` will
+    not make this one -- which is the point.
+
+  - **`hbs2-hub`: every verb that signs now checks that the key it was given is
+    the key it asked for.** `loadCredentials` resolves a key to the FILE that
+    holds it and answers with that file's credentials, whose sign key is the
+    file's PRIMARY one. For a key that is a secondary in its keyring, the secret
+    that comes back belongs to a different identity -- and nine call sites used
+    it and then declared the key they had asked about.
+
+    What that produced is the worst shape a tool can have: `hub maintainer add`
+    printed an event id, a seq, a commit and the new maintainer set, and exited
+    0, while `hub verify` on the same repository answered "author signature does
+    not verify, admitted 0 dropped 1". The event is in canon, it is refused by
+    every clone including the one that wrote it, and nothing between the two
+    commands said so. `hub inbox accept`, `hub issue close|reopen|label|assign`,
+    `hub redact`, `hub pr merge`, `hub issue|pr new`, `hub pr revise`, the
+    comment verbs, `hub policy` and the mailbox delete all signed the same way.
+
+    Nothing downstream could catch it. The bridge is handed a secret key and
+    told whose it is, so the mismatch is invisible by the time any check runs;
+    it has to be caught on the CLI side of that boundary, and now is, in one
+    place. `hub whoami --author` was answering the same question with the same
+    call, so it said "this machine can sign as it" about a key it could not sign
+    as -- the one command written to tell you otherwise.
+
+    Two functions in `HBS2.Hub.CLI.Common`: `signerFor`, which refuses
+    credentials whose sign key is not the key asked about, and `signingPair`,
+    which takes both halves of a signing pair out of one record so a
+    `TriageCtx` cannot be built from two identities. The refusal names the key
+    and says no keyring here holds it as its own signing key, which is a
+    different sentence from having no key at all.
+
   - **`hbs2-peer`: reading a mailbox policy no longer costs a merkle read and
     two parses per inbound packet.** A `CheckMailbox` is forty bytes with any
     key in the field, sent by any handshaken peer; answering one meant a

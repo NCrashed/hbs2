@@ -12,6 +12,8 @@ module HBS2.Hub.CompactSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Compact
 import HBS2.Hub.CLI.Compact
+import HBS2.Hub.Repo
+import HBS2.Hub.Canon (renderMeta)
 import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Hub.Fold ( foldEvents,frThreads,frAdmitted,frOrigins,frMaintainers
                      , frMaxSeq,tsAttrs )
@@ -22,7 +24,9 @@ import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Prelude.Plated (pretty)
 import HBS2.Hash (hashObject)
 
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Text.Encoding qualified as TextE
 import Data.Config.Suckless (Syntax,C)
 import Data.List (isInfixOf)
 import Data.Text qualified as Text
@@ -81,8 +85,64 @@ dropped = fmap eventId . cpDrop
 planOf :: KP -> [Event] -> Compaction
 planOf owner evs = compactionOf (foldEvents (fst owner) evs) evs
 
+-- A canon tree as a list of files, which is what the reader wants and what
+-- makes the classification testable without git. The same shape
+-- "HBS2.Hub.VerifySpec" uses, kept local because a test fixture shared between
+-- two specs is a third thing to keep in step.
+byPath :: [(BS.ByteString, Text)] -> CanonSource IO
+byPath files = CanonSource
+  { csCommit  = pure (Right "deadbeef")
+  , csClose   = pure ()
+  , csEntries = const (pure (Right
+      [ TreeEntry p (Blob (oidOf i) (BS.length (TextE.encodeUtf8 t)))
+      | (i,(p,t)) <- zip [0 :: Int ..] files ]))
+  , csBlob    = \oid -> pure (maybe (BlobRefused "no such object") BlobText
+                                    (lookup oid byOid))
+  }
+  where
+    oidOf i = Text.pack (show (i :: Int))
+    byOid = [ (oidOf i, t) | (i,(_,t)) <- zip [0 :: Int ..] files ]
+
 spec :: Spec
 spec = do
+
+  -- WHAT COMPACTION MAY NOT TOUCH BECAUSE IT CANNOT READ IT. `stEvents` is only
+  -- the files that became an event; everything else is in `stBad`, and the
+  -- writer commits the plan and nothing else -- no read-tree -- so a file this
+  -- reader could not take was deleted by a compaction that reported only the
+  -- events it dropped and exited 0. A shallow clone is the ordinary way in; a
+  -- hostile upstream planting one such file, so that compacting launders it out
+  -- of this lineage, is the other.
+  describe "PEP-19 compaction: what the reader could not take" $ do
+
+    it "refuses a canon holding a file it cannot read, and names it" $ do
+      owner <- kp
+      let repo = fst owner
+          junk = "threads/t/not-an-event"
+      st <- readCanon (byPath [("version", renderMeta), (junk, "nonsense")]) repo
+              >>= either (fail . show) pure
+      fmap fst (stBad st) `shouldBe` [junk]
+      case compactable st of
+        Left bad -> fmap fst bad `shouldBe` [junk]
+        Right () -> expectationFailure "compactable admitted an unreadable canon"
+
+    it "admits a canon whose every file read" $ do
+      owner <- kp
+      let repo = fst owner
+      st <- readCanon (byPath [("version", renderMeta)]) repo
+              >>= either (fail . show) pure
+      stBad st `shouldBe` []
+      compactable st `shouldBe` Right ()
+
+    -- The refusal has to name the file, or the operator is told to run
+    -- `hub verify` about a tree they were given no reason to doubt.
+    it "says which file, and what to run to see the rest" $ do
+      owner <- kp
+      let repo = fst owner
+          said = show (unreadableDoc repo [("threads/t/junk", FileUnreadable "no such object")])
+      said `shouldSatisfy` isInfixOf "threads/t/junk"
+      said `shouldSatisfy` isInfixOf "verify"
+      said `shouldSatisfy` isInfixOf "Nothing was written"
 
   describe "PEP-19 compaction: what may go" $ do
 

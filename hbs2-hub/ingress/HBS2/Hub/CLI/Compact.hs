@@ -28,6 +28,9 @@ module HBS2.Hub.CLI.Compact
   , ownsCanon
   , codeNothingToCompact
   , codeNotThisCanon
+  , compactable
+  , unreadableDoc
+  , codeCanonUnreadableHere
   ) where
 
 import HBS2.Hub.Types
@@ -41,11 +44,12 @@ import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,withCanonState,OnMissing(..))
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
-import HBS2.Hub.CLI.Verify (codeOf)
+import HBS2.Hub.CLI.Verify (codeOf,pathDoc)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
+import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
@@ -74,9 +78,62 @@ import System.Exit (die,exitSuccess,exitWith,ExitCode(..))
 ownsCanon :: [a] -> FoldResult -> Bool
 ownsCanon events fr = List.null events || not (HM.null (frAdmitted fr))
 
+-- | What canon holds that this build cannot carry forward, if anything.
+--
+-- The rule this verb implements is about EVENTS, and 'stEvents' is only the
+-- files that read, parsed and became one. Everything else -- a blob this clone
+-- does not have, a file over the reader's bound, a path the layout does not
+-- have, a duplicate -- is in 'stBad'. The writer is 'skRewrite', which commits
+-- the plan and nothing else: no read-tree, so nothing outside the plan
+-- survives. So compacting a tree with one unreadable file in it DELETED that
+-- file, reported only the events it had dropped, and exited 0.
+--
+-- Two ways that happens and neither is exotic. A shallow or partial clone
+-- classifies event blobs as absent, and @hub verify@ there exits 2 without
+-- refusing, so a compaction publishes a canon those events are gone from. And a
+-- hostile upstream puts one file this reader will not take into its own canon,
+-- so that a maintainer who compacts launders the finding out of their lineage
+-- while it stays in everybody else's.
+--
+-- Its own function, beside 'ownsCanon', for the same reason that one is: what
+-- this verb refuses should be readable without reading the verb.
+compactable :: CanonState -> Either [(ByteString, FileProblem)] ()
+compactable st
+  | List.null (stBad st) = Right ()
+  | otherwise            = Left (stBad st)
+
+-- | What this verb says when canon holds files it cannot carry forward.
+--
+-- Bounded and through 'pathDoc', because a canon path is a stranger's bytes:
+-- the same rule and the same printer @hub verify@ uses to report the same list,
+-- so the two cannot come to print it by different rules.
+unreadableDoc :: RepoRef -> [(ByteString, FileProblem)] -> Doc AnsiStyle
+unreadableDoc repo bad =
+  "canon here holds" <+> pretty (length bad)
+    <+> "file(s) this reader cannot take, and compacting"
+    <> line <> "  would remove them:"
+    <> line
+    <> indent 2 (vcat [ pathDoc p <> ":" <+> pretty w | (p, w) <- take 10 bad ])
+    <> line
+    <> "  Nothing was written. `hbs2-hub verify" <+> pretty (AsBase58 repo)
+      <> "` lists all of them;"
+    <> line <> "  a shallow or partial clone is the ordinary reason, and"
+      <+> "fetching the rest is the fix."
+
 -- | The key named is not the owner of this canon.
 codeNotThisCanon :: Int
 codeNotThisCanon = 43
+
+-- | Canon holds a file this reader cannot take, so compacting would remove it.
+--
+-- Its own code, and above the range the earlier verbs took, because a hook
+-- branches on these and they are never reassigned (PEP-22). Distinct from
+-- 'codeCanonUnwritable': nothing is wrong with the writer here and nothing was
+-- attempted -- the tree holds something this build cannot carry forward, which
+-- is usually a shallow or partial clone and is fixed by fetching rather than by
+-- retrying.
+codeCanonUnreadableHere :: Int
+codeCanonUnreadableHere = 48
 
 -- | There is nothing superseded to drop.
 --
@@ -172,6 +229,33 @@ compactEntries = do
                        <> "  that is a repository key this canon does not answer"
                           <+> "to: nothing was written." ))
                codeNotThisCanon
+
+      -- AND WHAT THE READER COULD NOT TAKE, before anything is planned.
+      --
+      -- The rule this verb implements is about EVENTS, and 'stEvents' is only
+      -- the files that read, parsed and became one. Everything else -- a blob
+      -- this clone does not have, a file over the reader's bound, a path the
+      -- layout does not have, a duplicate -- is in 'stBad', and the writer here
+      -- is 'skRewrite', which commits the plan and nothing else: no read-tree,
+      -- so nothing outside the plan survives. So a compaction over a tree with
+      -- one unreadable file DELETED it, reported only the events it had
+      -- dropped, and exited 0.
+      --
+      -- Two ways that happens and neither is exotic. A shallow or partial clone
+      -- classifies event blobs as absent, and `hub verify` there exits 2 and
+      -- does not refuse; compacting then publishes a canon those events are
+      -- gone from. And a hostile upstream puts one file the reader will not take
+      -- into its own canon, so that a maintainer who compacts launders the
+      -- finding out of their lineage while it stays in everybody else's.
+      --
+      -- REFUSED RATHER THAN NORMALISED, and the whole tree rather than the file:
+      -- what this verb may drop is written down (PEP-19 "Compaction"), a file it
+      -- cannot read is not on that list, and the module header says so about
+      -- events it merely cannot resolve. `hub verify` names them.
+      either (\bad -> liftIO (refuse (show (unreadableDoc (caRepo ca) bad))
+                                     codeCanonUnreadableHere))
+             pure
+             (compactable st)
 
       -- The FOLD is handed to the rule, not just the events: an event the fold
       -- refused must neither be dropped nor displace one it admitted. See the

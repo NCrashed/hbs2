@@ -534,6 +534,62 @@ spec5 =
         syCanon r `shouldBe` CanonMoved (Text.pack c1) (Text.pack c2)
         git here ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` c2)
 
+    -- THE REFSPEC THIS VERB DOES NOT CHOOSE. The first thing `hub sync` does is
+    -- fetch the code, and it does that by whatever the remote is configured
+    -- with. A mirror clone, or `+refs/*:refs/*`, has canon inside that -- so all
+    -- the never-force care below it ran against a ref the fetch had already
+    -- forced, and answered CanonSame about a rollback.
+    it "stops when fetching the code forced canon backwards" $
+      withClone $ \origin here -> do
+        c1 <- canonCommit origin "one"
+        void (ok =<< syncFrom (Just here) "origin")
+        -- This clone folds a letter the remote has not seen.
+        mine <- canonCommit here "mine"
+        mine `shouldSatisfy` (/= c1)
+        -- ...and the remote is configured to mirror everything.
+        void $ git here ["config", "remote.origin.fetch", "+refs/hbs2/*:refs/hbs2/*"]
+        r <- syncFrom (Just here) "origin"
+        case r of
+          Left (BundleCanonClobbered was now) -> do
+            was `shouldBe` Text.pack mine
+            now `shouldBe` Just (Text.pack c1)
+          other -> expectationFailure
+                     ("expected BundleCanonClobbered, got " <> show other)
+
+    -- And the same fetch with prune, where the ref is not moved but DELETED:
+    -- the verb used to answer "the remote has none, so nothing here folds yet"
+    -- having just removed the only copy of it.
+    it "stops when fetching the code pruned canon away" $
+      withClone $ \origin here -> do
+        mine <- canonCommit here "mine"
+        void $ git here ["config", "remote.origin.fetch", "+refs/hbs2/*:refs/hbs2/*"]
+        void $ git here ["config", "fetch.prune", "true"]
+        -- The remote has no canon at all, which is the ordinary state of a
+        -- repository nobody has folded into.
+        r <- syncFrom (Just here) "origin"
+        case r of
+          Left (BundleCanonClobbered was now) -> do
+            was `shouldBe` Text.pack mine
+            now `shouldBe` Nothing
+          other -> expectationFailure
+                     ("expected BundleCanonClobbered, got " <> show other)
+
+    -- A MIRROR IS NOT BROKEN BY THIS. On a mirror the branch fetch is how canon
+    -- legitimately arrives, so a fast-forward through it is left alone: this
+    -- verb refuses a rollback, not a mirror.
+    it "lets the code fetch fast-forward canon on a mirroring remote" $
+      withClone $ \origin here -> do
+        c1 <- canonCommit origin "one"
+        void (ok =<< syncFrom (Just here) "origin")
+        void $ git here ["config", "remote.origin.fetch", "+refs/hbs2/*:refs/hbs2/*"]
+        c2 <- canonCommit origin "two"
+        r <- ok =<< syncFrom (Just here) "origin"
+        -- The fetch moved it, so by the time this verb looks there is nothing
+        -- left to move: what matters is that it did not refuse.
+        git here ["rev-parse", "refs/hbs2/meta"] >>= (`shouldBe` c2)
+        syCanon r `shouldSatisfy` (\c -> c == CanonSame
+                                           || c == CanonMoved (Text.pack c1) (Text.pack c2))
+
     -- The case the plus in the refspec would eat: this clone has folded a
     -- letter the remote has not seen, and a forced fetch would drop the ref
     -- onto the older commit.

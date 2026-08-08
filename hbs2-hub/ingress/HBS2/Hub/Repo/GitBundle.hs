@@ -107,6 +107,21 @@ data BundleError =
     -- work, or the maintainer's own unpublished commits, and staging it puts
     -- them under a number and pushes them on the next publish.
   | BundleNoObjects Text
+    -- | The branch fetch moved @refs\/hbs2\/meta@ out from under this verb.
+    --
+    -- The first thing `hub sync` does is fetch the code, and it does that by
+    -- whatever refspec the remote is configured with, which this verb does not
+    -- choose. A mirror clone, or any remote configured @+refs\/*:refs\/*@, has
+    -- canon inside that refspec -- so the careful never-force logic below it ran
+    -- against a ref the fetch had already forced, and reported @CanonSame@
+    -- about a rollback. With @fetch.prune@ and no canon on the remote the ref is
+    -- DELETED, and the verb then says "the remote has none, so nothing here
+    -- folds yet" having just removed the only copy.
+    --
+    -- Carries what it was and what it became, because the way back is a ref
+    -- update to the first of those and nothing else is lost: the objects are
+    -- still in the repository.
+  | BundleCanonClobbered Text (Maybe Text)
   deriving stock (Eq,Show)
 
 instance Pretty BundleError where
@@ -129,6 +144,18 @@ instance Pretty BundleError where
                     , "fetched" <+> pretty got
                     , "the objects are not the ones the contributor put their"
                         <+> "name to; do not stage them" ]
+    BundleCanonClobbered was now ->
+      nest 2 $ vsep [ "fetching the code moved canon, and this verb did not"
+                    , "was  " <+> pretty was
+                    , "now  " <+> maybe "gone" pretty now
+                    , "this remote's refspec covers refs/hbs2/*, so the branch"
+                        <+> "fetch forced or pruned"
+                    , "the ref before anything here could compare it. Nothing"
+                        <+> "else was written and the"
+                    , "objects are still here. Put it back with:"
+                    , "  git update-ref refs/hbs2/meta" <+> pretty was
+                    , "then narrow the refspec, or fetch canon with hbs2-hub"
+                        <+> "alone." ]
     BundleNoObjects tip ->
       nest 2 $ vsep [ "the bundle names a commit it does not carry"
                     , "signed" <+> pretty (safeText tip)
@@ -457,8 +484,29 @@ syncFrom cwd remote = runExceptT do
                      , "-c", "fetch.fsckObjects=true"
                      , "fetch" ] <> as )
 
+  -- WHAT CANON WAS BEFORE THE BRANCH FETCH. Read here rather than after it,
+  -- because the fetch below runs under the remote's own refspec and this verb
+  -- does not choose that: on a mirror clone, or any remote configured
+  -- @+refs/*:refs/*@, it covers refs/hbs2/* and forces the ref that everything
+  -- underneath is careful never to force. Reading afterwards meant comparing
+  -- the remote against itself and answering CanonSame about a rollback.
+  before <- ExceptT (refTip cwd "refs/hbs2/meta")
+
   -- The branches, by whatever refspec the remote is configured with.
   _ <- ExceptT $ fetch [Text.unpack remote]
+
+  -- And whether it survived that. A FAST-FORWARD IS FINE and is left alone: on
+  -- a mirror that fetch is how canon legitimately arrives, and refusing it would
+  -- make this verb useless there. Anything else -- a rollback, a sideways move,
+  -- or a prune that deleted the ref -- is the case worth stopping on, and it is
+  -- stopped on before a single other ref is touched.
+  for_ before $ \was -> do
+    now <- ExceptT (refTip cwd "refs/hbs2/meta")
+    kept <- case now of
+              Nothing -> pure False
+              Just b | b == was  -> pure True
+                     | otherwise -> ExceptT (isAncestor cwd was b)
+    unless kept $ throwError (BundleCanonClobbered was now)
 
   -- ASKED FOR FIRST, because git fails outright on a NAMED ref the remote does
   -- not have ("couldn't find remote ref"), and a repository where nobody has

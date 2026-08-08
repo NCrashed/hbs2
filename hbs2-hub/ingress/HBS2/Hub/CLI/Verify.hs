@@ -24,6 +24,10 @@ module HBS2.Hub.CLI.Verify
   , reportCode
   , refusalDoc
   , codeOf
+    -- | A canon path on its way to a terminal. Exported because @hub compact@
+    -- refuses on the same list this reports, and printing a stranger's path by
+    -- two rules is how one of them comes to print it raw.
+  , pathDoc
 
 
     -- | The IO half: prints the report and exits. Exported for the one thing the
