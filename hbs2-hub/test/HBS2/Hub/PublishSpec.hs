@@ -20,6 +20,7 @@ import Data.List (isInfixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>),takeDirectory)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
 import Test.Hspec
@@ -165,6 +166,36 @@ spec = do
         pbPulls r1 `shouldBe` PullsMoved
         there <- git bare ["rev-parse", "refs/hbs2/pulls/1/head"]
         there `shouldBe` h
+
+    -- THE SAME REFUSAL BY ITS ORDINARY ROUTE, and the one the previous test
+    -- cannot reach: it rewinds a ref in a clone that still HOLDS the object.
+    -- A maintainer who never fetched does not, which is what "the remote is
+    -- ahead" means, and asking merge-base about an object git has not got is a
+    -- fatal error rather than an answer.
+    it "refuses without git's words when it cannot see the remote's canon" $
+      withRemote $ \work bare -> do
+        _ <- canonHere work
+
+        -- A second maintainer, in a repository sharing no history with this
+        -- one, publishes first.
+        let other = takeDirectory bare </> "other"
+        createDirectoryIfMissing True other
+        void $ git other ["init", "-q", "."]
+        writeFile (other </> "c.txt") "three\n"
+        void $ git other ["add", "c.txt"]
+        void $ git other ["commit", "-q", "-m", "theirs"]
+        theirs <- canonHere other
+        void $ git other ["remote", "add", "origin", bare]
+        _ <- either (fail . show) pure =<< publishTo (Just other) "origin"
+
+        -- And this clone has never fetched, so it does not hold that commit at
+        -- all. The answer is the sentence, not git's.
+        r <- either (fail . show) pure =<< publishTo (Just work) "origin"
+        pbCanon r `shouldBe` PublishedRefused theirs
+        publishCode r `shouldBe` codeNotPublished
+
+        still <- git bare ["rev-parse", "refs/hbs2/meta"]
+        still `shouldBe` Text.unpack theirs
 
     -- THE OTHER HALF OF THE REFUSAL, and it was missing: the canon push is a
     -- fast-forward check and the pulls push is a FORCE, so a run that refused

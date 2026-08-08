@@ -649,11 +649,36 @@ publishTo cwd remote = runExceptT do
         Just theirs
           | theirs == mine -> pure (PublishedSame mine)
           | otherwise -> do
-              -- Contains, not equals: the remote's commit has to be an
-              -- ancestor of ours, which is the same question the fetch side
-              -- asks in the other direction.
-              ff <- ExceptT (isAncestor cwd theirs mine)
-              if ff then push mine else pure (PublishedRefused theirs)
+              -- A REMOTE CHOSE THIS STRING, so it is checked before it reaches
+              -- a command line, on the rule the rest of this module follows.
+              -- 'isAncestor' checks its own arguments; the point of doing it
+              -- here is that there are now two commands downstream of it.
+              checked "object name" validSha theirs
+
+              -- AND THIS CLONE MAY SIMPLY NOT HAVE IT, which was the ordinary
+              -- case and not a rare one: not having the remote's canon is what
+              -- "the remote is ahead" MEANS when nobody has fetched. Asking
+              -- @merge-base --is-ancestor@ about an object git does not hold
+              -- gets "fatal: Not a valid commit name", so the default path of
+              -- the one scenario this verb is shaped around answered with a raw
+              -- git error at exit 46, and the sentence written for it appeared
+              -- only after fetching by hand.
+              --
+              -- It is the same answer, not a different one: an object this
+              -- repository does not contain is the strongest form of canon this
+              -- clone does not contain, and the remedy the report names -- sync,
+              -- which fetches and folds both -- is the remedy either way.
+              have <- lift $ call cwd smallSeconds "cat-file"
+                        ["cat-file", "-e", Text.unpack theirs <> "^{commit}"]
+
+              if isLeft have
+                then pure (PublishedRefused theirs)
+                else do
+                  -- Contains, not equals: the remote's commit has to be an
+                  -- ancestor of ours, which is the same question the fetch side
+                  -- asks in the other direction.
+                  ff <- ExceptT (isAncestor cwd theirs mine)
+                  if ff then push mine else pure (PublishedRefused theirs)
 
   -- And the staged proposals, when there are any. A push with no matching
   -- source refspec is an error from git, and a repository nobody has proposed

@@ -638,6 +638,15 @@
     made an honest cross-repository ack indistinguishable by eye from a forged
     one.
 
+  - **`hbs2-hub publish`: the scenario it is shaped around answered with a raw
+    git error.** It learned the remote's canon from `ls-remote` and asked
+    `merge-base --is-ancestor` about it -- but a clone that has never fetched
+    does not HOLD that object, which is what "the remote is ahead" means, so
+    the default path produced "fatal: Not a valid commit name" at exit 46 and
+    the sentence written for the case appeared only after fetching by hand. Not
+    having the object is the strongest form of holding canon this clone does
+    not contain, so it is now the same refusal, with the same remedy.
+
   - **`hbs2-hub publish`: it force-pushed staged proposals after refusing to
     publish canon.** The canon push is a fast-forward check and the pulls push
     is a force, and the second sat outside the branch that decides the first --
