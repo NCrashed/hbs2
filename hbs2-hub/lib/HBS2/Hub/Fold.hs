@@ -757,7 +757,12 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
           (AOpen{}, _)      -> True
           (_, Nothing)      -> True
           (_, Just _)       -> False
-        numberIsMax = ccNumber cc == Just maxBound
+        -- ABOVE THE CEILING, not only at the top of the range. See
+        -- 'maxCanonNumber': the render contract emits this as a bare JSON
+        -- integer and names a web layer as its reader, and a double cannot hold
+        -- the top of a Word64. The name is kept because the drop is the same
+        -- fact to whoever reads a report: this number is not one canon may carry.
+        numberIsMax = maybe False (> maxCanonNumber) (ccNumber cc)
         -- A ceiling rather than the top of the range, because the harm here is
         -- not the wrap the counters suffer: the next stamp is clamped to be no
         -- lower than this one, so 'max' carries a bad value forward from

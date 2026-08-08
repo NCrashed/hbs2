@@ -28,7 +28,7 @@ import Data.Aeson qualified as A
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.HashMap.Strict qualified as HM
-import Data.List (isInfixOf)
+import Data.List (isInfixOf,isPrefixOf,tails)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Test.Hspec
@@ -179,6 +179,54 @@ spec = do
       field v "created_at"  `shouldBe` A.Number 1737763200000
       field v "declared_at" `shouldBe` A.Number 1737763100000
       field v "updated_at"  `shouldBe` A.Number 1737849600000
+
+  -- EVERY INTEGER IN THE CONTRACT SURVIVES ITS OWN STATED READER. PEP-22 names
+  -- a web layer as the consumer, `JSON.parse` hands back a double, and two of
+  -- these fields were bounded by nothing: `number`, capped only at `maxBound`
+  -- by the fold, and `declared_at`, which is the author's own unverifiable
+  -- claim. 18446744073709551614 comes back as 18446744073709552000, so the
+  -- contract's promise that it says what canon holds was false for them.
+  describe "PEP-22 render contract: what a double can hold" $ do
+
+    let json t = LBS8.unpack (renderContract (threadContract t Nothing))
+
+    it "clamps the author's own timestamp at the ceiling canon admits" $ do
+      k <- aKey
+      let t = (aThread k k) { tsAuthorTs = maxBound }
+      field (threadContract t Nothing) "declared_at"
+        `shouldBe` A.Number (fromIntegral maxFoldedTs)
+      -- ...and the same for a comment, since the two renderers agreeing about
+      -- a field is the rule this module keeps failing in one half.
+      let t2 = (aThread k k) { tsComments = [ (aComment k k) { cAuthorTs = maxBound } ] }
+      case field (threadContract t2 Nothing) "comments" of
+        A.Array cs | [c] <- foldr (:) [] cs ->
+          field c "declared_at" `shouldBe` A.Number (fromIntegral maxFoldedTs)
+        x -> expectationFailure ("expected one comment, got " <> show x)
+
+    -- The bound canon itself now enforces, so a renderer never meets a number
+    -- it cannot represent. Asserted here because this is the module whose
+    -- reader the bound exists for.
+    it "carries a number a double holds exactly" $ do
+      k <- aKey
+      let t = (aThread k k) { tsNumber = Just maxCanonNumber }
+      field (threadContract t Nothing) "number"
+        `shouldBe` A.Number (fromIntegral maxCanonNumber)
+      maxCanonNumber `shouldBe` 2 ^ (53 :: Int) - 1
+
+    -- One counter for three document types, and PEP-22 leaves two of them
+    -- open: without this a renderer meeting an index document would see
+    -- `contract 1` and a shape it does not recognize, with nothing to branch on.
+    it "says which document it is" $ do
+      k <- aKey
+      field (threadContract (aThread k k) Nothing) "document"
+        `shouldBe` A.String "thread"
+      -- And it comes before the body of the document, so a reader can branch on
+      -- it without parsing the rest. 'keyOrder' is what puts it there, and a
+      -- field added to the object and forgotten in that list sorts to the end.
+      let out = json (aThread k k)
+          at s = length (takeWhile (not . isPrefixOf s) (tails out))
+      at "\"document\"" `shouldSatisfy` (< at "\"kind\"")
+      at "\"contract\"" `shouldSatisfy` (< at "\"document\"")
 
   describe "PEP-22 render contract: a redacted item is withheld" $ do
 

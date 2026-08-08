@@ -936,8 +936,12 @@ verbatimUnsafe = \case
 -- one, so only an open is checked.
 requireStamp :: CanonView -> AuthorContent -> Either TriageError ()
 requireStamp view content
+  -- THE FOLD'S CEILING, not the top of the range. 'maxCanonNumber' is where the
+  -- fold now stops admitting a number, so minting past it would break this
+  -- module's whole promise -- that it never mints what the fold drops -- at the
+  -- one place the promise is about a value this side chooses.
   | isJust (mintedNumber content (cvCursor view))
-  , ccrNextNumber (cvCursor view) == maxBound = Left CursorExhausted
+  , ccrNextNumber (cvCursor view) > maxCanonNumber = Left CursorExhausted
   | otherwise = Right ()
 
 -- Refuse to mint under a key canon will not accept as a blesser, or with a

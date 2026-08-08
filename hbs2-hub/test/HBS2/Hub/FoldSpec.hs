@@ -846,10 +846,14 @@ spec = do
       -- one: refused, and it never showed anyone a number, so burning one would
       -- leave a gap nothing explains. At the top of the range it would strand
       -- the counter and abort every later triage run.
+      --
+      -- 'maxCanonNumber' and not maxBound: the top of the range is now itself a
+      -- drop ('NumberAtTopOfRange'), so a fixture there would be refused for the
+      -- number rather than for the target and would stop testing what it says.
       let repo = fst owner
           foreign' = mkEvent alice owner
                        (AOpen (fst other) HubIssue "elsewhere" [] Nothing Nothing Nothing 1)
-                       (canon repo 1 (Just (maxBound - 1)))
+                       (canon repo 1 (Just maxCanonNumber))
           fr = foldEvents repo [foreign']
       reasons fr `shouldBe` [WrongTarget]
       -- the seq is spent, since the file sits at it; the number is not

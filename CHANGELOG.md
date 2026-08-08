@@ -219,6 +219,35 @@
 
 ## Changed
 
+  - **`hbs2-hub`: every integer in the render contract survives its own stated
+    reader.** PEP-22 names a web layer as the consumer and the contract promises
+    that what is in it is what canon holds; `JSON.parse` returns a double, and
+    two fields were bounded by nothing. `18446744073709551614` comes back as
+    `18446744073709552000`, so for those two the promise was false.
+
+    `number` is now capped at 2^53 - 1 by the fold. That is an ADMISSION RULE,
+    so it is consensus and it is set now because now is the only time it can be:
+    like `maxFoldedTs` it cannot be raised or lowered once a repository has
+    canon written under it, and nothing has been published yet. Nothing honest
+    is affected -- the cursor starts at 1 and counts, so the range above the cap
+    is reachable only by a canon box somebody wrote by hand. The bridge's
+    minting gate moved with it, since the module's promise is that it never
+    mints what the fold drops. The alternative was emitting the field as a
+    string, which would cost every renderer a conversion forever to carry values
+    no canon has.
+
+    `declared_at` is the author's own unverifiable claim and canon is right to
+    admit it, so the projection clamps it at the ceiling canon admits --
+    the same clamp the terminal renderer has applied all along. The two agreeing
+    is the point. The other three timestamps are folded-ts, which the fold
+    already caps three orders below what a double holds.
+
+    Also there: the contract carries `"document": "thread"`. One version counter
+    for three document types, two of which PEP-22 leaves open, would mean two
+    different shapes both calling themselves `contract 1` with nothing to branch
+    on. A field a consumer handles from the start costs nothing; one added later
+    is a field every renderer must treat as optional forever.
+
   - **`hbs2-hub`: the version a canon commit declares is a function of what it
     holds.** `renderMeta` took no argument and wrote `hubMetaVersion`, the build
     constant, into every commit. So the first accept by a newer build rewrote

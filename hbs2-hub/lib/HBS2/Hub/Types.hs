@@ -78,6 +78,7 @@ module HBS2.Hub.Types
   , hubMetaMin
   , hubEventVersion
   , maxFoldedTs
+  , maxCanonNumber
   , threadDir
   , repoDir
   , numberIndexPath
@@ -880,6 +881,29 @@ hubEventVersion = 2
 -- range is compaction (PEP-19), which restamps.
 maxFoldedTs :: Word64
 maxFoldedTs = 4102444800000
+
+-- | The highest human number canon may carry: 2^53 - 1.
+--
+-- AN ADMISSION RULE, so it is consensus, and it is set NOW because now is the
+-- only time it can be: like 'maxFoldedTs' it cannot be raised or lowered once a
+-- repository has canon written under it, and nothing has been published yet.
+--
+-- 2^53 - 1 and not the top of the range, because of who reads it. The PEP-22
+-- render contract emits @number@ as a bare JSON integer and names a web layer
+-- as the consumer; @JSON.parse@ hands back a double, so 18446744073709551614
+-- comes back as 18446744073709552000. The contract promises two clones of one
+-- canon produce identical bytes and that what is in it is what canon holds, and
+-- a value that cannot survive its own stated reader is neither. The alternative
+-- was emitting the field as a string, which costs every renderer a conversion
+-- forever to carry values no honest canon has: the cursor starts at 1 and
+-- counts, so the whole range above this is reachable only by a canon box
+-- somebody wrote by hand.
+--
+-- The timestamps need no such rule: 'maxFoldedTs' is already three orders below
+-- this, and @declared_at@ is the author's own unverifiable number, which the
+-- projection clamps rather than canon refusing (see "HBS2.Hub.Render").
+maxCanonNumber :: Word64
+maxCanonNumber = 2 ^ (53 :: Int) - 1
 
 -- | Where a thread's events live, relative to the canon tree root.
 threadDir :: ThreadId -> FilePath

@@ -53,6 +53,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Word (Word64)
 
 -- | The version a renderer checks before it reads anything else.
 --
@@ -61,6 +62,24 @@ import Data.Text qualified as Text
 -- point of putting a number here.
 contractVersion :: Int
 contractVersion = 1
+
+-- | The author's own timestamp, bounded so the contract's integers survive it.
+--
+-- THE ONE UNBOUNDED NUMBER THAT REACHED HERE. Everything else is either an id
+-- or a trusted clock: @created_at@, @updated_at@ and a comment's @ts@ are
+-- folded-ts, which the fold caps at 'maxFoldedTs' (three orders below what a
+-- double holds), and @number@ is capped by 'maxCanonNumber'. This one is the
+-- AUTHOR's, unverifiable and capped by nothing, so a sender could put
+-- 18446744073709551615 in it -- and this contract names a web layer as its
+-- reader, where @JSON.parse@ hands back a double and the value comes back
+-- changed.
+--
+-- Clamped rather than refused, because canon is right to admit it: the field is
+-- advisory and says what the sender claimed, which is a fact about the letter
+-- even when the claim is absurd. The terminal renderer has clamped it at the
+-- same ceiling all along ('utcOf'); the two agreeing is the point.
+declaredAt :: Word64 -> Word64
+declaredAt = min maxFoldedTs
 
 -- | Whether the objects a pull request proposes can be shown.
 --
@@ -94,6 +113,13 @@ data PRDiff = PRDiff
 threadContract :: ThreadState -> Maybe PRDiff -> Value
 threadContract t mdiff = object $
   [ "contract"    .= contractVersion
+    -- WHICH DOCUMENT THIS IS. One counter for three document types (PEP-22
+    -- leaves an index and an activity document open) and no way to tell them
+    -- apart would mean two different shapes both calling themselves
+    -- @contract 1@. A field a consumer has to handle from the start costs
+    -- nothing; one added later is a field every renderer must treat as
+    -- optional forever.
+  , "document"    .= ("thread" :: Text)
   , "kind"        .= kindOf (tsKind t)
   , "number"      .= tsNumber t
   , "thread_id"   .= b58 (tsId t)
@@ -104,15 +130,12 @@ threadContract t mdiff = object $
   , "author"      .= key58 (tsAuthor t)
   , "canon_by"    .= key58 (tsCanonBy t)
   , "created_at"  .= tsCreated t
-  , "declared_at" .= tsAuthorTs t
+  , "declared_at" .= declaredAt (tsAuthorTs t)
   , "updated_at"  .= tsUpdated t
   , "redacted"    .= tsRedacted t
   , "body"        .= hide (tsBody t)
   , "body_part"   .= fmap b58 (hide (tsBodyPart t))
   , "part_secret" .= fmap secret58 (hide (tsPartSecret t))
-    -- What the AUTHOR asked for, never applied. Kept separate from `labels`
-    -- for the reason PEP-19 makes applying one an owner-signed event: merging
-    -- the two would let a stranger label their own issue.
     -- What the AUTHOR asked for, never applied -- and WITHHELD like the body,
     -- because it is the same stranger's text: up to 32 labels of 128 bytes
     -- each, on the one event a redact of an open is usually aimed at. It went
@@ -143,7 +166,7 @@ commentContract c = object
     -- The name is historical and PEP-22 says so: this is folded-ts, the same
     -- trusted clock as `created_at`, and what orders the list.
   , "ts"          .= cFoldedTs c
-  , "declared_at" .= cAuthorTs c
+  , "declared_at" .= declaredAt (cAuthorTs c)
   , "reply_to"    .= fmap b58 (cReplyTo c)
   , "body"        .= hide (cBody c)
   , "body_part"   .= fmap b58 (hide (cBodyPart c))
@@ -242,7 +265,7 @@ renderContract = encodePretty' cfg
     cfg = defConfig
       { confIndent = Spaces 2
       , confCompare = keyOrder
-          [ "contract", "kind", "number", "thread_id", "title", "status"
+          [ "contract", "document", "kind", "number", "thread_id", "title", "status"
           , "labels", "assignees", "author", "canon_by"
           , "created_at", "declared_at", "updated_at", "redacted"
           , "body", "body_part", "part_secret", "labels_requested"
