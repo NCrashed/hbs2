@@ -58,6 +58,7 @@ import HBS2.CLI.Prelude hiding (filter)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Control.Monad.Except (ExceptT(..),runExceptT,throwError)
+import Data.Either (isLeft)
 import Data.Char (isHexDigit)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -96,6 +97,16 @@ data BundleError =
   | BundleBadName Text Text
     -- | The bundle fetched, and its tip is not the one the letter signed.
   | BundleTipMismatch Text Text
+    -- | The bundle records the signed tip and carries none of its objects.
+    --
+    -- Its own case because it is the one refusal here that is not a mistake. A
+    -- v2 header naming any commit the maintainer already has, followed by an
+    -- empty pack, is 106 bytes that passes @bundle verify@ ("records a complete
+    -- history"), fetches with exit 0, and resolves to exactly the signed tip
+    -- through the repository's own store. What it proposes is somebody else's
+    -- work, or the maintainer's own unpublished commits, and staging it puts
+    -- them under a number and pushes them on the next publish.
+  | BundleNoObjects Text
   deriving stock (Eq,Show)
 
 instance Pretty BundleError where
@@ -118,6 +129,13 @@ instance Pretty BundleError where
                     , "fetched" <+> pretty got
                     , "the objects are not the ones the contributor put their"
                         <+> "name to; do not stage them" ]
+    BundleNoObjects tip ->
+      nest 2 $ vsep [ "the bundle names a commit it does not carry"
+                    , "signed" <+> pretty (safeText tip)
+                    , "that commit is already in this repository, and the"
+                        <+> "bundle brought nothing:"
+                    , "the proposal is somebody else's work, or your own"
+                        <+> "unpublished commits. Do not stage it." ]
 
 -- | Where PEP-19 stages a proposed tip.
 pullRef :: Word64 -> Text
@@ -254,6 +272,27 @@ acceptBundle cwd bytes ref signedTip = runExceptT do
              <&> fmap (Text.strip . Text.decodeUtf8Lenient)
 
     when (got /= signedTip) $ throwError (BundleTipMismatch signedTip got)
+
+    -- AND THAT THE OBJECTS ARRIVED, which the check above does not establish
+    -- and the module header used to claim it did. The quarantine has the
+    -- repository's own store as an ALTERNATE, so @FETCH_HEAD^{commit}@ resolves
+    -- through it: a bundle with an empty pack, whose only content is a v2
+    -- header naming a commit this repository already holds, passes
+    -- @bundle verify@, fetches with exit 0, and produces exactly the signed tip
+    -- having transferred nothing. What it proposes is then whatever the
+    -- attacker named -- another contributor's accepted tip, or a merge commit
+    -- the maintainer made locally and has not pushed, which `hub publish` will
+    -- push because staging a ref pushes everything reachable from it.
+    --
+    -- So the question is asked of the QUARANTINE ALONE, with no alternate: is
+    -- the object one this fetch wrote. An honest bundle always answers yes,
+    -- since git packs the objects in @base..ref@ and refuses to build an empty
+    -- bundle at all; a re-sent bundle for objects already here answers no, and
+    -- that is a refusal worth having rather than a silent pass.
+    let alone = [ ("GIT_OBJECT_DIRECTORY", quarantine) ]
+    brought <- lift $ callWith alone cwd smallSeconds "cat-file"
+                        ["cat-file", "-e", Text.unpack signedTip <> "^{commit}"]
+    when (isLeft brought) $ throwError (BundleNoObjects signedTip)
 
     -- Only now, into the repository proper.
     _ <- ExceptT (fetch [])

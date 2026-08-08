@@ -271,6 +271,51 @@ spec1 = do
           =<< pure (setWorkingDir theirs (proc "git" ["cat-file", "-e", Text.unpack tip]))
         code `shouldSatisfy` (/= ExitSuccess)
 
+    -- THE BUNDLE THAT CARRIES NOTHING, which is the whole delta path's
+    -- assumption stated as a test. The module used to say that git's object
+    -- hashing binds the content to the tip, "so a bundle that produces the
+    -- signed tip is the objects the contributor put their name to". It does
+    -- not: the quarantine keeps the repository's own store as an ALTERNATE, so
+    -- @FETCH_HEAD^{commit}@ resolves through it, and a v2 header naming a
+    -- commit the maintainer already has plus an empty pack -- 106 bytes -- gets
+    -- all the way to a staged ref.
+    --
+    -- Built by hand rather than with `git bundle create`, because git will not
+    -- build this one: that is the point.
+    it "refuses a bundle that names the signed tip and carries no objects" $
+      withSystemTempDirectory "hub-empty" $ \root -> do
+        let theirs = root <> "/maintainer"
+
+        void $ git root ["init", "-q", theirs]
+        writeFile (theirs <> "/a.txt") "one\n"
+        void $ git theirs ["add", "a.txt"]
+        void $ git theirs ["commit", "-q", "-m", "base"]
+        -- Any commit the maintainer already holds. In the real attack this is
+        -- another contributor's accepted tip, read out of public canon, or a
+        -- merge the maintainer made locally and has not pushed.
+        victim <- Text.pack <$> git theirs ["rev-parse", "HEAD"]
+
+        void $ git theirs ["checkout", "-q", "-b", "keep"]
+
+        -- An empty pack, straight from git with nothing on stdin, so this is
+        -- what git accepts rather than what we imagine it accepts.
+        (_, packOut, _) <- readProcess (setStdin closed
+                             (setWorkingDir theirs
+                               (proc "git" ["pack-objects", "--stdout"])))
+        let pack = LBS8.toStrict packOut
+
+            bytes = BS.concat
+              [ Text.encodeUtf8 "# v2 git bundle\n"
+              , Text.encodeUtf8 (victim <> " refs/heads/evil\n")
+              , Text.encodeUtf8 "\n"
+              , pack ]
+
+        r <- acceptBundle (Just theirs) bytes "evil" victim
+        case r of
+          Left (BundleNoObjects t) -> t `shouldBe` victim
+          other -> expectationFailure
+                     ("expected BundleNoObjects, got " <> show other)
+
   describe "PEP-20 delta path: verifying and staging" $ do
 
     it "answers the ancestor question both ways" $ withWork $ \dir base tip -> do
