@@ -75,7 +75,8 @@ import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,codeMailboxUnknown, codePeerSilent
                            ,withCanon, OnMissing(..)
-                           ,blessed, committing, WriteStop(..))
+                           ,blessed, committing, WriteStop(..)
+                           ,signerFor, signingPair)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
@@ -91,8 +92,6 @@ import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Peer.RPC.Client
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
-import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Storage
 
 import Data.ByteString.Lazy qualified as LBS
@@ -333,9 +332,12 @@ acceptEntries = do
                 >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
                            pure
 
-      creds <- runKeymanClientRO (loadCredentials canonKey)
-                 >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                                   <+> pretty (AsBase58 canonKey)))
+      creds <- signerFor canonKey
+                 >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                    <+> pretty (AsBase58 canonKey)
+                                                    <> line
+                                                    <> "  no keyring here holds it as its own"
+                                                    <+> "signing key" ))
                                            codeNoCanonKey))
                            pure
 
@@ -414,7 +416,7 @@ acceptEntries = do
       -- seconds two owner ops in one tick collapse to one event-id.
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let ctx = TriageCtx (canonKey, _peerSignSk creds) allowed repo
+      let ctx = TriageCtx (signingPair creds) allowed repo
 
       -- What is known about each attachment, gathered before the bridge is
       -- asked. Measured first and opened second, and only when the size is one

@@ -30,7 +30,8 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode,withCanon,OnMissing(..)
+                           ,signerFor,signingPair)
 import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)
@@ -43,14 +44,12 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.Maybe (isNothing)
 import Data.Word (Word64)
@@ -188,9 +187,12 @@ commentEntries = do
                                pure
                 (Nothing, Nothing) -> liftIO (die (show commentUsage))
 
-      creds <- runKeymanClientRO (loadCredentials (cmAuthor cm))
-                 >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                                   <+> pretty (AsBase58 (cmAuthor cm))))
+      creds <- signerFor (cmAuthor cm)
+                 >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                    <+> pretty (AsBase58 (cmAuthor cm))
+                                                    <> line
+                                                    <> "  no keyring here holds it as its own"
+                                                    <+> "signing key" ))
                                            codeNoKey))
                            pure
 
@@ -219,7 +221,7 @@ commentEntries = do
       api <- getClientAPI @MailboxAPI @UNIX
 
       let ob = Outbound sto api rpcTimeout
-          box = signAuthor (cmAuthor cm) (_peerSignSk creds) content
+          box = uncurry signAuthor (signingPair creds) content
 
       h <- sendLetter ob (cmSender cm) [rcpt] box
              (ReplyTo (cmAuthor cm) (cmSender cm))

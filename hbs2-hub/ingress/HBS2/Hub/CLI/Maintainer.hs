@@ -36,15 +36,13 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop)
+                           ,blessed,committing,oneStop,signerFor,signingPair)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Net.Auth.Credentials (_peerSignSk)
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
@@ -140,20 +138,23 @@ maintainerEntries = do
     write mk mn = do
       -- The repo key, not a key of the caller's choosing: rule 5 admits no
       -- other signer, so taking one would take a value that can only be wrong.
-      creds <- runKeymanClientRO (loadCredentials (mnRepo mn))
-                 >>= maybe (liftIO (refuse (show ( "no signing key here for"
-                                                     <+> pretty (AsBase58 (mnRepo mn))
-                                                     <> line
-                                                     <> "  only the repository's own key may"
-                                                     <+> "delegate or revoke" ))
-                                           codeNotDelegated))
-                           pure
+      creds <- signerFor (mnRepo mn)
+                  >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                      <+> pretty (AsBase58 (mnRepo mn))
+                                                      <> line
+                                                      <> "  no keyring here holds it as its own"
+                                                      <+> "signing key, and"
+                                                      <> line
+                                                      <> "  only the repository's own key may"
+                                                      <+> "delegate or revoke" ))
+                                            codeNotDelegated))
+                            pure
 
       (parent, fr) <- canonOf (mnRepo mn)
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let ctx = TriageCtx (mnRepo mn, _peerSignSk creds) (const True) (mnRepo mn)
+      let ctx = TriageCtx (signingPair creds) (const True) (mnRepo mn)
           content = mk (mnRepo mn) (mnKey mn) now
 
       acc <- blessed codeNotDelegated

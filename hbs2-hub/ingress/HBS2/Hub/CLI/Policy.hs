@@ -46,14 +46,13 @@ import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
-import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent)
+import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,signerFor,signingPair)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.SignedBox (makeSignedBox,unboxSignedBox0)
-import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Peer.RPC.API.Mailbox
@@ -63,7 +62,6 @@ import HBS2.Storage
 import HBS2.Storage.Operations.Class (readFromMerkle,writeAsMerkle)
 import HBS2.Storage.Operations.ByteString (pattern SimpleKey)
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.HashMap.Strict qualified as HM
@@ -456,8 +454,8 @@ policyEntries = do
         saying ("nothing to change; the policy was not rewritten" <> line)
         exitSuccess
 
-      creds <- runKeymanClientRO (loadCredentials mbox)
-                 >>= maybe (liftIO (refuse (show ( "no signing key here for"
+      creds <- signerFor mbox
+                 >>= maybe (liftIO (refuse (show ( "cannot sign as"
                                                      <+> pretty (AsBase58 mbox)
                                                      <> line
                                                      <> "  the mailbox's own key signs its"
@@ -471,7 +469,7 @@ policyEntries = do
       href <- liftIO (writeAsMerkle sto (LBS.pack (Text.unpack (policyText p'))))
 
       let payload = SetPolicyPayload mbox v (HashRef href)
-          box = makeSignedBox @HubScheme mbox (_peerSignSk creds) payload
+          box = uncurry (makeSignedBox @HubScheme) (signingPair creds) payload
 
       callRpcWaitMay @RpcMailboxSetPolicy rpcTimeout api (mbox, box)
         >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox policy")) codePeerSilent))

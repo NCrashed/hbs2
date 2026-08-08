@@ -33,7 +33,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter (sigilNames)
 import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf,sigilOf)
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,repoFlags,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying,signerFor)
 import HBS2.Hub.CLI.Compose (codeWrongSigil)
 
 import HBS2.CLI.Prelude
@@ -42,13 +42,12 @@ import HBS2.CLI.Run.Internal
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef,pattern HashLike)
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
-import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.Credentials.Sigil (Sigil(..),loadSigil)
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,listCredentials,loadCredentials)
+import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,listCredentials)
 
 import Data.List qualified as List
 import Data.Maybe (isNothing)
@@ -163,7 +162,12 @@ whoamiEntries = do
         liftIO $ print (identityDoc keys)
 
       for_ whoAuthor $ \k -> do
-        creds <- runKeymanClientRO (loadCredentials k)
+        -- 'signerFor', because this line is the answer to "can I author as this
+        -- key" and 'loadCredentials' does not answer it: keyman resolves a key
+        -- to the FILE that holds it and returns that file's PRIMARY
+        -- credentials, so a key that is a secondary in its keyring got a
+        -- confident yes here and produced letters signed by a different key.
+        creds <- signerFor k
         liftIO $ print $ case creds of
           Just _  -> "author" <+> pretty (AsBase58 k) <+> ": this machine can sign as it"
           -- Not a refusal on its own: naming a key you cannot sign with is a

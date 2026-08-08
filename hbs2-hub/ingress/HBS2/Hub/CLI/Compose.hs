@@ -34,7 +34,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
@@ -54,7 +54,7 @@ import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials,loadKeyRingEntry)
+import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadKeyRingEntry)
 
 import Crypto.Saltine.Class qualified as Saltine
 
@@ -338,7 +338,7 @@ solveWithin t d mbox msg =
 services :: Outbound -> CreateMessageServices HubScheme
 services ob = CreateMessageServices
   (obStorage ob)
-  (runKeymanClientRO . loadCredentials)
+  signerFor
   (runKeymanClientRO . loadKeyRingEntry)
 
 -- | The peer answered and would not take the message.
@@ -432,9 +432,18 @@ composeEntries = do
                                                           (manifestCode e)))
                                     pure
 
-          creds <- runKeymanClientRO (loadCredentials author)
-                     >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                                       <+> pretty (AsBase58 author)))
+          -- 'signerFor' and not 'loadCredentials': keyman resolves a key to the
+          -- FILE that holds it and answers with that file's PRIMARY
+          -- credentials, so an author key that is a secondary in its keyring
+          -- signed the inner box with somebody else's secret while declaring
+          -- itself. The letter folds nowhere and the sender is told it was
+          -- queued.
+          creds <- signerFor author
+                     >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                        <+> pretty (AsBase58 author)
+                                                        <> line
+                                                        <> "  no keyring here holds it as its"
+                                                        <+> "own signing key" ))
                                                codeNoKey))
                                pure
 
@@ -466,7 +475,7 @@ composeEntries = do
           sto <- getStorage
           api <- getClientAPI @MailboxAPI @UNIX
 
-          let box = signAuthor author (_peerSignSk creds) content
+          let box = uncurry signAuthor (signingPair creds) content
               ob = Outbound sto api rpcTimeout
 
           h <- sendLetter ob senderSigil [rcptSigil] box (ReplyTo author senderSigil)

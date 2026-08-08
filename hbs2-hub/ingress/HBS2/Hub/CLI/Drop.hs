@@ -32,18 +32,17 @@ module HBS2.Hub.CLI.Drop
 
 import HBS2.Hub.Types
 import HBS2.Hub.Ingress (rpcTimeout)
+import HBS2.Hub.CLI.Common (signerFor,signingPair)
 
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.SignedBox (makeSignedBox)
-import HBS2.Net.Auth.Credentials (_peerSignSk)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.Text qualified as Text
 
@@ -78,14 +77,20 @@ dropMessage :: forall m . ( MonadUnliftIO m
                           )
             => HubKey -> HashRef -> m (Either DropTrouble ())
 dropMessage mbox msg =
-  runKeymanClientRO (loadCredentials mbox) >>= \case
+  -- 'signerFor' and not 'loadCredentials': keyman answers with the credentials
+  -- of the FILE holding a key, whose sign key is that file's primary one, so a
+  -- mailbox key that is a secondary in its keyring produced a delete box signed
+  -- by somebody else and refused by the peer as not the mailbox's own. Here
+  -- that is the same answer as holding no key at all, which is what
+  -- 'DropNoKey' already means.
+  signerFor mbox >>= \case
     Nothing -> pure (Left (DropNoKey mbox))
     Just creds -> do
       api <- getClientAPI @MailboxAPI @UNIX
 
       let payload = DeleteMessagesPayload
                       (MailboxMessagePredicate1 (Op (MessageHashEq msg)))
-          box = makeSignedBox @HubScheme mbox (_peerSignSk creds) payload
+          box = uncurry (makeSignedBox @HubScheme) (signingPair creds) payload
 
       callRpcWaitMay @RpcMailboxDeleteMessages rpcTimeout api box >>= \case
         Nothing        -> pure (Left DropPeerSilent)

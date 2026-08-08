@@ -50,6 +50,7 @@ import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
+                           ,signerFor,signingPair
                            ,blessed,committing,oneStop)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
@@ -59,14 +60,12 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Net.Auth.Credentials
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -290,11 +289,7 @@ prEntries = do
             Left e -> liftIO (refuse (show (pretty e)) codeBundleFailed)
 
     prMerge pm = do
-      creds <- runKeymanClientRO (loadCredentials (pmAs pm))
-                 >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                                   <+> pretty (AsBase58 (pmAs pm))))
-                                           codeNoKey))
-                           pure
+      creds <- signingKey (pmAs pm)
 
       (parent, fr) <- withCanon Refuse (pmRepo pm) withGitCanon
 
@@ -322,7 +317,7 @@ prEntries = do
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let ctx = TriageCtx (pmAs pm, _peerSignSk creds) (const True) (pmRepo pm)
+      let ctx = TriageCtx (signingPair creds) (const True) (pmRepo pm)
           content = AMerge (tsId t) (pmCommit pm) (pmInto pm) now
 
       acc <- blessed codeNotMerged
@@ -379,7 +374,7 @@ prEntries = do
           content = AOpen (pnRepo pn) HubPR (pnTitle pn) [] (letterBody body)
                           Nothing (Just coords) now
 
-      box <- sealed (pnAuthor pn) creds content
+      box <- sealed creds content
 
       h <- send (pnAuthor pn) (pnSender pn) rcpt part box
 
@@ -422,7 +417,7 @@ prEntries = do
       let coords = PRCoords Nothing (pvFrom pr) (bnTip b) (pvOnto pr) base (Just part)
           content = ARevise (pvThread pr) coords now
 
-      box <- sealed (pvAuthor pr) creds content
+      box <- sealed creds content
 
       h <- send (pvAuthor pr) (pvSender pr) rcpt part box
 
@@ -488,20 +483,29 @@ prEntries = do
       sigilFor mrcpt repo
         >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e))) pure
 
+    -- 'signerFor' and not 'loadCredentials': keyman resolves a key to the FILE
+    -- holding it and answers with that file's PRIMARY credentials, so a key
+    -- that is a secondary in its keyring yielded somebody else's secret and
+    -- every letter below was signed by one key and attributed to another.
     signingKey k =
-      runKeymanClientRO (loadCredentials k)
-        >>= maybe (liftIO (refuse (show ("no signing key here for"
-                                          <+> pretty (AsBase58 k)))
+      signerFor k
+        >>= maybe (liftIO (refuse (show ( "cannot sign as" <+> pretty (AsBase58 k)
+                                            <> line
+                                            <> "  no keyring here holds it as its own"
+                                            <+> "signing key" ))
                                   codeNoKey))
                   pure
 
-    sealed author creds content = do
+    -- The author comes OUT of the credentials rather than in beside them: the
+    -- two were separate arguments, and nothing said the key being declared was
+    -- the key doing the signing.
+    sealed creds content = do
       -- The same bound the fold will apply, before anything is signed: an
       -- oversized field inside a signed box is a letter no hub will fold, and
       -- the signature cannot be redone over less.
       for_ (oversizedField content) $ \f ->
         liftIO $ refuse (show ("over the size limit for a letter:" <+> pretty f)) 1
-      pure (signAuthor author (_peerSignSk creds) content)
+      pure (uncurry signAuthor (signingPair creds) content)
 
     send author sender rcpt part box = do
       sto <- getStorage

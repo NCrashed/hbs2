@@ -19,6 +19,9 @@ module HBS2.Hub.CLI.Common
   , manifestCode
   , codeMailboxUnknown
   , codePeerSilent
+  , signerFor
+  , signerOf
+  , signingPair
   , OnMissing(..)
   , withCanon
   , withCanonState
@@ -28,7 +31,7 @@ module HBS2.Hub.CLI.Common
   , committing
   ) where
 
-import HBS2.Hub.Types (maxFoldedTs)
+import HBS2.Hub.Types (maxFoldedTs,HubKey,HubScheme)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Repo.Manifest (ManifestGone(..),codeNoManifest)
 import HBS2.Hub.Repo
@@ -49,7 +52,8 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 import HBS2.Storage.Operations.Class (readFromMerkle)
 import HBS2.Storage.Operations.ByteString
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
+import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret,loadCredentials)
+import HBS2.Net.Auth.Credentials (PeerCredentials,_peerSignPk,_peerSignSk)
 import Control.Monad.Except (runExceptT)
 
 import Crypto.Saltine.Class qualified as Saltine
@@ -97,6 +101,55 @@ codeMailboxUnknown = 17
 -- | And what a peer that stopped answering exits with.
 codePeerSilent :: Int
 codePeerSilent = 18
+
+-- | The secret key for EXACTLY the key named, and nothing otherwise.
+--
+-- WHY THIS IS NOT 'loadCredentials'. keyman resolves a key to the FILE that
+-- holds it and returns that file's credentials, whose sign key is the file's
+-- PRIMARY one:
+--
+-- > select f.file from keytype t join keyfile f on t.key = f.key
+-- >   where t.key = ? and t.type = 'sign' order by w.weight desc limit 1
+--
+-- For a key that is a SECONDARY in its keyring, @_peerSignSk@ of that record is
+-- somebody else's secret. Every canon writer here used it and then declared the
+-- key it had asked for, so the event was signed by one key and attributed to
+-- another: the verb printed an event id, a seq and a commit, exited 0, and the
+-- fold dropped it as 'BadAuthorSig' in every clone including this one. Nothing
+-- downstream could catch it, because the bridge is handed a secret key and told
+-- whose it is -- which is exactly why the check belongs on this side of that
+-- boundary and in one place.
+--
+-- Answers rather than refuses. Four verbs want an exit code and one
+-- ("HBS2.Hub.CLI.Drop") wants a value, and the three states are not the same
+-- refusal: no key at all, a key this keyring cannot sign as, and a signable
+-- key. The middle one is the one that used to be invisible.
+--
+-- Returns the whole record because one caller needs the keyring to seal an
+-- acknowledgement; 'signingPair' is how the other four get what they wanted.
+signerFor :: (MonadUnliftIO m) => HubKey -> m (Maybe (PeerCredentials HubScheme))
+signerFor k = signerOf k <$> runKeymanClientRO (loadCredentials k)
+
+-- | The rule itself, without the keyman call around it.
+--
+-- Separate and exported because the call site is unreachable from a test (it
+-- wants a key database) while the decision is the whole of the fix, and a fix
+-- nothing asserts is a fix somebody removes as a redundant comparison.
+signerOf :: HubKey
+         -> Maybe (PeerCredentials HubScheme)  -- ^ what keyman answered
+         -> Maybe (PeerCredentials HubScheme)
+signerOf k = \case
+  Just creds | _peerSignPk creds == k -> Just creds
+  _                                   -> Nothing
+
+-- | The pair a 'HBS2.Hub.Bridge.TriageCtx' takes, from one record.
+--
+-- Both halves out of the same credentials, which is the point: assembled by
+-- hand at each call site, the public half came from the caller's argument and
+-- the private half from keyman, and nothing said they had to be the same
+-- identity. See 'signerFor'.
+signingPair :: PeerCredentials HubScheme -> (HubKey, PrivKey 'Sign HubScheme)
+signingPair c = (_peerSignPk c, _peerSignSk c)
 
 
 -- | The author's declared time as something a human reads. Epoch milliseconds are

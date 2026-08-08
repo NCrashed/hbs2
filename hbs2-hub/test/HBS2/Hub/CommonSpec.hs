@@ -21,13 +21,15 @@ module HBS2.Hub.CommonSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
-import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),blessed,oneStop,WriteStop(..))
+import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),blessed,oneStop,WriteStop(..)
+                           ,signerOf,signingPair)
 import HBS2.Hub.Bridge (TriageError(..))
 
 import HBS2.Net.Auth.Credentials
 
 import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
+import Data.Maybe (isJust)
 import Control.Monad (void)
 import Control.Exception (try,bracket)
 import GHC.IO.Handle (hDuplicate,hDuplicateTo)
@@ -58,7 +60,47 @@ runWith :: CanonSource IO -> (forall a . (CanonSource IO -> IO a) -> IO a)
 runWith cs act = act cs
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> spec3
+
+-- | The check between keyman's answer and the key a verb asked about.
+--
+-- WHY THIS IS HERE AT ALL. @loadCredentials@ resolves a key to the FILE that
+-- holds it and hands back that file's PRIMARY credentials, so for a key that is
+-- a secondary in its keyring the secret returned belongs to somebody else.
+-- Every canon writer signed with it and then declared the key it had asked for:
+-- the verb printed an event, a seq and a commit, exited 0, and the fold dropped
+-- the event as 'BadAuthorSig' in every clone. Nothing downstream could catch it,
+-- because the bridge is handed a secret key and told whose it is.
+--
+-- Asserted on 'signerOf' rather than 'signerFor' because the latter wants a key
+-- database. The comparison IS the fix, so it is the thing pinned: delete it and
+-- the second case below goes green-to-red, which is what nothing did before.
+spec3 :: Spec
+spec3 =
+  describe "keyman: the credentials answered are the credentials asked for" $ do
+
+    -- On the ANSWER's shape and not on the record: 'PeerCredentials' has no
+    -- Show, and a secret key is not a thing a failing test should print.
+    it "takes a record whose sign key is the key asked about" $ do
+      alice <- newCredentials @'HBS2Basic
+      isJust (signerOf (_peerSignPk alice) (Just alice)) `shouldBe` True
+
+    it "refuses a record for a DIFFERENT key, which is the keyring case" $ do
+      alice <- newCredentials @'HBS2Basic
+      bob   <- newCredentials @'HBS2Basic
+      -- What keyman does when alice's key is a secondary in bob's keyring: it
+      -- finds the file, and the file's own sign key is bob's.
+      isJust (signerOf (_peerSignPk alice) (Just bob)) `shouldBe` False
+
+    it "refuses when keyman found nothing" $ do
+      alice <- newCredentials @'HBS2Basic
+      isJust (signerOf (_peerSignPk alice) Nothing) `shouldBe` False
+
+    it "takes both halves of a signing pair out of one record" $ do
+      alice <- newCredentials @'HBS2Basic
+      -- The declared key is the record's own, which is what makes a
+      -- TriageCtx built from it unable to disagree with itself.
+      fst (signingPair alice) `shouldBe` _peerSignPk alice
 
 spec1 :: Spec
 spec1 =

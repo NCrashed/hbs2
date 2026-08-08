@@ -36,7 +36,7 @@ import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , flagSwitch,flagText,flagWord )
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop)
+                           ,blessed,committing,oneStop,signerFor,signingPair)
 import HBS2.Hub.CLI.Read (codeNoSuchThread)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 
@@ -45,8 +45,6 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (pattern HashLike)
-import HBS2.Net.Auth.Credentials (_peerSignSk)
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,loadCredentials)
 
 import Data.List qualified as List
 import Data.Maybe (fromMaybe,listToMaybe)
@@ -259,15 +257,18 @@ ownEntries = do
     writeOwn repo mas parent fr mk message = do
       let signer = fromMaybe repo mas
 
-      creds <- runKeymanClientRO (loadCredentials signer)
-                 >>= maybe (liftIO (refuse (show ( "no signing key here for"
-                                                     <+> pretty (AsBase58 signer) ))
-                                           codeNoCanonKey))
-                           pure
+      creds <- signerFor signer
+               >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                   <+> pretty (AsBase58 signer)
+                                                   <> line
+                                                   <> "  no keyring here holds it as its own"
+                                                   <+> "signing key" ))
+                                         codeNoCanonKey))
+                         pure
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
-      let ctx = TriageCtx (signer, _peerSignSk creds) (const True) repo
+      let ctx = TriageCtx (signingPair creds) (const True) repo
 
       acc <- blessed codeTriageRefused
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
