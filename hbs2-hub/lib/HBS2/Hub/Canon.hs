@@ -39,6 +39,14 @@ module HBS2.Hub.Canon
     -- it. The reasoning it encodes, including the measurements, is on
     -- 'scanText' below and is not worth deriving twice.
   , clausesWith
+    -- | Measuring and cutting text in the unit every bound here is derived in.
+    --
+    -- Exported because the reader is not the only place that budgets bytes:
+    -- @hub issue|pr show --json@ bounds the diff it embeds, and was doing it
+    -- with 'Text.length' against a constant named for bytes, which is the same
+    -- four-times overrun this module records having fixed once already.
+  , utf8Length
+  , takeBytes
   , renderEvent
   , parseEvent
   , renderMeta
@@ -157,12 +165,28 @@ bounded got limit what
 -- rather than encoded, because measuring by encoding allocates the very
 -- megabytes the bound exists to refuse.
 utf8Length :: Text -> Int
-utf8Length = Text.foldl' (\n c -> n + width c) 0
-  where
-    width c | c < '\x80'    = 1
+utf8Length = Text.foldl' (\n c -> n + utf8Width c) 0
+
+-- | What one character weighs in UTF-8.
+utf8Width :: Char -> Int
+utf8Width c | c < '\x80'    = 1
             | c < '\x800'   = 2
             | c < '\x10000' = 3
             | otherwise     = 4
+
+-- | The longest prefix of a text that fits in a byte budget.
+--
+-- Cuts BETWEEN code points, never inside one, because the caller is truncating
+-- for a byte bound and what comes out still has to be text. 'Text.take' is the
+-- wrong tool for the same reason 'Text.length' is the wrong measure: both count
+-- characters, and every bound in this package is derived in bytes.
+takeBytes :: Int -> Text -> Text
+takeBytes n = Text.pack . go n . Text.unpack
+  where
+    go _ [] = []
+    go k (c:cs) | w > k     = []
+                | otherwise = c : go (k - w) cs
+      where w = utf8Width c
 
 -- | Write one event file.
 --

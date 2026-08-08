@@ -39,6 +39,7 @@ module HBS2.Hub.CLI.Read
   , listArgs
   , labelsOf
   , assigneeOf
+  , diffArgv
   , codeNoSuchThread
   ) where
 
@@ -47,6 +48,8 @@ import HBS2.Hub.Render
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
+import HBS2.Hub.Canon (utf8Length,takeBytes)
+import HBS2.Hub.Repo.GitBundle (validSha)
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Common (withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
@@ -131,6 +134,36 @@ labelsOf = maybe [] decodeLabels . HM.lookup "labels" . tsAttrs
 -- show nothing at all for a thread whose canon says something else.
 assigneeOf :: ThreadState -> Maybe Text
 assigneeOf = HM.lookup "assignee" . tsAttrs
+
+-- | What git may be asked for the diff of these coordinates, if anything.
+--
+-- THE ONE PLACE IN THIS PACKAGE THAT HANDED CANON'S TEXT TO GIT UNCHECKED, and
+-- the shape it used made that fatal rather than merely sloppy. Both coordinates
+-- are a stranger's: 'oversizedField' bounds them by SIZE and by nothing else,
+-- and a fork-path proposal reaches canon with no verification at all and says
+-- so out loud. Joined into one argv word as a range, they are an option --
+-- @--output=sub/@ and @/victim.txt@ meet through the range's own @..@ to make
+-- @--output=sub\/..\/victim.txt@ -- and @git diff@ then truncates whatever that
+-- resolves to, exits 0 and prints nothing, so the render contract reports the
+-- diff as available and empty. Reading a stranger's canon is the ordinary case
+-- for this verb.
+--
+-- TWO WORDS AND A @--@, so neither coordinate can be read as an option or as a
+-- path, and 'validSha' first, because both are documented as object names and
+-- that is the predicate the rest of the package already applies to every
+-- coordinate it hands git ("HBS2.Hub.Repo.GitBundle"). Coordinates that are not
+-- object names are not a diff this build can ask for, which the caller reports
+-- as unavailable.
+--
+-- Top level and exported because it decides something, which is this module's
+-- own rule: the two bugs it records having had were both in a @where@ clause
+-- nothing could ask about.
+diffArgv :: PRCoords -> Maybe [String]
+diffArgv co
+  | validSha (prBase co) && validSha (prSourceTip co) =
+      Just [ "diff", "--no-color"
+           , Text.unpack (prBase co), Text.unpack (prSourceTip co), "--" ]
+  | otherwise = Nothing
 
 -- | The threads of one kind, filtered, in the order PEP-22 prints them.
 --
@@ -390,18 +423,19 @@ readEntries = do
       Nothing -> pure Nothing
       Just pr -> do
         let co = psCoords pr
-        r <- gitRun Nothing [] 30 "the diff of a proposal"
-               [ "diff", "--no-color"
-               , Text.unpack (prBase co) <> ".." <> Text.unpack (prSourceTip co) ] mempty
+        r <- case diffArgv co of
+               Nothing -> pure (Left ())
+               Just as -> Right <$> gitRun Nothing [] 30 "the diff of a proposal" as mempty
         pure $ Just $ case r of
-          Right (ExitSuccess, o, _) ->
+          Right (Right (ExitSuccess, o, _)) ->
             let txt = Text.decodeUtf8With Text.lenientDecode o
-            in if Text.length txt > maxDiffBytes
-                 then PRDiff DiffAvailable True (Text.take maxDiffBytes txt)
+            in if utf8Length txt > maxDiffBytes
+                 then PRDiff DiffAvailable True (takeBytes maxDiffBytes txt)
                  else PRDiff DiffAvailable False txt
-          -- git could not answer, which here means the objects are not in this
-          -- clone. Whether they can be got back is what canon says: a bundle
-          -- part is a way, a fork pointer is not one this build can follow.
+          -- git could not answer, or was never asked because the coordinates
+          -- are not object names. Whether the objects can be got back is what
+          -- canon says: a bundle part is a way, a fork pointer is not one this
+          -- build can follow.
           _ | Just{} <- prBundle co -> PRDiff DiffReconstructable False ""
             | otherwise             -> PRDiff DiffUnavailable False ""
 

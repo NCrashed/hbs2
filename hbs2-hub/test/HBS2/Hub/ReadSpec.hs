@@ -109,6 +109,49 @@ spec = do
       fmap tsNumber (threadsOf HubIssue (Filter Nothing (Just "bug")) fr)
         `shouldBe` [Just 2]
 
+  -- WHAT MAY BE HANDED TO GIT. The coordinates come out of a stranger's signed
+  -- box, are bounded by size and by nothing else, and reach canon unverified on
+  -- the fork path by design. Joined into one argv word as a range they were an
+  -- option, and `git diff --output=<path>` truncates a file and exits 0, so the
+  -- contract then reported the diff as available and empty.
+  describe "PEP-22 read: the coordinates a diff may be asked for" $ do
+
+    let coords b t = PRCoords Nothing "refs/heads/t" t "refs/heads/master" b Nothing
+        sha c = Text.replicate 40 c
+
+    it "asks for two object names, separated from any path" $
+      diffArgv (coords (sha "a") (sha "b"))
+        `shouldBe` Just [ "diff", "--no-color"
+                        , Text.unpack (sha "a"), Text.unpack (sha "b"), "--" ]
+
+    -- The exploit, as a shape: nothing git could read as an option, and no
+    -- element holding the range separator the old spelling supplied for free.
+    it "keeps the two coordinates apart, and never joins them into a range" $ do
+      let Just as = diffArgv (coords (sha "a") (sha "b"))
+          -- Everything this build chose is a literal; what came out of canon is
+          -- the rest, and that is what must not be read as an option.
+          ours = ["diff","--no-color","--"]
+          theirs = filter (`notElem` ours) as
+      theirs `shouldBe` [Text.unpack (sha "a"), Text.unpack (sha "b")]
+      theirs `shouldSatisfy` all (\a -> take 1 a /= "-")
+      -- The separator the old spelling supplied for free, and which turned two
+      -- harmless-looking halves into one traversal.
+      as `shouldSatisfy` all (not . isInfixOf "..")
+      -- And the terminator is there, so neither can be taken for a path.
+      last as `shouldBe` "--"
+
+    it "refuses a base that is an option" $
+      diffArgv (coords "--output=sub/" (sha "b")) `shouldBe` Nothing
+
+    it "refuses a tip that is a path" $
+      diffArgv (coords (sha "a") "/victim.txt") `shouldBe` Nothing
+
+    -- The abbreviated sha a person pastes is not an object name either. It is
+    -- refused rather than passed, and the caller reports the diff unavailable.
+    it "refuses anything that is not the length of a hash" $ do
+      diffArgv (coords "abc1234" (sha "b")) `shouldBe` Nothing
+      diffArgv (coords (sha "a") "") `shouldBe` Nothing
+
   describe "PEP-22 read: who a thread is assigned to" $ do
 
     it "shows the key an owner set, and nothing before that" $ do
