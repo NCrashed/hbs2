@@ -140,7 +140,7 @@ sendLetterWith
 sendLetterWith ob sender rcpts parts box reply = do
   checkReplyChannel ob reply
   sendPayload ob (Left sender) rcpts parts
-    (MessageData hubMsgVersion (Letter box reply))
+    (MessageData hubMsgWrite (Letter box reply))
 
 -- | Refuse a letter whose answer could never reach whoever sent it.
 --

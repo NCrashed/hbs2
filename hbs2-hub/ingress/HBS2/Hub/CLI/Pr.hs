@@ -325,7 +325,7 @@ prEntries = do
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
       commit <- committing (oneStop codeNotMerged) parent
-                  [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
                   ("hub: merged #" <> tshow (pmNumber pm)) now
 
       liftIO $ print $ vcat

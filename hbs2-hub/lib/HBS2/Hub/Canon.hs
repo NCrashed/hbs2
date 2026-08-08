@@ -49,6 +49,8 @@ module HBS2.Hub.Canon
   , takeBytes
   , renderEvent
   , parseEvent
+  , MetaVersions(..)
+  , metaAt
   , renderMeta
   , parseMeta
   , renderNumberIndex
@@ -359,13 +361,42 @@ parseEvent txt = do
 -- protects against an honest version skew and not against whoever can write to
 -- the tree; the fold's answer to that one is that only the reflog key can
 -- publish (PEP-19).
-renderMeta :: Text
-renderMeta = render (mkForm  "hub-meta" [mkInt hubMetaVersion]) <> "\n"
+-- | What the @version@ file says.
+--
+-- TWO NUMBERS, and the second is the one that decides whether a reader may
+-- proceed. @hub-meta@ is what the tree was written under; @hub-min@ is the
+-- lowest reader that still produces a SOUND view of it, which is not the same
+-- question and was not asked. See 'hubMetaMin'.
+data MetaVersions = MetaVersions
+  { mvRules :: Word32   -- ^ @(hub-meta N)@
+  , mvMin   :: Word32   -- ^ @(hub-min M)@; equal to N when the file omits it
+  }
+  deriving stock (Eq,Show)
 
-parseMeta :: Text -> Either CanonError Word32
+renderMeta :: MetaVersions -> Text
+renderMeta mv =
+  render (mkForm "hub-meta" [mkInt (mvRules mv)]) <> "\n"
+    <> render (mkForm "hub-min" [mkInt (mvMin mv)]) <> "\n"
+
+-- | The version this build writes for a tree needing rules @n@.
+--
+-- A helper rather than two arguments at each call site: they are both 'Word32'
+-- and swapping them would say the opposite of what was meant.
+metaAt :: Word32 -> MetaVersions
+metaAt n = MetaVersions n (min hubMetaMin n)
+
+parseMeta :: Text -> Either CanonError MetaVersions
 parseMeta txt = do
   cs <- clausesOf txt
-  word32 "hub-meta" =<< only "hub-meta" cs
+  n <- word32 "hub-meta" =<< only "hub-meta" cs
+  -- ABSENT MEANS N, which is what every tree written before this clause
+  -- existed says: without it a reader has no claim to lean on and the honest
+  -- floor is the rules version itself. 'only' tolerates a clause it does not
+  -- know, so a tree carrying it stays readable to a build that does not.
+  m <- case only "hub-min" cs of
+         Left _  -> pure n
+         Right c -> word32 "hub-min" c
+  pure (MetaVersions n m)
 
 -- | The number index (PEP-19): a convenience map from human @#N@ to thread.
 --

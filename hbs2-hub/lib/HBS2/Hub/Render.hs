@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- | The stable render contract (PEP-22): a thread, as JSON.
 --
 -- WHAT THIS IS FOR. PEP-22 calls it "the deliverable that keeps the web layer a

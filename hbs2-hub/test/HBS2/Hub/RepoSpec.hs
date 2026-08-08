@@ -93,12 +93,13 @@ spec = do
           thr = eventId eOpen
           eCom = mkEvent alice owner (AComment thr Nothing (Just "a reply") Nothing 2000)
                    (canon repo 2 Nothing)
-          files = [ ("version", renderMeta)
+          files = [ ("version", renderMeta (metaAt hubMetaVersion))
                   , (threadDir thr <> "/" <> eventFileName 1 thr, renderEvent eOpen)
                   , (threadDir thr <> "/" <> eventFileName 2 (eventId eCom), renderEvent eCom)
                   ]
 
       st <- readOk (inMemory files) repo
+      -- What the FILE says, which this fixture writes by hand.
       stVersion st `shouldBe` Just hubMetaVersion
       stBad st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -115,7 +116,7 @@ spec = do
                     (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
                     (canon repo 1 (Just 1))
           thr = eventId eOpen
-          files = [ ("version", renderMeta)
+          files = [ ("version", renderMeta (metaAt hubMetaVersion))
                   , (threadDir thr <> "/" <> eventFileName 1 thr, renderEvent eOpen)
                     -- Somebody put a file under threads/. Skipping it silently
                     -- would let a tree carry events a reader pretends not to
@@ -208,7 +209,7 @@ spec = do
                     (AOpen repo HubIssue "by the delegate" [] Nothing Nothing Nothing 2000)
                     (canon repo 2 (Just 1))
           thr = eventId eOpen
-          files = [ ("version", renderMeta)
+          files = [ ("version", renderMeta (metaAt hubMetaVersion))
                   , (repoDir <> "/" <> eventFileName 1 (eventId deleg), renderEvent deleg)
                   , (threadDir thr <> "/" <> eventFileName 2 thr, renderEvent eOpen)
                   ]
@@ -278,7 +279,7 @@ spec = do
           thr = eventId e
           right = threadDir thr <> "/" <> eventFileName 1 thr
       -- Named for another event, and otherwise perfectly good.
-      st <- readOk (inMemory [ ("version", renderMeta)
+      st <- readOk (inMemory [ ("version", renderMeta (metaAt hubMetaVersion))
                              , (threadDir thr <> "/" <> eventFileName 1 (canonBoxId (evCanonBox e))
                                , renderEvent e) ]) repo
       fmap snd (stMisnamed st) `shouldBe` [NameWrongEvent thr]
@@ -289,13 +290,13 @@ spec = do
       stBad st `shouldBe` []
 
       -- Not shaped like an event file name at all.
-      st2 <- readOk (inMemory [ ("version", renderMeta)
+      st2 <- readOk (inMemory [ ("version", renderMeta (metaAt hubMetaVersion))
                               , (threadDir thr <> "/hello", renderEvent e) ]) repo
       fmap snd (stMisnamed st2) `shouldBe` [NameNotEventShaped]
       HM.size (frThreads (stFold st2)) `shouldBe` 1
 
       -- And the name the writer produces passes.
-      st3 <- readOk (inMemory [("version", renderMeta), (right, renderEvent e)]) repo
+      st3 <- readOk (inMemory [("version", renderMeta (metaAt hubMetaVersion)), (right, renderEvent e)]) repo
       stMisnamed st3 `shouldBe` []
 
     it "says which nothing a directory where the version file goes is" $ do
@@ -336,7 +337,7 @@ spec = do
           src v = inMem (pure (Right "deadbeef")) (const (pure (Right huge)))
                     (const (pure (BlobText v)))
       -- Under a version this build knows, the tree is refused for its size.
-      readCanon (src renderMeta) (fst owner) >>= \r ->
+      readCanon (src (renderMeta (metaAt hubMetaVersion))) (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooBig (n * each))
       -- Under one it does not, the version wins.
       readCanon (src "(hub-meta 99)\n") (fst owner) >>= \r ->
@@ -351,7 +352,7 @@ spec = do
                   (const (pure (Right [ TreeEntry versionPath (Blob "v" 13)
                                       , TreeEntry (B8.pack "threads/t/0001-x")
                                           (Blob "e" 5) ])))
-                  (\oid -> pure (if oid == "v" then BlobText renderMeta
+                  (\oid -> pure (if oid == "v" then BlobText (renderMeta (metaAt hubMetaVersion))
                                                else BlobStalled "said nothing for 60s"))
       readCanon src (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (ToolStalled "said nothing for 60s")
@@ -365,7 +366,7 @@ spec = do
                   (const (pure (Right [ TreeEntry versionPath (Blob "v" 13)
                                       , TreeEntry (B8.pack "threads/t/0001-x")
                                           (Blob "e" 5) ])))
-                  (\oid -> pure (if oid == "v" then BlobText renderMeta
+                  (\oid -> pure (if oid == "v" then BlobText (renderMeta (metaAt hubMetaVersion))
                                                else BlobBudget "passed 180s"))
       readCanon src (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooSlow "passed 180s")
@@ -439,7 +440,7 @@ spec = do
       let big = inMem (pure (Right "deadbeef"))
                   (const (pure (Right
                     [TreeEntry versionPath (Blob "oid" (maxEventBytes + 1))])))
-                  (\_ -> modifyIORef fetched succ >> pure (BlobText renderMeta))
+                  (\_ -> modifyIORef fetched succ >> pure (BlobText (renderMeta (metaAt hubMetaVersion))))
       readCanon big (fst owner) >>= \r ->
         fmap (const ()) r
           `shouldBe` Left (VersionUnreadable (FileTooLarge (maxEventBytes + 1)))
@@ -511,7 +512,7 @@ spec = do
                       -- nothing looked at, because the skip was by path alone.
                     , TreeEntry (B8.pack numberIndexPath) NotABlob
                     ])))
-                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta (metaAt hubMetaVersion) else "junk")))
       st <- readOk src (fst owner)
       stBad st `shouldBe`
         [ ("100644 blob abc 5 extra", FileListingUnparsed)
@@ -569,7 +570,7 @@ spec = do
                     , TreeEntry "threads/t/0001-x" (Blob "b" 4)
                     ])))
                   (\oid -> do modifyIORef fetched (oid:)
-                              pure (BlobText (if oid == "v" then renderMeta else "junk")))
+                              pure (BlobText (if oid == "v" then renderMeta (metaAt hubMetaVersion) else "junk")))
       st <- readOk src (fst owner)
       ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
       -- Neither object was read: not "a", which was first, and not "b".
@@ -587,7 +588,7 @@ spec = do
                     , TreeEntry "threads/t/0001-x" (Blob "a" 4)
                     ])))
                   (\oid -> do modifyIORef fetched succ
-                              pure (BlobText (if oid == "v" then renderMeta else "junk")))
+                              pure (BlobText (if oid == "v" then renderMeta (metaAt hubMetaVersion) else "junk")))
       st <- readOk src (fst owner)
       ("threads/t/0001-x", FileDuplicated) `elem` stBad st `shouldBe` True
       -- The version file and the event once, not twice.
@@ -603,7 +604,7 @@ spec = do
                     [ TreeEntry versionPath (Blob "a" 13)
                     , TreeEntry versionPath (Blob "b" 13)
                     ])))
-                  (const (pure (BlobText renderMeta)))
+                  (const (pure (BlobText (renderMeta (metaAt hubMetaVersion)))))
       readCanon src (fst owner) >>= \r ->
         fmap (const ()) r `shouldBe` Left (VersionUnreadable FileDuplicated)
 
@@ -619,7 +620,7 @@ spec = do
                     , TreeEntry "threads/t/sub/0001-x" (Blob "b" 4)
                     , TreeEntry "repo/a/b" (Blob "c" 4)
                     ])))
-                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta (metaAt hubMetaVersion) else "junk")))
       st <- readOk src (fst owner)
       stBad st `shouldBe`
         [ ("repo/a/b", FileUnexpected)
@@ -666,7 +667,7 @@ spec = do
                     , TreeEntry "evil/plans" (Blob "e" 4)
                     , TreeEntry (B8.pack numberIndexPath) (Blob "i" 4)
                     ])))
-                  (\oid -> pure (BlobText (if oid == "v" then renderMeta else "junk")))
+                  (\oid -> pure (BlobText (if oid == "v" then renderMeta (metaAt hubMetaVersion) else "junk")))
       st <- readOk src (fst owner)
       stBad st `shouldBe` [("evil/plans", FileUnexpected)]
 
@@ -682,7 +683,7 @@ spec = do
                 (canon repo 1 (Just 1))
           thr = eventId e
           p = "threads/\1090\1077\1084\1072/" <> eventFileName 1 thr
-      st <- readOk (inMemory [("version", renderMeta), (p, renderEvent e)]) repo
+      st <- readOk (inMemory [("version", renderMeta (metaAt hubMetaVersion)), (p, renderEvent e)]) repo
       -- NOT `path == encode path`, which is what this asserted: the fixture puts
       -- those exact bytes in and this module hands them back untouched, so it
       -- was an identity on ByteString and would have passed with every line of
@@ -724,11 +725,12 @@ spec = do
           evs = [ (threadDir thr <> "/" <> eventFileName 1 thr, eOpen)
                 , (threadDir thr <> "/" <> eventFileName 2 (eventId eCom), eCom) ]
 
-      cw <- either (fail . show) pure (planCanon evs [(1, thr)])
+      cw <- either (fail . show) pure (planCanon Nothing evs [(1, thr)])
       cwIndexOmitted cw `shouldBe` 0
 
       st <- readOk (inMemory (asFiles cw)) repo
-      stVersion st `shouldBe` Just hubMetaVersion
+      -- 1: nothing here names a part, so a version 1 reader can fold it.
+      stVersion st `shouldBe` Just 1
       stBad st `shouldBe` []
       stMisnamed st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -753,11 +755,66 @@ spec = do
                 | (n,e) <- [(1,e1),(2,e2)] ]
 
       st0 <- readOk (inMemory (evFiles evs)) repo
-      cw <- either (fail . show) pure (planCanon evs (numberIndexOf (stFold st0)))
+      cw <- either (fail . show) pure (planCanon (stVersion st0) evs (numberIndexOf (stFold st0)))
 
       let idx = lookup (B8.pack numberIndexPath) (cwFiles cw)
       parseNumberIndex (Text.decodeUtf8 (maybe "" id idx))
         `shouldBe` Right [(1, eventId e1), (2, eventId e2)]
+
+    -- WHAT VERSION A COMMIT DECLARES. It was 'hubMetaVersion' -- a constant --
+    -- so the first accept by a newer build rewrote `version` for a canon
+    -- holding no new event, and every clone on the older build then refused the
+    -- WHOLE tree rather than the one event it could not read. Canon is
+    -- append-only, so there was no way back.
+    describe "PEP-19 tree: the version a commit declares" $ do
+
+      let verOf cw = [ Text.decodeUtf8 b | (p, b) <- cwFiles cw, p == versionPath ]
+
+      it "declares 1 for events a version 1 build can read" $ do
+        owner <- kp
+        alice <- kp
+        let repo = fst owner
+            ev = mkEvent alice owner
+                   (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
+                   (canon repo 1 (Just 1))
+            p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+        cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [])
+        verOf cw `shouldBe` [renderMeta (metaAt 1)]
+
+      -- 2 is what a PartRef costs, and it costs it per event: a version 1
+      -- reader would admit an event this one drops and compute a different
+      -- event-id for the same letter.
+      it "declares 2 for an event that names a part" $ do
+        owner <- kp
+        alice <- kp
+        let repo = fst owner
+            part = PartRef (HashRef (hashObject (LBS.pack "part")))
+                           (PartProof (HashRef (hashObject (LBS.pack "proof"))))
+            ev = mkEvent alice owner
+                   (AOpen repo HubIssue "an issue" [] Nothing (Just part) Nothing 1000)
+                   (canon repo 1 (Just 1))
+            p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+        cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [])
+        verOf cw `shouldBe` [renderMeta (metaAt 2)]
+
+      -- And NEVER below what the tree already said: a version is a floor a
+      -- reader has to meet, so lowering it would tell a version 1 build it may
+      -- fold a tree holding version 2 events. Reachable through compaction,
+      -- whose retained set may no longer hold the event that raised it.
+      it "never lowers a version the tree already declared" $ do
+        owner <- kp
+        alice <- kp
+        let repo = fst owner
+            ev = mkEvent alice owner
+                   (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
+                   (canon repo 1 (Just 1))
+            p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
+        cw <- either (fail . show) pure (planCanon (Just 2) [(p, ev)] [])
+        verOf cw `shouldBe` [renderMeta (metaAt 2)]
+
+      it "declares 1 for an empty canon nobody has written to" $ do
+        cw <- either (fail . show) pure (planCanon Nothing [] [])
+        verOf cw `shouldBe` [renderMeta (metaAt 1)]
 
     it "refuses two events that claim one path" $ do
       owner <- kp
@@ -767,7 +824,7 @@ spec = do
                  (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
                  (canon repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      planCanon [(p, ev), (p, ev)] [] `shouldBe` Left (PathCollision p)
+      planCanon Nothing [(p, ev), (p, ev)] [] `shouldBe` Left (PathCollision p)
 
     -- The reader refuses a file over its bounds, and a writer that produced one
     -- anyway would put an event in every clone that this build folds without.
@@ -784,7 +841,7 @@ spec = do
                  (AOpen repo HubIssue "an issue" [] (Just huge) Nothing Nothing 1000)
                  (canon repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      case planCanon [(p, ev)] [] of
+      case planCanon Nothing [(p, ev)] [] of
         Left (EventUnwritable p' _) -> p' `shouldBe` p
         other -> expectationFailure ("expected a refusal, got " <> show (fmap cwFiles other))
 
@@ -794,7 +851,7 @@ spec = do
     it "says how many numbers the index could not hold" $ do
       let ids = [ HashRef (hashObject (LBS.pack (show i))) | i <- [1 :: Int .. 60000] ]
           numbers = zip [1 ..] ids
-      cw <- either (fail . show) pure (planCanon [] numbers)
+      cw <- either (fail . show) pure (planCanon Nothing [] numbers)
       cwIndexOmitted cw `shouldSatisfy` (> 0)
       -- and what it DID hold is readable, which is the half that makes
       -- truncating better than refusing
@@ -810,4 +867,4 @@ asFiles cw = [ (Text.unpack (Text.decodeUtf8 p), Text.decodeUtf8 b) | (p,b) <- c
 
 -- A tree of just the events, for reading a fold back before planning from it.
 evFiles :: [(FilePath, Event)] -> [(FilePath, Text)]
-evFiles evs = ("version", renderMeta) : [ (p, renderEvent e) | (p,e) <- evs ]
+evFiles evs = ("version", renderMeta (metaAt hubMetaVersion)) : [ (p, renderEvent e) | (p,e) <- evs ]

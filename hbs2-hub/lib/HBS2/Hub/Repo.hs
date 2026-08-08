@@ -790,14 +790,23 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
           -- Zero is not a version this or any build implements, and it read as
           -- one: the gate only ever looked for NEWER, so (hub-meta 0) folded
           -- silently under today's rules with a clean report.
-          Right (Just 0) -> pure (Left (VersionUnreadable (FileBadVersion 0)))
-          -- BEFORE the blobs, not after them. The gate lives inside foldCanon,
-          -- which runs last, so a tree stamped newer than this build was read in
-          -- full first: measured at one cat-file per event, all of it thrown away.
-          -- Worse, a fork failing anywhere in that loop turned the answer into
-          -- ReaderFailed and "nothing was learned about canon", when the version
-          -- file had been read and the answer was already known.
-          Right (Just n) | n > hubMetaVersion -> pure (Left (CanonTooNewHere n))
+          Right (Just mv) | mvRules mv == 0 ->
+            pure (Left (VersionUnreadable (FileBadVersion 0)))
+          -- THE GATE IS @hub-min@, NOT @hub-meta@. What refuses a reader is the
+          -- lowest version that still produces a SOUND view ('hubMetaMin'); a
+          -- tree that omits the clause says its rules version, which is what
+          -- every tree written before the clause existed means, so nothing about
+          -- an older tree changes. Gating on the rules version refused the WHOLE
+          -- tree over one event an older reader could not decode -- and the
+          -- fold's ghost path, built to spend that event's seq and fold the
+          -- rest, could then never run: PEP-19 requires a bump for a new op, and
+          -- the bump locked the reader out.
+          --
+          -- BEFORE the blobs, not after them: the gate used to live inside
+          -- foldCanon, which runs last, so a tree stamped newer than this build
+          -- was read in full first and thrown away, one cat-file per event.
+          Right (Just mv) | mvMin mv > hubMetaVersion ->
+            pure (Left (CanonTooNewHere (mvMin mv)))
           -- Now the counting, and only now: see the note over the version read.
           _ | length entries > maxCanonFiles ->
                 pure (Left (CanonTooMany (length entries)))
@@ -824,16 +833,21 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
 
               -- foldCanon and not foldEvents: the tree's version governs the
               -- admission rules, which is the whole reason it is a tree-level file.
-              pure $ case foldCanon (maybe assumedMetaVersion id declared) owner (fmap snd evs) of
+              let rules = maybe assumedMetaVersion mvRules declared
+              pure $ case foldCanon rules owner (fmap snd evs) of
                 Left (MetaTooNew n) -> Left (CanonTooNewHere n)
                 Right fr -> Right CanonState
                   { stCommit  = commit
                   , stEvents  = reverse evs
-                  , stVersion = declared
+                  , stVersion = fmap mvRules declared
                   , stBad     = bad
                   , stFileVersions = sortOn fst vers
                   , stMisnamed = sortOn fst mis
-                  , stFold    = fr
+                    -- The DECLARATION, carried into the fold so that a writer
+                    -- holding only a 'FoldResult' can still refuse to lower it.
+                    -- 'foldEvents' answers Nothing, which is honest: a list of
+                    -- events is not a tree and declares nothing.
+                  , stFold    = fr { frMeta = fmap mvRules declared }
                   }
 
   where
@@ -1006,10 +1020,11 @@ threadsNumbered n fr = [ t | (n', t) <- numberIndexOf fr, n' == n ]
 -- most here (canon is in every clone and cannot be un-published), the reader
 -- has three bounds of its own that a size check would not cover, and the cost
 -- is one parse per event written, which is one event per accept.
-planCanon :: [(FilePath, Event)]
+planCanon :: Maybe Word32   -- ^ what the tree already declared, if anything
+          -> [(FilePath, Event)]
           -> [(Word64, ThreadId)]
           -> Either WriteRefused CanonCommit
-planCanon evs numbers = do
+planCanon declared evs numbers = do
   files <- traverse one evs
   case duplicates (fmap fst files) of
     (p:_) -> Left (PathCollision p)
@@ -1021,12 +1036,35 @@ planCanon evs numbers = do
       held = length (filter (not . Text.null) (Text.lines idx))
   pure CanonCommit
     { cwFiles = sortOn fst
-        (  [ (versionPath, TE.encodeUtf8 renderMeta)
+        (  [ (versionPath, TE.encodeUtf8 (renderMeta (metaAt version)))
            , (B8.pack numberIndexPath, TE.encodeUtf8 idx) ]
         <> fmap (\(p,t) -> (B8.pack p, t)) files )
     , cwIndexOmitted = max 0 (length numbers - held)
     }
   where
+    -- WHAT THIS COMMIT NEEDS, not what this build is. 'renderMeta' took no
+    -- argument and wrote 'hubMetaVersion', so the first accept by a newer build
+    -- rewrote @version@ for a canon holding no new event and every clone on the
+    -- older build then refused the WHOLE tree, not the one event it could not
+    -- read. Canon is append-only, so there was no way back.
+    --
+    -- The highest any retained event needs, and never below what the tree
+    -- already declared: a version is a floor a reader has to meet, so lowering
+    -- it would tell a version 1 build it may fold a tree holding version 2
+    -- events. An event this build cannot decode ('parseEvent' gave it back
+    -- verbatim, which is how compaction retains what it does not understand)
+    -- contributes nothing and is covered by the declared floor, which is the
+    -- version under which it arrived.
+    version = maximum (maybe 1 id declared : fmap metaVersionFor readable)
+
+    -- Only the events this build can read. One whose author box will not decode
+    -- is from the future or is damaged, and either way its own requirement
+    -- cannot be asked here -- it is covered by the declared floor instead, which
+    -- is the version under which it arrived. Guessing 1 for it would be the
+    -- downgrade this whole function exists to prevent.
+    readable = [ c | (_, ev) <- evs
+               , Right (_, c) <- [unboxChecked (evAuthorBox ev)] ]
+
     one (p, ev) =
       let txt = renderEvent ev
       in case parseEvent txt of

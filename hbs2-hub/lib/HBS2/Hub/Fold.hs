@@ -41,6 +41,7 @@ module HBS2.Hub.Fold
   , Anomaly(..)
   , eventParts
   , eventPartRefs
+  , metaVersionFor
   , referencesPart
   ) where
 
@@ -344,6 +345,13 @@ data FoldResult = FoldResult
     -- a writer needs (PEP-19 puts thread events under @threads/@ and the
     -- rest under @repo/@).
   , frAdmitted  :: HashMap EventId Admitted
+    -- | What the TREE declared as its rules version, absent when it had no
+    -- @version@ file.
+    --
+    -- Carried rather than collapsed, because it is what a writer has to compare
+    -- against: a commit must never lower the version, and "the tree said
+    -- nothing" is not "the tree said 1".
+  , frMeta      :: Maybe Word32
     -- | The authorized canon keys as of the end of the log: the owner plus
     -- everyone delegated and not since revoked. A folder needs this to know
     -- whether its own key may still bless anything, which nothing else in
@@ -644,6 +652,9 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       , frMaxSeq    = sMaxSeq s
       , frMaxNumber = sMaxNumber s
       , frAdmitted  = sSeen s
+        -- Nothing: this is the fold of a LIST of events, which has no tree and
+        -- so no declaration. `readCanonAt` fills it in from the file.
+      , frMeta      = Nothing
       , frMaintainers = sMaint s
       , frOrigins   = sOrigins s
       , frHonoured  = sHonoured s
@@ -1143,6 +1154,33 @@ eventParts = fmap ptPart . eventPartRefs
 -- Two functions rather than one, because most callers are asking which trees
 -- the event points at (retention, the size gate) and exactly one is asking
 -- whether the sender may publish them.
+-- | The lowest @(hub-meta N)@ under which this event means what it says.
+--
+-- WHY THE VERSION IS A FUNCTION OF THE CONTENT and not of the build. It was
+-- 'hubMetaVersion' -- a constant -- written into every canon commit by a
+-- 'renderMeta' with no argument, so the FIRST accept by a newer build rewrote
+-- @version@ for a canon holding no new event, and every clone on the older
+-- build then refused the WHOLE tree (@CanonTooNewHere@, exit 6): not one
+-- unreadable event on an otherwise usable tracker, but the five hundred issues
+-- it did understand, gone, with no warning on the writing side and no way back
+-- since canon is append-only.
+--
+-- 2 is what 'PartRef' costs, and it costs it per EVENT rather than per repository:
+-- a reader of version 1 canon would admit an event this one drops
+-- ('PartNotProven') and compute a different event-id for the same letter, so an
+-- event that names a part cannot be read by one. An event that names none can,
+-- which is most of them and all of them in a tracker nobody has attached
+-- anything to.
+--
+-- Derived from 'eventPartRefs' rather than from the constructor, because that
+-- is the same question and there should not be two answers to it: an @open@
+-- with no attachment is readable by a version 1 build and an @open@ with one is
+-- not, and the constructor cannot tell them apart.
+metaVersionFor :: AuthorContent -> Word32
+metaVersionFor c
+  | null (eventPartRefs c) = 1
+  | otherwise              = 2
+
 eventPartRefs :: AuthorContent -> [PartRef]
 eventPartRefs = \case
   AOpen _ _ _ _ _ part coords _ -> maybe [] pure part <> maybe [] bundle coords

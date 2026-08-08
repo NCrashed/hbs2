@@ -75,6 +75,7 @@ module HBS2.Hub.Types
   , usablePartSecret
   , partSecretBytes
   , hubMetaVersion
+  , hubMetaMin
   , hubEventVersion
   , maxFoldedTs
   , threadDir
@@ -828,6 +829,33 @@ usablePartSecret (PartSecret bs) = BS.length bs == (typicalKeyLength :: Int)
 -- the two cannot be told apart by anything smaller than this number.
 hubMetaVersion :: Word32
 hubMetaVersion = 2
+
+-- | The lowest reader that still produces a SOUND view of what this build
+-- writes: the @(hub-min M)@ of the @version@ file.
+--
+-- WHY A SECOND NUMBER. @(hub-meta N)@ answers "what rules were these written
+-- under", and a reader below N refused the whole tree. That is right when the
+-- bump changed a rule for events an older reader can decode, and much too
+-- strong when it did not: the 1-to-2 step is 'PartRef', which only reaches
+-- events that NAME a part. A version 1 reader meeting one of those cannot
+-- decode it, ghosts it -- spending its seq, so the numbering does not shift --
+-- and folds everything else correctly. The ghost path in "HBS2.Hub.Fold" is
+-- built for exactly that and, gated on N, never ran: PEP-19 requires a bump for
+-- a new op, and the bump locked the reader out of the tree.
+--
+-- So this is a CLAIM ABOUT WHAT EACH BUMP CHANGED, not something derivable from
+-- the events. A future version that changes an admission rule, an ordering, or
+-- how state is derived from an event an older reader CAN decode has to raise
+-- this to itself: below it, that reader would not be behind, it would be wrong.
+-- A version that only adds a shape older readers cannot decode leaves it.
+--
+-- A second CLAUSE and not a second atom, and that is the only extension the
+-- @version@ file has: @parseMeta@ selects a clause by name and tolerates ones it
+-- does not know, while a clause of the wrong arity is refused, so
+-- @(hub-meta 3 2)@ would make the tree unreadable to every build that exists.
+-- Free to add now, impossible to retrofit into readers that have shipped.
+hubMetaMin :: Word32
+hubMetaMin = 1
 
 -- | The version of a single event file: the @(hub-event N)@ of PEP-19.
 hubEventVersion :: Word32

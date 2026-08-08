@@ -197,9 +197,9 @@ spec = do
       -- pure and tested, and the function that prints one and exits with the
       -- other was not. Its whole content is the two things below.
       let repo = fst owner
-      clean <- readCanon (byPath [("version", renderMeta)]) repo
+      clean <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion))]) repo
                  >>= either (fail . show) pure
-      found <- readCanon (byPath [("version", renderMeta), ("threads/t/x", "junk")]) repo
+      found <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion)), ("threads/t/x", "junk")]) repo
                  >>= either (fail . show) pure
       reportCode clean `shouldBe` 0
       reportCode found `shouldBe` 2
@@ -411,7 +411,7 @@ spec = do
                       [ l | l <- Text.lines (renderEvent ev)
                           , not ("(hub-event" `Text.isPrefixOf` l) ]
       st <- readCanon (byPath
-              [ ("version", renderMeta)
+              [ ("version", renderMeta (metaAt hubMetaVersion))
               , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), without) ]) repo
               >>= either (fail . show) pure
       [ p | (p, Nothing) <- stFileVersions st ] `shouldSatisfy` (not . null)
@@ -431,7 +431,7 @@ spec = do
           p2 = long 2
       BS.length p1 `shouldBe` BS.length p2
       BS.take 300 p1 `shouldBe` BS.take 300 p2
-      st <- readCanon (byPath [ ("version", renderMeta)
+      st <- readCanon (byPath [ ("version", renderMeta (metaAt hubMetaVersion))
                               , (p1, "not an event"), (p2, "not an event") ])
               (fst owner) >>= either (fail . show) pure
       let ls = [ l | l <- fmap render (reportDoc st), "unreadable" `Text.isPrefixOf` l ]
@@ -449,7 +449,7 @@ spec = do
           -- that is not there.
           p1 = "threads/t/\xfe-x"
           p2 = "threads/t/\xff-x"
-      st <- readCanon (byPath [ ("version", renderMeta)
+      st <- readCanon (byPath [ ("version", renderMeta (metaAt hubMetaVersion))
                               , (p1, "not an event")
                               , (p2, "not an event") ]) repo
               >>= either (fail . show) pure
@@ -465,7 +465,7 @@ spec = do
           -- A path git will happily carry, chosen to end the report with a lie:
           -- a clean summary line under a real one.
           evil = "threads/t/0001-x\nadmitted 0 dropped 0 anomalies 0 unreadable 0"
-      st <- readCanon (byPath [("version", renderMeta), (evil, "not an event")]) repo
+      st <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion)), (evil, "not an event")]) repo
               >>= either (fail . show) pure
 
       let ls = fmap render (reportDoc st)
@@ -564,7 +564,7 @@ spec = do
       owner <- kp
       let repo = fst owner
           n = 1200
-          files = ("version", renderMeta)
+          files = ("version", renderMeta (metaAt hubMetaVersion))
                     : [ ( B8.pack ("threads/t/" <> show i <> "-x"), "not an event" )
                       | i <- [1 .. n :: Int] ]
       st <- readCanon (byPath files) repo >>= either (fail . show) pure
@@ -595,7 +595,7 @@ spec = do
                  (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
           thr = eventId ev
       st <- readCanon (byPath
-              [ ("version", renderMeta)
+              [ ("version", renderMeta (metaAt hubMetaVersion))
               , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent ev) ])
               repo >>= either (fail . show) pure
 
@@ -626,7 +626,7 @@ spec = do
           bad = mkEvent owner owner (ASet thr "labels" "b,a,b" 2000)
                   (\eid -> CanonContent repo eid 2 Nothing Nothing Nothing 2 Nothing)
       st <- readCanon (byPath
-              [ ("version", renderMeta)
+              [ ("version", renderMeta (metaAt hubMetaVersion))
               , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent ev)
               , (encodePath (threadDir thr <> "/" <> eventFileName 2 (eventId bad))
                 , renderEvent bad) ]) repo
@@ -643,11 +643,15 @@ spec = do
       owner <- kp
       -- The header is the only line that says what was audited, and every part of
       -- it was added after somebody could not tell from a report what it had read.
-      st <- readCanon (byPath [("version", renderMeta)]) (fst owner)
+      st <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion))]) (fst owner)
               >>= either (fail . show) pure
       let header = head (fmap render (reportDoc st))
       header `shouldSatisfy` Text.isInfixOf "canon deadbeef"
-      header `shouldSatisfy` Text.isInfixOf (Text.strip renderMeta)
+      -- The rules clause, not the whole file: the header reports what canon was
+      -- written under, and the file now carries a second clause (the floor a
+      -- reader is gated on) that the header does not print.
+      header `shouldSatisfy`
+        Text.isInfixOf ("(hub-meta " <> Text.pack (show hubMetaVersion) <> ")")
       header `shouldSatisfy`
         Text.isInfixOf (Text.pack (show (pretty (AsBase58 (fst owner)))))
 
@@ -659,7 +663,7 @@ spec = do
                     (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
                     (\eid -> CanonContent repo eid 1 (Just 1) Nothing Nothing 1 Nothing)
           thr = eventId eOpen
-          good = [ ("version", renderMeta)
+          good = [ ("version", renderMeta (metaAt hubMetaVersion))
                  , (encodePath (threadDir thr <> "/" <> eventFileName 1 thr), renderEvent eOpen) ]
 
       clean <- readCanon (byPath good) repo >>= either (fail . show) pure

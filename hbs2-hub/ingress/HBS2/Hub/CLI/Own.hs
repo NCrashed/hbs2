@@ -32,6 +32,7 @@ module HBS2.Hub.CLI.Own
 import HBS2.Hub.Types
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
+import HBS2.Hub.Fold (frMeta)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
@@ -293,7 +294,7 @@ ownEntries = do
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
 
       commit <- committing (oneStop codeCanonUnwritable) parent
-                  [(eventPath acc, acEvent acc)] (numberIndexOf fr) message now
+                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr) message now
 
       liftIO $ print $ vcat
         [ "event" <+> pretty (eventId (acEvent acc))

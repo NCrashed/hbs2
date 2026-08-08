@@ -454,6 +454,44 @@ spec = do
       hx (Domained author (ARevoke key key 4)) `shouldBe`
         "83001a4842324184098200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf04"
 
+    -- WHAT THE EVENT-ID ACTUALLY HASHES, which the fixture above does not
+    -- reach. An event-id is @hashObject (serialise (SignedBox pk bs sig))@ --
+    -- the FRAMING of that type, not only the payload inside it -- and
+    -- 'SignedBox' lives in hbs2-core, is an ordinary derived-Serialise record,
+    -- carried no note until now, and is shared with git3's LWWRef, RefChans and
+    -- sigils. It is exactly the type somebody refactors: a field for an
+    -- algorithm tag when PQ lands, a record, strict to lazy. Any of those
+    -- rewrites every event-id in the world, and every test here would stay
+    -- green, because they all pin the bytes inside the box.
+    --
+    -- The signature is not reproducible without a fixed keypair, so what is
+    -- pinned is the ARITY: 0x84, a four-element CBOR array -- the generic
+    -- encoding puts a constructor tag in front of the three fields. Adding a
+    -- field, or moving to a record with a map, changes this byte.
+    it "keeps the framing an event-id hashes frozen" $ do
+      owner <- kp
+      alice <- kp
+      let ev = mkEvent alice owner
+                 (AOpen (fst owner) HubIssue "t" [] Nothing Nothing Nothing 1)
+                 (canon (fst owner) 1 (Just 1))
+      LBS.head (serialise (evAuthorBox ev)) `shouldBe` 0x84
+      LBS.head (serialise (evCanonBox ev))  `shouldBe` 0x84
+
+    -- AND THE PREIMAGE OF A PART PROOF, which has the sharpest failure of the
+    -- three frozen things and had neither a note nor a test. 'partProofDomain'
+    -- beside it is carefully documented; the tuple was not. Reordering it to
+    -- @(who, part, secret)@ compiles, passes every distinctness property the
+    -- suite has, and turns every event that names an attachment into a
+    -- 'PartNotProven' drop -- canon that still looks fine and is quietly
+    -- shorter, which is worse than an id change because nothing says so.
+    it "keeps the part-proof preimage frozen" $ do
+      let part = HashRef (hashObject ("golden part" :: ByteString))
+          sec = fromMaybe (error "fixture secret") (mkPartSecret (BS.replicate 32 7))
+          who = fromMaybe (error "fixture key")
+                  (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
+          PartProof p = partProofFor part sec who
+      show (pretty p) `shouldBe` "3ARnDNcVfbshxV1hZK8p6QAiE1SGf5DWuY1H1R4veSau"
+
     it "refuses a folded-ts past the ceiling" $ do
       owner <- kp
       alice <- kp

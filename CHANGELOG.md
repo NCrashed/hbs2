@@ -217,6 +217,85 @@
     a number out of the presentation table, whose own comment says the numbers
     are a contract about stability and not a set of constructors.
 
+## Changed
+
+  - **`hbs2-hub`: the version a canon commit declares is a function of what it
+    holds.** `renderMeta` took no argument and wrote `hubMetaVersion`, the build
+    constant, into every commit. So the first accept by a newer build rewrote
+    `version` for a canon holding no new event, and every clone on the older
+    build then refused the WHOLE tree -- `CanonTooNewHere`, exit 6 -- rather than
+    the one event it could not read. Not a degraded view of an otherwise usable
+    tracker: the five hundred issues it did understand, gone, with no warning on
+    the writing side and no way back, since canon is append-only.
+
+    Version 2 exists because of `PartRef`, and that is a per-EVENT cost: a
+    version 1 reader would admit an event this build drops (`PartNotProven`) and
+    compute a different event-id for the same letter, so an event that names a
+    part cannot be read by one -- and an event that names none can, which is
+    most of them and all of them in a tracker nobody has attached anything to.
+    `metaVersionFor` derives that from `eventPartRefs` rather than from the
+    constructor, because it is the same question and there should not be two
+    answers to it.
+
+    A commit now declares the highest version any event it retains needs, and
+    never below what the tree already said: a version is a floor a reader has to
+    meet, so lowering it would tell a version 1 build it may fold a tree holding
+    version 2 events. That case is reachable through compaction, whose retained
+    set may no longer hold the event that raised it. An event this build cannot
+    decode -- which compaction retains on purpose -- contributes nothing and is
+    covered by the declared floor, the version under which it arrived.
+
+    And the `version` file carries a second clause, `(hub-min M)`: the lowest
+    reader that still produces a SOUND view. That is a different question from
+    what the tree was written under, and it is the one that should gate a
+    reader. The 1-to-2 step is `PartRef`, which reaches only events that NAME a
+    part: a version 1 reader meeting one cannot decode it, ghosts it -- spending
+    its seq, so the numbering does not shift -- and folds everything else
+    correctly. The fold's ghost path is built for exactly that and, gated on the
+    rules version, could never run: PEP-19 requires a bump for a new op and the
+    bump locked the reader out of the tree.
+
+    `hub-min` is a claim about what each bump CHANGED, not something derivable
+    from the events: a future version that changes an admission rule, an
+    ordering, or how state is derived from an event an older reader can decode
+    has to raise it to itself, because below it that reader would not be behind,
+    it would be wrong. A tree that omits the clause says its rules version,
+    which is what every tree written before the clause existed means, so nothing
+    about an older tree changes.
+
+    A second CLAUSE and not a second atom, and that is the only extension this
+    file has: the reader tolerates a clause it does not know and refuses one of
+    the wrong arity, so `(hub-meta 3 2)` would make the tree unreadable to every
+    build that exists. Free to add now, impossible to retrofit into readers that
+    have shipped.
+
+    Still open and unchanged: the fold does not select rules by version, so a
+    tree declaring 2 is folded by this build's rules and by nothing else. The
+    machinery to put a second rule set anywhere now exists (`frMeta` carries what
+    the tree declared, rather than the caller collapsing it); the second rule set
+    does not.
+
+  - **`hbs2-hub`, `hbs2-git3`: a manifest clause survives a field this build
+    does not know.** Both readers listed the clause arity literally, so
+    `(mailbox K hub public v2)` matched neither branch and the clause did not
+    lose a field -- it DISAPPEARED. `hubMailboxes` answered empty, `mailboxFor`
+    said the repository declares no ingress, and a contributor was told it is
+    not a forge, while the owner saw the clause in their own manifest with no
+    way to learn that half the network did not. The hub's module header claimed
+    the tolerant convention and git3 already wrote the tolerant predicate in one
+    place and the strict one in another, which is the same drift from both
+    sides. Extension by a new field now costs the field; extension by a new
+    clause was always free and still is.
+
+  - **`hbs2-hub`: what a letter reads and what it writes are two questions.**
+    One constant answered both and was compared in five places, so a v2 build
+    had to edit five sites to keep reading the v1 letters already sitting in
+    mailboxes -- and the site that gets missed costs nothing loudly:
+    `letterThreadId` answers `Nothing` for a good letter, `hub updates`
+    correlates against nothing, exit code zero. `hubMsgWrite` and
+    `hubMsgReadable` are the same number today and change no behaviour; what
+    they change is that v2 edits one line.
+
 ## Security
 
   - **`hbs2-hub`: a redaction hides what it says it hides.** The render

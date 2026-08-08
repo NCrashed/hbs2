@@ -295,7 +295,12 @@ compactEntries = do
       -- convenience map derived from the opens, all of which are retained, so
       -- rebuilding it cannot change what it says.
       plan <- either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable)) pure
-                (planCanon [ (BS8.unpack p, e) | (p, e) <- held ]
+                -- The tree's own declaration, so a compaction never lowers it:
+                -- the retained set may no longer contain the event that raised
+                -- it, and a rewrite that quietly said "version 1" would tell a
+                -- version 1 build it may fold what it cannot.
+                (planCanon (stVersion st)
+                           [ (BS8.unpack p, e) | (p, e) <- held ]
                            (numbersOf (stFold st)))
 
       commit <- withGitSink (\sk ->

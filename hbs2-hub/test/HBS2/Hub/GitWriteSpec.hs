@@ -19,7 +19,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git
 import HBS2.Hub.Repo.GitWrite
 import HBS2.Hub.CLI.Read (threadsOf,noFilter,listDoc,showDoc,statusOf)
-import HBS2.Hub.Canon (renderMeta)
+import HBS2.Hub.Canon (renderMeta,metaAt)
 
 import HBS2.Prelude.Plated (Pretty(..))
 
@@ -117,7 +117,7 @@ anOpen alice owner sq title = do
              (AOpen repo HubIssue title [] (Just "body") Nothing Nothing (sq * 1000))
              (canonOf repo sq (Just sq))
       p = threadDir (eventId ev) <> "/" <> eventFileName sq (eventId ev)
-  cw <- either (fail . show) pure (planCanon [(p, ev)] [(sq, eventId ev)])
+  cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [(sq, eventId ev)])
   pure (ev, cw)
 
 spec :: Spec
@@ -164,7 +164,8 @@ spec1 = do
       void $ commitOk dir Nothing cw 1000
 
       st <- readBack dir (fst owner)
-      stVersion st `shouldBe` Just hubMetaVersion
+      -- 1: the fixture's events name no part, so a version 1 reader folds them.
+      stVersion st `shouldBe` Just 1
       stBad st `shouldBe` []
       stMisnamed st `shouldBe` []
       frDropped (stFold st) `shouldBe` []
@@ -233,7 +234,7 @@ spec1 = do
       alice <- kp
       (ev, _) <- anOpen alice owner 1 "an issue"
       let odd' = "threads/\1055\1088\1080\1074\1077\1090/" <> eventFileName 1 (eventId ev)
-      cw <- either (fail . show) pure (planCanon [(odd', ev)] [])
+      cw <- either (fail . show) pure (planCanon Nothing [(odd', ev)] [])
       void $ commitOk dir Nothing cw 1000
 
       names <- git dir ["ls-tree", "-r", "--name-only", "refs/hbs2/meta"]
@@ -279,7 +280,15 @@ spec1 = do
       (_, cw) <- anOpen alice owner 1 "an issue"
       void $ commitOk dir Nothing cw 1000
       v <- git dir ["cat-file", "-p", "refs/hbs2/meta:version"]
-      v `shouldBe` Text.unpack (Text.strip renderMeta)
+      -- 1, not this build's constant: the fixture's event names no part, so a
+      -- version 1 reader can fold it. The version a commit declares is a
+      -- function of what it holds, which is what stops a newer build shutting
+      -- older clones out of a tree it added nothing new to.
+      --
+      -- The FIRST LINE, because the fixture's git helper keeps one and the file
+      -- now has two clauses: the rules version and the floor a reader is gated
+      -- on. That the two round-trip is CanonSpec's job.
+      v `shouldBe` "(hub-meta 1)"
 
     -- The whole chain in one assertion: mint, plan, commit to a real git ref,
     -- read it back with the reader, and render it with the verb's own
@@ -294,7 +303,7 @@ spec1 = do
                  (AOpen repo HubIssue "a real issue" [] (Just "body") Nothing Nothing 1000)
                  (canonOf repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      cw <- either (fail . show) pure (planCanon [(p, ev)] [(1, eventId ev)])
+      cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [(1, eventId ev)])
       void $ commitOk dir Nothing cw 1000
 
       st <- readBack dir repo
@@ -512,7 +521,7 @@ spec3 =
             s2 = mkEvent owner owner (ASet thr "labels" (encodeLabels ["b"]) 3000)
                          (canonOf repo 3 Nothing)
         cwBoth <- either (fail . show) pure
-                    (planCanon [ (threadDir thr <> "/" <> eventFileName 2 (eventId s1), s1)
+                    (planCanon Nothing [ (threadDir thr <> "/" <> eventFileName 2 (eventId s1), s1)
                                , (threadDir thr <> "/" <> eventFileName 3 (eventId s2), s2) ]
                                [(1, thr)])
         c2 <- commitOk dir (Just c1) cwBoth 3000
@@ -526,7 +535,7 @@ spec3 =
         length (cpDrop c) `shouldBe` 1
 
         plan <- either (fail . show) pure
-                  (planCanon held (numberIndexOf (stFold before)))
+                  (planCanon (stVersion before) held (numberIndexOf (stFold before)))
         _ <- withGitSinkIn (Just dir) $ \sk ->
                skRewrite sk (CanonWrite (Just c2) (cwFiles plan) "compacted" 4000)
                  >>= either (fail . show) pure

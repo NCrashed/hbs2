@@ -161,7 +161,7 @@ maintainerEntries = do
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
       commit <- committing (oneStop codeNotDelegated) parent
-                  [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
                   "hub: maintainer set" now
 
       liftIO $ print $ vcat

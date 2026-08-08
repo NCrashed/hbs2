@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- | @hub issue list@, @hub issue show@, @hub pr list@, @hub pr show@ and
 -- @hub log@ (PEP-22 "Read").
 --

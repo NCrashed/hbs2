@@ -408,9 +408,29 @@ spec = do
       frMaxSeq fr `shouldBe` 1
 
     it "writes the tree version and reads it back" $ do
-      parseMeta renderMeta `shouldBe` Right hubMetaVersion
-      parseMeta "(hub-meta 2)" `shouldBe` Right 2
+      parseMeta (renderMeta (metaAt hubMetaVersion))
+        `shouldBe` Right (metaAt hubMetaVersion)
       parseMeta "" `shouldBe` Left (MissingClause "hub-meta")
+
+    -- TWO NUMBERS, and the second is the one that gates a reader. A tree
+    -- written before the clause existed says nothing about the floor, and the
+    -- honest reading of that is its own rules version -- which is exactly
+    -- today's behaviour, so no older tree changes meaning.
+    it "reads a tree that predates hub-min as its own floor" $ do
+      parseMeta "(hub-meta 2)" `shouldBe` Right (MetaVersions 2 2)
+
+    -- ...and one that carries it says a lower floor, which is the whole point:
+    -- an event a version 1 reader cannot decode is ghosted, its seq spent, and
+    -- the rest of the tree folds. Gating on the rules version refused all of it.
+    it "reads the floor a tree declares, below its rules version" $ do
+      parseMeta "(hub-meta 2)\n(hub-min 1)" `shouldBe` Right (MetaVersions 2 1)
+
+    -- An unknown clause is ignored, which is what makes a second clause the
+    -- only extension this file has: a second ATOM inside (hub-meta N) is
+    -- refused, so it would make the tree unreadable to every build that exists.
+    it "ignores a clause it does not know and refuses a misshapen one" $ do
+      parseMeta "(hub-meta 2)\n(hub-whatever 9)" `shouldBe` Right (MetaVersions 2 2)
+      parseMeta "(hub-meta 3 2)" `shouldBe` Left (BadClause "hub-meta")
 
     it "round-trips the number index" $ do
       a <- someHash

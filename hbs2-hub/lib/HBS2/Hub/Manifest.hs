@@ -71,15 +71,28 @@ hubRole = "hub"
 -- The key is matched with 'SignPubKeyLike', which accepts a symbol or a
 -- string literal, so the role and tier accept both too ('StringLike'); a
 -- stricter match here would silently ignore @(mailbox "KEY" "hub")@.
+-- A TRAILING @rest@, not two exact arities. This module's header claims the
+-- git3 convention of ignoring what it does not recognize, which was true of
+-- unknown CLAUSES and false of unknown FIELDS: both branches listed the arity
+-- literally, so @(mailbox K hub public v2)@ matched neither and the clause did
+-- not lose a field -- it DISAPPEARED. 'hubMailboxes' would answer empty,
+-- 'mailboxFor' would say the repository declares no ingress, and a contributor
+-- would be told it is not a forge, while the owner sees the clause in their own
+-- manifest and has no way to learn that half the network does not.
+--
+-- git3 already writes the tolerant predicate in one place ('mailboxFor', with
+-- @: _@) and the strict one in another, which is the same drift from the other
+-- side.
 mailboxes :: [Syntax c] -> [HubMailbox]
 mailboxes syn = concatMap one syn
   where
     one = \case
-      ListVal [SymbolVal "mailbox", SignPubKeyLike k, StringLike role] ->
-        [HubMailbox k (Text.pack role) Nothing]
-      ListVal [SymbolVal "mailbox", SignPubKeyLike k, StringLike role, StringLike tier] ->
-        [HubMailbox k (Text.pack role) (Just (Text.pack tier))]
+      ListVal (SymbolVal "mailbox" : SignPubKeyLike k : StringLike role : rest) ->
+        [HubMailbox k (Text.pack role) (tierOf rest)]
       _ -> []
+
+    tierOf (StringLike t : _) = Just (Text.pack t)
+    tierOf _                  = Nothing
 
 -- | The forge ingress mailboxes: those tagged 'hubRole'.
 hubMailboxes :: [Syntax c] -> [HubMailbox]
@@ -116,7 +129,9 @@ sigils :: [Syntax c] -> [MailboxSigil]
 sigils syn = concatMap one syn
   where
     one = \case
-      ListVal [SymbolVal "mailbox-sigil", SignPubKeyLike k, HashLike h] ->
+      -- Trailing @rest@ for the reason 'mailboxes' has one: a field added later
+      -- must cost this clause a field and not the whole clause.
+      ListVal (SymbolVal "mailbox-sigil" : SignPubKeyLike k : HashLike h : _) ->
         [MailboxSigil k h]
       _ -> []
 

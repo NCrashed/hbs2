@@ -13,6 +13,19 @@ import Data.ByteString.Lazy qualified as LBS
 import Control.Monad.Trans.Maybe
 import Control.Monad.Identity
 
+-- | WIRE FORMAT, FROZEN BY hbs2-hub EVENT IDS.
+--
+-- This is an ordinary derived-'Serialise' record and it does not look
+-- load-bearing, so the note has to be here rather than in the package that
+-- depends on it. A hub event-id is @hashObject (serialise (SignedBox pk bs
+-- sig))@ -- the framing of THIS type, not only the payload inside it -- and
+-- those ids are what threads name their replies by, what redactions name their
+-- targets by, and what canon boxes bind to. Changing the encoding (a field, a
+-- record, an algorithm tag, strict to lazy) rewrites every event-id in every
+-- repository in the world, and nothing in either package's tests would notice:
+-- hbs2-hub's golden fixture pins the bytes INSIDE the box.
+--
+-- Anything that has to change here needs a new type beside it, not an edit.
 data SignedBox p s =
   SignedBox (PubKey 'Sign s) ByteString (Signature s)
   deriving stock (Generic)

@@ -13,7 +13,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Compact
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.Repo
-import HBS2.Hub.Canon (renderMeta)
+import HBS2.Hub.Canon (renderMeta,metaAt)
 import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Hub.Fold ( foldEvents,frThreads,frAdmitted,frOrigins,frMaintainers
                      , frMaxSeq,tsAttrs )
@@ -119,7 +119,7 @@ spec = do
       owner <- kp
       let repo = fst owner
           junk = "threads/t/not-an-event"
-      st <- readCanon (byPath [("version", renderMeta), (junk, "nonsense")]) repo
+      st <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion)), (junk, "nonsense")]) repo
               >>= either (fail . show) pure
       fmap fst (stBad st) `shouldBe` [junk]
       case compactable st of
@@ -129,7 +129,7 @@ spec = do
     it "admits a canon whose every file read" $ do
       owner <- kp
       let repo = fst owner
-      st <- readCanon (byPath [("version", renderMeta)]) repo
+      st <- readCanon (byPath [("version", renderMeta (metaAt hubMetaVersion))]) repo
               >>= either (fail . show) pure
       stBad st `shouldBe` []
       compactable st `shouldBe` Right ()

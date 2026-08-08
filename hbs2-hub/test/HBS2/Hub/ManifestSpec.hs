@@ -34,6 +34,30 @@ spec = do
       let syn = [clauseOf (HubMailbox k hubRole Nothing)]
       hubMailboxes syn `shouldBe` [HubMailbox k hubRole Nothing]
 
+    -- A FIELD THIS BUILD DOES NOT KNOW COSTS THE FIELD, NOT THE CLAUSE. Both
+    -- branches used to list the arity literally, so a five-element clause
+    -- matched neither and the mailbox DISAPPEARED: `hubMailboxes` answered
+    -- empty, `mailboxFor` said the repository declares no ingress, and a
+    -- contributor was told it is not a forge -- while the owner saw the clause
+    -- in their own manifest and had no way to learn that half the network did
+    -- not. This module's header claims the tolerant convention; this is it.
+    it "reads a mailbox clause carrying a field it does not know" $ do
+      k <- kp
+      let emitted = "(mailbox " <> show (pretty (AsBase58 k)) <> " \"hub\" \"public\" \"v2\")"
+      case parseTop emitted of
+        Left e    -> expectationFailure (show e)
+        Right syn -> hubMailboxes syn
+                       `shouldBe` [HubMailbox k hubRole (Just "public")]
+
+    it "reads a sigil clause carrying a field it does not know" $ do
+      k <- kp
+      let h = "5Uz3o1LWNo2ejmnFcgw7z3hMJnPHu3mB2FVwjTbEuC5j" :: String
+          emitted = "(mailbox-sigil " <> show (pretty (AsBase58 k))
+                      <> " " <> show h <> " \"whatever\")"
+      case parseTop emitted of
+        Left e    -> expectationFailure (show e)
+        Right syn -> length (sigilsFor k syn) `shouldBe` 1
+
     it "survives a text round-trip" $ do
       k <- kp
       let emitted = show (pretty (clauseOf (HubMailbox k hubRole Nothing)))

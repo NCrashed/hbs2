@@ -95,6 +95,26 @@ spec = do
         `shouldBe` "(mailbox-sigil 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV \
                    \8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ)"
 
+    -- A FIELD THIS BUILD DOES NOT KNOW COSTS THE FIELD, NOT THE CLAUSE, and
+    -- both sides of the wire have to agree about that or the tolerance is not
+    -- there. These readers listed the arity literally, so a clause carrying a
+    -- fifth field matched nothing and the mailbox disappeared: the repository
+    -- would read as one that declares no ingress at all. This module's own
+    -- 'mailboxFor' already tolerated a trailing field and these did not, which
+    -- is the same drift inside one module.
+    it "reads a mailbox clause carrying a field it does not know" $ do
+      case parseTop ("(mailbox 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV \
+                     \hub public v2)" :: String) of
+        Left e    -> expectationFailure (show e)
+        Right syn -> fmap (\(_,r,t) -> (r,t)) (declaredMailboxes syn)
+                       `shouldBe` [("hub", Just "public")]
+
+    it "reads a sigil clause carrying a field it does not know" $ do
+      case parseTop ("(mailbox-sigil 2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV \
+                     \8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ extra)" :: String) of
+        Left e    -> expectationFailure (show e)
+        Right syn -> length (declaredSigils syn) `shouldBe` 1
+
   describe "PEP-18: editing a manifest" $ do
 
     it "leaves the clauses repo:init wrote alone" $ do

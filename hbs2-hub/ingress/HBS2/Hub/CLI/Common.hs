@@ -32,6 +32,7 @@ module HBS2.Hub.CLI.Common
   ) where
 
 import HBS2.Hub.Types (maxFoldedTs,HubKey,HubScheme)
+import Data.Word (Word32)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Repo.Manifest (ManifestGone(..),codeNoManifest)
 import HBS2.Hub.Repo
@@ -304,14 +305,15 @@ oneStop c = WriteStop c c
 committing :: MonadUnliftIO m
            => WriteStop
            -> Maybe Text            -- ^ the parent, and what the ref must still hold
+           -> Maybe Word32          -- ^ the version the tree already declared
            -> [(FilePath, Event)]
            -> [(Word64, ThreadId)]  -- ^ the number index to regenerate
            -> Text                  -- ^ the commit message
            -> Word64                -- ^ now, in milliseconds
            -> m Text                -- ^ the commit written
-committing WriteStop{..} parent files numbers message now = do
+committing WriteStop{..} parent declared files numbers message now = do
   plan <- either (\e -> liftIO (refuse (show (pretty e)) wsUnplannable)) pure
-            (planCanon files numbers)
+            (planCanon declared files numbers)
 
   commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan) message now))
               >>= either (\e -> liftIO (refuse (show (pretty e)) wsUnwritable)) pure

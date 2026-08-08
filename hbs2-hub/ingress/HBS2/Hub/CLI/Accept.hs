@@ -493,7 +493,7 @@ acceptEntries = do
           numbers = sortOn fst (numberIndexOf fr <> minted)
 
       commit <- committing (WriteStop codeCanonUnplannable codeCanonUnwritable) parent
-                  [(eventPath acc, acEvent acc)] numbers (message acc) now
+                  (frMeta fr) [(eventPath acc, acEvent acc)] numbers (message acc) now
 
       -- AFTER the commit, because staging needs the number and the number is
       -- not public until canon holds it (PEP-20). A failure here leaves a

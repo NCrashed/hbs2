@@ -34,6 +34,8 @@ module HBS2.Hub.Letter
   , Disposition(..)
   , EnvelopeSigner(..)
   , hubMsgVersion
+  , hubMsgWrite
+  , hubMsgReadable
   , maxInlineBody
   , maxPartBytes
   , maxMessageParts
@@ -121,6 +123,27 @@ newtype EnvelopeSigner = EnvelopeSigner { fromEnvelopeSigner :: HubKey }
 -- v2 build that refuses them would strand them.
 hubMsgVersion :: Word32
 hubMsgVersion = 1
+
+-- | The version this build WRITES.
+--
+-- Split from what it reads, and that is the whole of the change: one constant
+-- answered both questions and was compared in five places, so a v2 build had to
+-- edit five sites to keep reading v1 letters -- and the one that gets missed
+-- costs nothing loudly. 'letterThreadId' would answer 'Nothing' for a perfectly
+-- good v1 letter, @hub updates@ would correlate against nothing, and the exit
+-- code would be zero.
+--
+-- Today it is the same number, so this changes no behaviour. What it changes is
+-- that v2 edits ONE line to keep reading what is already in the mailboxes.
+hubMsgWrite :: Word32
+hubMsgWrite = hubMsgVersion
+
+-- | Can this build decode a letter of that version?
+--
+-- The one place the answer lives. A v2 build makes this @v `elem` [1,2]@ and
+-- everything that reads a letter follows.
+hubMsgReadable :: Word32 -> Bool
+hubMsgReadable v = v == hubMsgVersion
 
 -- | The soft limit PEP-18 puts on an inline body, as a number.
 --
@@ -372,6 +395,9 @@ malformedRef = \case
 -- A mailbox key alone is useless (a sign key is not an encryption key), so
 -- the type pairs it with the sigil rather than allowing the invalid
 -- half-specified state.
+-- WIRE FORMAT, versioned by the envelope, under the same rule as
+-- 'MessageBody': it is reachable from one, so a change here is a change to that
+-- sum and has to move 'hubMsgWrite' with it.
 data ReplyChannel =
     NoReply
   | ReplyTo HubKey HashRef   -- ^ mailbox key + a sigil resolving its encryption key
@@ -425,6 +451,14 @@ sigilNames k msi = do
 -- inner box, never folded. Trust comes from checking the envelope signer
 -- against the repo's maintainer set ('openAckNoPolicy'); the authoritative status is
 -- always in canon.
+--
+-- WIRE FORMAT, AND THE RULE HERE IS NOT 'AuthorContent'S. This travels inside
+-- the versioned envelope, so it CAN change -- but only together with
+-- 'hubMsgWrite'. Changing it without raising the version is not a compatible
+-- addition: 'MessageBody' is a CBOR sum of fixed arity, so an old reader
+-- answers 'MalformedPayload', which reads as "somebody sent me rubbish" rather
+-- than "somebody sent me something newer". The difference is what an operator
+-- does next, and it is the whole reason the envelope carries a version at all.
 data AckRecord = AckRecord
   { akTarget      :: RepoRef
   , akThread      :: ThreadId
@@ -444,6 +478,16 @@ data AckRecord = AckRecord
 
 instance Serialise AckRecord
 
+-- | The plaintext of @messageData@: a letter, or an acknowledgement.
+--
+-- WIRE FORMAT, versioned by the envelope. A CBOR sum has fixed arity and
+-- positional constructor tags, so neither a new constructor nor a new field is
+-- a compatible addition: an old reader cannot ignore what it does not know, it
+-- fails the decode. That is survivable and is the design -- the body travels as
+-- opaque bytes and the version is read first -- but ONLY if 'hubMsgWrite' moves
+-- in the same change. Without it an old reader answers 'MalformedPayload',
+-- which accuses the sender of rubbish instead of reporting a version skew, and
+-- an operator acts on the difference.
 data MessageBody =
     Letter (SignedBox AuthorContent HubScheme) ReplyChannel
   | Ack AckRecord
@@ -538,16 +582,16 @@ makeLetter
   -> AuthorContent
   -> ReplyChannel
   -> MessageData
-makeLetter pk sk ac rc = MessageData hubMsgVersion (Letter (signAuthor pk sk ac) rc)
+makeLetter pk sk ac rc = MessageData hubMsgWrite (Letter (signAuthor pk sk ac) rc)
 
 makeAck :: AckRecord -> MessageData
-makeAck = MessageData hubMsgVersion . Ack
+makeAck = MessageData hubMsgWrite . Ack
 
 -- | The event-id this letter will have in canon: the hash of its inner box,
 -- computable by the sender before delivery.
 letterEventId :: MessageData -> Maybe EventId
 letterEventId md
-  | mdVersion md /= hubMsgVersion = Nothing
+  | not (hubMsgReadable (mdVersion md)) = Nothing
   | otherwise = case mdBody md of
       Letter box _ -> Just (authorBoxId box)
       Ack _        -> Nothing
@@ -560,7 +604,7 @@ letterEventId md
 -- 'AckRecord', whose 'akThread' is always the thread.
 letterThreadId :: MessageData -> Maybe ThreadId
 letterThreadId md
-  | mdVersion md /= hubMsgVersion = Nothing
+  | not (hubMsgReadable (mdVersion md)) = Nothing
   | otherwise = case mdBody md of
       Ack a -> Just (akThread a)
       Letter box _ -> do
@@ -589,7 +633,7 @@ parsePayload bs = do
   -- schema is no more decodable here than a newer one, and treating an
   -- unknown small number as "close enough to v1" is how a reader ends up
   -- interpreting bytes it does not understand.
-  if v /= hubMsgVersion
+  if not (hubMsgReadable v)
     then Left (UnsupportedVersion v)
     else MessageData v <$> strictDecode body
 
@@ -618,7 +662,7 @@ openLetterNoPolicy
 openLetterNoPolicy md
   -- The constructor is exported, so a MessageData can reach here without
   -- passing parsePayload; check the version rather than trust that it did.
-  | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
+  | not (hubMsgReadable (mdVersion md)) = Left (UnsupportedVersion (mdVersion md))
   | otherwise = case mdBody md of
       Ack _ -> Left NotALetter
       Letter box rc ->
@@ -705,7 +749,7 @@ openAckNoPolicy
   -> MessageData
   -> Either LetterError AckRecord
 openAckNoPolicy isMaintainer (EnvelopeSigner envelopeSigner) md
-  | mdVersion md /= hubMsgVersion = Left (UnsupportedVersion (mdVersion md))
+  | not (hubMsgReadable (mdVersion md)) = Left (UnsupportedVersion (mdVersion md))
   | otherwise = case mdBody md of
       Letter{} -> Left NotAnAck
       Ack a
@@ -815,7 +859,7 @@ openAckFor isMaintainer isMine signer md = do
 -- Display only, like 'letterSyntax': the wire form is the CBOR 'AckRecord'.
 ackSyntax :: AckRecord -> [Syntax C]
 ackSyntax a =
-  [ mkForm "hub-msg" [mkInt hubMsgVersion]
+  [ mkForm "hub-msg" [mkInt hubMsgWrite]
   , mkForm "kind"   [mkSym @C "ack"]
   , mkForm "target" [b58 (akTarget a)]
   , mkForm "thread" [href (akThread a)]
@@ -832,7 +876,7 @@ ackSyntax a =
 -- authoritative form is the binary inner box. Used by @hub show@ and for
 -- debugging.
 letterSyntax :: AuthorContent -> [Syntax C]
-letterSyntax ac = mkForm "hub-msg" [mkInt hubMsgVersion] : contentSyntax ac
+letterSyntax ac = mkForm "hub-msg" [mkInt hubMsgWrite] : contentSyntax ac
 
 -- | The same projection without the envelope clause.
 --

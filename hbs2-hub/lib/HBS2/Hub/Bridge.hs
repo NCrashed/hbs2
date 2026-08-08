@@ -110,7 +110,7 @@ import HBS2.Hub.Letter
 import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Data.Types.SignedBox (SignedBox)
 import HBS2.Net.Auth.Credentials
-import HBS2.Prelude.Plated (Pretty(..),viaShow,(<+>),nest,vsep,line)
+import HBS2.Prelude.Plated (Pretty(..),viaShow,(<+>),nest,vsep)
 
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
@@ -1568,11 +1568,25 @@ accepted (pk,sk) repo view folded origin honours secret content box authorOf sco
           AOpen _ kind _ _ _ _ _ _ ->
             HM.insert eid (ThreadFacts kind authorOf (mintedNumber content cur) "open")
               (cvThreads view)
-          ASet thr "status" v _ -> setStatus thr v
+          ASet thr k v _ | k == "status" -> setStatus thr v
+                         | otherwise     -> cvThreads view
           AClose thr _ _        -> setStatus thr "closed"
           AReopen thr _ _       -> setStatus thr "open"
           AMerge thr _ _ _      -> setStatus thr "merged"
-          _                     -> cvThreads view
+          -- SPELLED OUT, not a wildcard, and this module is where that matters
+          -- most: it carries -Werror=incomplete-patterns for 'outcome', and the
+          -- header says a divergence between this cache and the rebuilt view is
+          -- a bug even where nothing reads the diverged field. A wildcard here
+          -- is correct only because 'ThreadFacts' happens to hold no field a
+          -- revise or a redact changes. The day it gains one -- 'ackFor' is the
+          -- obvious pressure, since it already wants the number and the status
+          -- -- a revise would fall through and the divergence would surface
+          -- only after a restart, which is bug one through five in this module.
+          ARevise{}   -> cvThreads view
+          ARedact{}   -> cvThreads view
+          AComment{}  -> cvThreads view
+          ADelegate{} -> cvThreads view
+          ARevoke{}   -> cvThreads view
       , cvEvents = HM.insert eid (Admitted (scopeThread scope) (redactable content))
                               (cvEvents view)
         -- Delegation takes effect for the next accept, exactly as it will
@@ -1584,7 +1598,16 @@ accepted (pk,sk) repo view folded origin honours secret content box authorOf sco
       , cvMaintainers = case content of
           ADelegate _ k _           -> HS.insert k (cvMaintainers view)
           ARevoke _ k _ | k /= repo -> HS.delete k (cvMaintainers view)
-          _                       -> cvMaintainers view
+                        | otherwise -> cvMaintainers view
+          -- Spelled out for the reason 'cvThreads' above is.
+          AOpen{}     -> cvMaintainers view
+          AComment{}  -> cvMaintainers view
+          ARevise{}   -> cvMaintainers view
+          ASet{}      -> cvMaintainers view
+          AClose{}    -> cvMaintainers view
+          AReopen{}   -> cvMaintainers view
+          AMerge{}    -> cvMaintainers view
+          ARedact{}   -> cvMaintainers view
       , cvOrigins = maybe (cvOrigins view) (`HS.insert` cvOrigins view) origin
       , cvHonoured = maybe (cvHonoured view) (`HS.insert` cvHonoured view) honours
       , cvLastFolded = stamped

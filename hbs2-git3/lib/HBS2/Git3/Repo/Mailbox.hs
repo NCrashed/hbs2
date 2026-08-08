@@ -159,7 +159,11 @@ mailboxFor k = \case
 
 sigilFor :: GitRepoKey -> Syntax C -> Bool
 sigilFor k = \case
-  ListVal [SymbolVal "mailbox-sigil", SignPubKeyLike k', HashLike _] -> k' == k
+  -- A trailing @_@ like its sibling above. The two were written differently in
+  -- one module: 'mailboxFor' tolerates a field it does not know and this did
+  -- not, which is the same drift the hub's reader had -- an unknown field made
+  -- the clause vanish rather than lose the field.
+  ListVal (SymbolVal "mailbox-sigil" : SignPubKeyLike k' : HashLike _ : _) -> k' == k
   _ -> False
 
 -- | Every mailbox this manifest declares, as (key, role, tier).
@@ -167,18 +171,19 @@ declaredMailboxes :: [Syntax C] -> [(GitRepoKey, Text, Maybe Text)]
 declaredMailboxes mf = do
   x <- mf
   case x of
-    ListVal [SymbolVal "mailbox", SignPubKeyLike k, StringLike role] ->
-      [(k, Text.pack role, Nothing)]
-    ListVal [SymbolVal "mailbox", SignPubKeyLike k, StringLike role, StringLike tier] ->
-      [(k, Text.pack role, Just (Text.pack tier))]
+    ListVal (SymbolVal "mailbox" : SignPubKeyLike k : StringLike role : rest) ->
+      [(k, Text.pack role, tierOf rest)]
     _ -> []
+  where
+    tierOf (StringLike t : _) = Just (Text.pack t)
+    tierOf _                  = Nothing
 
 -- | Every sigil this manifest declares, as (mailbox key, sigil hash).
 declaredSigils :: [Syntax C] -> [(GitRepoKey, HashRef)]
 declaredSigils mf = do
   x <- mf
   case x of
-    ListVal [SymbolVal "mailbox-sigil", SignPubKeyLike k, HashLike h] -> [(k, h)]
+    ListVal (SymbolVal "mailbox-sigil" : SignPubKeyLike k : HashLike h : _) -> [(k, h)]
     _ -> []
 
 -- | Does the manifest, once written and read back, declare this mailbox?
