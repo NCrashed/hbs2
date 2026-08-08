@@ -11,7 +11,7 @@
 module HBS2.Hub.PublishSpec (spec) where
 
 import HBS2.Hub.CLI.Publish
-import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..))
+import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..),PublishedPulls(..))
 
 import HBS2.Prelude.Plated (Doc)
 
@@ -77,21 +77,21 @@ spec = do
     it "says nothing was folded here, rather than reporting a failure" $ do
       -- A young repository, not an error: the verb exits zero and the report
       -- says which of the two nothings this is.
-      let out = shown (publishDoc "origin" (Published PublishedNone False))
+      let out = shown (publishDoc "origin" (Published PublishedNone PullsNone))
       out `shouldSatisfy` isInfixOf "nothing has been folded"
-      publishCode (Published PublishedNone False) `shouldBe` 0
+      publishCode (Published PublishedNone PullsNone) `shouldBe` 0
 
     it "tells an unchanged remote from one it moved" $ do
-      shown (publishDoc "origin" (Published (PublishedSame "abc") False))
+      shown (publishDoc "origin" (Published (PublishedSame "abc") PullsNone))
         `shouldSatisfy` isInfixOf "already there"
-      shown (publishDoc "origin" (Published (PublishedMoved "abc") False))
+      shown (publishDoc "origin" (Published (PublishedMoved "abc") PullsNone))
         `shouldSatisfy` isInfixOf "published"
 
     -- The one that needs a person. It has to say what to do, because what to
     -- do is not guessable: the answer is a sync, and a sync with the repository
     -- key, since only a fold can tell a rewrite from a fork.
     it "says what to do when the remote is ahead, and exits its own code" $ do
-      let p = Published (PublishedRefused "deadbeef") False
+      let p = Published (PublishedRefused "deadbeef") PullsNone
           out = shown (publishDoc "origin" p)
       out `shouldSatisfy` isInfixOf "NOT published"
       out `shouldSatisfy` isInfixOf "nothing was written"
@@ -106,9 +106,9 @@ spec = do
     -- and sees no line about it cannot tell "there were none" from "this verb
     -- does not do that".
     it "says either way whether there were staged proposals" $ do
-      shown (publishDoc "origin" (Published PublishedNone True))
+      shown (publishDoc "origin" (Published PublishedNone PullsMoved))
         `shouldSatisfy` isInfixOf "staged proposals published"
-      shown (publishDoc "origin" (Published PublishedNone False))
+      shown (publishDoc "origin" (Published PublishedNone PullsNone))
         `shouldSatisfy` isInfixOf "no staged proposals"
 
   describe "PEP-22 hub publish: what it does" $ do
@@ -157,11 +157,49 @@ spec = do
       withRemote $ \work bare -> do
         _ <- canonHere work
         r0 <- either (fail . show) pure =<< publishTo (Just work) "origin"
-        pbPulls r0 `shouldBe` False
+        pbPulls r0 `shouldBe` PullsNone
 
         h <- git work ["rev-parse", "HEAD"]
         void $ git work ["update-ref", "refs/hbs2/pulls/1/head", h]
         r1 <- either (fail . show) pure =<< publishTo (Just work) "origin"
-        pbPulls r1 `shouldBe` True
+        pbPulls r1 `shouldBe` PullsMoved
         there <- git bare ["rev-parse", "refs/hbs2/pulls/1/head"]
         there `shouldBe` h
+
+    -- THE OTHER HALF OF THE REFUSAL, and it was missing: the canon push is a
+    -- fast-forward check and the pulls push is a FORCE, so a run that refused
+    -- canon and printed "nothing was written" went on to replace the remote's
+    -- staged proposals in the same breath. They are numbered out of canon, and
+    -- the canon they are numbered out of is the one this clone has not got.
+    it "holds the staged proposals back when it refused canon" $
+      withRemote $ \work bare -> do
+        _ <- canonHere work
+        base <- git work ["rev-parse", "HEAD"]
+        void $ git work ["update-ref", "refs/hbs2/pulls/1/head", base]
+        _ <- either (fail . show) pure =<< publishTo (Just work) "origin"
+
+        -- Somebody else folds, and stages a different proposal under the same
+        -- number, and publishes both.
+        writeFile (work <> "/b.txt") "two\n"
+        void $ git work ["add", "b.txt"]
+        void $ git work ["commit", "-q", "-m", "theirs"]
+        theirs <- canonHere work
+        void $ git work ["update-ref", "refs/hbs2/pulls/1/head", Text.unpack theirs]
+        _ <- either (fail . show) pure =<< publishTo (Just work) "origin"
+
+        -- And this clone is back where a maintainer who never fetched is: an
+        -- older canon, and its own idea of what proposal 1 is.
+        void $ git work ["update-ref", "refs/hbs2/meta", "HEAD~1"]
+        void $ git work ["update-ref", "refs/hbs2/pulls/1/head", base]
+
+        r <- either (fail . show) pure =<< publishTo (Just work) "origin"
+        pbCanon r `shouldBe` PublishedRefused theirs
+        pbPulls r `shouldBe` PullsHeld
+
+        -- Asked of the remote: the other maintainer's proposal is still there.
+        still <- git bare ["rev-parse", "refs/hbs2/pulls/1/head"]
+        still `shouldBe` Text.unpack theirs
+
+        -- And the report says so, rather than leaving a reader to infer it
+        -- from the canon line.
+        shown (publishDoc "origin" r) `shouldSatisfy` isInfixOf "NOT published either"

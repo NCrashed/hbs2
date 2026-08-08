@@ -35,7 +35,7 @@ module HBS2.Hub.CLI.Publish
   ) where
 
 import HBS2.Hub.Types (safeText)
-import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..))
+import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..),PublishedPulls(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
 import HBS2.Hub.CLI.Common (refuse)
 
@@ -160,12 +160,16 @@ publishDoc remote p = canonLine <> pullsLine
             <+> "takes the rewrite when it is one; then publish again."
         ]
 
-    pullsLine
-      | pbPulls p = [ "staged proposals published" <+> to ]
+    pullsLine = case pbPulls p of
+      PullsMoved -> [ "staged proposals published" <+> to ]
       -- Said rather than left out: a maintainer who has just staged one and
       -- sees no line about it should be able to tell "there were none" from
       -- "this verb does not do that".
-      | otherwise = [ "no staged proposals here to publish" ]
+      PullsNone  -> [ "no staged proposals here to publish" ]
+      PullsHeld  ->
+        [ "staged proposals NOT published either: they are numbered out of"
+            <+> "canon, and this clone's"
+        , "  canon is behind. Sync first, as above." ]
 
 -- | And what it exits with.
 publishCode :: Published -> Int

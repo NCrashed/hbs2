@@ -42,6 +42,7 @@ module HBS2.Hub.Repo.GitBundle
   , publishTo
   , Published(..)
   , PublishedCanon(..)
+  , PublishedPulls(..)
   , pullRef
   , Bundled(..)
   , BundleError(..)
@@ -556,13 +557,33 @@ syncFrom cwd remote = runExceptT do
 -- | What a publish did.
 data Published = Published
   { pbCanon :: PublishedCanon
-    -- | Whether the staged proposals were pushed.
-    --
-    -- 'False' means there were none here to push, which is the ordinary state
-    -- of a repository nobody has proposed anything to. A failure is an error
-    -- rather than a 'False'.
-  , pbPulls :: Bool
+  , pbPulls :: PublishedPulls
   }
+  deriving stock (Eq,Show)
+
+-- | And what happened to the remote's copy of the staged proposals.
+--
+-- Three states rather than a Bool, because the Bool could not say the third
+-- one and the report was false as a result: canon could be refused, with
+-- @nothing was written@ on stdout, while this verb had just FORCED
+-- @refs\/hbs2\/pulls\/*@ over the remote's copies in the same run.
+data PublishedPulls =
+    -- | There were none here to push, which is the ordinary state of a
+    -- repository nobody has proposed anything to. A failure is an error rather
+    -- than a 'PullsNone'.
+    PullsNone
+    -- | Pushed.
+  | PullsMoved
+    -- | There were some, and they were left where they are, because canon was
+    -- refused.
+    --
+    -- These refs are DERIVED FROM CANON -- the number in the name comes out of
+    -- the fold -- so publishing them against a remote whose canon this clone
+    -- does not contain writes names built from an accounting the remote has
+    -- already moved past. And the force is what makes it matter: the remote's
+    -- own copies, staged against the canon it actually holds, would be
+    -- overwritten by ours. The sync the canon line asks for fixes both.
+  | PullsHeld
   deriving stock (Eq,Show)
 
 -- | What happened to the remote's copy of canon.
@@ -642,16 +663,25 @@ publishTo cwd remote = runExceptT do
 
   let anyStaged = not (BS.null (BS.filter (not . isSpace8) staged))
 
-  when anyStaged $ void $ ExceptT $ call cwd fetchSeconds "push"
-    [ "push", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
+  pulls <- case canon of
+    _ | not anyStaged      -> pure PullsNone
+    PublishedRefused{}     -> pure PullsHeld
+    PublishedNone          -> movePulls
+    PublishedSame{}        -> movePulls
+    PublishedMoved{}       -> movePulls
 
-  pure (Published canon anyStaged)
+  pure (Published canon pulls)
 
   where
     push mine = do
       _ <- ExceptT $ call cwd fetchSeconds "push"
              [ "push", Text.unpack remote, "refs/hbs2/meta:refs/hbs2/meta" ]
       pure (PublishedMoved mine)
+
+    movePulls = do
+      _ <- ExceptT $ call cwd fetchSeconds "push"
+             [ "push", Text.unpack remote, "+refs/hbs2/pulls/*:refs/hbs2/pulls/*" ]
+      pure PullsMoved
 
     -- ls-remote answers a line of "<sha>\t<ref>", or nothing at all.
     theirTip bs = case BS.split 0x09 (BS.takeWhile (/= 0x0a) bs) of

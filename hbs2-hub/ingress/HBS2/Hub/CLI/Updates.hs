@@ -30,6 +30,7 @@ module HBS2.Hub.CLI.Updates
   , updatesUsage
     -- * The parts that decide something
   , Update(..)
+  , updateOf
   , updatesDoc
   , updatesNotes
   , UpdatesArgs(..)
@@ -167,7 +168,7 @@ updatesEntries = do
       -- NotALetter; what is wanted here is the other reading of the same bytes.
       us <- for (irLetters r) $ \lv -> do
               raw <- rawMessage ig (lvMessage lv)
-              pure (updateOf maint (submittedBy sent) lv raw)
+              pure (updateOf (uaRepo ua) maint (submittedBy sent) lv raw)
 
       liftIO $ handleJust
         (\e -> if isResourceVanishedError e then Just () else Nothing)
@@ -180,12 +181,13 @@ updatesEntries = do
 --
 -- Pure and top level for the reason every decision in this package is: this one
 -- says whether a stranger's message is shown as a maintainer's word.
-updateOf :: HS.HashSet HubKey
+updateOf :: RepoRef                        -- ^ the repository the caller named
+         -> HS.HashSet HubKey              -- ^ ...and its maintainers, as of its canon
          -> (RepoRef -> ThreadId -> Bool)   -- ^ did this node submit that thread?
          -> LetterView
          -> Either OpenError LetterRaw
          -> Update
-updateOf maint isMine lv = \case
+updateOf theRepo maint isMine lv = \case
   Left _ -> Refused
   Right raw ->
     case openAckFor isMaintainer isMine (EnvelopeSigner (lrEnvelope raw)) (lrData raw) of
@@ -205,11 +207,18 @@ updateOf maint isMine lv = \case
           Left _  -> Refused
       Left _ -> Refused
   where
-    -- The repo the ack names is checked against the maintainer set of the repo
-    -- the CALLER named, which is the only set this node read. An ack about
-    -- another repository is refused rather than trusted, because its maintainer
-    -- set is not in front of us.
-    isMaintainer _ k = HS.member k maint
+    -- THE REPO THE ACK NAMES HAS TO BE THE ONE WE READ, and this discarded that
+    -- argument: 'openAckNoPolicy' passes 'akTarget' in precisely so the ack's
+    -- own claim can be checked, and the comment here said an ack about another
+    -- repository is refused rather than trusted while nothing compared the two.
+    --
+    -- What that cost: a maintainer of ANY repository this node checks could
+    -- sign an ack naming a different one -- a thread-id is public, it is the
+    -- hash of an author box sitting in that repository's canon -- and it was
+    -- shown as a maintainer's word about your submission, with a status and a
+    -- note of their choosing. The set 'maint' belongs to 'theRepo' and to
+    -- nothing else, which is the whole reason it cannot answer for another.
+    isMaintainer r k = r == theRepo && HS.member k maint
 
 -- | The acks, for stdout.
 --
@@ -223,6 +232,12 @@ updatesDoc showAll us =
   where
     one m a mark =
       hashDoc m
+        -- WHICH REPOSITORY IT IS ABOUT, which this never printed. An ack names
+        -- its target and nothing else in the line did, so a reader could not
+        -- tell one repository's answer from another's even by eye -- and with
+        -- @--all@, where unrelated acks are shown on purpose, that is the one
+        -- fact that makes the row worth reading.
+        <+> "repo" <+> keyDoc (akTarget a)
         <+> "thread" <+> hashDoc (akThread a)
         <+> maybe "-" (\n -> "#" <> pretty n) (akNumber a)
         -- Through 'safeText': the status and the note are a maintainer's words

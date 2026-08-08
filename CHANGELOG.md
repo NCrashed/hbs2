@@ -627,6 +627,27 @@
 
 ## Fixed
 
+  - **`hbs2-hub updates`: an ack was checked against the wrong repository's
+    maintainers.** The `RepoRef` an ack names was passed into the predicate and
+    then discarded, so membership was asked of the set belonging to the
+    repository the READER named. A maintainer of that repository could sign an
+    ack about a different one and have it printed as a maintainer's word about
+    the reader's own submission, with a status and a note of their choosing; a
+    thread-id is the hash of an author box in public canon, so naming one costs
+    nothing. The line now prints the repository the ack is about, which is what
+    made an honest cross-repository ack indistinguishable by eye from a forged
+    one.
+
+  - **`hbs2-hub publish`: it force-pushed staged proposals after refusing to
+    publish canon.** The canon push is a fast-forward check and the pulls push
+    is a force, and the second sat outside the branch that decides the first --
+    so a run that printed "NOT published, nothing was written" and exited 45
+    had just replaced the remote's `refs/hbs2/pulls/*` in the same breath.
+    Those refs are numbered out of canon, and the canon they were numbered out
+    of is the one this clone does not have. They are held back now, and the
+    report says so rather than leaving a reader to infer it from the canon
+    line.
+
   - **`hbs2-hub`: the deny-list was rewritten in place.** A torn write leaves a
     file that is SHORTER and still parses -- every line is one key -- so an
     interrupted `hub ban` silently unbans whatever came after the break. That

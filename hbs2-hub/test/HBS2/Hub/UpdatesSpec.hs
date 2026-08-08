@@ -8,6 +8,7 @@ module HBS2.Hub.UpdatesSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
+import HBS2.Hub.Ingress (LetterView(..),LetterRaw(..),OpenError(..))
 import HBS2.Hub.CLI.Updates
 import HBS2.Hub.CLI.Argv (argvAtom)
 
@@ -15,12 +16,14 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
 import HBS2.Prelude.Plated (Doc,pretty)
 
 import Data.Config.Suckless (Syntax,C)
 import Data.ByteString qualified as BS
+import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
-import Data.Text qualified as Text
+import Data.Maybe (fromMaybe)
 import Test.Hspec
 
 shown :: [Doc ()] -> String
@@ -40,6 +43,19 @@ argv = fmap argvAtom
 
 ack :: HubKey -> AckRecord
 ack repo = AckRecord repo (mh "thread") (Just 7) "open" Nothing Nothing
+
+-- | A message as it reaches 'updateOf': the record it carries, and the key
+-- that signed the envelope it arrived in.
+--
+-- The parts and the secret are not read on this path; the fields exist because
+-- the accept side needs them.
+arrived :: AckRecord -> HubKey -> (LetterView, Either OpenError LetterRaw)
+arrived rec' signer =
+  ( LetterView (mh "m") (Just signer) (Left NotAMessage) Nothing
+  , Right (LetterRaw signer [] (makeAck rec') noSecret) )
+  where
+    noSecret = fromMaybe (error "mkMessageSecret")
+                 (mkMessageSecret (BS.replicate typicalKeyLength 0))
 
 spec :: Spec
 spec = do
@@ -171,3 +187,48 @@ spec = do
       repo <- aKey
       let notes = shown (updatesNotes False False [Unrelated (mh "m") (ack repo)])
       notes `shouldSatisfy` isInfixOf "not an empty mailbox"
+
+  -- The maintainer set belongs to the repository it was read out of, and to no
+  -- other. Every other fixture in this file uses a single key, which is exactly
+  -- the shape in which a repository confusion cannot be seen: here there are
+  -- two.
+  describe "PEP-18 hub updates: whose maintainer set answers" $ do
+
+    it "takes an ack about the repository it was asked about" $ do
+      ours <- aKey ; keeper <- aKey
+      let (lv,raw) = arrived ((ack ours) { akThread = mh "t" }) keeper
+          u = updateOf ours (HS.singleton keeper) (\_ _ -> True) lv raw
+      u `shouldBe` Acked (mh "m") ((ack ours) { akThread = mh "t" })
+
+    -- THE ONE THIS EXISTS FOR. A maintainer of the repository the reader named
+    -- signs an ack about a DIFFERENT repository. Both keys check out -- the
+    -- signature is real and the signer is really a maintainer here -- so
+    -- nothing but the target tells the two apart, and the target is the thing
+    -- that was being discarded. A thread-id is public (it is the hash of an
+    -- author box in public canon), so picking one to name costs nothing.
+    it "refuses an ack that names another repository, however it was signed" $ do
+      ours <- aKey ; other <- aKey ; keeper <- aKey
+      let (lv,raw) = arrived ((ack other) { akThread = mh "t" }) keeper
+      updateOf ours (HS.singleton keeper) (\_ _ -> True) lv raw `shouldBe` Refused
+
+    -- And not by the back door either: an ack the relation check sets aside is
+    -- opened a second time for --all, and that second opening is the same
+    -- question. Getting it wrong there would print a stranger's status under
+    -- --all instead of under the default, which is not better.
+    it "refuses it under --all as well, rather than setting it aside" $ do
+      ours <- aKey ; other <- aKey ; keeper <- aKey
+      let (lv,raw) = arrived ((ack other) { akThread = mh "t" }) keeper
+      updateOf ours (HS.singleton keeper) (\_ _ -> False) lv raw `shouldBe` Refused
+      -- The control: same everything, with the target put right, and now the
+      -- unmatched thread is the only difference left.
+      let (lv',raw') = arrived ((ack ours) { akThread = mh "t" }) keeper
+      updateOf ours (HS.singleton keeper) (\_ _ -> False) lv' raw'
+        `shouldBe` Unrelated (mh "m") ((ack ours) { akThread = mh "t" })
+
+    -- Because the ack carries a target and the line did not, an honest
+    -- cross-repository ack under --all was indistinguishable by eye from one
+    -- about the reader's own.
+    it "prints which repository an ack is about" $ do
+      repo <- aKey
+      shown (updatesDoc False [Acked (mh "m") (ack repo)])
+        `shouldSatisfy` isInfixOf (b58 repo)
