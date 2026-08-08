@@ -1087,26 +1087,23 @@ acceptLetter ctx envelopeSigner view folded origin (LetterParts parts) md = do
   thread <- case content of
     AOpen target kind _ _ _ _ coords _
       | target /= repo                    -> Left WrongRepo
-      | kind == HubPR && isNothing coords -> Left BadContent
-      | kind == HubIssue && isJust coords -> Left BadContent
-      | maybe False (not . reachableCoords) coords -> Left BadContent
+      | Just _ <- openTrouble kind coords -> Left BadContent
       | otherwise                         -> Right (authorBoxId box)
 
     AComment thr _ _ _ _ -> known thr
 
-    ARevise thr coords _ ->
+    ARevise thr _ _ ->
       case HM.lookup thr (cvThreads view) of
         Nothing -> Left UnknownThread
         Just tf
           -- Kind and payload first: those are about the shape of the
           -- request, not about who signed it.
-          | tfKind tf /= HubPR           -> Left BadContent
-          | not (reachableCoords coords) -> Left BadContent
-          | tfAuthor tf == author        -> Right thr
+          | Just _ <- threadOpTrouble (tfKind tf) content -> Left BadContent
+          | tfAuthor tf == author                         -> Right thr
           -- Stricter than the fold on purpose: the fold also lets a
           -- maintainer revise, but a maintainer doing that through the
           -- letter path would be acting as someone else.
-          | otherwise                    -> Left NotAuthorOfRecord
+          | otherwise                                     -> Left NotAuthorOfRecord
 
     -- classify has already restricted this to the three ops above.
     _ -> Left BadContent
@@ -1382,9 +1379,7 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
 
     AOpen target kind _ _ _ _ coords _
       | target /= repo                    -> Left WrongRepo
-      | kind == HubPR && isNothing coords -> Left BadContent
-      | kind == HubIssue && isJust coords -> Left BadContent
-      | maybe False (not . reachableCoords) coords -> Left BadContent
+      | Just _ <- openTrouble kind coords -> Left BadContent
       | otherwise                         -> Right (ThreadScope eid)
 
     -- The remaining ops are thread ops; the fold checks kind for the PR-only
@@ -1394,26 +1389,17 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
            Just thr -> case HM.lookup thr (cvThreads view) of
              Nothing -> Left UnknownThread
              Just tf
-               | prOnly content && tfKind tf /= HubPR -> Left BadContent
-               -- The fold checks the coordinates of a revise as well, and it
-               -- lets a maintainer author one, so this path is reachable:
-               -- without the check a maintainer mints an event the fold then
-               -- drops, burning a seq and losing the action silently.
-               | not (coordsOK content)               -> Left BadContent
-               | otherwise                            -> Right (ThreadScope thr)
+               -- Both halves at once, and the coordinate half is reachable:
+               -- the fold checks the coordinates of a revise as well and it
+               -- lets a maintainer author one, so without this a maintainer
+               -- mints an event the fold then drops, burning a seq and losing
+               -- the action silently.
+               | Just _ <- threadOpTrouble (tfKind tf) content -> Left BadContent
+               | otherwise                                     -> Right (ThreadScope thr)
 
   secret <- requireParts pk parts content
 
   Right (accepted kp repo view folded Nothing Nothing secret content box pk scope NoReply)
-  where
-    coordsOK = \case
-      ARevise _ c _ -> reachableCoords c
-      _             -> True
-
-    prOnly = \case
-      ARevise{} -> True
-      AMerge{}  -> True
-      _         -> False
 
 -- | Where the writer must put this event in the canon tree (PEP-19 layout).
 --

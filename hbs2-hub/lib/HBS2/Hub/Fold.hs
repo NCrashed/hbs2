@@ -34,6 +34,8 @@ module HBS2.Hub.Fold
   , foldCanon
   , CanonTooNew(..)
   , reachableCoords
+  , openTrouble
+  , threadOpTrouble
   , Anomaly(..)
   , eventParts
   , eventPartRefs
@@ -861,12 +863,9 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
         -- cannot be lifted out of another repo's canon and replayed here.
         | target /= owner    -> dropE r WrongTarget s
         | not (canonOK r s)  -> dropE r UnauthorizedCanon s
-        -- Kind and payload must agree. A PR must carry its coordinates
-        -- (nothing may invent them later); an issue must not, or canon
-        -- would silently materialize less than the author box says.
-        | kind == HubPR && isNothing mpr -> dropE r PROpenWithoutCoords s
-        | kind == HubIssue && isJust mpr -> dropE r IssueOpenWithCoords s
-        | maybe False (not . reachableCoords) mpr -> dropE r CoordsUnreachable s
+        -- Kind and payload must agree; 'openTrouble' says how, for this and
+        -- for the two places in the bridge that must refuse the same shapes.
+        | Just why <- openTrouble kind mpr -> dropE r why s
         | otherwise ->
             let t = ThreadState
                       { tsId = rId r, tsKind = kind
@@ -894,14 +893,15 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
         touch r t { tsComments = mkComment r replyto ts body (fmap ptPart bodypart) : tsComments t }
 
       ARevise thr coords _ts -> onThreadWith r thr s $ \t ->
-        if tsKind t /= HubPR then Left PROnlyOnIssue
-        else if not (reachableCoords coords) then Left CoordsUnreachable
-        else if rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s)
-          -- The new coordinates come with the secret for their own bundle.
-          then Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
-                                                      (tsPR t >>= psMerge)
-                                                      (rAuthorKey r) (rCanonKey r)) })
-          else Left BadRevise
+        case threadOpTrouble (tsKind t) (rContent r) of
+          Just why -> Left why
+          Nothing
+            | rAuthorKey r == tsAuthor t || HS.member (rAuthorKey r) (sMaint s) ->
+                -- The new coordinates come with the secret for their own bundle.
+                Right (touch r t { tsPR = Just (PRState coords (ccPartSecret (rCanon r))
+                                                        (tsPR t >>= psMerge)
+                                                        (rAuthorKey r) (rCanonKey r)) })
+            | otherwise -> Left BadRevise
 
       ASet thr k v _ts -> onOwnerThread r thr s $ \t ->
         touch r t { tsAttrs = HM.insert k v (tsAttrs t) }
@@ -913,11 +913,15 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
         addNote note r ts $ touch r t { tsAttrs = HM.insert "status" "open" (tsAttrs t) }
 
       AMerge thr mc into _ts -> onOwnerThreadWith r thr s $ \t ->
-        case (tsKind t, tsPR t) of
-          (HubPR, Just pr) ->
+        case (threadOpTrouble (tsKind t) (rContent r), tsPR t) of
+          (Just why, _) -> Left why
+          (Nothing, Just pr) ->
             Right (touch r t { tsPR = Just pr { psMerge = Just (mc,into) }
                              , tsAttrs = HM.insert "status" "merged" (tsAttrs t) })
-          _ -> Left PROnlyOnIssue
+          -- A pr thread with no coordinates, which 'openTrouble' does not admit
+          -- and nothing else creates. Answered as it always was rather than
+          -- left to a pattern-match failure inside the fold.
+          (Nothing, Nothing) -> Left PROnlyOnIssue
 
     foldedTs = ccFoldedTs . rCanon
 
@@ -1133,6 +1137,70 @@ referencesPart = not . null . eventParts
 -- PEP-19): it cannot be relaxed once a repo has canon written under it.
 reachableCoords :: PRCoords -> Bool
 reachableCoords c = isJust (prBundle c) || isJust (prSource c)
+
+-- | Whether an @open@'s kind agrees with what it carries, and what the fold
+-- calls it when it does not.
+--
+-- THE ONE IMPLEMENTATION, and it was three: here, and twice in
+-- "HBS2.Hub.Bridge" (the letter path and the owner-native path). Three copies
+-- of a rule whose entire purpose is that the gate refuses exactly what the
+-- fold would drop, so a copy that drifted breaks that in one of two ways: the
+-- gate mints an event the fold throws away, burning a @seq@ and losing the
+-- submission with no trace a maintainer would look at, or it refuses one canon
+-- would have taken.
+--
+-- Written over the PAIR rather than as a chain of guards, so that a third
+-- 'HubKind' is a build error in the one place that decides. As three guard
+-- chains it was a build error in none of them: each kept compiling and each
+-- would have answered for the new kind by falling through to @otherwise@.
+openTrouble :: HubKind -> Maybe PRCoords -> Maybe DropReason
+openTrouble kind mpr = case (kind, mpr) of
+  -- A pr must carry its coordinates. Nothing may invent them later: an event
+  -- canon admits is the whole of what its author signed.
+  (HubPR,    Nothing) -> Just PROpenWithoutCoords
+  -- An issue must not, or canon would silently materialize less than the
+  -- author box says.
+  (HubIssue, Just _)  -> Just IssueOpenWithCoords
+  (HubIssue, Nothing) -> Nothing
+  (HubPR,    Just c)
+    | reachableCoords c -> Nothing
+    | otherwise         -> Just CoordsUnreachable
+
+-- | The same question for an op that names a thread: does the op agree with
+-- the kind of thread it names?
+--
+-- Total over 'AuthorContent' on purpose. The bridge used to ask this through
+-- two predicates that each ended in a wildcard -- in a module whose header
+-- pragma exists precisely to turn an unhandled op into a build error. A new
+-- op would have been swallowed by those wildcards, declared to agree with
+-- every thread, and minted.
+--
+-- The four ops that name no thread are listed rather than left to a wildcard,
+-- which is the whole point: an @open@ IS its thread, and 'ARedact',
+-- 'ADelegate' and 'ARevoke' are repo-scope ('authorThread' is 'Nothing' for
+-- all four). They cannot reach a caller that has a thread's kind in hand, and
+-- saying so here costs four lines and keeps the check mechanical.
+threadOpTrouble :: HubKind -> AuthorContent -> Maybe DropReason
+threadOpTrouble kind = \case
+  ARevise _ c _
+    | kind /= HubPR     -> Just PROnlyOnIssue
+    | reachableCoords c -> Nothing
+    | otherwise         -> Just CoordsUnreachable
+
+  AMerge{}
+    | kind /= HubPR -> Just PROnlyOnIssue
+    | otherwise     -> Nothing
+
+  -- Ops any thread carries, whatever its kind.
+  AComment{} -> Nothing
+  ASet{}     -> Nothing
+  AClose{}   -> Nothing
+  AReopen{}  -> Nothing
+
+  AOpen{}     -> Nothing
+  ARedact{}   -> Nothing
+  ADelegate{} -> Nothing
+  ARevoke{}   -> Nothing
 
 -- Events that belong to no thread.
 repoScope :: Maybe ThreadId
