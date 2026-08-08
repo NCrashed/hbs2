@@ -219,6 +219,51 @@
 
 ## Security
 
+  - **`hbs2-hub`: a redaction hides what it says it hides.** The render
+    contract's own header states the rule -- a redacted item carries no text,
+    because a body shipped beside a boolean has been published to every renderer
+    that forgets to read the boolean. Four ways the code did not keep it.
+
+    **A redacted pull request published the secret the same document had just
+    withheld.** `threadContract` hides `part_secret`; `prContract` took no
+    redaction argument at all, and for a PR's opening event the two are the same
+    bytes -- the fold fills `tsPartSecret` and `psPartSecret` from
+    `ccPartSecret` of one canon box. So a document carried
+    `"part_secret": null` and, two lines later, `"pr": {"part_secret": "<the 32
+    bytes>"}`. The coordinates went out with it: five stranger-chosen strings of
+    up to 512 bytes each. The hashes stay -- a bundle part is not text somebody
+    wrote, and a renderer offering to rebuild a withdrawn proposal has to say
+    there was one.
+
+    **`labels_requested` survived redaction in both renderers**: up to 32 labels
+    of 128 bytes, author-chosen, on the one event a redact of an open is usually
+    aimed at, printed beside a null title and a null body.
+
+    **The two renderers disagreed about what a redaction covers.** The terminal
+    printed a redacted comment's `body-part` hash from outside the branch that
+    withholds its body, and told the reader "secret published" for a redacted
+    thread -- which is where to go and read it. The contract hid both.
+
+    **And a redact of anything but an open or a comment hid nothing while
+    reporting success.** `frRedacted` is consulted in exactly one place, which
+    sets the flag on a thread and on its comments, so a redact naming a
+    `revise`, a `merge`, a `set`, a note-less `close`, a `delegate`, a `revoke`
+    or another `redact` was admitted, spent a seq, moved the thread's `updated`,
+    was counted by `hub verify`, was retained forever by compaction -- and
+    changed no rendering anywhere, while the verb printed an event id, a seq and
+    a commit. A maintainer moderating an abusive revision was told it worked.
+
+    That one is now refused at the bridge, before anything is signed, rather
+    than made to work in the projection: hiding what a `revise` contributed
+    needs per-source provenance the fold does not keep, since a thread carries
+    the latest coordinates and not which event supplied them. `redactable` is
+    total over the ops with no wildcard, so an op whose content a reader starts
+    showing has to be added there in the same change. `frAdmitted` and
+    `CanonView`'s copy of it now carry that answer alongside the scope, in ONE
+    record rather than a second map -- the two have diverged five times in this
+    module's history and every one was a field the cache updated by its own
+    rule.
+
   - **`hbs2-hub`: three verbs wrote the wrong thing into append-only canon.**
 
     **The assignee attribute was spelled two ways and nobody agreed.**

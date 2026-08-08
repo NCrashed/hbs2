@@ -270,9 +270,11 @@ showDoc t =
   <> [ "labels" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
      | ls <- [labelsOf t], not (null ls) ]
   -- Said only when there is something to say, and said as a REQUEST: the
-  -- author asked, nobody applied it.
+  -- author asked, nobody applied it. WITHHELD on a redacted thread, like the
+  -- body: it is the same stranger's text, up to 32 labels of 128 bytes, on the
+  -- one event a redact of an open is usually aimed at.
   <> [ "labels-requested" <+> hsep (punctuate comma (fmap (pretty . safeText) ls))
-     | ls <- [tsLabelsRequested t], not (null ls) ]
+     | not (tsRedacted t), ls <- [tsLabelsRequested t], not (null ls) ]
   -- THROUGH hashDoc, every one of them, and that is a rule about the renderer
   -- and not about these four fields. A HashRef is a newtype over a ByteString
   -- with a derived Serialise instance, so it takes any width off the wire;
@@ -284,11 +286,13 @@ showDoc t =
   -- hashes this way.
   <> [ "origin" <+> hashDoc o | Just o <- [tsOrigin t] ]
   -- The body's hash and the secret's presence, not the secret: a reader needs
-  -- to know the body is fetchable and this is a terminal.
+  -- to know the body is fetchable and this is a terminal. Not on a redacted
+  -- thread: "secret published" beside a withheld body tells a reader exactly
+  -- how to go and read it, which the two renderers used to disagree about.
   <> [ "body-part" <+> hashDoc h
          <+> (if isJust (tsPartSecret t) then "(secret published)" else "(no secret)")
-     | Just h <- [tsBodyPart t] ]
-  <> [ coords p | Just p <- [tsPR t] ]
+     | not (tsRedacted t), Just h <- [tsBodyPart t] ]
+  <> [ coords p | not (tsRedacted t), Just p <- [tsPR t] ]
   <> body t
   <> concatMap comment (tsComments t)
   where
@@ -307,7 +311,11 @@ showDoc t =
       <> ( if cRedacted c
              then ["(redacted)"]
              else maybe [] (\b -> [pretty (safeText b)]) (cBody c) )
-      <> [ "body-part" <+> hashDoc h | Just h <- [cBodyPart c] ]
+      -- OUTSIDE the branch above, which is what it was, so a redacted comment
+      -- printed "(redacted)" and then the hash of the body it had just
+      -- withheld. The JSON contract hides it; two renderers disagreeing about
+      -- what a redaction covers is the same defect twice.
+      <> [ "body-part" <+> hashDoc h | not (cRedacted c), Just h <- [cBodyPart c] ]
 
 -- | The surviving events, oldest first.
 --

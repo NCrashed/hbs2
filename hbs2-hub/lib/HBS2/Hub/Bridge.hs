@@ -110,7 +110,7 @@ import HBS2.Hub.Letter
 import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Data.Types.SignedBox (SignedBox)
 import HBS2.Net.Auth.Credentials
-import HBS2.Prelude.Plated (Pretty(..),viaShow,(<+>))
+import HBS2.Prelude.Plated (Pretty(..),viaShow,(<+>),nest,vsep,line)
 
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
@@ -188,7 +188,7 @@ data CanonView = CanonView
     -- @merge@, a note-less @close@), so a redact of one would be refused and
     -- a resent revise would not be caught as a duplicate. That divergence
     -- only appears after a restart, when the view is rebuilt from canon.
-  , cvEvents  :: HashMap EventId (Maybe ThreadId)
+  , cvEvents  :: HashMap EventId Admitted
     -- | The canon keys still authorized at the end of the log. A folder must
     -- check its OWN key against this: a maintainer whose delegation has been
     -- revoked can still sign, but the fold will not admit what they sign, so
@@ -311,6 +311,13 @@ data TriageError =
     -- 'UnknownThread': the target is an event, and the fold reports this
     -- case separately too.
   | UnknownTarget
+    -- | The event named is in canon and redacting it would hide nothing.
+    --
+    -- Its own case because it is not a mistake about WHICH event: the id is
+    -- real and the target is admitted. What is wrong is that no reader shows
+    -- its content, so the redact would be an owner-signed no-op in canon
+    -- forever. See 'redactable'.
+  | NotRedactable
     -- | The cursor has reached the top of its range, so the next stamp would
     -- be one the fold refuses ('SeqAtTopOfRange'). Unreachable in practice, but it
     -- is the one case that would otherwise leave the module's promise
@@ -521,6 +528,13 @@ instance Pretty TriageError where
     NotOnAThread          -> "names no thread to answer"
     UnauthorizedForRepo   -> "this folding key may not bless events here"
     UnknownTarget         -> "redacts an event canon does not hold"
+    NotRedactable         -> nest 2 $ vsep
+      [ "redacts an event no reader would hide anything of"
+      , "an open and a comment carry text a redact withholds; a revise, a"
+          <+> "merge, a set, a"
+      , "delegate or a revoke do not, so this would be an owner-signed no-op"
+          <+> "in canon"
+      , "forever. Nothing was written." ]
     CursorExhausted       -> "the cursor has no room left"
     StampOutOfRange       -> "the clock to stamp is past the ceiling canon admits"
     ThreadMismatch        -> "moves the request to another thread"
@@ -558,6 +572,8 @@ outcome = \case
   -- Order, not validity: fold the thread's opening letter and come back.
   UnknownThread   -> Retry
   UnknownTarget   -> Retry
+  -- Not Retry: the target is here and will not become hideable.
+  NotRedactable   -> Discard
   -- Our own key, not the letter's: another folder may be able to.
   UnauthorizedForRepo -> Retry
   -- The letter is from a newer schema than this build speaks. Discarding it
@@ -1402,12 +1418,27 @@ ownerEvent' ctx view folded (OwnerParts parts) content = do
   scope <- case content of
     -- A redact belongs with the thread of the event it hides, so it lands
     -- beside it in the tree rather than under an id of its own.
+    -- AND THAT REDACTING IT HIDES SOMETHING. 'frRedacted' is consulted in one
+    -- place, which sets the flag on a thread and on its comments, so a redact
+    -- naming a @revise@, a @merge@, a @set@, a note-less @close@, a
+    -- @delegate@, a @revoke@ or another @redact@ was admitted, spent a seq,
+    -- moved the thread's @updated@, was counted by @hub verify@, was retained
+    -- forever by compaction -- and changed no rendering anywhere, while the
+    -- verb printed an event id, a seq and a commit. A maintainer moderating an
+    -- abusive revision was told it worked.
+    --
+    -- Refused HERE rather than made to work in the projection, which is the
+    -- owner's call: hiding what a @revise@ contributed needs per-source
+    -- provenance the fold does not keep (a thread carries the latest
+    -- coordinates, not which event supplied them), so the honest answer is that
+    -- this build cannot hide it and says so before signing.
     ARedact target hidden _
       | target /= repo -> Left WrongRepo
       | otherwise -> case HM.lookup hidden (cvEvents view) of
-          Nothing         -> Left UnknownTarget
-          Just (Just thr) -> Right (ThreadScope thr)
-          Just Nothing    -> Right RepoScope
+          Nothing -> Left UnknownTarget
+          Just a
+            | not (adHideable a) -> Left NotRedactable
+            | otherwise -> Right (maybe RepoScope ThreadScope (adScope a))
 
     -- Only the owner key may delegate (PEP-19 rule 5): a delegate signing
     -- one would be dropped, so refuse before minting.
@@ -1542,7 +1573,8 @@ accepted (pk,sk) repo view folded origin honours secret content box authorOf sco
           AReopen thr _ _       -> setStatus thr "open"
           AMerge thr _ _ _      -> setStatus thr "merged"
           _                     -> cvThreads view
-      , cvEvents = HM.insert eid (scopeThread scope) (cvEvents view)
+      , cvEvents = HM.insert eid (Admitted (scopeThread scope) (redactable content))
+                              (cvEvents view)
         -- Delegation takes effect for the next accept, exactly as it will
         -- when the view is later rebuilt from canon. Revoking the owner is a
         -- no-op here for the same reason it is one in the fold: the owner is

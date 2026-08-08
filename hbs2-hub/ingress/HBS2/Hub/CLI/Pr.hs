@@ -249,7 +249,7 @@ prEntries = do
         Nothing ->
           liftIO $ refuse (show ( "nothing is staged for #" <> pretty (pcNumber pc)
                                     <> line
-                                    <> "  canon says the proposal is" <+> pretty want
+                                    <> "  canon says the proposal is" <+> pretty (safeText want)
                                     <> line
                                     <> "  this clone has no" <+> pretty (pullRef (pcNumber pc))
                                     <> ". If you folded it here, the stage"
@@ -263,8 +263,8 @@ prEntries = do
         Just got | got /= want ->
           liftIO $ refuse (show ( "what is staged for #" <> pretty (pcNumber pc)
                                     <+> "is not what canon says is proposed"
-                                    <> line <> "  canon " <+> pretty want
-                                    <> line <> "  staged" <+> pretty got
+                                    <> line <> "  canon " <+> pretty (safeText want)
+                                    <> line <> "  staged" <+> pretty (safeText got)
                                     <> line
                                     <> "  a revision landed in canon and the ref did"
                                     <+> "not move, or the ref moved and canon did not."
@@ -276,9 +276,9 @@ prEntries = do
           checkoutBranch Nothing branch got >>= \case
             Right () -> liftIO $ print $ vcat
               [ "on branch" <+> pretty branch
-              , "#" <> pretty (pcNumber pc) <+> "proposes" <+> pretty got
-              , "onto" <+> pretty (prOnto (psCoords pr))
-                  <+> "base" <+> pretty (prBase (psCoords pr))
+              , "#" <> pretty (pcNumber pc) <+> "proposes" <+> pretty (safeText got)
+              , "onto" <+> pretty (safeText (prOnto (psCoords pr)))
+                  <+> "base" <+> pretty (safeText (prBase (psCoords pr)))
               ]
             Left e@BundleTipMismatch{} ->
               liftIO $ refuse (show ( "the branch" <+> pretty branch <+> "exists and"

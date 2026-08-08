@@ -33,6 +33,8 @@ module HBS2.Hub.Fold
   , foldEvents
   , foldCanon
   , CanonTooNew(..)
+  , Admitted(..)
+  , redactable
   , reachableCoords
   , openTrouble
   , threadOpTrouble
@@ -334,15 +336,14 @@ data FoldResult = FoldResult
     -- canon rather than of any node-local counter.
   , frMaxSeq    :: Word64
   , frMaxNumber :: Word64
-    -- | Every admitted event, mapped to the thread it belongs to, or
-    -- 'Nothing' for the repo-scope ones (@delegate@/@revoke@).
+    -- | Every admitted event and what canon remembers about it.
     --
     -- The fold knows this exactly; reconstructing it from 'frThreads' would
     -- miss every event that leaves no visible trace (a @set@, a @merge@, a
     -- note-less @close@), which is enough to break both dedup and the layout
     -- a writer needs (PEP-19 puts thread events under @threads/@ and the
     -- rest under @repo/@).
-  , frAdmitted  :: HashMap EventId (Maybe ThreadId)
+  , frAdmitted  :: HashMap EventId Admitted
     -- | The authorized canon keys as of the end of the log: the owner plus
     -- everyone delegated and not since revoked. A folder needs this to know
     -- whether its own key may still bless anything, which nothing else in
@@ -968,7 +969,7 @@ data St = S
     -- seq it occupies available again (see 'stamp').
   , sEver     :: !(HashSet HubKey)
   , sThreads  :: !(HashMap ThreadId ThreadState)
-  , sSeen     :: !(HashMap EventId (Maybe ThreadId))
+  , sSeen     :: !(HashMap EventId Admitted)
   , sRedacted :: !(HashSet EventId)
   , sDropped  :: ![Dropped]
   , sMaxSeq    :: !Word64
@@ -1007,11 +1008,52 @@ data St = S
 staleStampWindow :: Word64
 staleStampWindow = 16
 
+-- | What canon remembers about an admitted event.
+--
+-- One record rather than two maps, and that is the point: 'CanonView' is a
+-- cache of this, the two have diverged five times in this module's history, and
+-- every one of those was a field the cache updated by its own rule. A second
+-- map would be a sixth chance.
+data Admitted = Admitted
+  { adScope :: Maybe ThreadId
+    -- ^ the thread it belongs to, or 'Nothing' for the repo-scope ops
+  , adHideable :: Bool
+    -- ^ would redacting it change what any reader shows? See 'redactable'.
+  }
+  deriving stock (Eq,Show)
+
+-- | Does redacting this event hide anything?
+--
+-- WHY THIS EXISTS. 'frRedacted' is consulted in exactly one place, which sets
+-- 'tsRedacted' on a thread and 'cRedacted' on its comments -- so a redact
+-- naming a @revise@, a @merge@, a @set@, a note-less @close@ or @reopen@, a
+-- @delegate@, a @revoke@ or another @redact@ was admitted, spent a seq, moved
+-- the thread's @updated@, was counted by @hub verify@, was retained forever by
+-- compaction, and changed no rendering anywhere. The verb printed an event id,
+-- a seq and a commit, so the maintainer moderating an abusive revision was told
+-- it worked.
+--
+-- Total, with no wildcard, because the answer for a new op is a decision and
+-- not a default: an op whose content a reader shows must be added here in the
+-- same change that makes the reader show it.
+redactable :: AuthorContent -> Bool
+redactable = \case
+  AOpen{}     -> True   -- title, body, body-part, part-secret, labels, coords
+  AComment{}  -> True   -- body, body-part, part-secret
+  ARevise{}   -> False
+  ASet{}      -> False
+  AClose{}    -> False
+  AReopen{}   -> False
+  AMerge{}    -> False
+  ARedact{}   -> False
+  ADelegate{} -> False
+  ARevoke{}   -> False
+
 -- Mark an event applied: the dedup set, the id every later redact resolves
 -- against, which thread it belongs to, and the provenance a later fold reads.
 keep :: Maybe ThreadId -> Resolved -> St -> St
 keep scope r s = s
-  { sSeen      = HM.insert (rId r) scope (sSeen s)
+  { sSeen      = HM.insert (rId r) (Admitted scope (redactable (rContent r))) (sSeen s)
     -- The @seq@ is advanced by 'stamp' before this, for events that were not
     -- admitted too, because it is a position in the log and the file occupies
     -- it either way. Everything below is advanced only here, on admission.
@@ -1208,7 +1250,7 @@ repoScope = Nothing
 
 -- Which thread an already-admitted event belongs to, for a redact naming it.
 threadOfEvent :: EventId -> St -> Maybe ThreadId
-threadOfEvent eid s = fromMaybe Nothing (HM.lookup eid (sSeen s))
+threadOfEvent eid s = maybe Nothing adScope (HM.lookup eid (sSeen s))
 
 dropE :: Resolved -> DropReason -> St -> St
 dropE r = dropAt (rId r) (Just (rSeq r)) (Just (rCanonKey r))

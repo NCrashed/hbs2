@@ -112,11 +112,16 @@ threadContract t mdiff = object $
     -- What the AUTHOR asked for, never applied. Kept separate from `labels`
     -- for the reason PEP-19 makes applying one an owner-signed event: merging
     -- the two would let a stranger label their own issue.
-  , "labels_requested" .= tsLabelsRequested t
+    -- What the AUTHOR asked for, never applied -- and WITHHELD like the body,
+    -- because it is the same stranger's text: up to 32 labels of 128 bytes
+    -- each, on the one event a redact of an open is usually aimed at. It went
+    -- out beside a null title and a null body, which is precisely the failure
+    -- the header of this module describes.
+  , "labels_requested" .= (if tsRedacted t then [] else tsLabelsRequested t)
   , "origin"      .= fmap b58 (tsOrigin t)
   , "comments"    .= fmap commentContract (tsComments t)
   ]
-  <> maybe [] (\pr -> ["pr" .= prContract pr mdiff]) (tsPR t)
+  <> maybe [] (\pr -> ["pr" .= prContract (tsRedacted t) pr mdiff]) (tsPR t)
   where
     attr k d = fromMaybe d (HM.lookup k (tsAttrs t))
     multi k  = maybe [] decodeLabels (HM.lookup k (tsAttrs t))
@@ -149,15 +154,28 @@ commentContract c = object
     hide :: Maybe a -> Maybe a
     hide x = if cRedacted c then Nothing else x
 
-prContract :: PRState -> Maybe PRDiff -> Value
-prContract pr mdiff = object
-  [ "onto"        .= prOnto co
-  , "base"        .= prBase co
-  , "tip"         .= prSourceTip co
-  , "source"      .= prSource co
-  , "source_ref"  .= prSourceRef co
+-- | The pull-request half of a thread.
+--
+-- TAKES THE THREAD'S REDACTION, and did not, which was the sharpest of the four
+-- leaks: 'threadContract' withholds @part_secret@ and this emitted the SAME
+-- BYTES two lines later. For a pull request's opening event the two are one
+-- value -- the fold fills @tsPartSecret@ and @psPartSecret@ from
+-- @ccPartSecret@ of the same canon box -- so one document carried
+-- @"part_secret": null@ and @"pr": {"part_secret": "<the 32 bytes>"}@. The
+-- coordinates are stranger-chosen text of the same kind, up to 512 bytes each.
+--
+-- The hashes stay: @bundle_part@ and the merge commit are not text somebody
+-- wrote, and a renderer offering to rebuild a withdrawn proposal still needs to
+-- say there was one. What goes is what a person composed.
+prContract :: Bool -> PRState -> Maybe PRDiff -> Value
+prContract redacted pr mdiff = object
+  [ "onto"        .= text (prOnto co)
+  , "base"        .= text (prBase co)
+  , "tip"         .= text (prSourceTip co)
+  , "source"      .= fmap withhold (prSource co)
+  , "source_ref"  .= text (prSourceRef co)
   , "bundle_part" .= fmap (b58 . ptPart) (prBundle co)
-  , "part_secret" .= fmap secret58 (psPartSecret pr)
+  , "part_secret" .= fmap secret58 (if redacted then Nothing else psPartSecret pr)
   , "merge_commit" .= fmap fst (psMerge pr)
   , "merged_into"  .= fmap snd (psMerge pr)
     -- Who supplied THESE coordinates, which is not always the thread's author:
@@ -165,9 +183,14 @@ prContract pr mdiff = object
     -- one person can point at a tip another one chose.
   , "coords_author"   .= key58 (psAuthor pr)
   , "coords_canon_by" .= key58 (psCanonBy pr)
-  , "diff"        .= diffContract mdiff
+  , "diff"        .= diffContract (if redacted then Nothing else mdiff)
   ]
-  where co = psCoords pr
+  where
+    co = psCoords pr
+    -- Null and not the empty string, matching how the thread withholds a
+    -- title: a renderer has to be able to tell "withdrawn" from "empty".
+    text x = if redacted then Null else String x
+    withhold x = if redacted then Nothing else Just x
 
 diffContract :: Maybe PRDiff -> Value
 diffContract Nothing = object

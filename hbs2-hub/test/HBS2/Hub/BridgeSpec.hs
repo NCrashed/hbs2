@@ -414,15 +414,16 @@ spec = do
       ghost <- someHash
       expectOwn UnknownTarget (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ARedact (fst owner) ghost 1))
 
-    it "can redact an event that left no visible trace" $ do
+    -- WHAT REDACTING SOMETHING HAS TO DO: hide something. 'frRedacted' is
+    -- consulted in one place, which sets the flag on a thread and on its
+    -- comments, so a redact naming a `set` was admitted, spent a seq, moved the
+    -- thread's `updated`, was counted by `hub verify`, was retained forever by
+    -- compaction -- and changed no rendering anywhere, while the verb printed an
+    -- event id, a seq and a commit. This test used to assert that it worked.
+    it "refuses to redact an event no reader would hide anything of" $ do
       alice <- kp
       owner <- kp
       origin <- someHash
-      -- A set leaves nothing in the materialized thread beyond its effect,
-      -- so a view rebuilt from threads alone would not know it exists and
-      -- would refuse to redact it. The fold reports admitted events, so it
-      -- does. This only diverges after a restart, which is why the view is
-      -- taken from the fold rather than reconstructed.
       let repo = fst owner
           letter = makeLetter (fst alice) (snd alice)
                      (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
@@ -430,15 +431,54 @@ spec = do
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       aSet <- expectRight
         (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (ASet (scopeOf aOpen) "labels" "bug" 2))
-      -- rebuild the view the way a restarted folder would
-      let fr = foldEvents repo (map acEvent [aOpen, aSet])
-          rebuilt = viewOf fr
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aOpen, aSet]))
+      expectOwn NotRedactable
+        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments
+           (ARedact repo (eventId (acEvent aSet)) 3))
+
+    -- ...and the property the case above was written for, which is a different
+    -- one and still holds: a view rebuilt from threads alone would not know a
+    -- `set` exists at all, so it is taken from the fold. What proves the view
+    -- knows is that a RESENT set is caught as already in canon -- which only
+    -- diverges after a restart, and is why this rebuilds the view.
+    it "knows about an event that left no visible trace, after a restart" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
+      aSet <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (ASet (scopeOf aOpen) "labels" "bug" 2))
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aOpen, aSet]))
+      expectOwn AlreadyInCanon
+        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments
+           (ASet (scopeOf aOpen) "labels" "bug" 2))
+
+    -- A comment IS hideable, so redacting one is admitted and lands with its
+    -- thread rather than under an id of its own.
+    it "redacts a comment, and it lands with the thread it belongs to" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      origin2 <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
+      let reply = makeLetter (fst alice) (snd alice)
+                    (AComment (scopeOf aOpen) Nothing (Just "hi") Nothing 2) noReplyChannel
+      aCm <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aOpen) 2 origin2 noParts reply)
+      let rebuilt = viewOf (foldEvents repo (map acEvent [aOpen, aCm]))
       aRedact <- expectRight
-        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments (ARedact repo (eventId (acEvent aSet)) 3))
-      -- and it lands with the thread it belongs to, not under its target's id
+        (ownerEvent (ctxOf owner) rebuilt 3 noOwnAttachments
+           (ARedact repo (eventId (acEvent aCm)) 3))
       acScope aRedact `shouldBe` ThreadScope (scopeOf aOpen)
-      let fr' = foldEvents repo (map acEvent [aOpen, aSet, aRedact])
-      frDropped fr' `shouldBe` []
+      frDropped (foldEvents repo (map acEvent [aOpen, aCm, aRedact])) `shouldBe` []
 
     it "catches a resent revise after a restart" $ do
       o2 <- someHash
@@ -533,15 +573,17 @@ spec = do
       expectOwn UnauthorizedForRepo
         (ownerEvent (ctxAs bob (fst owner)) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
 
-    it "puts a redact of a repo-scope event under repo scope" $ do
+    -- A delegate is repo-scope, and it is also an event no reader shows the
+    -- content of, so redacting one is refused before the scope question comes
+    -- up. This case used to assert the scope of an owner-signed no-op.
+    it "refuses to redact a repo-scope event, which hides nothing" $ do
       owner <- kp
       bob <- kp
       aDel <- expectRight
         (ownerEvent (ctxOf owner) (emptyView (fst owner)) 1 noOwnAttachments (ADelegate (fst owner) (fst bob) 1))
-      aRed <- expectRight
+      expectOwn NotRedactable
         (ownerEvent (ctxOf owner) (acView aDel) 2 noOwnAttachments
            (ARedact (fst owner) (eventId (acEvent aDel)) 2))
-      acScope aRed `shouldBe` RepoScope
 
     it "reports an unknown redact target as such, not as an unknown thread" $ do
       owner <- kp
@@ -2046,8 +2088,13 @@ spec = do
                            (letter (AComment (scopeOf a2) Nothing Nothing (Just (proven (fst alice) part)) 3)))
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
                            (ASet (scopeOf a2) "labels" "bug" 4))
+      -- Redacting the COMMENT, not the set: a redact hides a thread's or a
+      -- comment's content, and one naming an event no reader shows is refused
+      -- before it is signed. The batch keeps a redact in it because the point
+      -- here is that the accumulated view agrees with the fold after every
+      -- shape of op, this one included.
       a5 <- expectRight (ownerEvent (ctxOf owner) (acView a4) 5 noOwnAttachments
-                           (ARedact repo (eventId (acEvent a4)) 5))
+                           (ARedact repo (eventId (acEvent a3)) 5))
       a6 <- expectRight (ownerEvent (ctxOf owner) (acView a5) 6 noOwnAttachments
                            (ADelegate repo (fst carol) 6))
       a7 <- expectRight (ownerEvent (ctxOf owner) (acView a6) 7 noOwnAttachments

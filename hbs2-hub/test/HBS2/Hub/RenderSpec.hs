@@ -67,6 +67,26 @@ aThread author canonBy = ThreadState
   , tsOrigin     = Just (mh "letter")
   }
 
+-- Coordinates with every field filled in, so a redaction case can look for
+-- each one by name rather than by whichever the fixture happened to set.
+aCoords :: PRCoords
+aCoords = PRCoords
+  { prSource    = Just "hbs23://fork"
+  , prSourceRef = "refs/heads/topic"
+  , prSourceTip = "cafe"
+  , prOnto      = "refs/heads/master"
+  , prBase      = "beef"
+  , prBundle    = Just (PartRef (mh "bundle") (PartProof (mh "proof")))
+  }
+
+-- A pull request whose own secret is the thread's, which is what the fold
+-- produces for an opening event: both come from `ccPartSecret` of one canon
+-- box. The two used to be withheld by different rules, and that is what made
+-- one document carry the same 32 bytes twice.
+aPR :: HubKey -> HubKey -> PRState
+aPR author canonBy =
+  PRState aCoords (mkPartSecret (BS.replicate 32 7)) Nothing author canonBy
+
 aComment :: HubKey -> HubKey -> Comment
 aComment author canonBy = Comment
   { cId         = mh "comment"
@@ -197,6 +217,49 @@ spec = do
           out = LBS8.unpack (renderContract (threadContract t Nothing))
       out `shouldSatisfy` (not . isInfixOf "the-secret-text")
       out `shouldSatisfy` (not . isInfixOf "the-secret-title")
+
+    -- THE FIXTURE THIS TEST DID NOT HAVE. The three cases above ran against a
+    -- thread with `tsPR = Nothing`, so the whole pull-request half of the
+    -- document went unasserted -- and that half took no redaction argument at
+    -- all. For a PR's opening event the two secrets are one value (the fold
+    -- fills both from `ccPartSecret` of the same canon box), so a document said
+    -- "part_secret": null and then printed the same 32 bytes two lines later.
+    it "withholds a redacted pull request's secret and coordinates" $ do
+      k <- aKey
+      let t = (aThread k k) { tsRedacted = True, tsKind = HubPR
+                            , tsPR = Just (aPR k k) }
+          v = threadContract t Nothing
+          pr = field v "pr"
+      field v "part_secret" `shouldBe` A.Null
+      -- The one that made this sharp: the SAME bytes the thread just withheld.
+      field pr "part_secret" `shouldBe` A.Null
+      field pr "onto"        `shouldBe` A.Null
+      field pr "base"        `shouldBe` A.Null
+      field pr "tip"         `shouldBe` A.Null
+      field pr "source_ref"  `shouldBe` A.Null
+      field pr "source"      `shouldBe` A.Null
+      -- The hash stays: it is not text somebody wrote, and a renderer offering
+      -- to rebuild a withdrawn proposal still has to say there was one.
+      field pr "bundle_part" `shouldSatisfy` (/= A.Null)
+
+    it "withholds the labels an author asked for" $ do
+      k <- aKey
+      let t = (aThread k k) { tsRedacted = True
+                            , tsLabelsRequested = ["the-secret-label"] }
+          out = LBS8.unpack (renderContract (threadContract t Nothing))
+      field (threadContract t Nothing) "labels_requested" `shouldBe` A.Array mempty
+      out `shouldSatisfy` (not . isInfixOf "the-secret-label")
+
+    -- And the same assertion over the PR half, in bytes, which is what
+    -- survives whatever the shape becomes.
+    it "does not put a redacted proposal's text anywhere in the bytes" $ do
+      k <- aKey
+      let co = (aCoords) { prOnto = "the-secret-branch", prSourceRef = "the-secret-ref" }
+          t = (aThread k k) { tsRedacted = True, tsKind = HubPR
+                            , tsPR = Just (aPR k k) { psCoords = co } }
+          out = LBS8.unpack (renderContract (threadContract t Nothing))
+      out `shouldSatisfy` (not . isInfixOf "the-secret-branch")
+      out `shouldSatisfy` (not . isInfixOf "the-secret-ref")
 
   describe "PEP-22 render contract: the bytes" $ do
 
