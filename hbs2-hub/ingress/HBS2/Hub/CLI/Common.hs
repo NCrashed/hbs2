@@ -19,11 +19,18 @@ module HBS2.Hub.CLI.Common
   , manifestCode
   , codeMailboxUnknown
   , codePeerSilent
+  , OnMissing(..)
+  , withCanon
+  , withCanonState
   ) where
 
 import HBS2.Hub.Types (maxFoldedTs)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Repo.Manifest (ManifestGone(..),codeNoManifest)
+import HBS2.Hub.Repo
+import HBS2.Hub.Fold (FoldResult,foldEvents)
+import HBS2.Hub.Types (RepoRef)
+import HBS2.Hub.CLI.Verify (refusalDoc,codeOf)
 
 import HBS2.CLI.Prelude
 
@@ -191,3 +198,75 @@ badService e = throwIO (userError (show ("mailbox service:" <+> viaShow e)))
 
 silent :: MonadUnliftIO m' => String -> Maybe a -> m' a
 silent what = maybe (throwIO (PeerSilent what)) pure
+
+-- | What a verb does when this repository has no canon yet.
+--
+-- The rule the eleven canon reads followed and none of them stated. It has two
+-- halves and they divide cleanly: a verb that needs canon to HOLD something
+-- refuses, and a verb that ASKS canon a question answers "no". @inbox accept@
+-- folds the first event into a repository that has none, so it treats the
+-- absence as empty; @pr merge@ needs a thread that is already there, so it does
+-- not.
+--
+-- Written down here because it was not written anywhere: each verb spelled its
+-- own answer, and `hub issue close` in a repository nobody has folded into
+-- refused with "canon is unreadable" while `hub inbox accept` in the same one
+-- started from an empty fold, and nothing said which was intended.
+data OnMissing =
+    -- | No canon is an empty canon. For the verbs that CREATE it.
+    TreatAsEmpty
+    -- | No canon is a refusal, with the reader's own code and its remedy.
+  | Refuse
+    -- | The same, with a code and a sentence of the verb's own. One caller:
+    -- @hub compact@, for which "there is no canon" is the same event as
+    -- "there is nothing superseded to drop", and a scheduled run should read
+    -- one number for both.
+  | RefuseWith Int (Doc AnsiStyle)
+
+-- | Canon for this repository: the commit it is at, and the fold over it.
+--
+-- 'Nothing' for the commit means canon does not exist yet, which only
+-- 'TreatAsEmpty' can produce -- the fold beside it is then the fold of no
+-- events, which is what a first accept mints against.
+--
+-- EVERY refusal goes through 'refusalDoc', which is the other half of what
+-- this collapses: ten of the eleven printed a bare `pretty e` and only the
+-- listing verb printed the REMEDY. A plain clone does not fetch
+-- @refs\/hbs2\/meta@, so "no canon here" is the first thing a new reader meets
+-- and the fetch line is the one sentence they need.
+withCanon :: (MonadUnliftIO m)
+          => OnMissing
+          -> RepoRef
+          -> (forall a . (CanonSource m -> m a) -> m a)  -- ^ usually 'withGitCanon'
+          -> m (Maybe Text, FoldResult)
+withCanon onMissing repo runIt = runIt (\cs -> readCanon cs repo) >>= \case
+  Right st -> pure (Just (stCommit st), stFold st)
+  Left NoCanonRef{} | TreatAsEmpty <- onMissing -> pure (Nothing, foldEvents repo [])
+  Left NoCanonRef{} | RefuseWith n d <- onMissing -> liftIO do
+    saying (d <> line)
+    exitWith (ExitFailure n)
+  Left e -> refusedBy e
+  where
+    refusedBy e = liftIO do
+      saying (refusalDoc e <> line)
+      exitWith (ExitFailure (codeOf e))
+
+-- | The same, for the one caller that needs the FILES and not just the fold.
+--
+-- @hub compact@ writes the retained events back under the names the tree held
+-- them at, so it needs 'stEvents', which the fold does not carry. Its own entry
+-- point rather than a wider return type for the other ten: a caller handed a
+-- 'CanonState' it does not need is a caller that can reach into it.
+withCanonState :: (MonadUnliftIO m)
+               => OnMissing
+               -> RepoRef
+               -> (forall a . (CanonSource m -> m a) -> m a)
+               -> m CanonState
+withCanonState onMissing repo runIt = runIt (\cs -> readCanon cs repo) >>= \case
+  Right st -> pure st
+  Left NoCanonRef{} | RefuseWith n d <- onMissing -> liftIO do
+    saying (d <> line)
+    exitWith (ExitFailure n)
+  Left e -> liftIO do
+    saying (refusalDoc e <> line)
+    exitWith (ExitFailure (codeOf e))

@@ -41,7 +41,8 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf
-                           ,codeMailboxUnknown,codePeerSilent)
+                           ,codeMailboxUnknown,codePeerSilent
+                           ,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -190,12 +191,11 @@ showEntries = do
       parts <- for walked $ \h -> (,) h <$> measurePart ig h
 
       folded <- for (shRepo sa) $ \repo ->
-        withGitCanon (\cs -> readCanon cs repo) >>= \case
-          -- No canon ref is not a failure: it is a repository whose first
-          -- accept has not happened, and the honest answer is "not folded".
-          Left NoCanonRef{} -> pure False
-          Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
-          Right st -> pure (HS.member msg (frOrigins (stFold st)))
+        -- TreatAsEmpty: this ASKS canon a question ("is this letter already
+        -- folded"), and a repository whose first accept has not happened
+        -- answers no.
+        withCanon TreatAsEmpty repo withGitCanon
+          <&> HS.member msg . frOrigins . snd
 
       let sw = Shown lv parts (length unmeasured) folded
 

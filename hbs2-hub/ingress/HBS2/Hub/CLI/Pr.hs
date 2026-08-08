@@ -51,7 +51,7 @@ import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..))
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
@@ -225,9 +225,7 @@ prEntries = do
   where
 
     prCheckout pc = do
-      (_, fr) <- withGitCanon (\cs -> readCanon cs (pcRepo pc)) >>= \case
-        Right st -> pure (Just (stCommit st), stFold st)
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      (_, fr) <- withCanon Refuse (pcRepo pc) withGitCanon
 
       t <- numbered fr (pcNumber pc)
 
@@ -299,9 +297,7 @@ prEntries = do
                                            codeNoKey))
                            pure
 
-      (parent, fr) <- withGitCanon (\cs -> readCanon cs (pmRepo pm)) >>= \case
-        Right st -> pure (Just (stCommit st), stFold st)
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      (parent, fr) <- withCanon Refuse (pmRepo pm) withGitCanon
 
       t <- numbered fr (pmNumber pm)
 

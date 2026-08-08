@@ -36,7 +36,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -132,9 +132,11 @@ maintainerEntries = do
             _ -> liftIO (die (show maintainerUsage))
 
     canonOf repo =
-      withGitCanon (\cs -> readCanon cs repo) >>= \case
-        Right st -> pure (Just (stCommit st), stFold st)
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      -- TreatAsEmpty: a delegation may be the first event canon holds. Naming a
+      -- co-maintainer before anybody has filed an issue is an ordinary order of
+      -- work, and this used to refuse it -- the only reason being that accept
+      -- and this verb had each written the answer themselves.
+      withCanon TreatAsEmpty repo withGitCanon
 
     write mk mn = do
       -- The repo key, not a key of the caller's choosing: rule 5 admits no

@@ -44,7 +44,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent)
+import HBS2.Hub.CLI.Common (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -131,14 +131,20 @@ updatesEntries = do
       -- The maintainer set, out of the repository this runs in. Read BEFORE the
       -- mailbox: a run that cannot check an ack should say so instead of
       -- printing a queue and deciding what to do about it afterwards.
-      maint <- withGitCanon (\cs -> readCanon cs (uaRepo ua)) >>= \case
-        Right st -> pure (frMaintainers (stFold st))
-        -- Not a failure: a repository whose canon nobody has fetched has an
-        -- empty maintainer set, so every ack is refused and the note below says
-        -- why. Refusing to run would be refusing to show the one thing a
-        -- contributor waiting for a first answer would want.
-        Left e | codeOf e == 3 -> pure mempty
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      -- TreatAsEmpty: refusing to run would refuse to show the one thing a
+      -- contributor waiting for a first answer wants. What this used to do was
+      -- branch on @codeOf e == 3@ -- control flow keyed on a number out of the
+      -- PRESENTATION table, whose own comment says the numbers are a contract
+      -- about stability, not a set of constructors. Reorder that table and this
+      -- breaks silently.
+      --
+      -- It also used to answer @mempty@, and the fold of no events does not: the
+      -- owner is a maintainer BY DEFINITION rather than by any event, so the
+      -- repository key is in the set. That is the honest answer and a small
+      -- behaviour change -- an ack signed by the owner of a repository whose
+      -- canon this node has never fetched now validates, which it should: the
+      -- owner key is the authority the ack is checked against.
+      maint <- frMaintainers . snd <$> withCanon TreatAsEmpty (uaRepo ua) withGitCanon
 
       -- The log this node keeps of its own letters. A damaged one stops the
       -- run, unlike a missing one: reading on with an empty log would set every

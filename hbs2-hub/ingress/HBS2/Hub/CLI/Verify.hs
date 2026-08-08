@@ -24,6 +24,8 @@ module HBS2.Hub.CLI.Verify
   , reportCode
   , refusalDoc
   , codeOf
+
+
     -- | The IO half: prints the report and exits. Exported for the one thing the
     -- pure halves cannot show, which is that a closed pipe exits 141 rather than
     -- 1 and that the exit code matches what reportCode computed.
@@ -124,6 +126,7 @@ notHere = \case
   -- The file read here perfectly well; the number in it is not a version. That
   -- is the publisher's, not the clone's.
   FileBadVersion _    -> False
+
 
 -- | What a refusal says: the reason, and what to do about it.
 refusalDoc :: CanonUnreadable -> Doc ann

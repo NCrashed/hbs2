@@ -30,7 +30,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode,withCanon,OnMissing(..))
 import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)
@@ -122,9 +122,7 @@ commentEntries = do
     -- numbers to resolve against -- which is a refusal naming the number,
     -- rather than a letter sent into nothing.
     threadNumbered repo n = do
-      fr <- withGitCanon (\cs -> readCanon cs repo) >>= \case
-              Right st -> pure (stFold st)
-              Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      fr <- snd <$> withCanon Refuse repo withGitCanon
       case [ t | (n', t) <- numberIndexOf fr, n' == n ] of
         (t:_) -> pure t
         [] -> liftIO (refuse (show ("canon here holds no thread numbered" <+> pretty n))

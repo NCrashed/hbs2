@@ -36,7 +36,7 @@ import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
                          , flagSwitch,flagText,flagWord )
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Read (codeNoSuchThread)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -207,9 +207,10 @@ ownEntries = do
             _ -> liftIO (die (show ownUsage))
 
     canonOf repo =
-      withGitCanon (\cs -> readCanon cs repo) >>= \case
-        Right st -> pure (Just (stCommit st), stFold st)
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      -- Refuse: every verb here names a thread by number, and a repository with
+      -- no canon has none. Its sibling in Maintainer treats the absence as
+      -- empty, because a delegation CAN be the first event canon holds.
+      withCanon Refuse repo withGitCanon
 
     -- The number to the thread it names, through the fold's own index. A
     -- number nobody minted is a refusal and not an event: minting against a

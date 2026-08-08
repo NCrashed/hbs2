@@ -47,6 +47,7 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
+import HBS2.Hub.CLI.Common (withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -347,11 +348,10 @@ readEntries = do
     -- One table, so a script branches on one set of numbers whichever read
     -- verb it ran.
     withFold repo act =
-      withGitCanon (\cs -> readCanon cs repo) >>= \case
-        Right st -> act (stFold st)
-        Left u -> liftIO $ do
-          hPutDoc stderr (refusalDoc u <> line)
-          exitWith (ExitFailure (codeOf u))
+      -- Refuse: a listing of a repository with no canon is not an empty
+      -- listing, it is a question this clone cannot answer, and the remedy
+      -- (fetch the ref, which a plain clone does not) is what refusalDoc adds.
+      withCanon Refuse repo withGitCanon >>= act . snd
 
     -- 141 is 128 plus SIGPIPE, what a shell reports for a program a pipe
     -- killed. `hub issue list K | head` exiting 1 would say "bad argument"

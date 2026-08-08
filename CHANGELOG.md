@@ -1,5 +1,43 @@
 # Unreleased
 
+## Changed
+
+  - **`hbs2-hub`: what a verb does when a repository has no canon yet is one
+    rule, written down.** Eleven verbs read canon and each spelled its own
+    answer to a missing `refs/hbs2/meta`. Two answers were in the tree, both
+    defensible, neither stated: `hub issue close` refused with "canon is
+    unreadable" while `hub inbox accept` in the same repository started from an
+    empty fold, and nothing said which was intended.
+
+    The rule is now an argument to a shared reader: a verb that needs canon to
+    HOLD something refuses, a verb that ASKS canon a question answers no.
+
+    Three behaviours change with it.
+
+    `hub maintainer add|remove` can now write the first event canon holds.
+    Naming a co-maintainer before anybody has filed an issue is an ordinary
+    order of work, and it was refused only because `accept` and this verb had
+    each written the answer separately.
+
+    `hub compact` with no canon exits 42, its own "there was nothing to do",
+    rather than 3, "canon is unreadable". No canon and canon with nothing
+    superseded in it are one event for a scheduled run: neither is a failure
+    and neither writes anything, so a hook branching on 42 was missing half the
+    cases it was written for.
+
+    `hub updates` counts the owner as a maintainer of a canon that does not
+    exist, because the owner is one by definition rather than by any event. It
+    used to answer an empty set, which refused even an ack signed by the owner
+    of a repository whose canon this node had never fetched -- and the owner key
+    is the authority such an ack is checked against.
+
+    Two things go with it. Every refusal now prints the REMEDY: ten of the
+    eleven printed a bare reason and only the listing verb said that a plain
+    clone does not fetch `refs/hbs2/meta` and gave the line that does. And
+    `hub updates` no longer branches on `codeOf e == 3` -- control flow keyed on
+    a number out of the presentation table, whose own comment says the numbers
+    are a contract about stability and not a set of constructors.
+
 ## Security
 
   - **`hbs2-peer`: the clock window made the mailbox status check decide

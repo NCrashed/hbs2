@@ -70,7 +70,8 @@ import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRe
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
-                           ,codeMailboxUnknown, codePeerSilent)
+                           ,codeMailboxUnknown, codePeerSilent
+                           ,withCanon, OnMissing(..))
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
@@ -338,10 +339,7 @@ acceptEntries = do
       -- A repository with no canon ref is the FIRST accept, not a failure. Every
       -- other way of not reading is, and they keep the codes `hub verify`
       -- already assigns them, so a script branches on one table.
-      (parent, fr) <- withGitCanon (\cs -> readCanon cs repo) >>= \case
-        Right st -> pure (Just (stCommit st), stFold st)
-        Left NoCanonRef{} -> pure (Nothing, foldEvents repo [])
-        Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
+      (parent, fr) <- withCanon TreatAsEmpty repo withGitCanon
 
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX

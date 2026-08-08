@@ -32,7 +32,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
 import HBS2.Hub.Ingress (PeerSilent(..))
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -118,11 +118,10 @@ rejectEntries = do
       -- refused before anything is signed: the refusal is about what canon
       -- promises, and asking after would mean having signed a delete for it.
       for_ (rjRepo rj) $ \repo ->
-        withGitCanon (\cs -> readCanon cs repo) >>= \case
-          Left NoCanonRef{} -> pure ()
-          Left e -> liftIO (refuse (show (pretty e)) (codeOf e))
-          Right st -> do
-            let fr = stFold st
+        -- TreatAsEmpty, like `inbox show`: the question is whether canon already
+        -- holds this letter, and no canon is no.
+        withCanon TreatAsEmpty repo withGitCanon >>= \(_, fr) -> do
+          do
             when (HS.member (rjMessage rj) (frOrigins fr)) $
               liftIO $ refuse (show ( "this letter is already in canon: rejecting"
                                         <+> "is not what happened to it"

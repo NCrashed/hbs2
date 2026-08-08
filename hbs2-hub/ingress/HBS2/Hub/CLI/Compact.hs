@@ -39,7 +39,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying,withCanon,withCanonState,OnMissing(..))
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -86,6 +86,10 @@ codeNotThisCanon = 43
 -- schedule should be able to tell it from a refusal.
 codeNothingToCompact :: Int
 codeNothingToCompact = 42
+
+-- | And what it says when there is no canon at all.
+nothingHere :: Doc AnsiStyle
+nothingHere = "nothing to compact: this repository has no canon yet"
 
 -- | What one compaction was asked to do.
 data CompactArgs = CompactArgs
@@ -149,8 +153,13 @@ compactEntries = do
   where
 
     compact ca = do
-      st <- withGitCanon (\cs -> readCanon cs (caRepo ca))
-              >>= either (\e -> liftIO (refuse (show (pretty e)) (codeOf e))) pure
+      -- RefuseWith 42, which is this verb's own "there was nothing to do".
+      -- No canon and canon with nothing superseded in it are one event for
+      -- whoever runs this on a schedule: neither is a failure and neither
+      -- wrote anything. Answering 3 ("canon is unreadable") for the first made
+      -- a hook branching on 42 miss half the cases it was written for.
+      st <- withCanonState (RefuseWith codeNothingToCompact nothingHere)
+                           (caRepo ca) withGitCanon
 
       -- BEFORE anything is planned or printed. A wrong --repo produces a
       -- perfectly good-looking plan (the rule never asks whose canon this is)
