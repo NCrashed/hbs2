@@ -2,6 +2,28 @@
 
 ## Changed
 
+  - **`hbs2-hub`: a refused write says what the bridge said, in every verb.**
+    Four verbs mint an event onto canon and three of them printed the derived
+    `Show` of the refusal, so a contributor whose pull request arrived with
+    nothing to fetch was told `BadContent CoordsUnreachable`. Only
+    `hub inbox accept` printed the sentence the bridge writes for a person --
+    and the sentence is the whole reason `TriageError` has a hand-written
+    renderer. `hub maintainer add|remove`, `hub pr merge` and the owner verbs
+    (`issue close|reopen|label|assign`, `redact`) now print it too.
+
+    The exit codes are unchanged. `hub pr merge` and the maintainer verbs each
+    decided in their own words that every way of stopping means one thing to
+    whoever ran them -- nothing was published, the repository is as it was --
+    and that decision is now spelled once rather than being three identical
+    numbers in a row.
+
+  - **`hbs2-hub`: a truncated number index is mentioned by every verb that
+    writes one.** Each canon write regenerates `index/number.sexp` from the
+    whole fold, so any of them can overflow it, and only `hub inbox accept`
+    said so. The note now comes from the shared write, and it goes to stderr:
+    it is advice about a convenience map that PEP-19 says is regenerable and
+    never trusted, not part of what the verb produced.
+
   - **`hbs2-hub`: a refused submission says which of five things was wrong with
     it.** Triage printed "kind and payload disagree" for all five, one of which
     is not a disagreement at all: a pull request that arrived with neither a

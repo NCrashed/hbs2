@@ -31,15 +31,14 @@ import HBS2.Hub.Types
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
                          , flagSwitch,flagText,flagWord )
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
+                           ,blessed,committing,oneStop)
 import HBS2.Hub.CLI.Read (codeNoSuchThread)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
-import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -270,18 +269,11 @@ ownEntries = do
 
       let ctx = TriageCtx (signer, _peerSignSk creds) (const True) repo
 
-      acc <- either (\e -> liftIO (refuse (show ("refused:" <+> pretty e))
-                                          codeTriageRefused))
-                    pure
+      acc <- blessed codeTriageRefused
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
 
-      plan <- either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable)) pure
-                (planCanon [(eventPath acc, acEvent acc)] (numberIndexOf fr))
-
-      commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan)
-                                                   message now))
-                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable))
-                             pure
+      commit <- committing (oneStop codeCanonUnwritable) parent
+                  [(eventPath acc, acEvent acc)] (numberIndexOf fr) message now
 
       liftIO $ print $ vcat
         [ "event" <+> pretty (eventId (acEvent acc))

@@ -65,18 +65,17 @@ import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,maxMessageParts
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,codeMailboxUnknown, codePeerSilent
-                           ,withCanon, OnMissing(..))
+                           ,withCanon, OnMissing(..)
+                           ,blessed, committing, WriteStop(..))
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 
@@ -437,9 +436,7 @@ acceptEntries = do
 
       let evidence = [ (h, ev) | (h, (ev, _)) <- opened ]
 
-      acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e))
-                                          codeTriageRefused))
-                    pure
+      acc <- blessed codeTriageRefused
                (acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
                              now msg (attachments (lrSecret raw) evidence)
                              (lrData raw))
@@ -485,13 +482,8 @@ acceptEntries = do
       let minted = [ (n, t) | Just n <- [acNumber acc], ThreadScope t <- [acScope acc] ]
           numbers = sortOn fst (numberIndexOf fr <> minted)
 
-      plan <- either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnplannable)) pure
-                (planCanon [(eventPath acc, acEvent acc)] numbers)
-
-      commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan)
-                                                            (message acc) now))
-                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable))
-                             pure
+      commit <- committing (WriteStop codeCanonUnplannable codeCanonUnwritable) parent
+                  [(eventPath acc, acEvent acc)] numbers (message acc) now
 
       -- AFTER the commit, because staging needs the number and the number is
       -- not public until canon holds it (PEP-20). A failure here leaves a
@@ -626,7 +618,6 @@ acceptEntries = do
                      (\h -> "acknowledged" <+> hashDoc h)
                      acked
             ]
-          for_ (omittedNote plan) print
 
       -- AND WHAT WAS NOT CHECKED, when nothing was.
       --
@@ -654,12 +645,6 @@ acceptEntries = do
     -- Not a place to put anything authoritative: everything that is signed is
     -- in the files.
     message acc = "hub: " <> tshow (acNumber acc) <> " " <> tshow (eventId (acEvent acc))
-
-    omittedNote plan
-      | cwIndexOmitted plan <= 0 = Nothing
-      | otherwise = Just ( "note:" <+> pretty (cwIndexOmitted plan)
-                             <+> "number(s) did not fit index/number.sexp;"
-                             <+> "it is a convenience map and is regenerable" )
 
     tshow :: Pretty a => a -> Text
     tshow = fromString . show . pretty

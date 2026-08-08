@@ -46,12 +46,11 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
+                           ,blessed,committing,oneStop)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
@@ -326,17 +325,12 @@ prEntries = do
       let ctx = TriageCtx (pmAs pm, _peerSignSk creds) (const True) (pmRepo pm)
           content = AMerge (tsId t) (pmCommit pm) (pmInto pm) now
 
-      acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e)) codeNotMerged))
-                    pure
+      acc <- blessed codeNotMerged
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
-      plan <- either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
-                (planCanon [(eventPath acc, acEvent acc)] (numberIndexOf fr))
-
-      commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan)
-                                                   ("hub: merged #" <> tshow (pmNumber pm))
-                                                   now))
-                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
+      commit <- committing (oneStop codeNotMerged) parent
+                  [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+                  ("hub: merged #" <> tshow (pmNumber pm)) now
 
       liftIO $ print $ vcat
         [ "merged #" <> pretty (pmNumber pm) <+> "into" <+> pretty (pmInto pm)

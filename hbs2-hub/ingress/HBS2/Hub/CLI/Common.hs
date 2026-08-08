@@ -22,6 +22,10 @@ module HBS2.Hub.CLI.Common
   , OnMissing(..)
   , withCanon
   , withCanonState
+  , blessed
+  , WriteStop(..)
+  , oneStop
+  , committing
   ) where
 
 import HBS2.Hub.Types (maxFoldedTs)
@@ -29,8 +33,10 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.Repo.Manifest (ManifestGone(..),codeNoManifest)
 import HBS2.Hub.Repo
 import HBS2.Hub.Fold (FoldResult,foldEvents)
-import HBS2.Hub.Types (RepoRef)
+import HBS2.Hub.Types (RepoRef,Event,ThreadId)
 import HBS2.Hub.CLI.Verify (refusalDoc,codeOf)
+import HBS2.Hub.Repo.GitWrite (withGitSink)
+import HBS2.Hub.Bridge (TriageError)
 
 import HBS2.CLI.Prelude
 
@@ -192,6 +198,82 @@ manifestCode :: ManifestGone -> Int
 manifestCode = \case
   ManifestPeerSilent -> codePeerSilent
   _                  -> codeNoManifest
+
+-- | Take what the bridge blessed, or stop with what the bridge said.
+--
+-- THE WORDS ARE THE POINT. Three of the four verbs that mint an event printed
+-- @viaShow e@, which is the derived 'Show': a reader whose pull request arrived
+-- with nothing to fetch was told @BadContent CoordsUnreachable@. 'TriageError'
+-- has a hand-written 'Pretty' instance for exactly this moment, written so that
+-- the refusal is a sentence a person can act on -- and it names, among other
+-- things, the one refusal in that family a SENDER can fix.
+--
+-- One function rather than four spellings of it, so a fifth verb cannot get
+-- this wrong a fifth time.
+blessed :: MonadUnliftIO m => Int -> Either TriageError a -> m a
+blessed code = either (\e -> liftIO (refuse (show ("refused:" <+> pretty e)) code)) pure
+
+-- | What to exit with when a canon write does not happen.
+--
+-- Two codes and not one because they are two different things: an event that
+-- will not render to a file is this build's bug, and a commit git refuses is
+-- the repository's state. A record and not two positional 'Int's, because two
+-- adjacent arguments of one type are two arguments that can be swapped in
+-- silence.
+data WriteStop =
+  WriteStop
+  { wsUnplannable :: Int  -- ^ the event will not render to a canon file
+  , wsUnwritable  :: Int  -- ^ git would not write the commit
+  }
+
+-- | One code for every way of stopping.
+--
+-- Not a shortcut: @hub pr merge@ and the maintainer verbs each say in their own
+-- words that every way of stopping means the same thing to whoever ran them --
+-- nothing was published and the repository is as it was. This is that decision
+-- spelled once instead of being lost in a pair of identical arguments.
+oneStop :: Int -> WriteStop
+oneStop c = WriteStop c c
+
+-- | Plan a canon write and commit it: the tail of every verb that writes.
+--
+-- Four copies of it, and the order they share is the load-bearing part.
+-- Minting and planning write NOTHING, so a refusal anywhere above the commit
+-- leaves canon exactly as it was, and the commit is the only step that
+-- publishes. A fifth verb that wrote this out again could get the order right
+-- and the codes wrong, or the codes right and the order wrong; there is no
+-- reason for it to write it out at all.
+committing :: MonadUnliftIO m
+           => WriteStop
+           -> Maybe Text            -- ^ the parent, and what the ref must still hold
+           -> [(FilePath, Event)]
+           -> [(Word64, ThreadId)]  -- ^ the number index to regenerate
+           -> Text                  -- ^ the commit message
+           -> Word64                -- ^ now, in milliseconds
+           -> m Text                -- ^ the commit written
+committing WriteStop{..} parent files numbers message now = do
+  plan <- either (\e -> liftIO (refuse (show (pretty e)) wsUnplannable)) pure
+            (planCanon files numbers)
+
+  commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan) message now))
+              >>= either (\e -> liftIO (refuse (show (pretty e)) wsUnwritable)) pure
+
+  -- A TRUNCATED NUMBER INDEX IS SAID OUT LOUD BY EVERY VERB THAT WRITES ONE.
+  --
+  -- Every canon write regenerates @index/number.sexp@ from the whole fold, so
+  -- every one of them can overflow it -- but only `hub inbox accept` mentioned
+  -- it. The other three rewrote a truncated index in silence, which is the
+  -- half of "not an error and not silent" that was missing.
+  --
+  -- On stderr, because it is advice about a convenience map and not part of
+  -- what the verb produced. The report a verb prints on stdout is the event,
+  -- the seq and the commit.
+  when (cwIndexOmitted plan > 0) $ liftIO $ saying
+    ( "note:" <+> pretty (cwIndexOmitted plan)
+        <+> "number(s) did not fit index/number.sexp;"
+        <+> "it is a convenience map and is regenerable" <> line )
+
+  pure commit
 
 badService :: MonadUnliftIO m => MailboxServiceError -> m a
 badService e = throwIO (userError (show ("mailbox service:" <+> viaShow e)))

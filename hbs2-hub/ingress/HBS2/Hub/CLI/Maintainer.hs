@@ -34,11 +34,10 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
+                           ,blessed,committing,oneStop)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
-import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -157,18 +156,12 @@ maintainerEntries = do
       let ctx = TriageCtx (mnRepo mn, _peerSignSk creds) (const True) (mnRepo mn)
           content = mk (mnRepo mn) (mnKey mn) now
 
-      acc <- either (\e -> liftIO (refuse (show ("refused:" <+> viaShow e))
-                                          codeNotDelegated))
-                    pure
+      acc <- blessed codeNotDelegated
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
-      plan <- either (\e -> liftIO (refuse (show (pretty e)) codeNotDelegated)) pure
-                (planCanon [(eventPath acc, acEvent acc)] (numberIndexOf fr))
-
-      commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan)
-                                                   "hub: maintainer set" now))
-                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeNotDelegated))
-                             pure
+      commit <- committing (oneStop codeNotDelegated) parent
+                  [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+                  "hub: maintainer set" now
 
       liftIO $ print $ vcat
         [ "event" <+> pretty (eventId (acEvent acc))
