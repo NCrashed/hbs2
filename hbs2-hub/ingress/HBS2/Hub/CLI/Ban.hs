@@ -29,7 +29,7 @@ module HBS2.Hub.CLI.Ban
 import HBS2.Hub.Types (HubKey,RepoRef)
 import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo)
-import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Common (refuse)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -39,7 +39,7 @@ import HBS2.Base58 (AsBase58(..))
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.Text.IO qualified as Text
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing,renameFile)
 import System.Exit (die,exitSuccess)
 import System.FilePath (takeDirectory)
 
@@ -127,7 +127,21 @@ banEntries = do
       p <- banPath (baRepo ba)
       liftIO do
         createDirectoryIfMissing True (takeDirectory p)
-        Text.writeFile p (renderBans bans')
+        -- WRITTEN BESIDE IT AND RENAMED OVER IT, never in place.
+        --
+        -- A torn in-place write leaves a file that is SHORTER and still
+        -- parses -- every line is one key, so half a file is a valid
+        -- deny-list with keys missing. That is the one failure this design is
+        -- otherwise built to exclude: 'loadBans' refuses a file it cannot
+        -- read entirely, precisely so that a list an attacker shortened is a
+        -- refusal rather than a shorter list. An interrupted write did the
+        -- shortening for them.
+        --
+        -- rename is atomic within a filesystem, and the temporary is made in
+        -- the same directory so that it is the same one.
+        let tmp = p <> ".new"
+        Text.writeFile tmp (renderBans bans')
+        renameFile tmp p
         print $ vcat
           [ (if ban then "banned" else "unbanned") <+> pretty (AsBase58 who)
           , pretty (HS.size bans') <+> "author(s) denied, in" <+> pretty p

@@ -51,7 +51,7 @@ import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Inbox (refuse,saying,codePeerSilent,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)

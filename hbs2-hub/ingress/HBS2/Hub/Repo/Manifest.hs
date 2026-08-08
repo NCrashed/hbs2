@@ -50,7 +50,6 @@ import HBS2.Storage
 import Control.Monad.Except (runExceptT)
 import Data.Text.Encoding qualified as Text
 import Data.ByteString.Lazy qualified as LBS
-import Data.List qualified as List
 import Data.Maybe (listToMaybe)
 
 -- | Why this node cannot say what a repository declares.

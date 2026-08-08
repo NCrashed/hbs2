@@ -36,7 +36,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Inbox (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Verify (codeOf)
 

@@ -36,7 +36,7 @@ import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
                          , flagSwitch,flagText,flagWord )
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Inbox (refuse,saying)
+import HBS2.Hub.CLI.Common (refuse,saying)
 import HBS2.Hub.CLI.Read (codeNoSuchThread)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 import HBS2.Hub.CLI.Verify (codeOf)

@@ -30,7 +30,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode)
 import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)

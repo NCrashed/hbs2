@@ -1,6 +1,43 @@
 # Unreleased
 
+## Fixed
+
+  - **`hbs2-hub`: the deny-list was rewritten in place.** A torn write leaves a
+    file that is SHORTER and still parses -- every line is one key -- so an
+    interrupted `hub ban` silently unbans whatever came after the break. That
+    is the one failure the design otherwise excludes: `loadBans` refuses a file
+    it cannot read entirely, precisely so that a list somebody shortened is a
+    refusal rather than a shorter list. Written beside it and renamed over it
+    now, in the same directory so the rename is atomic.
+
+  - **`hbs2-hub`: two files that are not UTF-8 threw past their own contract.**
+    `loadBans` and `loadSent` answer `Either Text`, and read through
+    `Data.Text.IO.readFile`, which throws `UnicodeException` -- so a corrupt
+    deny-list aborted an accept with a raw exception instead of the refusal
+    that has an exit code. Both catch it and report it as what it is.
+
+  - **`hbs2-hub`: `hub issue new` lost its exit code on an oversized field.**
+    It left through `throwIO (userError ...)`, which exits 1 via the RTS, where
+    the same check in `issue comment` and `pr new` goes through `refuse` --
+    the defect `refuse`'s own haddock is a paragraph about.
+
+  - **`hbs2-hub`: two positional numbers bypassed the guard written for them.**
+    `hub log <repo> <n>` and `hub issue show <repo> <n>` did an unguarded
+    `fromIntegral` on the `Integer` a literal carries, while `flagWord` exists
+    because `--number 18446744073709551617` once wrapped to 1 and the verb
+    answered about a thread nobody named. Display-only here, and the rule has
+    one source of truth or it has none.
+
 ## Changed
+
+  - **`hbs2-hub`: the shared CLI plumbing is no longer part of the `hub inbox`
+    verb.** `refuse`, `saying`, the peer wiring and the exit codes lived in
+    `HBS2.Hub.CLI.Inbox`, and twelve other verb modules imported them from
+    there -- so `hub compact` depended on the queue verb in order to know how
+    to refuse, and `HBS2.Hub.Deny` carried a note about routing around the
+    near-cycle that caused. They are in `HBS2.Hub.CLI.Common` now, which is a
+    module and not a verb. No behaviour changes; what changes is that the exit
+    codes, which PEP-22 makes a contract, are in one file.
 
   - **`hbs2-hub`: `pr` is a whole noun.** `close`, `reopen`, `label` and
     `assign` were bound under `issue` only, so closing a pull request was

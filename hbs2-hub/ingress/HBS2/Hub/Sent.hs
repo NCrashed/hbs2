@@ -48,6 +48,7 @@ import HBS2.Data.Types.Refs (HashRef,pattern HashLike)
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.Text qualified as Text
+import Data.Text.Encoding.Error (UnicodeException)
 import Data.Text.IO qualified as Text
 import Data.Word (Word64)
 import System.Directory (createDirectoryIfMissing,doesFileExist,getXdgDirectory
@@ -188,7 +189,11 @@ loadSent = do
   p <- sentPath
   here <- liftIO (doesFileExist p)
   if not here then pure (Right [])
-    else liftIO (Text.readFile p) <&> parseSent
+    -- try, for the reason 'HBS2.Hub.Deny.loadBans' gives: a file that is not
+    -- UTF-8 throws past this function's Either.
+    else liftIO (try @_ @UnicodeException (Text.readFile p)) <&> \case
+           Left e -> Left ("the sent log is not UTF-8: " <> Text.pack (show e))
+           Right t -> parseSent t
 
 -- | Remember one.
 --

@@ -37,7 +37,7 @@ module HBS2.Hub.CLI.Publish
 import HBS2.Hub.Types (safeText)
 import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
-import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Common (refuse)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal

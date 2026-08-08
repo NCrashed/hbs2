@@ -47,6 +47,8 @@ import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 
+import HBS2.Hub.CLI.Common
+
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
@@ -195,37 +197,6 @@ inboxEntries = do
       liftIO $ case inboxCode r of
         0 -> pure ()
         n -> exitWith (ExitFailure n)
-
--- | Say why, on stderr, and leave with the code that says which why.
---
--- The write is GUARDED and the exit is not. A closed stderr is not a reason to
--- lose the exit code: `hub inbox K 2>&1 | head` closes both handles, and an
--- unguarded 'hPutDoc' then leaves through the RTS with 1, which PEP-22 gives to
--- usage errors -- so the hook that 17 and 18 were added for saw the one code
--- they were added to be told apart from.
-refuse :: String -> Int -> IO a
-refuse msg n = do
-  saying ("hbs2-hub:" <+> pretty msg <> line)
-  exitWith (ExitFailure n)
-
--- | Write to stderr, or do not, but do not take the exit code with you.
-saying :: Doc AnsiStyle -> IO ()
-saying d =
-  handleJust (\e -> if isResourceVanishedError e then Just () else Nothing)
-             (\_ -> pure ())
-             (hPutDoc stderr d)
-
--- | What the peer not holding the mailbox exits with.
---
--- Above the range PEP-22 assigns to `hub verify`'s own refusals (3..16), and
--- added to that table rather than reusing one of them: the numbers are a
--- contract a hook branches on, so they may be added to and not reassigned.
-codeMailboxUnknown :: Int
-codeMailboxUnknown = 17
-
--- | And what a peer that stopped answering exits with.
-codePeerSilent :: Int
-codePeerSilent = 18
 
 -- | What this verb takes, in the words somebody typing it would use.
 inboxUsage :: Doc ann
@@ -411,105 +382,6 @@ render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body
       RequestOnly  -> "(request)"
       OwnerNative  -> "(owner-only: not acceptable from a letter)"
 
-badService :: MonadUnliftIO m => MailboxServiceError -> m a
-badService e = throwIO (userError (show ("mailbox service:" <+> viaShow e)))
-
--- | The author's declared time as something a human reads. Epoch milliseconds are
--- what the field IS (PEP-19) and what any tooling should parse, but a triage
--- queue is read by a person, and a column of thirteen-digit integers is a column
--- nobody compares.
-utcOf :: Word64 -> String
-utcOf ms
-  -- Clamped at the ceiling canon admits, because the value is the SENDER's and
-  -- unverifiable (PEP-19): maxBound formats as the year 584 million, which does
-  -- not crash but does let a sender wreck the column alignment of the queue a
-  -- maintainer is reading.
-  | ms > maxFoldedTs = "after " <> utcOf maxFoldedTs
-  | otherwise = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
-                  (posixSecondsToUTCTime (fromIntegral ms / 1000))
-
--- | The one place the ingress is wired to a peer.
---
--- Top level and exported, because there are two callers now: listing a queue
--- and accepting one letter out of it. Two copies of this would be two answers
--- to what a hub asks a peer for, drifting apart at whichever of the six a
--- later fix touches.
---
--- Everything above it is a function of these six, which is what lets the wait
--- loop and every OpenError be tested without a peer.
-overRpc :: (MonadUnliftIO m) => AnyStorage -> ServiceCaller MailboxAPI UNIX -> Ingress m
-overRpc sto api = Ingress
-  { -- BOUNDED, and it is the only one of these that was not. The other three
-    -- go through 'callRpcWaitMay', which is 'race' against a pause; this one
-    -- is the storage client's 'getBlock', which calls 'callService' raw, and
-    -- that blocks on a TQueue with no timeout at all. Every merkle node and
-    -- every message body comes through here, so the bulk of what `hub inbox`
-    -- asks the peer for was the part with no bound: a peer that answered the
-    -- mailbox service and then stalled on storage hung the verb forever,
-    -- after all three timed calls had succeeded. Per block, not per walk --
-    -- see 'bounded'.
-    igBlock  = \h -> bounded rpcTimeout "a block of the mailbox"
-                       (liftIO (getBlock sto (coerce h)))
-    -- The size alone, which is the whole reason this is not `length <$>
-    -- igBlock`: the gate that refuses an oversized attachment has to fire
-    -- before the attachment is paid for.
-  , igSize   = \h -> bounded rpcTimeout "the size of a block"
-                       (liftIO (hasBlock sto (coerce h)))
-    -- THE SECRET IS CAUGHT ON THE WAY PAST, in an IORef, and that is not a
-    -- trick for want of a better one: 'ToDecryptBS' takes the resolver as a
-    -- function and returns only the plaintext, so the value canon needs is
-    -- visible exactly once, inside the call the reader makes. Widening the
-    -- reader's result is the alternative and it is in hbs2-core, used by
-    -- everything that reads an encrypted tree.
-    --
-    -- Called once per read by construction (the reader resolves one group key
-    -- for the whole tree), so there is no last-writer question to answer.
-  , igOpenPart = \h -> do
-      seen <- liftIO (newIORef Nothing)
-      -- Inline, because 'findSecret' is rank-2: a named binding would be
-      -- monomorphic in the monad the reader instantiates it at.
-      r <- liftIO $ runExceptT $ readFromMerkle sto
-             (ToDecryptBS (coerce h) (\gk -> liftIO do
-                 s <- runKeymanClientRO (extractGroupKeySecret gk)
-                 for_ s (writeIORef seen . Just)
-                 pure s))
-      case r of
-        Left e -> pure (Left (Text.pack (show e)))
-        Right bs -> liftIO (readIORef seen) >>= \case
-          Just s  -> pure (Right (bs, Saltine.encode s))
-          -- Unreachable through the reader above, which throws when it cannot
-          -- resolve. Answered rather than asserted because the alternative is
-          -- publishing a part-secret this build invented.
-          Nothing -> pure (Left "the part opened and its secret was not seen")
-  , igStatus = \k ->
-      callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api k
-        >>= silent "the mailbox service"
-        >>= either badService (pure . void)
-    -- Checked, not voided. 'void' threw away the Maybe, and the Maybe IS the
-    -- timeout signal: a fetch that never reached the peer left the wait loop
-    -- to conclude, correctly and uselessly, that a mailbox it had never
-    -- asked for had not arrived.
-  , igFetch  = \k ->
-      void (callRpcWaitMay @RpcMailboxFetch rpcTimeout api k
-              >>= silent "the mailbox service")
-  , igRoot   = \k ->
-      callRpcWaitMay @RpcMailboxGet rpcTimeout api k
-        >>= silent "the mailbox service"
-  , igPause  = pause
-    -- No deny-list: PEP-21 policy lives in the repo manifest and this verb
-    -- takes a mailbox key rather than a repo. Allowing everything is honest
-    -- here, since listing is not accepting; the accept path must not
-    -- inherit this default, and 'inboxNotes' says so on stderr whenever the
-    -- queue actually contains something a reader might take for permission.
-  , igAllowed = const True
-  , igSecret = ReadMessageServices
-      (liftIO . runKeymanClientRO . extractGroupKeySecret)
-  }
-
--- A call that answered nothing in the time allowed is not an answer.
-silent :: MonadUnliftIO m' => String -> Maybe a -> m' a
-silent what = maybe (throwIO (PeerSilent what)) pure
-
 -- | @--mailbox <key> [--repo <key>]@.
 --
 -- The repository is optional and is not about which mailbox to read: it names
@@ -530,13 +402,3 @@ inboxArgs syn = do
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
 
--- | What a verb that could not resolve a mailbox should exit with.
---
--- Here rather than beside 'ManifestGone', because an exit code is this layer's
--- business and the reader below the CLI cannot import the module that owns
--- them. Silence keeps its own number: it is the one case where trying again is
--- the answer.
-manifestCode :: ManifestGone -> Int
-manifestCode = \case
-  ManifestPeerSilent -> codePeerSilent
-  _                  -> codeNoManifest

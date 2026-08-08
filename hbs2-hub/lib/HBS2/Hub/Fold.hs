@@ -752,10 +752,17 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
         -- window around the reader's own clock.
         foldedOK = ccFoldedTs cc <= maxFoldedTs
 
-    -- Spend a stamp: raise the two high-water marks that describe a POSITION in
-    -- the log, the @seq@ and the @folded-ts@. The human number is not one of
-    -- them; it is spent by 'keep', on admission, and the difference is
-    -- deliberate (see there).
+    -- Spend a stamp: raise the @seq@ high-water mark, which is the one thing
+    -- here that describes a POSITION in the log.
+    --
+    -- NOT the clock and NOT the number. Both are spent by 'keep', on
+    -- ADMISSION, and both differences are deliberate and load-bearing --
+    -- 'keep' argues the clock one at length, and the short version is that a
+    -- refused file stamped at the ceiling would otherwise pin every future
+    -- stamp in this repository to the year 2100. This comment used to say that
+    -- a stamp raises the folded-ts too, which is what a reader would act on:
+    -- 'Stamp' carries no such field, and adding one would reintroduce exactly
+    -- that.
     --
     -- Spent by anything whose canon box a key this log ever authorized signed,
     -- admitted or not, for two reasons. Admission is not final: a reply dropped

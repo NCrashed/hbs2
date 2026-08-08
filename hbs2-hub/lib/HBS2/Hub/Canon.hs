@@ -214,8 +214,17 @@ renderEvent e = Text.unlines (fmap render clauses)
     -- The two boxes are base64 and everything else base58: see "encodedBytes"
     -- for why they are not the same encoding.
     b64 bs = mkSym @C (B8.unpack (B64.encode (LBS.toStrict bs)))
-    b58key k = mkSym @C (show (pretty (AsBase58 k)))
-    href h = mkSym @C (show (pretty h))
+
+    -- THROUGH THE SAME GUARDS THE REPORTS USE. base58 is Integer base
+    -- conversion and therefore quadratic, and neither a HashRef nor a HubKey
+    -- is bounded to its scheme's width by the type -- so a field that is not
+    -- a hash is rendered as its size rather than converted. The haddock on
+    -- 'hashDoc' predicted this module by name: "every renderer that prints one
+    -- of these needs the same guard, and the second one to need it printed
+    -- pretty instead". This is the third, and it is the one  compact@
+    -- reaches over canon somebody else published.
+    b58key k = mkSym @C (show (keyDoc k))
+    href h = mkSym @C (show (hashDoc h))
 
     boxBytes :: Serialise a => a -> LBS.ByteString
     boxBytes = serialise

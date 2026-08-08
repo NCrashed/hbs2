@@ -44,7 +44,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
 import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Inbox (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent)
+import HBS2.Hub.CLI.Common (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -57,7 +57,6 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import Data.HashSet qualified as HS
-import Data.List qualified as List
 import System.Exit (die,exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
 

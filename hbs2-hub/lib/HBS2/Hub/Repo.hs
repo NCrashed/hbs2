@@ -901,7 +901,7 @@ data CanonCommit = CanonCommit
   { cwFiles :: [(ByteString, ByteString)]
     -- ^ path to contents, in path order, no duplicates
   , cwIndexOmitted :: Int
-    -- | How many numbers @index\/number.sexp@ could not hold.
+    -- ^ How many numbers @index\/number.sexp@ could not hold.
     --
     -- Not an error and not silent. The index is a convenience map that PEP-19
     -- says is regenerable from the @open@ events and never trusted over them,
@@ -1032,6 +1032,7 @@ data CanonSink m = CanonSink
   { skParent :: m (Either CanonUnwritable (Maybe Text))
     -- ^ what @refs\/hbs2\/meta@ points at, 'Nothing' when canon does not exist yet
   , skCommit :: CanonWrite -> m (Either CanonUnwritable Text)
+    -- ^ write the files, commit them, move the ref; the new commit
     -- | The same, writing a ROOT commit: the tree is exactly the files given
     -- and the history before it is gone.
     --
@@ -1044,7 +1045,6 @@ data CanonSink m = CanonSink
     -- This is what a compaction publishes (PEP-19): a new lineage holding the
     -- retained events, replacing one whose history is what it traded for size.
   , skRewrite :: CanonWrite -> m (Either CanonUnwritable Text)
-    -- ^ write the files, commit them, move the ref; the new commit
   , skClose  :: m ()
   }
 

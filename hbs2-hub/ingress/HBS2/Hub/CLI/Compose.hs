@@ -33,7 +33,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Inbox (refuse,codePeerSilent,saying,manifestCode)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
@@ -410,8 +410,12 @@ composeEntries = do
           let content = AOpen repo HubIssue (fromString title) (fmap fromString labels)
                           (bodyOf body) Nothing Nothing now
 
+          -- Through 'refuse', like the same check in Comment and Pr. A throwIO
+          -- here exits 1 through the RTS, which loses the exit code the
+          -- refusal was supposed to carry -- the defect 'refuse''s own haddock is
+          -- a paragraph about.
           for_ (oversizedField content) $ \f ->
-            throwIO (userError (show ("over the size limit for a letter:" <+> pretty f)))
+            liftIO (refuse (show ("over the size limit for a letter:" <+> pretty f)) 1)
 
           sto <- getStorage
           api <- getClientAPI @MailboxAPI @UNIX

@@ -46,7 +46,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
+import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -275,8 +275,13 @@ readEntries = do
              <> line <> "Give a number to see one thread's events." )
     $ entry $ bindMatch "hub:log" $ nil_ \case
         [ SignPubKeyLike repo ] -> lift (withFold repo (out . logDoc Nothing))
-        [ SignPubKeyLike repo, LitIntVal n ] ->
-          lift (withFold repo (out . logDoc (Just (fromIntegral n))))
+        -- Through 'flagWord', which guards BOTH ends. A bare fromIntegral on the
+        -- Integer a LitIntVal carries guards neither: flagWord's own haddock is
+        -- the report of that bug -- `--number 18446744073709551617` wrapped to
+        -- 1 and the verb answered about a thread nobody named. Display-only
+        -- here, and the rule has one source of truth or it has none.
+        [ SignPubKeyLike repo, (flagWord -> Just n) ] ->
+          lift (withFold repo (out . logDoc (Just n)))
         _ -> liftIO (die "usage: hub log <repo-key> [<number>]")
 
   where
@@ -317,8 +322,8 @@ readEntries = do
                  <> line <> "A body shipped as an encrypted tree is named, not fetched:"
                  <> line <> "this verb talks to no peer." )
         $ entry $ bindMatch name $ nil_ \case
-            [ SignPubKeyLike repo, LitIntVal n ] ->
-              lift (withFold repo (pick kind (byNumber (fromIntegral n))))
+            [ SignPubKeyLike repo, (flagWord -> Just n) ] ->
+              lift (withFold repo (pick kind (byNumber n)))
             [ SignPubKeyLike repo, StringLike "--thread", HashLike h ] ->
               lift (withFold repo (pick kind ((== h) . tsId)))
             _ -> liftIO (die ("usage: hub " <> spelled name

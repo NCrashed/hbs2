@@ -35,7 +35,7 @@ import HBS2.Hub.Repo (readCanonAt,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle (syncFrom,takeCanon,Synced(..),SyncedCanon(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,repoFlags,flagRepo,flagRepoMaybe)
-import HBS2.Hub.CLI.Inbox (refuse)
+import HBS2.Hub.CLI.Common (refuse)
 import HBS2.Hub.CLI.Publish (codePublishFailed)
 
 import HBS2.CLI.Prelude

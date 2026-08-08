@@ -1,9 +1,14 @@
 -- | The triage deny-list, as a store (PEP-21 "Deny-lists").
 --
 -- Split from the verbs in "HBS2.Hub.CLI.Ban" because three callers need the
--- list and one of them cannot import that module: `hub inbox` builds its queue
--- in "HBS2.Hub.CLI.Inbox", which Ban already imports for 'refuse'. A cycle is
--- the shape "who may be folded" being answered next to "how a refusal prints".
+-- list and none of them should have to import a verb to get it.
+--
+-- It used to be a near-cycle as well: `hub inbox` builds its queue in
+-- "HBS2.Hub.CLI.Inbox", and Ban imported that same module for 'refuse', so
+-- "who may be folded" was answered next door to "how a refusal prints". That
+-- half is gone -- 'refuse' and the exit codes live in "HBS2.Hub.CLI.Common"
+-- now, which is a module and not a verb -- and the split here stands on its
+-- own reason.
 --
 -- LOCAL STATE, and that is PEP-21's decision rather than an omission: a public
 -- ban needs an author-content constructor and an admission rule saying who may
@@ -33,6 +38,7 @@ import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (sort)
 import Data.Text qualified as Text
+import Data.Text.Encoding.Error (UnicodeException)
 import Data.Text.IO qualified as Text
 import System.Directory (doesFileExist,getXdgDirectory,XdgDirectory(..))
 import System.FilePath ((</>))
@@ -99,4 +105,10 @@ loadBans repo = do
   p <- banPath repo
   here <- liftIO (doesFileExist p)
   if not here then pure (Right HS.empty)
-    else liftIO (Text.readFile p) <&> parseBans
+    -- try, because Data.Text.IO.readFile throws UnicodeException on a file
+    -- that is not UTF-8, which walks straight past this function's Either and
+    -- out of an accept as a raw exception. A deny-list that will not decode is
+    -- a deny-list this node cannot read, which is the answer this already has.
+    else liftIO (try @_ @UnicodeException (Text.readFile p)) <&> \case
+           Left e -> Left ("the deny-list is not UTF-8: " <> Text.pack (show e))
+           Right t -> parseBans t

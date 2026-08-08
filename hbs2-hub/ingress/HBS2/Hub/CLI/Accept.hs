@@ -69,8 +69,8 @@ import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Inbox (overRpc, refuse, saying, manifestCode
-                          ,codeMailboxUnknown, codePeerSilent)
+import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
+                           ,codeMailboxUnknown, codePeerSilent)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
