@@ -44,7 +44,7 @@ argv = fmap argvAtom
 -- caller.
 letter :: HubKey -> AuthorContent -> Disposition -> Shown
 letter author ac disp =
-  Shown (LetterView (mh "m") (Just author) (Right (author, ac, disp)) (Just (mh "e")))
+  Shown (LetterView (mh "m") (Just author) (Right (author, ac, disp)) (Just (mh "e")) [])
         []
         0
         Nothing
@@ -119,7 +119,7 @@ spec1 = do
 
     it "prints an unreadable letter as far as it got" $ do
       author <- aKey
-      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing) [] 0 Nothing
+      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing []) [] 0 Nothing
           out = shown (showDoc sw)
       -- The envelope key is the one thing a maintainer can act on (hub block),
       -- so it survives every failure path that knows it.

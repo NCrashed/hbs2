@@ -31,7 +31,8 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
-import HBS2.Hub.Ingress (PeerSilent(..))
+import HBS2.Hub.Ingress (PeerSilent(..),copiesOf)
+import HBS2.Hub.CLI.Common (overRpc)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -43,10 +44,12 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
+import HBS2.Storage
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 
 
 import Data.HashSet qualified as HS
+import Data.List qualified as List
 import System.Exit (die)
 
 -- | The letter is already in canon, so "rejected" is not what happened to it.
@@ -80,6 +83,7 @@ rejectUsage =
 
 rejectEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
+                              , HasStorage m
                               , HasClientAPI MailboxAPI UNIX m
                               , Exception (BadFormException c)
                               ) => MakeDictM c m ()
@@ -135,21 +139,39 @@ rejectEntries = do
                                         <+> pretty (rjMessage rj) ))
                               codeAlreadyFolded
 
-      -- The peer is silent for the reason 'PeerSilent' says and NOT for the
-      -- reason a missing key is, so the three answers keep their own codes.
-      dropMessage (rjMailbox rj) (rjMessage rj) >>= \case
-        Right () -> pure ()
-        Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
-                                              codePeerSilent)
-        Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
+      -- AND THE COPIES OF IT, which used to be a decision each. A rewrap needs
+      -- no key at all -- 'lvCopies' has the mechanism -- so the same letter
+      -- arrives under any number of envelopes, and a tombstone is written by
+      -- message hash, so rejecting one copy rejected one copy. The maintainer
+      -- read the letter once and should decide about it once.
+      --
+      -- Bounded by the page the queue shows, because that is the set this can
+      -- know without an unbounded walk, and because it is the set the operator
+      -- was looking at when they typed this.
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+      copies <- copiesOf (overRpc sto api) (rjMailbox rj) (rjMessage rj)
+
+      for_ (rjMessage rj : copies) $ \h ->
+        -- The peer is silent for the reason 'PeerSilent' says and NOT for the
+        -- reason a missing key is, so the three answers keep their own codes.
+        dropMessage (rjMailbox rj) h >>= \case
+          Right () -> pure ()
+          Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
+                                                codePeerSilent)
+          Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
 
       liftIO $ print $ vcat
-        [ "rejected" <+> pretty (rjMessage rj)
-        , "a tombstone was written; the blocks are still on disk"
-        , maybe ("canon was not consulted: no --repo was given")
-                (const "canon does not hold this letter")
-                (rjRepo rj)
-        ]
+        ( [ "rejected" <+> pretty (rjMessage rj) ]
+       <> [ "and" <+> pretty (length copies)
+              <+> "copy(ies) of it under other envelopes:"
+              <> line <> indent 2 (vcat (fmap pretty copies))
+          | not (List.null copies) ]
+       <> [ "a tombstone was written; the blocks are still on disk"
+          , maybe ("canon was not consulted: no --repo was given")
+                  (const "canon does not hold this letter")
+                  (rjRepo rj)
+          ] )
 
 -- Every value behind a flag, and the two keys are one type again.
 rejectArgs :: forall c . IsContext c => [Syntax c] -> Maybe Reject

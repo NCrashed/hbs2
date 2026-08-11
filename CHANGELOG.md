@@ -627,6 +627,33 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox`: one letter under many envelopes cost one decision
+    each.** Re-signing a captured message under a fresh key needs no key and no
+    plaintext: a signed box keeps its payload as opaque bytes and the message
+    carries no sender field, so anyone who saw the ciphertext go past can put
+    their own signature on it. PEP-18 reads as though this is available to a
+    recipient; it is available to a bystander.
+
+    Canon was never at risk -- an event is named by the hash of the author's
+    inner box, so a second copy is refused as already folded -- but everything a
+    PERSON does was one-shot: a queue line, a decision and a tombstone per copy,
+    for a letter read once.
+
+    The queue groups copies onto one line with a count, and `inbox reject` drops
+    the group. The grouping key is the hash of the ciphertext, which a re-wrap
+    cannot change (producing a different valid ciphertext of one plaintext needs
+    the plaintext) and which this node computes before any keyman lookup, so a
+    letter now costs one decrypt however many envelopes it arrives under. A copy
+    made distinct by padding the ciphertext no longer opens, so it is a line
+    rather than a decision.
+
+    WHAT THIS DOES NOT FIX, now said in `hub ban`'s own help and in the manual:
+    every copy carries the same inner author, so the only ban that stops a flood
+    names the person whose letter was captured. `hub block` names the envelope
+    key and a re-wrapper mints a fresh one per copy. An open inbox has no
+    re-wrap resistance of its own; what prices the flood is `hub policy pow`,
+    which charges nothing until it is set.
+
   - **`hbs2-hub inbox accept`: it decrypted every attachment a message carried,
     and published a key to all of them.** Two halves of one gap between what a
     message carries and what its letter names, and nothing compared the two

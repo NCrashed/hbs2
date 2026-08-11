@@ -57,7 +57,7 @@ b58 = show . pretty . AsBase58
 
 -- One queue line, with everything a stranger controls left to the caller.
 view :: HashRef -> Maybe HubKey -> Either OpenError (HubKey, AuthorContent, Disposition) -> LetterView
-view m env letter = LetterView m env letter Nothing
+view m env letter = LetterView m env letter Nothing []
 
 spec :: Spec
 spec = spec1 >> spec2

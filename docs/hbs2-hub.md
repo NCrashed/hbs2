@@ -320,6 +320,39 @@ stores and relays, and it is evadable by exactly the re-wrap `ban`
 survives. A full stop is both: one bounds the disk, the other bounds
 canon.
 
+### What a re-wrap costs, and who pays
+
+Re-signing a captured message under a fresh key needs no key and no
+plaintext. The payload of a signed box is opaque bytes and the box
+carries no sender field, so anyone who saw the ciphertext go past can
+put their own signature on it. They cannot read it, cannot change a
+word of it, and cannot make it say anything else.
+
+What that does not reach is canon. An event is named by the hash of the
+author's inner box, so a second copy of one letter is refused as already
+folded, and a request carried out twice is caught the same way.
+
+What it does reach is your attention. The queue groups copies of one
+letter onto a single line, and `hbs2-hub inbox reject` drops the group,
+so a flood costs one decision rather than one per copy.
+
+The part that has no clean answer: every copy carries the same inner
+author, so the only `ban` that stops them all names the person whose
+letter was captured. They may have sent it once and done nothing wrong.
+`block` names the envelope key, and a re-wrapper mints a fresh one per
+copy, so it cannot keep up.
+
+An open inbox therefore has no re-wrap resistance of its own. What
+prices the flood at the door is proof-of-work:
+
+```
+hbs2-hub policy pow --mailbox <mbox-key> --bits <n>
+```
+
+It charges nothing until you set it. Work is per message and nothing
+carries over, so it is a price and not a ban: a determined sender pays
+and continues.
+
 ## Housekeeping
 
 A `set` event that a later one overwrote is dead weight. Compaction

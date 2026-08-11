@@ -110,6 +110,19 @@ banEntries = do
                  <> line <> "disk. Bounding storage is 'hub block', on the envelope"
                  <> line <> "key. A full ban is both."
                  <> line
+                 <> line <> "READ THIS BEFORE BANNING SOMEBODY FOR A FLOOD OF ONE"
+                 <> line <> "LETTER. Re-signing a captured message under a fresh key"
+                 <> line <> "needs no key and no plaintext: anyone who saw the"
+                 <> line <> "ciphertext can do it. Every such copy carries the same"
+                 <> line <> "inner author, so the only ban that stops them all is a"
+                 <> line <> "ban on the person whose letter was captured -- who may"
+                 <> line <> "have sent it once and done nothing else."
+                 <> line
+                 <> line <> "The queue groups copies onto one line and 'hub inbox"
+                 <> line <> "reject' drops the group, so a flood costs one decision"
+                 <> line <> "rather than one per copy. What prices it at the door is"
+                 <> line <> "'hub policy pow', which charges nothing until set."
+                 <> line
                  <> line <> "Local and unsigned, and it does not travel: PEP-21"
                  <> line <> "defers a published ban to a later hub-meta. Past events stay"
                  <> line <> "in canon; this refuses future ones." )

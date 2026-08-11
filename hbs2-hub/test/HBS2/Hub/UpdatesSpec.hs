@@ -51,7 +51,7 @@ ack repo = AckRecord repo (mh "thread") (Just 7) "open" Nothing Nothing
 -- the accept side needs them.
 arrived :: AckRecord -> HubKey -> (LetterView, Either OpenError LetterRaw)
 arrived rec' signer =
-  ( LetterView (mh "m") (Just signer) (Left NotAMessage) Nothing
+  ( LetterView (mh "m") (Just signer) (Left NotAMessage) Nothing []
   , Right (LetterRaw signer [] (makeAck rec') noSecret) )
   where
     noSecret = fromMaybe (error "mkMessageSecret")

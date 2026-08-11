@@ -356,8 +356,18 @@ inboxCode r
 -- quadratic: a 48 KiB field is 0.7 s of CPU and 67 000 characters, per line, in
 -- a queue anybody can write to.
 render :: LetterView -> Doc ann
-render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body
+render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body <> copies
   where
+    -- SAID, not silently collapsed. A rewrap needs no key (see 'lvCopies'), so
+    -- one letter can arrive under any number of envelopes, and the queue used
+    -- to give each of them a line and a decision. Showing one line is the point;
+    -- showing it WITHOUT the count would hide from the maintainer that somebody
+    -- is doing this, which is the one fact they can act on.
+    copies = case lvCopies lv of
+      [] -> mempty
+      cs -> " +" <> pretty (length cs) <+> "copy(ies) of the same letter,"
+              <+> "under other envelopes"
+
     body = case lvLetter lv of
       Left e -> "unreadable:" <+> pretty e
       Right (author, content, disp) ->

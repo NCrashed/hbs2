@@ -32,6 +32,9 @@ module HBS2.Hub.Ingress
   , MailboxLive(..)
   , mailboxLive
   , openMessage
+  , openBlock
+  , copyOf
+  , copiesOf
   , awaitMailbox
   , maxFetchRounds
   , maxInboxLetters
@@ -58,12 +61,13 @@ import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,walkMerkle,MTreeAnn(..)
 import HBS2.Data.Detect (tryDetect,BlobType(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Hash (hashObject)
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Storage.Operations.Class (OperationError)
 
-import Codec.Serialise (deserialiseOrFail)
+import Codec.Serialise (deserialiseOrFail,serialise)
 import Crypto.Saltine.Class qualified as Saltine
 import Data.Coerce (coerce)
 import Data.HashSet (HashSet)
@@ -75,7 +79,7 @@ import Data.List (sort)
 import Data.List qualified as List
 import Data.Word (Word64)
 import Data.Text qualified as Text
-import Data.Maybe (isJust)
+import Data.Maybe (isJust,listToMaybe)
 import Streaming.Prelude qualified as S
 import Control.Monad.Except (runExceptT,throwError)
 
@@ -236,6 +240,28 @@ data LetterView = LetterView
     -- a letter that will be refused: it is how a sender correlates the
     -- acknowledgement they get back with the thread they asked for.
   , lvEventId  :: Maybe EventId
+    -- | Other messages in this mailbox carrying THE SAME LETTER, by hash.
+    --
+    -- A rewrap needs no key at all: 'SignedBox' keeps its payload as opaque
+    -- bytes and 'MessageContent' has no sender field, so anyone who saw the
+    -- ciphertext can re-sign it under a fresh key and produce a new message
+    -- hash for a letter they never read. Canon is not at risk from that -- an
+    -- event-id is the hash of the inner box, so the second copy is refused as
+    -- 'AlreadyInCanon', and a request honoured twice is caught by
+    -- @ccHonours@ -- but everything a HUMAN does was one-shot: one queue line
+    -- per copy, one decision per copy, one tombstone per copy.
+    --
+    -- WHAT MAKES THE GROUPING POSSIBLE WITHOUT A KEY: a rewrap that still
+    -- delivers the same letter must carry @messageData@ byte for byte, because
+    -- producing a different valid ciphertext of one plaintext needs the
+    -- plaintext. So the hash of that block is an identity a rewrap cannot
+    -- change and this node can compute before a keyman lookup, before a
+    -- secretbox open, before anything.
+    --
+    -- A copy CAN be made distinct by padding the ciphertext, and that is not a
+    -- hole in this: such a message no longer opens, so it is a line in the
+    -- queue rather than a decision, which is the cheaper of the two.
+  , lvCopies   :: [HashRef]
   }
   deriving stock (Eq,Show)
 
@@ -453,7 +479,31 @@ readInbox ig mbox = do
   -- truncated one.
   let live = sort (HS.toList (mlLive ml))
       (taken, left) = List.splitAt maxInboxLetters live
-  lvs <- mapM (openMessage ig) taken
+
+  -- ONE BLOCK READ EACH, then group, then open. A rewrap costs nothing to make
+  -- -- see 'lvCopies' -- and every copy used to be its own queue line, its own
+  -- keyman lookup, its own secretbox open and its own decision, all for a
+  -- letter the maintainer had already read. The grouping key is the hash of the
+  -- ciphertext, which needs no key of ours and which a rewrap cannot change.
+  --
+  -- Only the first of each group is opened. The others were the same bytes, so
+  -- the answer would have been the same answer.
+  blocks <- for taken $ \h -> (,) h <$> igBlock ig h
+
+  let keyed  = [ (h, copyOf =<< blk, blk) | (h, blk) <- blocks ]
+      -- Grouped by the copy id, in the order the sorted page had them, so a
+      -- queue read twice is the same queue. A message with no copy id (not a
+      -- message, or an envelope that will not open) groups with nothing: there
+      -- is nothing to compare, and a guess would put two letters on one line.
+      groups = [ (h, blk, [ o | (o, k', _) <- keyed, Just k <- [key], k' == Just k, o /= h ])
+               | (h, key, blk) <- keyed
+               , maybe True (\k -> firstOf k == Just h) key
+               ]
+      firstOf k = listToMaybe [ h | (h, k', _) <- keyed, k' == Just k ]
+
+  lvs <- for groups $ \(h, blk, copies) ->
+           (\lv -> lv { lvCopies = copies }) <$> openBlock ig h blk
+
   pure (InboxRead lvs (mlMissing ml) (mlSettled ml) (length left) (mlLive ml))
 
 -- | What a mailbox HOLDS, without opening any of it.
@@ -520,14 +570,60 @@ mailboxLive ig mbox = do
 -- been fixed once already, and while this lived inside a @where@ clause nothing
 -- could have caught it coming back.
 openMessage :: MonadUnliftIO m => Ingress m -> HashRef -> m LetterView
-openMessage ig mh = do
-  blk <- igBlock ig mh
+openMessage ig mh = igBlock ig mh >>= openBlock ig mh
+
+-- | The identity a rewrap cannot change, for a block already in hand.
+--
+-- Not a hash of the whole message: that is what a rewrap DOES change, by
+-- construction. The ciphertext of the letter is what it cannot, because
+-- producing a different valid ciphertext of one plaintext needs the plaintext,
+-- and the whole point of the attack is that the rewrapper never had it.
+--
+-- 'Nothing' for a block that is not a message, or whose envelope will not open:
+-- there is nothing to compare, and grouping on a guess would put two different
+-- letters on one line, which is worse than the copies it would collapse.
+copyOf :: LBS.ByteString -> Maybe HashRef
+copyOf blk = do
+  msg <- either (const Nothing) Just (deserialiseOrFail @(Message HBS2Basic) blk)
+  (_, content) <- unboxSignedBox0 @(MessageContent HBS2Basic) (messageContent msg)
+  pure (HashRef (hashObject (serialise (messageData content))))
+
+-- | Which other messages in this mailbox carry the same letter as the one named.
+--
+-- The grouping 'readInbox' does, asked about one message rather than the whole
+-- page, because the verb that acts on a decision has to act on the same set the
+-- verb that showed it grouped. A tombstone is written per message hash, so
+-- without this rejecting one copy of a rewrapped letter rejected one copy, and
+-- the maintainer who read a letter once decided about it N times.
+--
+-- BOUNDED BY THE PAGE, which is not a shortcut: it is the set this can know
+-- without an unbounded walk, and it is the set the operator was looking at. A
+-- message from outside it answers with no copies, which is right -- nothing here
+-- has seen the others.
+copiesOf :: MonadUnliftIO m => Ingress m -> HubKey -> HashRef -> m [HashRef]
+copiesOf ig mbox msg = do
+  ml <- mailboxLive ig mbox
+  let live = List.take maxInboxLetters (sort (HS.toList (mlLive ml)))
+  keyed <- for live $ \h -> (,) h . (>>= copyOf) <$> igBlock ig h
+  pure $ case List.lookup msg keyed of
+    Just (Just k) -> [ h | (h, k') <- keyed, k' == Just k, h /= msg ]
+    _             -> []
+
+-- | The reading half of 'openMessage', over a block the caller already fetched.
+--
+-- Split out so the queue can group copies without paying for the block twice:
+-- 'readInbox' reads each block once, works out which of them carry one letter,
+-- and only then decrypts -- one keyman lookup and one secretbox open per
+-- LETTER rather than per message.
+openBlock :: MonadUnliftIO m
+          => Ingress m -> HashRef -> Maybe LBS.ByteString -> m LetterView
+openBlock ig mh blk = do
   -- Two answers, not one. These used to be the same `Nothing`, so "the peer has
   -- not downloaded this yet" and "the peer has it and it is not a message" both
   -- printed "not fetched yet" and left with 0: the first is a wait and the
   -- second never changes, and only one of them is worth retrying.
   case blk >>= either (const Nothing) Just . deserialiseOrFail @(Message HBS2Basic) of
-    Nothing  -> pure (LetterView mh Nothing (Left (unreadable blk)) Nothing)
+    Nothing  -> pure (LetterView mh Nothing (Left (unreadable blk)) Nothing [])
     Just msg -> do
       -- The envelope signer is recovered separately from the decryption, and
       -- that is the point. It is authenticated by this call alone, so on every
@@ -559,7 +655,7 @@ openMessage ig mh = do
 
       opened <- tryOpen msg
       case opened of
-        Left e -> pure (LetterView mh (envelopeFor e envelope) (Left e) Nothing)
+        Left e -> pure (LetterView mh (envelopeFor e envelope) (Left e) Nothing [])
         Right (_, _, payload) -> do
           let md = parsePayload payload
           pure LetterView
@@ -601,6 +697,10 @@ openMessage ig mh = do
                 (Nothing, _)          -> Left BadEnvelopeSig
                 (Just who, Right md') -> openWith who md'
             , lvEventId  = either (const Nothing) letterEventId md
+              -- Filled in by 'readInbox', which is the only caller that knows
+              -- what else is in the mailbox. One message read on its own has
+              -- nothing to compare against and says so.
+            , lvCopies   = []
             }
 
   where

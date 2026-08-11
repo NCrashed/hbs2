@@ -679,6 +679,28 @@ openLetterNoPolicy md
 --   * the reply channel is honoured only when the envelope signer is the
 --     inner author AND the channel names that same key's mailbox, because a
 --     rewrapper can substitute their own and a sender can name a stranger's.
+--
+-- WHO CAN REWRAP, exactly, and it is a wider set than PEP-18 assumes. The spec
+-- reads as though rewrapping is available to a recipient -- somebody who
+-- decrypted the letter and re-sent it. It is available to ANYONE WHO SAW THE
+-- CIPHERTEXT: 'SignedBox' keeps its payload as opaque bytes and
+-- @MessageContent@ has no sender field, so re-signing a captured envelope under
+-- a fresh key needs no key of the attacker's and no plaintext.
+--
+-- What that does and does not reach. Canon is not at risk: an event-id is the
+-- hash of the inner box, so a second copy is refused as @AlreadyInCanon@, and a
+-- request honoured twice is caught by the honours-id, which is the request's own
+-- box. What IS reached is everything a person does -- one queue line, one
+-- decision and one tombstone per copy -- and 'copiesOf' in "HBS2.Hub.Ingress" is
+-- the answer to that: the ciphertext is what a rewrap cannot change, so copies
+-- group without any key at all.
+--
+-- WHAT STAYS TRUE AND IS WORTH SAYING OUT LOUD: the only key every copy shares
+-- is the INNER AUTHOR's, so the only ban that stops a flood of rewraps is a ban
+-- on the person whose letter was captured. That is a property of the protocol
+-- and not a gap in this function. @hub block@ names the envelope key, and the
+-- rewrapper mints a fresh one per copy. Pricing the flood is @(pow D)@, which is
+-- zero unless somebody sets it (see @hub policy pow@).
 openLetterAs
      -- | May a letter from this key be folded? Asked about the inner author,
      -- and about the envelope signer when there is no inner author to ask

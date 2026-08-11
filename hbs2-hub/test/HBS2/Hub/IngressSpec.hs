@@ -250,6 +250,70 @@ spec1 = do
       length missed `shouldBe` 5
       all (`HS.member` irLive r) missed `shouldBe` True
 
+    -- A REWRAP NEEDS NO KEY. 'SignedBox' keeps its payload as opaque bytes and
+    -- 'MessageContent' has no sender field, so anyone who saw the ciphertext can
+    -- re-sign it under a fresh key and produce a new message hash for a letter
+    -- they never read. Canon is not at risk (an event-id is the hash of the
+    -- inner box, so the copy is 'AlreadyInCanon'), but everything a HUMAN does
+    -- was one-shot: a line, a decision and a tombstone per copy, for a letter
+    -- read once.
+    --
+    -- What makes the grouping possible without any key of ours: a rewrap that
+    -- still delivers the letter must carry the ciphertext byte for byte,
+    -- because producing a different valid ciphertext of one plaintext needs the
+    -- plaintext.
+    it "shows one line for a letter rewrapped under many envelopes" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      let ac = AOpen owner HubIssue "t" [] Nothing Nothing Nothing 1
+      (msg, gks) <- opened alice
+                      (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice)
+                                                 ac noReplyChannel))
+      -- Three strangers, none of whom can read it, each re-signing the same
+      -- bytes. And a fourth message that is a different letter, to say the
+      -- grouping is about the ciphertext and not about "everything collapses".
+      m1 <- rewrap msg <$> newCredentials @'HBS2Basic
+      m2 <- rewrap msg <$> newCredentials @'HBS2Basic
+      bob <- newCredentials @'HBS2Basic
+      (other, _) <- opened bob
+                      (letterPayload (makeLetter (_peerSignPk bob) (_peerSignSk bob)
+                                                 ac noReplyChannel))
+
+      let ig = servingAll [msg, m1, m2, other] gks
+      r <- readInbox ig owner
+
+      -- Two lines: one letter, and the other letter.
+      length (irLetters r) `shouldBe` 2
+      -- ...and all four messages are still live, because grouping is a decision
+      -- about the QUEUE and not a claim about the mailbox.
+      HS.size (irLive r) `shouldBe` 4
+
+      let copiesShown = concatMap lvCopies (irLetters r)
+      length copiesShown `shouldBe` 2
+      -- the representative is not listed among its own copies
+      all (`notElem` fmap lvMessage (irLetters r)) copiesShown `shouldBe` True
+
+    -- And the verb that acts on the decision acts on the same set: a tombstone
+    -- is per message hash, so without this rejecting one copy rejected one copy.
+    it "answers with the copies of a letter, for the verb that drops them" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      let ac = AOpen owner HubIssue "t" [] Nothing Nothing Nothing 1
+      (msg, gks) <- opened alice
+                      (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice)
+                                                 ac noReplyChannel))
+      m1 <- rewrap msg <$> newCredentials @'HBS2Basic
+      let ig = servingAll [msg, m1] gks
+          hashOf m = HashRef (hashObject (serialise m))
+      cs <- copiesOf ig owner (hashOf msg)
+      cs `shouldBe` [hashOf m1]
+      -- asked from the other end it answers the other one, so the relation is
+      -- symmetric and neither copy is privileged
+      copiesOf ig owner (hashOf m1) `shouldReturn` [hashOf msg]
+      -- a message this mailbox does not hold has no copies here, rather than
+      -- an answer invented from nothing
+      copiesOf ig owner (mh "elsewhere") `shouldReturn` []
+
     it "tells a block that has not arrived from one that is not a message" $ do
       -- These were one answer. "not fetched yet" is a WAIT, and it was what a
       -- block the peer holds and cannot decode also said -- a wait for something
@@ -649,3 +713,32 @@ partSeam =
       -- pending, the one where the tree could not be measured at all, and the
       -- accept turns both into a Retry rather than a refusal.
       fmap (fmap fst) r `shouldBe` [(part, PartPending 40)]
+
+-- | A rewrap: the same 'MessageContent', re-signed by somebody who never read
+-- it. The whole attack in four lines, which is the point of writing it out.
+rewrap :: Message 'HBS2Basic -> PeerCredentials 'HBS2Basic -> Message 'HBS2Basic
+rewrap (MessageBasic box) creds =
+  case unboxSignedBox0 @(MessageContent 'HBS2Basic) box of
+    Just (_, content) ->
+      MessageBasic (makeSignedBox @'HBS2Basic (_peerSignPk creds) (_peerSignSk creds) content)
+    Nothing -> error "the fixture built an envelope that will not open"
+
+-- | A mailbox holding these messages, each at its own hash, with one group key
+-- that opens all of them.
+servingAll :: [Message 'HBS2Basic] -> GroupSecret -> Ingress IO
+servingAll msgs gks = stub
+  { igRoot   = const (pure (Just treeH))
+  , igBlock  = \h -> pure (lookup h store)
+  , igSecret = ReadMessageServices (const (pure (Just gks)))
+  }
+  where
+    -- The entry and the message it names live at DIFFERENT hashes, unlike the
+    -- fixture above where nothing decodes the message and the two were allowed
+    -- to coincide. Here they must not: a store keyed by hash would serve the
+    -- entry where the message was asked for.
+    blobs   = [ (HashRef (hashObject b), b) | b <- fmap serialise msgs ]
+    entries = [ (HashRef (hashObject e), e)
+              | (h, _) <- blobs, let e = serialise (Exists mempty h) ]
+    treeB   = serialise (MLeaf (fmap fst entries) :: MTree [HashRef])
+    treeH   = HashRef (hashObject treeB)
+    store   = (treeH, treeB) : entries <> blobs
