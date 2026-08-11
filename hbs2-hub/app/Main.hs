@@ -30,7 +30,6 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run
 import HBS2.CLI.Run.Help
 
-import Data.Config.Suckless.Script.File qualified as SF
 
 import Data.HashMap.Strict qualified as HM
 import Data.List (isPrefixOf,sort)
@@ -154,7 +153,36 @@ main = do
               -- What actually converts them is a converter.
               <> "\nConvert it first, e.g. with iconv -f <encoding> -t UTF-8." )
 
-  let dict = makeDict do
+  -- AN ALLOWLIST, and it is the whole of what this tool answers to.
+  --
+  -- The dictionary inherits hbs2-cli's 'internalEntries', which inherits
+  -- suckless-conf's, which binds about 154 verbs nothing here documents --
+  -- @rm@, @mv@, @cp@, @cd@, @setenv@ and the whole @run:proc:*@ family. So
+  -- `hbs2-hub rm victim.txt` deleted the file and exited 0, and `help rm`
+  -- answered for it while @--help@, which lists the @hub:@ names, did not.
+  -- A tool that files issues does not need to delete files, and surface it does
+  -- not need is surface a typo can land in.
+  --
+  -- NOT BY DROPPING A MODULE, which is where the obvious fix goes wrong: those
+  -- primitives are in @Script.Internal@, next to the evaluator, and not in
+  -- @Script.File@ as their names suggest -- so removing the import that looks
+  -- responsible removes something else and leaves @rm@ bound. And a blocklist is
+  -- the wrong shape whichever module it names: the upstream set grows, and a
+  -- verb added there would arrive here unannounced.
+  --
+  -- So the surface is stated positively: the verbs this tool defines, plus the
+  -- four names that are about the tool rather than about a forge. @--run@
+  -- evaluates in THIS dictionary, so a script gets the forge verbs in sequence
+  -- and nothing that touches the filesystem or spawns a process. Anything that
+  -- has to move a file has a shell, and hbs2-cli still ships the full set.
+  --
+  -- FREEZING THE CLI FREEZES WHAT IS IN IT, which is why this happens before a
+  -- release: dropping a verb somebody's script calls is a break, and none of
+  -- these has a caller yet.
+  let ours (Id t) = "hub:" `Text.isPrefixOf` t
+                      || t `elem` ["help", "--help", "--version", "--run"]
+
+      dict = HM.filterWithKey (\k _ -> ours k) $ makeDict do
         internalEntries
         inboxEntries
         acceptEntries
@@ -202,7 +230,6 @@ main = do
              | otherwise -> liftIO (hubHelp dict)
 
         helpEntries
-        SF.entries
 
         -- Own top-level help. The inherited one lists every builtin the
         -- suckless script dictionary carries, alphabetically, which put the two

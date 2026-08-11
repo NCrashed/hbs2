@@ -627,6 +627,22 @@
 
 ## Fixed
 
+  - **`hbs2-hub rm <file>` deleted the file.** The dictionary inherited about
+    154 verbs nothing here documents -- `rm`, `mv`, `cp`, `cd`, `setenv` and the
+    whole `run:proc:*` family -- so a typo landed in them: `hbs2-hub rm
+    victim.txt` removed it and exited 0, and `help rm` answered for it while
+    `--help`, which lists the forge verbs, did not.
+
+    The surface is stated positively now: the dictionary is filtered to the
+    `hub:` verbs plus `help`, `--help`, `--version` and `--run`. Not by dropping
+    a module -- those primitives live next to the evaluator, not in the
+    file-operations module their names suggest, so the obvious removal takes
+    something else and leaves `rm` bound -- and not by a blocklist, which the
+    upstream set would outgrow. `--run` evaluates in the same dictionary, so a
+    script gets the forge verbs in sequence and nothing that touches the
+    filesystem or spawns a process; anything that has to move a file has a
+    shell, and `hbs2-cli` still ships the full set.
+
   - **`hbs2-hub compact`: it erased the only record a tree keeps of two rule
     sets.** `(hub-event N)` is per file and has no consumer yet; every retained
     file goes back through the renderer on a compaction, and the version came
