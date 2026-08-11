@@ -77,7 +77,8 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,codeMailboxUnknown, codePeerSilent
                            ,withCanon, OnMissing(..)
                            ,blessed, committing, WriteStop(..)
-                           ,signerFor, signingPair)
+                           ,signerFor, signingPair
+                           ,mailboxHoles, holesDoc, codeMailboxIncomplete)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
@@ -283,12 +284,20 @@ data AcceptArgs = AcceptArgs
     -- queue that keeps everything it folded is a queue nobody can triage from
     -- after a week.
   , aaKeep    :: Bool
+    -- | Fold even though the mailbox tree has holes in it.
+    --
+    -- The membership answer over a tree with an unreadable chunk is wrong in
+    -- both directions, and this verb is irreversible, so the default is to
+    -- refuse. The escape exists because a tree is a stranger's: without it one
+    -- block nobody can serve would make a mailbox permanently
+    -- unacceptable-from, which is a denial anybody could arrange.
+  , aaIncomplete :: Bool
   }
   deriving stock (Eq,Show)
 
 acceptUsage :: Doc ()
 acceptUsage =
-  "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep]"
+  "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep] [--incomplete]"
 
 -- | @hub inbox accept@.
 acceptEntries :: forall c m . ( IsContext c
@@ -305,7 +314,8 @@ acceptEntries = do
            , arg "string" "--repo repo-key"
            , arg "string" "--message message-hash"
            , arg "string" "[--as canon-key]"
-           , arg "string" "[--keep]" ]
+           , arg "string" "[--keep]"
+           , arg "string" "[--incomplete]" ]
     -- It was "Writes. Everything else in this tool reads", and that was true
     -- when accept was the only writer. Six more verbs write canon now, and a
     -- sentence a reader can check against `hub --help` is a sentence that has
@@ -318,6 +328,16 @@ acceptEntries = do
              <> line <> "compare-and-swap against the canon it folded, so two"
              <> line <> "accepts racing leave one refusal rather than one silent"
              <> line <> "loss."
+             <> line
+             <> line <> "IT REFUSES OVER A MAILBOX TREE WITH HOLES IN IT. A chunk"
+             <> line <> "that would not read makes the membership question"
+             <> line <> "wrong in both directions: a missing chunk of Exists"
+             <> line <> "entries hides letters, one of Deleted entries brings back"
+             <> line <> "letters that were already settled -- and folding one of"
+             <> line <> "those puts it in every clone forever. hbs2-peer download"
+             <> line <> "<hash> asks for a block; --incomplete folds anyway, and"
+             <> line <> "exists so that one block nobody can serve cannot make a"
+             <> line <> "mailbox permanently unacceptable-from."
              <> line
              <> line <> "--as names the canon key to sign with, for a delegate"
              <> line <> "(PEP-21). It defaults to the repo key, which is the owner"
@@ -425,12 +445,42 @@ acceptEntries = do
       -- mailbox" about a letter that is, with no flag to raise the bound. That
       -- one was permanent for the price of an afternoon; the drop below now
       -- clears the junk, which shortens the queue and does not fix the reasoning.
+      -- AND A HOLE IN THE TREE MAKES THAT ANSWER WORTHLESS, in both directions.
+      -- `hub inbox` has said so for a long time and exits 2 for it; the two
+      -- verbs that ask a MEMBERSHIP question over the same walk read only the
+      -- live set, so the reasoning stopped at the verb that lists and did not
+      -- reach the one that publishes to every clone forever. A missing chunk of
+      -- @Deleted@ entries is the sharp direction: this would fold a letter the
+      -- maintainer had already settled, and canon is append-only.
+      --
+      -- REFUSED AND NOT WARNED, because the act is irreversible and a warning
+      -- before an irreversible act that proceeds anyway is a warning nobody
+      -- reads twice. Not refused FOREVER either: --incomplete is the way past
+      -- it, and it exists because a tree is a stranger's -- one block nobody can
+      -- serve would otherwise make a mailbox permanently unacceptable-from,
+      -- which is a denial anybody could arrange.
+      unless (aaIncomplete a) $
+        for_ (mailboxHoles inbox) $ \hs ->
+          liftIO $ refuse (show ( holesDoc mbox msg hs <> line
+                                    <> "  --incomplete accepts anyway, if you know"
+                                    <+> "this letter is not settled." ))
+                          codeMailboxIncomplete
+
       unless (HS.member msg (mlLive inbox)) $
         liftIO $ refuse (show ( pretty msg <+> "is not in mailbox"
                                   <+> pretty (AsBase58 mbox)
                                   <> (if mlSettled inbox
                                         then mempty
-                                        else ", which had not settled when it was read") ))
+                                        else ", which had not settled when it was read")
+                                  -- Said HERE too, because with --incomplete
+                                  -- this refusal is the one that may be a lie:
+                                  -- the entry naming this message can be in a
+                                  -- chunk that did not read.
+                                  <> (case mlMissing inbox of
+                                        [] -> mempty
+                                        hs -> ", and" <+> pretty (length hs)
+                                                <+> "block(s) of it could not be read,"
+                                                <+> "so this answer is not reliable") ))
                         codeLetterUnreadable
 
       raw <- rawMessage ig msg
@@ -698,7 +748,8 @@ acceptEntries = do
 -- type, so a swap is a well-typed accept against the wrong repository.
 acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe AcceptArgs
 acceptArgs syn = do
-  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"]) ["--keep"] syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"])
+                           ["--keep","--incomplete"] syn
   -- Optional, unlike the repository: without it the manifest is read. A
   -- caller who names it is not asking to be corrected, so it wins and costs
   -- no lookup.
@@ -712,7 +763,8 @@ acceptArgs syn = do
   as   <- flagMaybe kvs "--as" asKey
   -- A switch, so `--keep --repo K` cannot bind the repository as its value.
   keep <- flagSwitch kvs "--keep"
-  pure (AcceptArgs mbox repo h as keep)
+  inc  <- flagSwitch kvs "--incomplete"
+  pure (AcceptArgs mbox repo h as keep inc)
   where
     -- EVERY value is behind a flag, including the message, and nothing is
     -- positional. Not a style choice: a sign key and a hash are both thirty-two

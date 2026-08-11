@@ -54,7 +54,7 @@ spec1 = do
       mbox <- aKey
       repo <- aKey
       let h = aHash "a message"
-          want = Just (AcceptArgs (Just mbox) repo h Nothing False)
+          want = Just (AcceptArgs (Just mbox) repo h Nothing False False)
       acceptArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)])
         `shouldBe` want
       acceptArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox, "--message", show (pretty h)])
@@ -69,7 +69,7 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv [ "--mailbox", b58 mbox, "--repo", b58 repo
                        , "--as", b58 bob, "--message", show (pretty h) ])
-        `shouldBe` Just (AcceptArgs (Just mbox) repo h (Just bob) False)
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h (Just bob) False False)
 
     -- The letter is dropped from the mailbox after the fold, so the flag that
     -- keeps it has to be a flag and not an absence: an accept that quietly kept
@@ -87,6 +87,21 @@ spec1 = do
       acceptArgs (argv (base <> ["--keep", "yes"])) `shouldBe` Nothing
       acceptArgs (argv (base <> ["--keep", "--keep"])) `shouldBe` Nothing
 
+    -- The escape from a refusal that is otherwise permanent, so it has to be a
+    -- flag and it has to take no value: a mailbox tree is a stranger's, and one
+    -- block nobody can serve would make it unacceptable-from for good.
+    it "reads --incomplete, and it takes no value" $ do
+      mbox <- aKey
+      repo <- aKey
+      let h = aHash "a message"
+          base = ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)]
+      fmap aaIncomplete (acceptArgs (argv base)) `shouldBe` Just False
+      fmap aaIncomplete (acceptArgs (argv (base <> ["--incomplete"]))) `shouldBe` Just True
+      acceptArgs (argv (base <> ["--incomplete", "yes"])) `shouldBe` Nothing
+      -- and the two switches do not eat each other
+      acceptArgs (argv (base <> ["--keep", "--incomplete"]))
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h Nothing True True)
+
     -- The repository is required and the mailbox is not: without one the
     -- manifest is read (PEP-18), and a mailbox named by hand skips that. A
     -- form with neither is a form this verb must not act on at all.
@@ -95,7 +110,7 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv ["--mailbox", b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
       acceptArgs (argv ["--repo", b58 k, "--message", show (pretty h)])
-        `shouldBe` Just (AcceptArgs Nothing k h Nothing False)
+        `shouldBe` Just (AcceptArgs Nothing k h Nothing False False)
       acceptArgs (argv [b58 k, b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
 
     it "refuses a form with no message" $ do

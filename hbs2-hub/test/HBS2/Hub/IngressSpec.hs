@@ -4,6 +4,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Ingress
 import HBS2.Hub.Bridge (PartEvidence(..))
 import HBS2.Hub.CLI.Accept (partEvidence)
+import HBS2.Hub.CLI.Common (mailboxHoles,holesDoc)
 import HBS2.Hub.Letter (maxPartBytes)
 import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel
                        ,Envelope(..),hubMsgWrite)
@@ -29,6 +30,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
+import Data.List (isInfixOf)
 import Crypto.Saltine.Core.SecretBox qualified as SK
 import Crypto.Saltine.Class qualified as Saltine
 import Data.IORef
@@ -87,7 +89,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> partSeam
+spec = spec1 >> spec2 >> spec3 >> partSeam >> holes
 
 spec1 :: Spec
 spec1 = do
@@ -742,3 +744,36 @@ servingAll msgs gks = stub
     treeB   = serialise (MLeaf (fmap fst entries) :: MTree [HashRef])
     treeH   = HashRef (hashObject treeB)
     store   = (treeH, treeB) : entries <> blobs
+
+-- | WHAT A MEMBERSHIP ANSWER IS WORTH OVER A TREE WITH HOLES IN IT.
+--
+-- `hub inbox` has said for a long time that a hole makes its list wrong in BOTH
+-- directions and exits 2 for it. The two verbs that ask a MEMBERSHIP question
+-- over the same walk read only the live set, so the reasoning stopped at the
+-- verb that lists and did not reach the one that publishes to every clone
+-- forever.
+holes :: Spec
+holes =
+  describe "PEP-22 a mailbox tree that did not read whole" $ do
+
+    it "answers with the holes when there are any, and nothing when there are none" $ do
+      mailboxHoles (MailboxLive mempty [] True) `shouldBe` Nothing
+      mailboxHoles (MailboxLive mempty [mh "a", mh "b"] True)
+        `shouldBe` Just [mh "a", mh "b"]
+      -- Settling is a different question and must not answer this one: an
+      -- unsettled read is a SHORTER answer, a holed one is a WRONG answer.
+      mailboxHoles (MailboxLive mempty [] False) `shouldBe` Nothing
+
+    -- A hash is the one thing anybody can act on, and the tree is a stranger's,
+    -- so the list it comes from is a length a stranger chose.
+    it "names the blocks and what to run, and does not print all of them" $ do
+      k <- aKey
+      let said = show (holesDoc k (mh "m") [ mh (B8.pack (show i)) | i <- [1 .. 50 :: Int] ])
+      said `shouldSatisfy` isInfixOf "hbs2-peer download"
+      said `shouldSatisfy` isInfixOf "Nothing was written"
+      said `shouldSatisfy` isInfixOf "50 block(s)"
+      -- both directions named, because a reader who only hears about one will
+      -- reason about the wrong risk
+      said `shouldSatisfy` isInfixOf "Exists"
+      said `shouldSatisfy` isInfixOf "Deleted"
+      length (lines said) `shouldSatisfy` (< 20)

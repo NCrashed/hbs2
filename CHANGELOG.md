@@ -627,6 +627,24 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox accept`: it folded over a mailbox tree it had not read
+    whole.** `hub inbox` has said for a long time that a chunk which would not
+    read makes its list wrong in BOTH directions -- a missing chunk of `Exists`
+    entries hides letters, one of `Deleted` entries brings back letters that
+    were already settled -- and exits 2 for it. The two verbs that ask a
+    MEMBERSHIP question over the same walk read only the live set, so the
+    reasoning stopped at the verb that lists and never reached the one that
+    publishes to every clone forever.
+
+    `accept` refuses now, rather than warning: the act is irreversible, and a
+    warning before an irreversible act that proceeds anyway is a warning nobody
+    reads twice. `--incomplete` is the way past it, and it exists because a
+    mailbox tree is a stranger's -- without it one block nobody can serve would
+    make a mailbox permanently unacceptable-from, which is a denial anybody
+    could arrange. `inbox show` writes nothing, so it says so instead of
+    refusing, and both verbs qualify their "is not in mailbox" refusal, which
+    is the direction in which it can be a lie.
+
   - **`hbs2-hub`: a repository could send every contribution to the wrong
     mailbox, silently.** The manifest carries two clauses written by hand and
     only one of them decides anything: `resolveKeys` on the peer takes the

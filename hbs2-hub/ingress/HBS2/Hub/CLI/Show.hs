@@ -42,7 +42,8 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf
                            ,codeMailboxUnknown,codePeerSilent
-                           ,withCanon,OnMissing(..))
+                           ,withCanon,OnMissing(..)
+                           ,mailboxHoles,holesDoc)
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
@@ -164,12 +165,29 @@ showEntries = do
                 `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
                 `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
+      -- A HOLE IN THE TREE MAKES THIS ANSWER WRONG IN BOTH DIRECTIONS, and this
+      -- verb read only the live set. Said and not refused, unlike the accept
+      -- next door: showing a letter writes nothing, so the useful thing is for
+      -- the reader to know how much to believe the answer they got. It goes to
+      -- stderr, so a --json consumer's stdout is still one document.
+      liftIO $ for_ (mailboxHoles live) $ \hs ->
+        saying (holesDoc mbox msg hs <> line)
+
       unless (HS.member msg (mlLive live)) $
         liftIO $ refuse (show ( pretty msg <+> "is not in mailbox"
                                   <+> pretty (AsBase58 mbox)
                                   <> (if mlSettled live
                                         then mempty
-                                        else ", which had not settled when it was read") ))
+                                        else ", which had not settled when it was read")
+                                  -- The refusal repeats it, because this is the
+                                  -- direction in which it may be a lie: the
+                                  -- entry naming this message can be in a chunk
+                                  -- that did not read.
+                                  <> (case mlMissing live of
+                                        [] -> mempty
+                                        hs -> ", and" <+> pretty (length hs)
+                                                <+> "block(s) of it could not be read,"
+                                                <+> "so this answer is not reliable") ))
                         codeLetterUnreadable
 
       lv <- openMessage ig msg

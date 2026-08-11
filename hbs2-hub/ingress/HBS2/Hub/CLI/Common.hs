@@ -17,6 +17,9 @@ module HBS2.Hub.CLI.Common
   , utcOf
   , overRpc
   , manifestCode
+  , mailboxHoles
+  , holesDoc
+  , codeMailboxIncomplete
   , codeMailboxUnknown
   , codePeerSilent
   , signerFor
@@ -60,6 +63,8 @@ import Control.Monad.Except (runExceptT)
 import Crypto.Saltine.Class qualified as Saltine
 
 import Data.Coerce (coerce)
+import Data.List qualified as List
+import HBS2.Base58 (AsBase58(..))
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
@@ -257,6 +262,48 @@ manifestCode :: ManifestGone -> Int
 manifestCode = \case
   ManifestPeerSilent -> codePeerSilent
   _                  -> codeNoManifest
+
+-- | The holes in a mailbox tree, when a membership answer over it has any.
+--
+-- 'hub inbox' has said for a long time that a hole makes its list wrong in BOTH
+-- directions -- a missing chunk of @Exists@ entries makes letters vanish, one of
+-- @Deleted@ entries puts settled letters back -- and exits 2 for it. The two
+-- verbs that ask a MEMBERSHIP question over the same walk read only 'mlLive'
+-- and 'mlSettled', so the reasoning stopped at the verb that only lists and did
+-- not reach the one that publishes to every clone forever.
+--
+-- One function because the two verbs must not answer this differently, and
+-- 'Maybe' rather than a Bool so the caller has the hashes to print: a hash is
+-- the one thing anybody can act on.
+mailboxHoles :: MailboxLive -> Maybe [HashRef]
+mailboxHoles ml
+  | List.null (mlMissing ml) = Nothing
+  | otherwise                = Just (mlMissing ml)
+
+-- | And what to say about them.
+--
+-- Bounded, on the rule every report over a stranger's bytes here follows: the
+-- tree is a stranger's and so is the length of this list.
+holesDoc :: HubKey -> HashRef -> [HashRef] -> Doc AnsiStyle
+holesDoc mbox msg hs =
+  pretty (length hs) <+> "block(s) of mailbox" <+> pretty (AsBase58 mbox)
+    <+> "could not be read," <> line
+    <> "  so whether" <+> pretty msg <+> "is in it cannot be answered either way:"
+    <> line
+    <> "  a missing chunk of Exists entries hides letters, one of Deleted"
+      <+> "entries" <> line
+    <> "  brings back letters that were settled." <> line
+    <> indent 2 (vsep (fmap pretty (take 10 hs))) <> line
+    <> "  `hbs2-peer download <hash>` asks for one. Nothing was written."
+
+-- | A membership answer that cannot be believed, over a tree with holes in it.
+--
+-- Its own code, and NOT 'codeLetterUnreadable': nothing is wrong with the
+-- letter, nothing is wrong with this node, and the remedy is neither retyping
+-- the command nor giving up -- it is fetching some blocks. A script sweeping a
+-- queue wants to come back to this one rather than treat it as decided.
+codeMailboxIncomplete :: Int
+codeMailboxIncomplete = 50
 
 -- | Take what the bridge blessed, or stop with what the bridge said.
 --
