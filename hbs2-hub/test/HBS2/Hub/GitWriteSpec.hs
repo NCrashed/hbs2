@@ -117,7 +117,7 @@ anOpen alice owner sq title = do
              (AOpen repo HubIssue title [] (Just "body") Nothing Nothing (sq * 1000))
              (canonOf repo sq (Just sq))
       p = threadDir (eventId ev) <> "/" <> eventFileName sq (eventId ev)
-  cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [(sq, eventId ev)])
+  cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [(p, ev)] [(sq, eventId ev)])
   pure (ev, cw)
 
 spec :: Spec
@@ -235,7 +235,7 @@ spec1 = do
       alice <- kp
       (ev, _) <- anOpen alice owner 1 "an issue"
       let odd' = "threads/\1055\1088\1080\1074\1077\1090/" <> eventFileName 1 (eventId ev)
-      cw <- either (fail . show) pure (planCanon Nothing [(odd', ev)] [])
+      cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [(odd', ev)] [])
       void $ commitOk dir Nothing cw 1000
 
       names <- git dir ["ls-tree", "-r", "--name-only", "refs/hbs2/meta"]
@@ -305,7 +305,7 @@ spec1 = do
                  (AOpen repo HubIssue "a real issue" [] (Just "body") Nothing Nothing 1000)
                  (canonOf repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [(1, eventId ev)])
+      cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [(p, ev)] [(1, eventId ev)])
       void $ commitOk dir Nothing cw 1000
 
       st <- readBack dir repo
@@ -523,7 +523,7 @@ spec3 =
             s2 = mkEvent owner owner (ASet thr "labels" (encodeLabels ["b"]) 3000)
                          (canonOf repo 3 Nothing)
         cwBoth <- either (fail . show) pure
-                    (planCanon Nothing [ (threadDir thr <> "/" <> eventFileName 2 (eventId s1), s1)
+                    (planCanon Nothing (const Nothing) [ (threadDir thr <> "/" <> eventFileName 2 (eventId s1), s1)
                                , (threadDir thr <> "/" <> eventFileName 3 (eventId s2), s2) ]
                                [(1, thr)])
         c2 <- commitOk dir (Just c1) cwBoth 3000
@@ -537,7 +537,7 @@ spec3 =
         length (cpDrop c) `shouldBe` 1
 
         plan <- either (fail . show) pure
-                  (planCanon (stVersion before) held (numberIndexOf (stFold before)))
+                  (planCanon (stVersion before) (const Nothing) held (numberIndexOf (stFold before)))
         _ <- withGitSinkIn (Just dir) $ \sk ->
                skRewrite sk (CanonWrite (Just c2) (cwFiles plan) "compacted" 4000)
                  >>= either (fail . show) pure

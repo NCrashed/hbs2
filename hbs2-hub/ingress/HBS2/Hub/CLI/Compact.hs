@@ -325,7 +325,15 @@ compactEntries = do
                 -- the retained set may no longer contain the event that raised
                 -- it, and a rewrite that quietly said "version 1" would tell a
                 -- version 1 build it may fold what it cannot.
+                -- AND THE VERSION EACH FILE DECLARED, which this used to throw
+                -- away: every retained file was re-rendered with this build's
+                -- constant, so a file that said (hub-event 1) came back saying
+                -- 2 and the only record a tree keeps of holding files written
+                -- under two rule sets was destroyed by the one verb that
+                -- rewrites files. The clause has no consumer yet, which is
+                -- precisely why it must survive until it does.
                 (planCanon (stVersion st)
+                           (declaredBy (stFileVersions st))
                            [ (BS8.unpack p, e) | (p, e) <- held ]
                            (numbersOf (stFold st)))
 
@@ -347,6 +355,15 @@ compactEntries = do
       liftIO (saying (notPublishedYet <> line))
 
     numbersOf fr = numberIndexOf fr
+
+    -- The reader already carries this, keyed by the path it read the file at,
+    -- and 'planCanon' asks by the path it is about to write it at -- which are
+    -- the same path, because a compaction puts every file back under the name
+    -- it had. A file the reader saw no clause on answers Nothing, which is this
+    -- build's rules, and that is right: there is nothing to preserve.
+    declaredBy vers p = case List.lookup (BS8.pack p) vers of
+                          Just v  -> v
+                          Nothing -> Nothing
 
     message c = "hub: compacted, dropped " <> tshow (length (cpDrop c)) <> " event(s)"
 

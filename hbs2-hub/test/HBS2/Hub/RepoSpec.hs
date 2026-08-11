@@ -79,7 +79,7 @@ readOk :: CanonSource IO -> RepoRef -> IO CanonState
 readOk cs repo = readCanon cs repo >>= either (fail . show) pure
 
 spec :: Spec
-spec = do
+spec = eventVersions >> do
 
   describe "PEP-19 canon tree" $ do
 
@@ -725,7 +725,7 @@ spec = do
           evs = [ (threadDir thr <> "/" <> eventFileName 1 thr, eOpen)
                 , (threadDir thr <> "/" <> eventFileName 2 (eventId eCom), eCom) ]
 
-      cw <- either (fail . show) pure (planCanon Nothing evs [(1, thr)])
+      cw <- either (fail . show) pure (planCanon Nothing (const Nothing) evs [(1, thr)])
       cwIndexOmitted cw `shouldBe` 0
 
       st <- readOk (inMemory (asFiles cw)) repo
@@ -755,7 +755,7 @@ spec = do
                 | (n,e) <- [(1,e1),(2,e2)] ]
 
       st0 <- readOk (inMemory (evFiles evs)) repo
-      cw <- either (fail . show) pure (planCanon (stVersion st0) evs (numberIndexOf (stFold st0)))
+      cw <- either (fail . show) pure (planCanon (stVersion st0) (const Nothing) evs (numberIndexOf (stFold st0)))
 
       let idx = lookup (B8.pack numberIndexPath) (cwFiles cw)
       parseNumberIndex (Text.decodeUtf8 (maybe "" id idx))
@@ -778,7 +778,7 @@ spec = do
                    (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
                    (canon repo 1 (Just 1))
             p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-        cw <- either (fail . show) pure (planCanon Nothing [(p, ev)] [])
+        cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [(p, ev)] [])
         verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
       -- What each EVENT needs is still a per-event question, and the floor
@@ -810,7 +810,7 @@ spec = do
                    (AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000)
                    (canon repo 1 (Just 1))
             p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-        cw <- either (fail . show) pure (planCanon (Just ahead) [(p, ev)] [])
+        cw <- either (fail . show) pure (planCanon (Just ahead) (const Nothing) [(p, ev)] [])
         verOf cw `shouldBe` [renderMeta (metaAt ahead)]
 
       -- The floor in the other direction, which is what @hub-meta 3@ needed: a
@@ -820,11 +820,11 @@ spec = do
       -- version can decode would go on declaring 1 while being written under
       -- rules a version 1 reader disagrees with about 'frMaxSeq'.
       it "raises a declaration that sits below the floor" $ do
-        cw <- either (fail . show) pure (planCanon (Just 1) [] [])
+        cw <- either (fail . show) pure (planCanon (Just 1) (const Nothing) [] [])
         verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
       it "declares the floor for an empty canon nobody has written to" $ do
-        cw <- either (fail . show) pure (planCanon Nothing [] [])
+        cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [] [])
         verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
     it "refuses two events that claim one path" $ do
@@ -835,7 +835,7 @@ spec = do
                  (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
                  (canon repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      planCanon Nothing [(p, ev), (p, ev)] [] `shouldBe` Left (PathCollision p)
+      planCanon Nothing (const Nothing) [(p, ev), (p, ev)] [] `shouldBe` Left (PathCollision p)
 
     -- The reader refuses a file over its bounds, and a writer that produced one
     -- anyway would put an event in every clone that this build folds without.
@@ -852,7 +852,7 @@ spec = do
                  (AOpen repo HubIssue "an issue" [] (Just huge) Nothing Nothing 1000)
                  (canon repo 1 (Just 1))
           p = threadDir (eventId ev) <> "/" <> eventFileName 1 (eventId ev)
-      case planCanon Nothing [(p, ev)] [] of
+      case planCanon Nothing (const Nothing) [(p, ev)] [] of
         Left (EventUnwritable p' _) -> p' `shouldBe` p
         other -> expectationFailure ("expected a refusal, got " <> show (fmap cwFiles other))
 
@@ -862,7 +862,7 @@ spec = do
     it "says how many numbers the index could not hold" $ do
       let ids = [ HashRef (hashObject (LBS.pack (show i))) | i <- [1 :: Int .. 60000] ]
           numbers = zip [1 ..] ids
-      cw <- either (fail . show) pure (planCanon Nothing [] numbers)
+      cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [] numbers)
       cwIndexOmitted cw `shouldSatisfy` (> 0)
       -- and what it DID hold is readable, which is the half that makes
       -- truncating better than refusing
@@ -879,3 +879,58 @@ asFiles cw = [ (Text.unpack (Text.decodeUtf8 p), Text.decodeUtf8 b) | (p,b) <- c
 -- A tree of just the events, for reading a fold back before planning from it.
 evFiles :: [(FilePath, Event)] -> [(FilePath, Text)]
 evFiles evs = ("version", renderMeta (metaAt hubMetaVersion)) : [ (p, renderEvent e) | (p,e) <- evs ]
+
+-- | THE ONLY RECORD A TREE KEEPS OF TWO RULE SETS, and the one verb that
+-- rewrites files was destroying it.
+--
+-- `(hub-event N)` is per file and has no consumer yet. Every retained file goes
+-- back through the renderer on a compaction, and with the version taken from
+-- this build's constant a file that said 1 came back saying 2 -- so a reader
+-- could no longer tell an old event from a new one, in a tree that no longer
+-- held the evidence. It cannot be recovered afterwards, which is exactly why a
+-- clause nothing reads yet has to survive until something does.
+eventVersions :: Spec
+eventVersions =
+  describe "PEP-19 tree: the version each file declares" $ do
+
+    let anEvent owner alice sq =
+          mkEvent alice owner
+            (AOpen (fst owner) HubIssue "t" [] (Just "body") Nothing Nothing 1000)
+            (canon (fst owner) sq (Just sq))
+
+    it "writes this build's version for an event it just minted" $ do
+      owner <- kp ; alice <- kp
+      let ev = anEvent owner alice 1
+      renderEventAt Nothing ev `shouldSatisfy`
+        Text.isInfixOf (Text.pack ("(hub-event " <> show hubEventVersion <> ")"))
+
+    it "writes back the version a file already declared" $ do
+      owner <- kp ; alice <- kp
+      let ev = anEvent owner alice 1
+      renderEventAt (Just 1) ev `shouldSatisfy` Text.isInfixOf "(hub-event 1)"
+      renderEventAt (Just 7) ev `shouldSatisfy` Text.isInfixOf "(hub-event 7)"
+      -- ...and the boxes are untouched by it: the version is a projection, so a
+      -- file rewritten under a different one is the same event.
+      let idOf t = case parseEvent t of
+                     Right (_, e) -> Just (eventId e)
+                     Left _       -> Nothing
+      idOf (renderEventAt (Just 1) ev) `shouldBe` Just (eventId ev)
+      idOf (renderEventAt (Just 7) ev) `shouldBe` Just (eventId ev)
+
+    -- The plan is where compaction meets it, and the lookup is by the path the
+    -- file will be written at -- which is the path it was read at, because a
+    -- compaction puts every file back under the name it had.
+    it "keeps each file's own version through a plan" $ do
+      owner <- kp ; alice <- kp
+      let e1 = anEvent owner alice 1
+          e2 = anEvent owner alice 2
+          p1 = threadDir (eventId e1) <> "/" <> eventFileName 1 (eventId e1)
+          p2 = threadDir (eventId e2) <> "/" <> eventFileName 2 (eventId e2)
+          declared p | p == p1 = Just 1
+                     | otherwise = Nothing
+      cw <- either (fail . show) pure
+              (planCanon Nothing declared [(p1, e1), (p2, e2)] [])
+      let textAt p = [ Text.decodeUtf8 b | (q, b) <- cwFiles cw, q == encPath p ]
+      textAt p1 `shouldSatisfy` any (Text.isInfixOf "(hub-event 1)")
+      textAt p2 `shouldSatisfy`
+        any (Text.isInfixOf (Text.pack ("(hub-event " <> show hubEventVersion <> ")")))

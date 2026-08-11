@@ -185,6 +185,19 @@ partProofDomain = 0x48423250  -- "HB2P"
 -- The part is in it as well, so that a letter carrying two attachments has one
 -- proof per part rather than one value repeated, and nothing has to decide
 -- which of two disagreeing copies is the real one.
+-- WIRE FORMAT, AND THE TUPLE BELOW IS THE WHOLE OF IT. 'partProofDomain' above
+-- is carefully labelled and this was not, which left the load-bearing half
+-- looking like an implementation detail: the preimage is
+-- @(part, secret bytes, author key)@ IN THAT ORDER, and the order is as frozen
+-- as the tag is. Swapping two fields compiles, passes every distinctness
+-- property the suite asserts (they all hold under any permutation), and turns
+-- every event that names an attachment into a 'PartNotProven' drop -- canon
+-- that still looks well formed and is quietly shorter, in every clone, with no
+-- signature to have failed and nothing to point at.
+--
+-- Pinned by a golden test rather than by argument, for the same reason the
+-- event-id fixture is: a property cannot see a permutation, and a reader of
+-- this function cannot see that anybody depends on the order.
 partProofFor :: HashRef -> PartSecret -> HubKey -> PartProof
 partProofFor part sec who =
   PartProof (HashRef (hashObject (serialise (Domained partProofDomain payload))))
@@ -563,6 +576,25 @@ safeWith allow = Text.concatMap esc
 -- the font decides, which includes nothing. NotAssigned is deliberately NOT
 -- here: GHC's tables lag Unicode, so a character assigned after this compiler
 -- would be escaped for no reason and the output would change on an upgrade.
+--
+-- AND THAT LAST SENTENCE IS TRUE OF THE CATEGORIES TOO, which is the part this
+-- comment used to reason its way up to and stop short of. 'generalCategory' is
+-- the compiler's table, not a constant: a code point that moves into @Cf@ in a
+-- later Unicode revision is escaped by a build on a newer GHC and not by one on
+-- an older, so the same event renders to different bytes, and canon's bytes are
+-- a commit id. Two clones would then hold canons that say the same thing and
+-- compare as diverged -- @hub sync --repo@ folds through it, and plain
+-- @hub sync@ shows DIVERGED.
+--
+-- WHAT IS DONE ABOUT IT: the whole predicate is pinned by a checksum over every
+-- code point ('TextSpec'), so a compiler whose tables differ fails the build
+-- rather than forking canon in silence. It does not make the classification
+-- portable, and nothing short of an explicit table would; what it does is turn
+-- an invisible fork into a decision somebody has to take, which is the property
+-- that was missing. Four of the six categories here (Cc, Cs, Co, Zl/Zp) are
+-- fixed by definition and one (Zs) has not moved in years, so the checksum is
+-- expected to move only when @Cf@ grows -- and freezing @Cf@ as an explicit
+-- range table is the answer if it ever does.
 invisible :: Char -> Bool
 invisible c = Char.isControl c || ignorable c
                 || cat `elem` [ Char.Format, Char.LineSeparator

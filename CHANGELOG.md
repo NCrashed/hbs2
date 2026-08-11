@@ -627,6 +627,42 @@
 
 ## Fixed
 
+  - **`hbs2-hub compact`: it erased the only record a tree keeps of two rule
+    sets.** `(hub-event N)` is per file and has no consumer yet; every retained
+    file goes back through the renderer on a compaction, and the version came
+    from this build's constant -- so a file that said 1 came back saying 2, and
+    a reader could no longer tell an old event from a new one, in a tree that no
+    longer held the evidence. The one verb that rewrites files was the one that
+    destroyed what it had to preserve. The declared version survives now, keyed
+    by the path the file is written back under, which is the path it was read
+    at. A clause nothing reads yet is exactly the one that must survive until
+    something does: it cannot be recovered afterwards.
+
+  - **`hbs2-hub`: two frozen things nothing was watching.** The part-proof
+    preimage is `(part, secret, author)` in that order, and the order is as
+    frozen as the domain tag beside it, which was carefully labelled while this
+    was not: swapping two fields compiles, passes every distinctness property
+    the suite asserts, and turns every event that names an attachment into a
+    `PartNotProven` drop -- canon that still looks well formed and is quietly
+    shorter, with no signature to have failed. And domain separation was an
+    argument rather than a check: `Domained` protects the two records this
+    package signs, and nothing stopped a record in another package -- a git3
+    LWWRef, a sigil -- from acquiring the shape of one, which would make a
+    signature made for that record a signed event. Both are pinned by tests now,
+    the second with a positive control, since a negative that cannot pass is a
+    test that asserts nothing.
+
+  - **`hbs2-hub`: canon bytes depended on the compiler's Unicode tables.** What
+    is escaped in a projection is decided by `generalCategory`, which is GHC's
+    table and not a constant, so a code point that moves into `Cf` in a later
+    Unicode revision is escaped by one build and not another -- the same event
+    rendering to different bytes, and canon's bytes are a commit id. Two clones
+    would hold canons that say the same thing and compare as diverged. The
+    predicate is pinned by a checksum over every code point: that does not make
+    the classification portable, and nothing short of an explicit table would,
+    but a compiler whose tables differ now fails the build instead of forking
+    canon in silence.
+
   - **`hbs2-peer`: three unbounded stores behind the mailbox worker, and a
     batch that took the whole worker down with it.**
 

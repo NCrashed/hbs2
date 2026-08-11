@@ -10,6 +10,9 @@ import Data.Config.Suckless
 
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Bits (xor)
+import Data.List (foldl')
+import Data.Word (Word64)
 import Test.Hspec
 
 -- Characters that print as nothing, or that a terminal OBEYS, spread across
@@ -78,6 +81,36 @@ spec = do
       -- character survives into the output at all.
       let raw c = safeText (Text.singleton c) == Text.singleton c
       filter raw ignorables `shouldBe` []
+
+    -- CANON'S BYTES ARE A COMMIT ID, and this predicate decides some of them.
+    --
+    -- 'generalCategory' is the COMPILER's table and not a constant: a code point
+    -- that moves into Cf in a later Unicode revision is escaped by a build on a
+    -- newer GHC and not by one on an older, so the same event renders to
+    -- different bytes on the two, and two clones then hold canons that say the
+    -- same thing and compare as diverged.
+    --
+    -- This does not make the classification portable -- nothing short of an
+    -- explicit table would. What it does is make a compiler whose tables differ
+    -- FAIL THE BUILD, so an invisible fork becomes a decision somebody takes.
+    -- Over every code point rather than a list of interesting ones, because a
+    -- list only guards the points somebody thought of, which is the mistake the
+    -- hand-written ignorables list above kept making.
+    --
+    -- If this number moves: work out WHICH points changed before touching it.
+    -- Four of the six categories the predicate names are fixed by definition
+    -- (Cc, Cs, Co, Zl/Zp) and one (Zs) has not moved in years, so Cf growing is
+    -- the expected cause -- and freezing Cf as an explicit range table is the
+    -- answer if it starts happening.
+    it "classifies every code point exactly as this build was pinned to" $ do
+      let step h i = (h * 1099511628211) `xor` fromIntegral i
+          cks = foldl' (\h i -> if invisible (toEnum i) then step h i else h)
+                       (14695981039346656037 :: Word64) [0 .. 0x10FFFF]
+          n = length [ () | i <- [0 .. 0x10FFFF :: Int], invisible (toEnum i) ]
+      -- The count as well as the checksum: a checksum alone says "something
+      -- moved", and the count says which way, which is the first thing anybody
+      -- reading this failure wants.
+      (cks, n) `shouldBe` (14084282334322581083, 140036)
 
     it "leaves an ordinary character alone, including a space" $ do
       -- The other half, and the reason this is not "escape everything above

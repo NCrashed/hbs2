@@ -5,6 +5,8 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Bridge (cursorFrom,CanonCursor(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.SignedBox
+import HBS2.Net.Auth.Credentials.Sigil (SigilData(..))
+import HBS2.Peer.Proto.LWWRef (LWWRef(..))
 
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
@@ -15,7 +17,7 @@ import HBS2.Base58 (AsBase58(..))
 import Data.Maybe (fromMaybe)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
-import Codec.Serialise (Serialise,serialise)
+import Codec.Serialise (Serialise,serialise,deserialiseOrFail)
 import Data.ByteString.Base16 qualified as B16
 import Data.ByteString.Char8 qualified as B8
 import HBS2.Hash (hashObject)
@@ -166,7 +168,7 @@ secret32 = fromMaybe (error "bad fixture secret")
              (mkPartSecret (BS.replicate typicalKeyLength 0x41))
 
 spec :: Spec
-spec = do
+spec = domains >> do
 
   describe "PEP-19 fold" $ do
 
@@ -1596,3 +1598,75 @@ spec = do
           fr = foldEvents repo [eOpen]
       HM.null (frThreads fr) `shouldBe` True
       reasons fr `shouldBe` [IssueOpenWithCoords]
+
+-- | THE OTHER HALF OF DOMAIN SEPARATION, which was an argument and not a check.
+--
+-- 'Domained' writes a tag into the signed bytes so that a signature made for
+-- one kind of record is not a signature for another. That protects the two
+-- records THIS package signs. What it cannot do is stop a record in another
+-- package from acquiring the shape of one: the same owner key signs a git3
+-- LWWRef on every push, a sigil, and a mailbox message, and if any of those
+-- ever encodes as a `Domained AuthorContent` then one of those signatures is a
+-- signed event.
+--
+-- The note in "HBS2.Hub.Types" says as much and says the safety is an accident
+-- -- the LWWRef escapes only because its third field is a Maybe, so an array
+-- rather than an int. An accident nothing asserts is one a refactor two
+-- packages away can spend without noticing, and there is no repairing it
+-- afterwards, since an event-id hashes the whole box.
+--
+-- WHAT THIS IS AND IS NOT. It is a tripwire over the shapes we know share a
+-- signing key today, not a proof about all possible records. Its value is that
+-- a field-type change in git3 or in the mailbox fails HERE, in the package that
+-- would be forged, rather than nowhere.
+domains :: Spec
+domains =
+  describe "PEP-19 domain separation: nothing else signs into our domains" $ do
+
+    let notOurs :: LBS.ByteString -> Expectation
+        notOurs bs = do
+          isRight (deserialiseOrFail @(Domained AuthorContent) bs) `shouldBe` False
+          isRight (deserialiseOrFail @(Domained CanonContent) bs) `shouldBe` False
+
+    -- THE POSITIVE CONTROL, first, because everything below is a negative and a
+    -- negative that cannot pass is a test that asserts nothing. A decoder that
+    -- refused every input -- a wrong instance, a typo in the type application --
+    -- would make the rest of this describe block green forever.
+    it "reads our own bytes as ours, so the rest of this is not vacuous" $ do
+      let h = HashRef (hashObject ("ours" :: ByteString))
+          d = domainOf (Nothing @AuthorContent)
+          k = fromMaybe (error "fixture key")
+                (fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8")
+      isRight (deserialiseOrFail @(Domained AuthorContent)
+                 (serialise (Domained d (ARedact k h 5))))
+        `shouldBe` True
+      -- and a payload signed into the OTHER domain is not this one, which is
+      -- the whole of what the tag buys
+      isRight (deserialiseOrFail @(Domained CanonContent)
+                 (serialise (Domained d (ARedact k h 5))))
+        `shouldBe` False
+
+    it "does not read a git3 LWWRef as one of ours" $ do
+      let h = HashRef (hashObject ("lww" :: ByteString))
+      notOurs (serialise (LWWRef @'HBS2Basic 7 h Nothing))
+      notOurs (serialise (LWWRef @'HBS2Basic 7 h (Just h)))
+      -- Zero and one especially: those are the constructor tags of our own sums,
+      -- so a record whose first field is a small integer is the shape at risk.
+      notOurs (serialise (LWWRef @'HBS2Basic 0 h Nothing))
+      notOurs (serialise (LWWRef @'HBS2Basic 1 h Nothing))
+
+    it "does not read a sigil's signed half as one of ours" $ do
+      c <- newCredentials @'HBS2Basic >>= addKeyPair Nothing
+      let enc = head [ _krPk e | e <- _peerKeyring c ]
+      notOurs (serialise (SigilData @'HBS2Basic enc Nothing Nothing))
+      notOurs (serialise (SigilData @'HBS2Basic enc (Just "who") Nothing))
+
+    -- The domain constants themselves, because the whole scheme rests on them
+    -- being unlikely rather than on anything structural: a record that began
+    -- with one would have to have been built to.
+    it "keeps the two domains distinct and large" $ do
+      let a = domainOf (Nothing @AuthorContent)
+          c = domainOf (Nothing @CanonContent)
+      a `shouldSatisfy` (/= c)
+      a `shouldSatisfy` (> 0x10000000)
+      c `shouldSatisfy` (> 0x10000000)

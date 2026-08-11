@@ -1028,10 +1028,22 @@ threadsNumbered n fr = [ t | (n', t) <- numberIndexOf fr, n' == n ]
 -- has three bounds of its own that a size check would not cover, and the cost
 -- is one parse per event written, which is one event per accept.
 planCanon :: Maybe Word32   -- ^ what the tree already declared, if anything
+            -- | What each retained file declared as its own @(hub-event N)@.
+            --
+            -- A LOOKUP AND NOT A LIST, so it cannot be swapped with either of
+            -- the two lists beside it: three positional lists of pairs would be
+            -- a well-typed mistake waiting to happen.
+            --
+            -- Every file here is re-rendered, and with the version taken from
+            -- this build's constant a compaction erased the only record a tree
+            -- keeps of holding files written under two rule sets -- the one verb
+            -- that rewrites files destroying the evidence that it had to. A
+            -- caller minting fresh events answers 'Nothing' for all of them.
+          -> (FilePath -> Maybe Word32)
           -> [(FilePath, Event)]
           -> [(Word64, ThreadId)]
           -> Either WriteRefused CanonCommit
-planCanon declared evs numbers = do
+planCanon declared perFile evs numbers = do
   files <- traverse one evs
   case duplicates (fmap fst files) of
     (p:_) -> Left (PathCollision p)
@@ -1081,7 +1093,7 @@ planCanon declared evs numbers = do
                , Right (_, c) <- [unboxChecked (evAuthorBox ev)] ]
 
     one (p, ev) =
-      let txt = renderEvent ev
+      let txt = renderEventAt (perFile p) ev
       in case parseEvent txt of
            Left e -> Left (EventUnwritable p e)
            Right (_, back)

@@ -360,7 +360,9 @@ committing :: MonadUnliftIO m
            -> m Text                -- ^ the commit written
 committing WriteStop{..} parent declared files numbers message now = do
   plan <- either (\e -> liftIO (refuse (show (pretty e)) wsUnplannable)) pure
-            (planCanon declared files numbers)
+            -- Fresh events, so no file has a version to preserve: they are
+            -- being written under this build's rules and say so.
+            (planCanon declared (const Nothing) files numbers)
 
   commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan) message now))
               >>= either (\e -> liftIO (refuse (show (pretty e)) wsUnwritable)) pure

@@ -48,6 +48,7 @@ module HBS2.Hub.Canon
   , utf8Length
   , takeBytes
   , renderEvent
+  , renderEventAt
   , parseEvent
   , MetaVersions(..)
   , metaAt
@@ -75,6 +76,7 @@ import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
 import Data.List (mapAccumL)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -202,14 +204,29 @@ takeBytes n = Text.pack . go n . Text.unpack
 -- from canon, so it must be able to write a file whose content it does not
 -- understand without inventing clauses for it.
 renderEvent :: Event -> Text
-renderEvent e = Text.unlines (fmap render clauses)
+renderEvent = renderEventAt Nothing
+
+-- | The same, writing a version the caller already knows this file had.
+--
+-- WHAT COMPACTION MUST NOT INVENT. Every retained file is re-rendered through
+-- here, and with the version taken from this build's constant that erased the
+-- only record a tree keeps of having been written under two rule sets: a file
+-- declaring @(hub-event 1)@ came back declaring 2, so a reader could no longer
+-- tell an old event from a new one, and the one verb that rewrites files was
+-- the one that destroyed the evidence. The clause has no consumer yet, which is
+-- exactly why it must survive until it does: it cannot be recovered afterwards.
+--
+-- 'Nothing' is a freshly minted event, which is written under this build's
+-- rules and says so.
+renderEventAt :: Maybe Word32 -> Event -> Text
+renderEventAt ver e = Text.unlines (fmap render clauses)
   where
 
     -- The op clause comes from 'contentSyntax', which every projection of an
     -- author content emits: writing one here as well put two of them in every
     -- file, and 'only' refuses a clause that appears twice.
     clauses =
-      [ mkForm "hub-event" [mkInt hubEventVersion]
+      [ mkForm "hub-event" [mkInt (fromMaybe hubEventVersion ver)]
       , mkForm "author-box" [b64 (boxBytes (evAuthorBox e))]
       , mkForm "canon-box"  [b64 (boxBytes (evCanonBox e))]
       ]
