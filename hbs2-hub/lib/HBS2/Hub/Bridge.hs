@@ -92,6 +92,7 @@ module HBS2.Hub.Bridge
   , ackFor
   , TriageError(..)
   , viewOf
+  , originFits
   , emptyView
   , initialCursor
   , cursorFrom
@@ -711,9 +712,47 @@ seenAlready view eid
 -- because the caller's response is the same.
 honouredAlready :: CanonView -> HashRef -> EventId -> Either TriageError ()
 honouredAlready view origin asked
-  | HS.member origin (cvOrigins view)  = Left AlreadyHonoured
   | HS.member asked (cvHonoured view)  = Left AlreadyHonoured
+  -- AND THE MESSAGE HASH ONLY WHEN CANON'S CLAIM ON IT CAN BE THIS LETTER'S.
+  -- See 'originFits': without that conjunct the field is an unverifiable claim
+  -- with a blocking effect, and any authorized key could spend one event to
+  -- put a specific letter permanently beyond folding.
+  | HS.member origin (cvOrigins view)
+  , originFits view asked              = Left AlreadyHonoured
   | otherwise                          = Right ()
+
+-- | Whether canon's record of a message hash can have come from THIS letter.
+--
+-- @origin@ is a claim: it says "the event you are reading was folded from the
+-- message with this hash", and nothing in canon binds it to a message that
+-- exists. The fold records it for any admitted event and cannot do better --
+-- it has no mailbox and never sees a message. So an authorized key could mint
+-- one ordinary event carrying @origin = H@ for any H it liked, and the letter
+-- in message H was then refused as already folded, forever: the set never
+-- shrinks, so revoking the key does not free the letter, and 'DupOrigin' fires
+-- only on a SECOND event with that origin, so nothing reported it.
+--
+-- What CAN be checked is the other end of the claim. Folding a letter produces
+-- an event whose id is the hash of the author's inner box; honouring its
+-- request records that same box id under @honours@. So if canon claims to have
+-- folded message H and holds neither of those, the claim did not come from the
+-- letter in H, whoever wrote it and whatever they meant.
+--
+-- The answer to a claim that does not fit is to IGNORE IT rather than to
+-- report it: the gate exists so that a triage loop re-reading a mailbox after a
+-- restart does not fold one letter twice, and in that case canon does hold the
+-- letter's own event, so the refusal stands. Where it does not, the letter
+-- folds -- and canon then holds two events claiming one origin, which is
+-- exactly what 'DupOrigin' is for. The attack turns itself into a reported
+-- anomaly instead of a silent block.
+--
+-- A bystander cannot get round this by claiming the id as well: minting an
+-- event with the letter's event-id needs the letter's author box, which is
+-- inside the encrypted payload. Somebody who can read the mailbox can, and that
+-- is not an attack -- it is folding the letter, which is their job.
+originFits :: CanonView -> EventId -> Bool
+originFits view asked =
+  HM.member asked (cvEvents view) || HS.member asked (cvHonoured view)
 
 -- | What the caller can vouch for about an event's encrypted attachments.
 --

@@ -627,6 +627,28 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: one event could put a chosen letter beyond folding, forever
+    and in silence.** An event's `origin` says "I was folded from the message
+    with this hash", and nothing bound the claim to a message that exists -- the
+    fold records it for any admitted event and cannot do better, having no
+    mailbox. So an authorized key could mint one ordinary event carrying the
+    hash of a letter it wanted kept out, and that letter was refused as already
+    folded from then on: the origin set never shrinks, so revoking the key did
+    not free it, and `DupOrigin` fires only on a SECOND event with that origin,
+    so `hub verify` reported nothing.
+
+    The other end of the claim was already in canon. Folding a letter produces
+    an event whose id is the hash of the author's inner box, and honouring its
+    request records that same box id, so the gate now fires only when canon also
+    holds one of the two. A claim that fits neither is ignored rather than
+    reported: the gate exists so a triage loop re-reading a mailbox after a
+    restart does not fold one letter twice, and in that case canon does hold the
+    letter's own event. Where it does not, the letter folds and canon ends up
+    with two events claiming one origin -- which is what `DupOrigin` is for, so
+    the attack turns itself into a reported anomaly instead of a silent block.
+    `inbox reject` asks the same question, or the two verbs would disagree about
+    one letter.
+
   - **`hbs2-hub inbox`: the queue could be pushed off its own first page, and
     a ban did not take a letter out of it.** Two ways the only screen a
     maintainer triages from was a stranger's to fill.

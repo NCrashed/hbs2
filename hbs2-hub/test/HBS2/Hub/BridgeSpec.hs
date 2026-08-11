@@ -13,6 +13,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Codec.Serialise (serialise)
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 import Data.List (isInfixOf,nub)
 import Data.Char qualified as Char
 import Data.String (fromString)
@@ -1853,6 +1854,78 @@ spec = do
       -- Discard, because the request has been carried out: deleting the resent
       -- copy is the correct thing to do with it
       outcome AlreadyHonoured `shouldBe` Discard
+
+    -- AN ORIGIN IS A CLAIM AND NOTHING BINDS IT TO A MESSAGE THAT EXISTS. The
+    -- fold records it for any admitted event and cannot do better: it has no
+    -- mailbox and never sees a message. So an authorized key could mint ONE
+    -- ordinary event carrying `origin = H` for any H it liked, and the letter
+    -- in message H was refused as already folded from then on -- forever, since
+    -- the set never shrinks and revoking the key does not free it, and silently,
+    -- since DupOrigin fires only on a SECOND event with that origin.
+    it "does not let one event's origin claim block a letter it did not carry" $ do
+      alice <- kp
+      owner <- kp
+      mallory <- kp
+      victim <- someHash
+      other <- someHash
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+          theirs c = makeLetter (fst mallory) (snd mallory) c noReplyChannel
+
+      -- A delegate folds an unrelated letter of their own, and stamps it with
+      -- the hash of a message they want kept out.
+      seeded <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (emptyView repo)
+           1 victim noParts
+           (theirs (AOpen repo HubIssue "mine" [] Nothing Nothing Nothing 1)))
+      HS.member victim (cvOrigins (acView seeded)) `shouldBe` True
+
+      -- The letter that message really carries still folds: canon's claim on
+      -- that hash holds neither this letter's event nor an honour of it, so it
+      -- did not come from this letter, whoever wrote it and whatever they meant.
+      _ <- expectRight
+        (acceptLetter (ctxOf owner) env (acView seeded) 2 victim noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 2)))
+
+      -- ...and the gate still does the job it exists for. A triage loop
+      -- re-reading a mailbox after a restart must not fold one letter twice,
+      -- and there canon DOES hold the letter's own event.
+      real <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 other noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+      expectErr AlreadyHonoured
+        (acceptLetter (ctxOf owner) env (acView real) 2 other noParts
+           (letter (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)))
+
+    -- The predicate on its own, because the whole of the fix is which two sets
+    -- it asks and a caller elsewhere asks it too.
+    it "counts a folded letter and an honoured request, and nothing else" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      req <- someHash
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letter c = makeLetter (fst alice) (snd alice) c noReplyChannel
+          ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
+      folded <- expectRight
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts (letter ac))
+      -- the event it folded to
+      originFits (acView folded) (authorBoxId (signAuthor (fst alice) (snd alice) ac))
+        `shouldBe` True
+      -- and a request the owner carried out, which is re-authored and so has a
+      -- different event-id: only the requester's own box ties the two
+      let ask = letter (AClose (scopeOf folded) Nothing 2)
+      done <- expectRight
+        (honourRequest (ctxOf owner) env (acView folded) 2 req ask)
+      originFits (acView done) (authorBoxId (signAuthor (fst alice) (snd alice)
+                                               (AClose (scopeOf folded) Nothing 2)))
+        `shouldBe` True
+      -- something canon has never seen fits nothing
+      originFits (acView done) (authorBoxId (signAuthor (fst alice) (snd alice)
+                                               (AOpen repo HubIssue "never" [] Nothing Nothing Nothing 9)))
+        `shouldBe` False
 
     it "refuses an owner event lifted back out of canon" $ do
       alice <- kp

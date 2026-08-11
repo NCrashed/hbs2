@@ -31,7 +31,8 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
-import HBS2.Hub.Ingress (PeerSilent(..),copiesOf)
+import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..))
+import HBS2.Hub.Bridge (originFits,viewOf)
 import HBS2.Hub.CLI.Common (overRpc)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
@@ -121,12 +122,25 @@ rejectEntries = do
       -- Canon first, when there is a canon to ask. A letter already folded is
       -- refused before anything is signed: the refusal is about what canon
       -- promises, and asking after would mean having signed a delete for it.
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+      let ig = overRpc sto api
+
       for_ (rjRepo rj) $ \repo ->
         -- TreatAsEmpty, like `inbox show`: the question is whether canon already
         -- holds this letter, and no canon is no.
         withCanon TreatAsEmpty repo withGitCanon >>= \(_, fr) -> do
+          -- AND THE CLAIM HAS TO FIT THIS LETTER. `origin` is unverifiable (see
+          -- 'originFits'), so an authorized key could put any message hash into
+          -- canon and every verb that reads the set would then say the letter in
+          -- it was folded. Here that is a sentence rather than a block, and the
+          -- sentence would be false: the accept path stopped believing such a
+          -- claim, so this must not go on believing it either, or the two verbs
+          -- disagree about one letter.
+          mine <- lvEventId <$> openMessage ig (rjMessage rj)
           do
-            when (HS.member (rjMessage rj) (frOrigins fr)) $
+            when (HS.member (rjMessage rj) (frOrigins fr)
+                    && maybe False (originFits (viewOf fr)) mine) $
               liftIO $ refuse (show ( "this letter is already in canon: rejecting"
                                         <+> "is not what happened to it"
                                         <> line <> "  nothing was deleted."
@@ -148,9 +162,7 @@ rejectEntries = do
       -- Bounded by the page the queue shows, because that is the set this can
       -- know without an unbounded walk, and because it is the set the operator
       -- was looking at when they typed this.
-      sto <- getStorage
-      api <- getClientAPI @MailboxAPI @UNIX
-      copies <- copiesOf (overRpc sto api) (rjMailbox rj) (rjMessage rj)
+      copies <- copiesOf ig (rjMailbox rj) (rjMessage rj)
 
       for_ (rjMessage rj : copies) $ \h ->
         -- The peer is silent for the reason 'PeerSilent' says and NOT for the

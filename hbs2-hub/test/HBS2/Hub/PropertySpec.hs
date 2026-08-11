@@ -9,7 +9,9 @@ import HBS2.Hub.Canon
 import HBS2.Hub.Compact (compactionOf,cpKeep,cpDrop,equivalentTo)
 import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.GroupKeySymm (typicalKeyLength)
-import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Hash (hashObject)
+
 import HBS2.Data.Types.SignedBox (SignedBox(..),makeSignedBox)
 
 import Control.Monad ((<=<))
@@ -55,6 +57,15 @@ data Step =
     -- order are other bytes and so another event-id.
   | StepSetLabels Int Word64 Bool
   | StepHonourWith Int Word64   -- ^ the maintainer signs their own note
+    -- | Honour one request, then honour the very same request again.
+    --
+    -- One step and not two, because the generator cannot be relied on to draw
+    -- the same (thread, clock) pair twice, and that pair is what makes it the
+    -- same REQUEST: a message hash follows the letter, so two requests that
+    -- differ anywhere are two messages and honouring both is ordinary. What
+    -- must be refused is the same one twice, and this is the only shape that
+    -- produces it reliably.
+  | StepHonourTwice Int Word64
   | StepAttach Int Word64 Attach
   | StepBigBody Word64          -- ^ an inline body over what triage carries
     -- | A letter from the second contributor, rewrapped by someone else. The
@@ -117,6 +128,7 @@ instance Arbitrary Step where
     , (1, StepStaleView <$> genIx <*> genTs)
     , (2, StepSetLabels <$> genIx <*> genTs <*> arbitrary)
     , (2, StepHonourWith <$> genIx <*> genTs)
+    , (2, StepHonourTwice <$> genIx <*> genTs)
     , (2, StepAttach <$> genIx <*> genTs
             <*> elements [Ready,NotFetched,NotCarried,NoKey,TooBig,Unproven])
     , (1, StepBigBody <$> genTs)
@@ -147,6 +159,7 @@ instance Arbitrary Step where
     StepAsDelegate i ts -> both StepAsDelegate i ts
     StepStaleView i ts  -> both StepStaleView i ts
     StepHonourWith i ts -> both StepHonourWith i ts
+    StepHonourTwice i ts -> both StepHonourTwice i ts
     StepBigBody ts      -> [StepBigBody ts' | ts' <- shrinkTs ts]
     StepFromDenied ts   -> [StepFromDenied ts' | ts' <- shrinkTs ts]
     StepCorrupt ts      -> [StepCorrupt ts' | ts' <- shrinkTs ts]
@@ -594,9 +607,21 @@ step cast st = \case
   StepHonour i ts -> withThread i $ \thr ->
     let req = letterOf (AClose thr Nothing ts)
     in case honourRequest (castOwner cast) (EnvelopeSigner alicePk) (stView st) (clockOf st)
-              (reqOriginOf i) req of
+              (reqOriginFor req) req of
          Right acc -> keep THonour acc
          Left e    -> refuse e
+
+  -- The same request presented twice. The first must fold and the second must
+  -- be refused, and what refuses it is the requester's own box: the message
+  -- hash agrees too (it follows the letter), but the box is the identity that
+  -- survives a rewrap, which is the case the gate is for.
+  StepHonourTwice i ts -> withThread i $ \thr ->
+    let req = letterOf (AClose thr Nothing ts)
+        once s = case honourRequest (castOwner cast) (EnvelopeSigner alicePk)
+                        (stView s) (clockOf s) (reqOriginFor req) req of
+                   Right acc -> keep THonour acc
+                   Left e    -> refuse e
+    in once (once st)
 
   StepOwnerSet i ts -> withThread i $ \thr ->
     mint TSet (ASet thr "status" "closed" ts) ts
@@ -623,12 +648,13 @@ step cast st = \case
   StepSetLabels i ts ok -> withThread i $ \thr ->
     mint TSetLabels (ASet thr "labels" (if ok then "bug,ui" else "ui,bug") ts) ts
 
-  -- The reviewed half of the honour path, sharing the request origin with
-  -- StepHonour so that honouring one letter both ways is caught.
+  -- The reviewed half of the honour path. It shares an origin with StepHonour
+  -- for the same thread AND the same clock, because it builds the same request,
+  -- which is how honouring one letter both ways is caught.
   StepHonourWith i ts -> withThread i $ \thr ->
     let req = letterOf (AClose thr Nothing ts)
     in case honourWith (castOwner cast) (EnvelopeSigner alicePk) (stView st)
-              (clockOf st) (reqOriginOf i) (AClose thr (Just "reviewed") ts) req of
+              (clockOf st) (reqOriginFor req) (AClose thr (Just "reviewed") ts) req of
          Right acc -> keep THonourWith acc
          Left e    -> refuse e
 
@@ -830,9 +856,15 @@ step cast st = \case
       (o:_) -> o
       []    -> head (stOrigins st)
 
-    reqOriginOf n = case drop (n `mod` length (stReqOrigins st)) (stReqOrigins st) of
-      (o:_) -> o
-      []    -> head (stReqOrigins st)
+    -- THE MESSAGE HASH FOLLOWS THE LETTER, the way a mailbox does: a message
+    -- hash determines the bytes, which determine the one letter inside, so two
+    -- different requests cannot share one. This used to pick from a pool by
+    -- index, which let the model hand the bridge an origin belonging to some
+    -- other letter -- a state no ingress can produce, and the only one in which
+    -- the message hash alone had to carry the whole dedup. What catches
+    -- honouring ONE letter twice is its box, which is the identity that means
+    -- it (see 'originFits').
+    reqOriginFor req = HashRef (hashObject (letterPayload req))
 
     withThread i k = case drop i (stThreads st) of
       (thr:_) -> k thr
