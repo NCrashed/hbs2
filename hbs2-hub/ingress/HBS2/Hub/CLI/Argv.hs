@@ -16,6 +16,7 @@ module HBS2.Hub.CLI.Argv
   , repoFlags
   , flagRepo
   , flagRepoMaybe
+  , repoAndFlags
   , flagMaybe
   , flagText
   , flagWord
@@ -362,3 +363,31 @@ flagWord x = do
   n <- readMaybe s
   guard (n >= 0 && n <= toInteger (maxBound :: Word64))
   pure (fromIntegral n)
+
+-- | The repository a READ verb is about: positionally, or behind @--repo@.
+--
+-- Six verbs -- @issue list@, @pr list@, @issue show@, @pr show@, @log@ and
+-- @verify@ -- took it positionally and ONLY positionally, while every verb that
+-- writes takes @--repo@. So the flag a user learns from the writing half was a
+-- usage error on the reading half, and the key is already in the git remote's
+-- URL (@hbs23:\/\/\<key\>@) where a later version can read it from.
+--
+-- Both, and that is the point of doing it now: accepting the flag is additive
+-- and costs nobody anything, while REMOVING the positional form after a release
+-- is a break. Whichever way this eventually settles, the flag has to exist
+-- first.
+--
+-- The verb's own flags are read either way; the repository's are accepted only
+-- in the flag form, so @hub issue list K --repo K2@ is a refusal rather than a
+-- guess about which key was meant.
+repoAndFlags :: forall c a . IsContext c
+             => (Syntax c -> Maybe a)   -- ^ how this verb reads a key
+             -> [String]                -- ^ the verb's own flags
+             -> [Syntax c]
+             -> Maybe (a, [(String, Syntax c)])
+repoAndFlags asKey own syn = case syn of
+  (k : rest) | Just repo <- asKey k -> (,) repo <$> flagsOf own rest
+  _ -> do
+    kvs  <- flagsOf (repoFlags <> own) syn
+    repo <- flagRepo asKey kvs
+    pure (repo, kvs)

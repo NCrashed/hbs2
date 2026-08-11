@@ -16,8 +16,10 @@ import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Hash (hashObject)
+import Data.ByteString.Lazy.Char8 qualified as LBS
 
-import Data.Config.Suckless (C)
+import Data.Config.Suckless (C,Syntax)
 import Data.List (isInfixOf)
 import Data.List qualified as List
 import Data.Maybe (isJust)
@@ -53,7 +55,7 @@ rendered :: [Doc ann] -> String
 rendered = unlines . fmap show
 
 spec :: Spec
-spec = do
+spec = repoFlagForms >> do
 
   describe "PEP-22 read: what is listed" $ do
 
@@ -447,3 +449,88 @@ spec = do
           key = argvAtom (show (pretty (AsBase58 repo)))
       fmap snd (listArgs @C [key, argvAtom "--label=bug"])
         `shouldBe` Just (Filter Nothing (Just "bug"))
+
+-- | THE FLAG EVERY WRITING VERB TAKES, on the six that only read.
+--
+-- `issue list`, `pr list`, `issue show`, `pr show`, `log` and `verify` took the
+-- repository positionally and only positionally, while everything that writes
+-- takes --repo. So the spelling a user learns from one half of the tool was a
+-- usage error on the other, and the key is already in the git remote's URL for
+-- a later version to read it from.
+--
+-- Both forms, and that is the point of doing it before a release: accepting the
+-- flag is additive and costs nobody anything, while removing the positional
+-- form afterwards is a break.
+repoFlagForms :: Spec
+repoFlagForms =
+  describe "PEP-22 read verbs: the repository, either way" $ do
+
+    it "reads a listing positionally and behind the flag alike" $ do
+      k <- aKey
+      let want = Just (k, noFilter)
+      listArgs (argv [b58 k]) `shouldBe` want
+      listArgs (argv ["--repo", b58 k]) `shouldBe` want
+      -- --target is the old spelling, still accepted and no longer printed
+      listArgs (argv ["--target", b58 k]) `shouldBe` want
+
+    it "keeps the verb's own flags working in both forms" $ do
+      k <- aKey
+      let want = Just (k, Filter (Just "open") (Just "bug"))
+      listArgs (argv [b58 k, "--status", "open", "--label", "bug"]) `shouldBe` want
+      listArgs (argv ["--repo", b58 k, "--status", "open", "--label", "bug"])
+        `shouldBe` want
+
+    -- The repository's own flags are accepted only in the flag form: a line
+    -- carrying the key twice is a line somebody edited half way, and choosing
+    -- between the two is the guess this reader exists to refuse.
+    it "refuses a line that names the repository twice" $ do
+      k <- aKey ; other <- aKey
+      listArgs (argv [b58 k, "--repo", b58 other]) `shouldBe` Nothing
+      listArgs (argv ["--repo", b58 k, "--target", b58 other]) `shouldBe` Nothing
+      listArgs (argv []) `shouldBe` Nothing
+
+    it "reads a thread by number or by id, either way round" $ do
+      k <- aKey
+      let h = mh "thread"
+      showArgs (argv [b58 k, "7"]) `shouldBe` Just (k, ByNumber 7, False)
+      showArgs (argv ["--repo", b58 k, "--number", "7"]) `shouldBe` Just (k, ByNumber 7, False)
+      showArgs (argv [b58 k, "--thread", show (pretty h)])
+        `shouldBe` Just (k, ByThread h, False)
+      showArgs (argv ["--repo", b58 k, "--thread", show (pretty h)])
+        `shouldBe` Just (k, ByThread h, False)
+      -- and --json rides along with all of them
+      showArgs (argv [b58 k, "7", "--json"]) `shouldBe` Just (k, ByNumber 7, True)
+      showArgs (argv ["--repo", b58 k, "--number", "7", "--json"])
+        `shouldBe` Just (k, ByNumber 7, True)
+
+    -- EXACTLY ONE way of naming the thread. Both, or neither, is a refusal
+    -- rather than a preference.
+    it "refuses a thread named twice or not at all" $ do
+      k <- aKey
+      let h = mh "thread"
+      showArgs (argv ["--repo", b58 k, "--number", "7", "--thread", show (pretty h)])
+        `shouldBe` Nothing
+      showArgs (argv ["--repo", b58 k]) `shouldBe` Nothing
+
+    it "reads the log's optional number in both forms" $ do
+      k <- aKey
+      logArgs (argv [b58 k]) `shouldBe` Just (k, Nothing)
+      logArgs (argv [b58 k, "3"]) `shouldBe` Just (k, Just 3)
+      logArgs (argv ["--repo", b58 k]) `shouldBe` Just (k, Nothing)
+      logArgs (argv ["--repo", b58 k, "--number", "3"]) `shouldBe` Just (k, Just 3)
+      -- A number that does not fit is refused at both ends, not wrapped.
+      logArgs (argv ["--repo", b58 k, "--number", "18446744073709551617"])
+        `shouldBe` Nothing
+
+-- The argv reader's own words, which is the only shape these verbs ever see.
+argv :: [String] -> [Syntax C]
+argv = fmap argvAtom
+
+aKey :: IO HubKey
+aKey = fst <$> kp
+
+b58 :: HubKey -> String
+b58 = show . pretty . AsBase58
+
+mh :: String -> HashRef
+mh = HashRef . hashObject . LBS.pack

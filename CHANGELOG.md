@@ -627,6 +627,17 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: the six read verbs refused the flag every writing verb
+    takes.** `issue list`, `pr list`, `issue show`, `pr show`, `log` and
+    `verify` took the repository positionally and only positionally, so
+    `--repo` -- which every verb that writes takes, and which a user therefore
+    learns from the other half of the tool -- was a usage error on the half that
+    reads. All six take it now, through one reader so they cannot drift apart,
+    and `show` grew `--number`/`--thread` to go with it. The positional form
+    still works: accepting the flag is additive today, and removing the
+    positional form after a release would not be, so whichever way this settles
+    the flag had to exist first.
+
   - **`hbs2-hub rm <file>` deleted the file.** The dictionary inherited about
     154 verbs nothing here documents -- `rm`, `mv`, `cp`, `cd`, `setenv` and the
     whole `run:proc:*` family -- so a typo landed in them: `hbs2-hub rm

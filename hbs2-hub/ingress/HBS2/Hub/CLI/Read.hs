@@ -38,6 +38,9 @@ module HBS2.Hub.CLI.Read
   , logDoc
   , statusOf
   , listArgs
+  , showArgs
+  , logArgs
+  , Which(..)
   , labelsOf
   , assigneesOf
   , diffArgv
@@ -53,19 +56,21 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
 import HBS2.Hub.Canon (utf8Length,takeBytes)
 import HBS2.Hub.Repo.GitBundle (validSha)
-import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText,flagWord)
+import HBS2.Hub.CLI.Argv (flagsOf,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
+                         ,repoFlags,flagRepo,repoAndFlags)
 import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),refuse)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
 import HBS2.CLI.Run.Internal
 
-import HBS2.Data.Types.Refs (pattern HashLike)
+import HBS2.Data.Types.Refs (pattern HashLike, HashRef)
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,isJust)
+import Control.Applicative ((<|>))
 import System.IO.Error (isResourceVanishedError)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -372,21 +377,15 @@ readEntries = do
              <> line
              <> line <> "Give a number to see one thread's events." )
     $ entry $ bindMatch "hub:log" $ nil_ \case
-        [ SignPubKeyLike repo ] -> lift (withFold repo (out . logDoc Nothing))
-        -- Through 'flagWord', which guards BOTH ends. A bare fromIntegral on the
-        -- Integer a LitIntVal carries guards neither: flagWord's own haddock is
-        -- the report of that bug -- `--number 18446744073709551617` wrapped to
-        -- 1 and the verb answered about a thread nobody named. Display-only
-        -- here, and the rule has one source of truth or it has none.
-        [ SignPubKeyLike repo, (flagWord -> Just n) ] ->
-          lift (withFold repo (out . logDoc (Just n)))
-        _ -> liftIO (die "usage: hub log <repo-key> [<number>]")
+        (logArgs -> Just (repo, n)) -> lift (withFold repo (out . logDoc n))
+        _ -> liftIO (die ("usage: hub log <repo-key> [<number>]"
+                            <> "\n   or: hub log --repo <key> [--number <n>]"))
 
   where
 
     listVerb name kind what =
       brief (fromString ("list this repository's folded " <> what))
-        $ args [arg "string" "repo-key"]
+        $ args [arg "string" "[--repo] repo-key"]
         $ desc ( "Read-only and peerless: canon is a git ref in this"
                  <> line <> "repository, so this needs neither a peer nor a key."
                  <> line
@@ -405,7 +404,9 @@ readEntries = do
             (listArgs -> Just (repo, f)) ->
               lift (withFold repo (out . listDoc . threadsOf kind f))
             _ -> liftIO (die ("usage: hub " <> spelled name
-                                <> " <repo-key> [--status S] [--label L]"))
+                                <> " <repo-key> [--status S] [--label L]"
+                                <> "\n   or: hub " <> spelled name
+                                <> " --repo <key> [--status S] [--label L]"))
 
     showVerb name kind =
       brief "show one folded thread with its comments"
@@ -427,16 +428,17 @@ readEntries = do
                  <> line <> "here, and it says so ('unavailable'), because building"
                  <> line <> "one needs git and this verb needs nothing." )
         $ entry $ bindMatch name $ nil_ \case
-            [ SignPubKeyLike repo, (flagWord -> Just n) ] ->
-              lift (withFold repo (pick kind AsDoc (byNumber n)))
-            [ SignPubKeyLike repo, (flagWord -> Just n), StringLike "--json" ] ->
-              lift (withFold repo (pick kind AsJson (byNumber n)))
-            [ SignPubKeyLike repo, StringLike "--thread", HashLike h ] ->
-              lift (withFold repo (pick kind AsDoc ((== h) . tsId)))
-            [ SignPubKeyLike repo, StringLike "--thread", HashLike h, StringLike "--json" ] ->
-              lift (withFold repo (pick kind AsJson ((== h) . tsId)))
+            (showArgs -> Just (repo, which, asJson)) ->
+              lift (withFold repo (pick kind (if asJson then AsJson else AsDoc)
+                                             (matches which)))
             _ -> liftIO (die ("usage: hub " <> spelled name
-                                <> " <repo-key> (<number> | --thread <id>) [--json]"))
+                                <> " <repo-key> (<number> | --thread <id>) [--json]"
+                                <> "\n   or: hub " <> spelled name
+                                <> " --repo <key> (--number <n> | --thread <id>) [--json]"))
+
+    matches = \case
+      ByNumber n -> byNumber n
+      ByThread h -> (== h) . tsId
 
     -- "hub:issue:list" as somebody types it.
     spelled n = fmap (\c -> if c == ':' then ' ' else c) (drop 4 (show (pretty n)))
@@ -545,13 +547,77 @@ readEntries = do
 -- It also brings @--flag=value@, which 'issueUsage' has been telling everybody
 -- is accepted and which five verbs refused.
 listArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Filter)
-listArgs syn = case syn of
-  (SignPubKeyLike repo : rest) -> do
-    kvs <- flagsOf ["--status","--label"] rest
-    -- Through 'flagText', the same reading the compose verbs use: a status or
-    -- a label that spells a number is the word that was typed, and 'argvAtom'
-    -- keeps a numeric word as a number.
-    st <- flagMaybe kvs "--status" (fmap Text.pack . flagText)
-    lb <- flagMaybe kvs "--label"  (fmap Text.pack . flagText)
-    pure (repo, Filter st lb)
-  _ -> Nothing
+listArgs syn = do
+  -- Positionally or behind --repo, which is the spelling every verb that WRITES
+  -- takes. See 'repoAndFlags': accepting it is additive now and removing the
+  -- positional form after a release is not.
+  (repo, kvs) <- repoAndFlags asKey ["--status","--label"] syn
+  -- Through 'flagText', the same reading the compose verbs use: a status or
+  -- a label that spells a number is the word that was typed, and 'argvAtom'
+  -- keeps a numeric word as a number.
+  st <- flagMaybe kvs "--status" (fmap Text.pack . flagText)
+  lb <- flagMaybe kvs "--label"  (fmap Text.pack . flagText)
+  pure (repo, Filter st lb)
+  where
+    asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
+-- | Which thread @issue show@ / @pr show@ was asked about.
+data Which = ByNumber Word64 | ByThread HashRef
+  deriving stock (Eq,Show)
+
+-- | @<repo> (<n> | --thread <id>) [--json]@, or the same behind flags.
+--
+-- The positional form is what the verb has always taken; the flag form exists
+-- because @--repo@ is what every writing verb takes and a reader who learned it
+-- there met a usage error here. See 'repoAndFlags'.
+--
+-- EXACTLY ONE of the two ways of naming a thread, in both forms: a line giving
+-- a number and a thread-id is a line somebody edited half way, and picking one
+-- is the guess this reader exists to refuse.
+showArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Which, Bool)
+showArgs syn = positional syn <|> flagged syn
+  where
+    asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
+    positional = \case
+      [ SignPubKeyLike repo, (flagWord -> Just n) ] -> Just (repo, ByNumber n, False)
+      [ SignPubKeyLike repo, (flagWord -> Just n), StringLike "--json" ] ->
+        Just (repo, ByNumber n, True)
+      [ SignPubKeyLike repo, StringLike "--thread", HashLike h ] ->
+        Just (repo, ByThread h, False)
+      [ SignPubKeyLike repo, StringLike "--thread", HashLike h, StringLike "--json" ] ->
+        Just (repo, ByThread h, True)
+      _ -> Nothing
+
+    flagged s = do
+      kvs <- flagsAndSwitches (repoFlags <> ["--number","--thread"]) ["--json"] s
+      repo <- flagRepo asKey kvs
+      n <- flagMaybe kvs "--number" flagWord
+      t <- flagMaybe kvs "--thread" (\case { HashLike h -> Just h ; _ -> Nothing })
+      j <- flagSwitch kvs "--json"
+      which <- case (n, t) of
+                 (Just k, Nothing)  -> Just (ByNumber k)
+                 (Nothing, Just h)  -> Just (ByThread h)
+                 _                  -> Nothing
+      pure (repo, which, j)
+
+-- | @<repo> [<n>]@, or the same behind flags.
+logArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Maybe Word64)
+logArgs syn = positional syn <|> flagged syn
+  where
+    asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
+    positional = \case
+      [ SignPubKeyLike repo ] -> Just (repo, Nothing)
+      -- Through 'flagWord', which guards BOTH ends. A bare fromIntegral on the
+      -- Integer a LitIntVal carries guards neither: flagWord's own haddock is
+      -- the report of that bug -- `--number 18446744073709551617` wrapped to 1
+      -- and the verb answered about a thread nobody named.
+      [ SignPubKeyLike repo, (flagWord -> Just n) ] -> Just (repo, Just n)
+      _ -> Nothing
+
+    flagged s = do
+      kvs <- flagsOf (repoFlags <> ["--number"]) s
+      repo <- flagRepo asKey kvs
+      n <- flagMaybe kvs "--number" flagWord
+      pure (repo, n)

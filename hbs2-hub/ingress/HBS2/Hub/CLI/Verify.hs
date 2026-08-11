@@ -38,7 +38,8 @@ module HBS2.Hub.CLI.Verify
   , usage
   ) where
 
-import HBS2.Hub.Types (pathText)
+import HBS2.Hub.Types (pathText,HubKey)
+import HBS2.Hub.CLI.Argv (repoAndFlags)
 import HBS2.Hash (hashObject,HbSync)
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Fold
@@ -77,7 +78,10 @@ verifyEntries = do
              <> line <> "the trust chain, so canon that named its own owner would be"
              <> line <> "canon that could rename it." )
     $ entry $ bindMatch "hub:verify" $ nil_ \case
-        [ SignPubKeyLike repo ] -> lift do
+        -- Positionally or behind --repo. See 'repoAndFlags': the flag is what
+        -- every verb that writes takes, so a reader who learned it there met a
+        -- usage error on the six verbs that only read.
+        (repoAndFlags asKey [] -> Just (repo, _)) -> lift do
           withGitCanon $ \cs ->
             readCanon cs repo >>= liftIO . either refused report
 
@@ -88,9 +92,13 @@ verifyEntries = do
         -- caller did not type.
         _ -> liftIO (die (show (usage :: Doc ())))
 
+asKey :: forall c . IsContext c => Syntax c -> Maybe HubKey
+asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
 -- What this verb takes, in the words somebody typing it would use.
 usage :: Doc ann
 usage = "usage: hub verify <repo-key>" <> line
+          <> "   or: hub verify --repo <repo-key>" <> line
           <> "  the repository's key in base58, which is what `hbs2-git3` calls"
           <> " the repo key." <> line
           <> "  It is an argument because the owner key is the root of the trust"
