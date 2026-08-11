@@ -627,6 +627,18 @@
 
 ## Fixed
 
+  - **`hbs2-hub issue new`: the positional form is gone.** It took five values,
+    four of them base58 blobs, and two PAIRS of those are interchangeable at the
+    pattern level -- the repository key and the author key are both signing
+    keys, the two sigils are both hashes. So a swap within either pair sent a
+    correctly signed, delivered letter authored by the repository key, with no
+    error and a zero exit, and an authorship claim lives inside a signed box
+    where nothing afterwards can take it back. The verb's own documentation
+    said as much and kept the form because the tests drove it, which is a reason
+    to keep a form and not a reason it is safe. Every value is behind a flag
+    now; a name cannot be swapped silently. Before a release rather than after,
+    because afterwards removing it is a break.
+
   - **`hbs2-hub`: `--key` meant four different kinds of key.** An inner author
     at `ban`, an envelope key at `block`, a canon signer at `maintainer add`, a
     person at `assign --to` -- all thirty-two bytes of base58, so every swap

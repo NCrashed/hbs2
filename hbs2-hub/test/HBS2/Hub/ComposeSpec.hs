@@ -38,14 +38,36 @@ spec = do
 
   describe "PEP-22 hub issue new: which value is which" $ do
 
-    it "reads the five positional arguments it always read" $ do
+    -- THE POSITIONAL FORM IS GONE, and this test was the one that drove it.
+    --
+    -- It was four base58 blobs in a row and two PAIRS of them are
+    -- interchangeable at the pattern level: repo-key and author-key are both
+    -- SignPubKeyLike, the two sigils are both HashLike. Swapping either pair
+    -- produced a valid, signed, DELIVERED letter authored by the repository key,
+    -- with no error and a zero exit -- and an authorship claim lives inside a
+    -- signed box, so nothing afterwards takes it back.
+    --
+    -- The old comment here said the form stays "because it is what exists and
+    -- what the tests drive", which is a reason to keep a form and not a reason
+    -- it is safe. Removed before a release rather than after, because the shape
+    -- is well-typed either way round: the only defence a caller has is that the
+    -- tool will not take it.
+    it "refuses the five positional arguments it used to read" $ do
       repo <- aKey
       author <- aKey
       let s = href "sender"
           r = href "rcpt"
           argv = [ keyWord repo, word (pretty s), word (pretty r), keyWord author
                  , mkStr @C "a title" ]
-      issueArgs argv `shouldBe` Just (repo, s, Just r, author, "a title", [], Nothing)
+      issueArgs argv `shouldBe` Nothing
+      -- And the swap it used to accept in silence, which is the whole reason:
+      -- same shape, two of the four values exchanged.
+      issueArgs [ keyWord author, word (pretty r), word (pretty s), keyWord repo
+                , mkStr @C "a title" ]
+        `shouldBe` Nothing
+      -- The usage no longer offers it either, or the refusal above would send a
+      -- reader straight back to the form that was just taken away.
+      show (issueUsage :: Doc ()) `shouldSatisfy` not . isInfixOf "<repo-key> <sender-sigil>"
 
     it "reads them by name, in any order" $ do
       -- The reason the named form exists: FOUR base58 blobs in a row, and two

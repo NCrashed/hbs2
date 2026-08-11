@@ -33,7 +33,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
@@ -400,11 +400,12 @@ composeEntries = do
            , arg "string" "--sender sender-sigil"
            , arg "string" "--recipient recipient-sigil"
            , arg "string" "--author author-key", arg "string" "--title title" ]
-    $ desc ( "The flags may be given in any order, and the same five values"
-             <> line <> "are also accepted positionally in the order above. Prefer"
-             <> line <> "the flags: the two keys are interchangeable positionally,"
-             <> line <> "and so are the two sigils, so a swap sends a correctly"
-             <> line <> "signed letter claiming the wrong author."
+    $ desc ( "Every value is behind a flag, and they may be given in any"
+             <> line <> "order. There is no positional form: two of the four values"
+             <> line <> "are keys and two are sigils, so a swap within either pair"
+             <> line <> "sent a correctly signed letter claiming the wrong author,"
+             <> line <> "with no error and a zero exit -- and an authorship claim"
+             <> line <> "inside a signed box cannot be taken back."
              <> line
              <> line <> "Signs the author box with author-key and seals it to"
              <> line <> "recipient-sigil, which is also what says which mailbox"
@@ -548,20 +549,25 @@ letterBody s = case Text.dropWhileEnd isSpace (Text.pack s) of
   t | Text.null t -> Nothing
     | otherwise   -> Just t
 
--- | The arguments to @hub issue new@, positionally or by name.
+-- | The arguments to @hub issue new@. EVERY value behind a flag.
 --
--- The named form exists because the positional one is four base58 blobs in a
--- row and TWO PAIRS OF THEM ARE INTERCHANGEABLE AT THE PATTERN LEVEL: repo-key
--- and author-key are both 'SignPubKeyLike', the two sigils are both 'HashLike'.
--- Swapping the keys produced a valid, signed, delivered letter authored by the
--- repository key and targeting the author key, with no error and a zero exit --
--- and an authorship claim inside a signed box is permanent. A name cannot be
--- swapped silently.
+-- THE POSITIONAL FORM IS GONE, and this is why it could not stay. It was four
+-- base58 blobs in a row and TWO PAIRS OF THEM ARE INTERCHANGEABLE AT THE
+-- PATTERN LEVEL: repo-key and author-key are both 'SignPubKeyLike', the two
+-- sigils are both 'HashLike'. So swapping either pair produced a valid, signed,
+-- DELIVERED letter -- authored by the repository key, targeting the author
+-- key -- with no error and a zero exit. An authorship claim lives inside a
+-- signed box, so nothing afterwards can take it back.
 --
--- PEP-22 spells the verb with flags, and this is also the rule the sibling verb
--- states for itself: "a form the spec names has to be accepted under that name
--- or the divergence has merely moved". The positional form stays because it is
--- what exists and what the tests drive; --title's argument is the only free text
+-- This comment used to end "the positional form stays because it is what exists
+-- and what the tests drive", which is a reason to keep a form and not a reason
+-- it is safe. It is removed before a release rather than after, because
+-- afterwards it is a break: the shape is well-typed either way round, so the
+-- only defence a caller has is that the tool will not take it.
+--
+-- PEP-22 spells the verb with flags, and the sibling verb states the rule for
+-- itself: "a form the spec names has to be accepted under that name or the
+-- divergence has merely moved". @--title@'s argument is the only free text
 -- here, and it is the one the argv reader must hand over verbatim.
 --
 -- Total, and exported so that a test can ask what a command line means without
@@ -569,13 +575,7 @@ letterBody s = case Text.dropWhileEnd isSpace (Text.pack s) of
 issueArgs :: forall c . IsContext c
           => [Syntax c]
           -> Maybe (RepoRef, HashRef, Maybe HashRef, HubKey, String, [String], Maybe String)
-issueArgs = \case
-  [ SignPubKeyLike repo, HashLike sender, HashLike rcpt
-    , SignPubKeyLike author, (titleOf -> Just title) ] ->
-      -- No labels positionally: a repeatable value has no position, and the
-      -- positional form stays only because it is what exists.
-      Just (repo, sender, Just rcpt, author, title, [], Nothing)
-  ss -> named ss
+issueArgs = named
   where
     -- A title is TEXT, and a person is allowed to call an issue "2026".
     --
@@ -642,8 +642,6 @@ issueUsage = "usage: hub issue new --repo <repo-key> --sender <sender-sigil>"
           <> line <> "                     --recipient <recipient-sigil>"
           <> line <> "                     --author <author-key> --title <title>"
           <> line <> "                     [--label <label>]..."
-          <> line <> "   or: hub issue new <repo-key> <sender-sigil> <recipient-sigil>"
-          <> line <> "                     <author-key> <title>"
           <> line
           <> line <> "  --label may be given more than once. A label here is a"
           <> line <> "  REQUEST: applying one is the owner's to sign (PEP-19), so"
@@ -666,10 +664,10 @@ issueUsage = "usage: hub issue new --repo <repo-key> --sender <sender-sigil>"
           <> line <> "  WrongTarget, with no reply path to tell you."
           <> line
           <> line <> "  --body <text>, or --body - to read it from stdin."
-          <> line <> "  Prefer the named form: the two keys and the two sigils are"
-          <> line <> "  interchangeable positionally, and a swap sends a correctly"
-          <> line <> "  signed letter claiming the wrong author, which cannot be"
-          <> line <> "  taken back."
+          <> line <> "  Every value is behind a flag and there is no positional"
+          <> line <> "  form. The two keys and the two sigils are interchangeable"
+          <> line <> "  by shape, so a swap sent a signed letter"
+          <> line <> "  claiming the wrong author, which cannot be taken back."
           <> line <> "  `hub help issue new` says more."
 
 -- | Where a letter's body comes from, and it is never a surprise.
