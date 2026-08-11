@@ -2,10 +2,14 @@ module HBS2.Hub.ManifestSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Manifest
+import HBS2.Hub.Repo.Manifest (ManifestGone(..),sigilTrouble)
+import HBS2.Net.Auth.Credentials.Sigil (makeSigilFromCredentials)
+import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Prelude.Plated (pretty,fromStringMay)
-import HBS2.Data.Types.Refs (HashRef)
+import HBS2.Data.Types.Refs (HashRef(..))
+import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Function ((&))
 import Data.Maybe (fromMaybe)
 
@@ -228,3 +232,49 @@ spec = do
                         <> " 8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ)" ) of
         Left e    -> expectationFailure (show e)
         Right syn -> sigils syn `shouldBe` [MailboxSigil k h]
+
+  -- THE TWO CLAUSES ARE WRITTEN BY HAND AND ONLY ONE OF THEM DECIDES ANYTHING.
+  -- `resolveKeys` on the peer takes the recipient's sign key out of the SIGIL's
+  -- own signed box, so `(mailbox-sigil K H)` where H names some other key
+  -- delivers every contribution to that other key's mailbox: the owner reads K
+  -- and sees an empty queue, the contributor is told `queued` and exits 0, and
+  -- no layer between them is wrong about anything.
+  describe "PEP-18 manifest: the sigil a repository publishes for its mailbox" $ do
+
+    let sigilOf' creds =
+          fromMaybe (error "the fixture could not build a sigil")
+            (makeSigilFromCredentials @HBS2Basic creds
+               (head [ _krPk e | e <- _peerKeyring creds ]) Nothing Nothing)
+
+    it "takes a sigil that names the mailbox it was published for" $ do
+      repo <- kp
+      mbox <- newCredentials @'HBS2Basic >>= addKeyPair Nothing
+      let h = aHash "sigil"
+      sigilTrouble repo (_peerSignPk mbox) h (Just (sigilOf' mbox))
+        `shouldBe` Right h
+
+    it "refuses one that names somebody else, and says which two keys" $ do
+      repo <- kp
+      mbox <- kp
+      other <- newCredentials @'HBS2Basic >>= addKeyPair Nothing
+      let h = aHash "sigil"
+      sigilTrouble repo mbox h (Just (sigilOf' other))
+        `shouldBe` Left (ManifestSigilMismatch repo mbox h (_peerSignPk other))
+      -- and the report names both, because the fix is to change one of them and
+      -- the owner has to be able to see which
+      let said = show (pretty (ManifestSigilMismatch repo mbox h (_peerSignPk other)))
+      said `shouldSatisfy` isInfixOf (show (pretty (AsBase58 mbox)))
+      said `shouldSatisfy` isInfixOf (show (pretty (AsBase58 (_peerSignPk other))))
+      said `shouldSatisfy` isInfixOf "Nothing was sent"
+
+    -- A sigil this node cannot read PROCEEDS, matching `checkReplyChannel` on
+    -- the other side of the same question: absent bytes are not evidence of a
+    -- mismatch, and the send fails on its own if they are really gone.
+    it "proceeds on a sigil it could not read, rather than accusing" $ do
+      repo <- kp
+      mbox <- kp
+      let h = aHash "sigil"
+      sigilTrouble repo mbox h Nothing `shouldBe` Right h
+
+aHash :: String -> HashRef
+aHash = HashRef . hashObject . LBS.pack

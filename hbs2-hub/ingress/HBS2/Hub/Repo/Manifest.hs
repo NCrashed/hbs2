@@ -25,12 +25,14 @@ module HBS2.Hub.Repo.Manifest
   , codeNoManifest
   , mailboxFor
   , sigilFor
+  , sigilTrouble
   , mailboxOf
   , sigilOf
   ) where
 
-import HBS2.Hub.Types (HubKey,RepoRef,safeText)
+import HBS2.Hub.Types (HubKey,HubScheme,RepoRef,safeText)
 import HBS2.Hub.Canon (clausesWith)
+import HBS2.Hub.Letter (sigilOwner)
 import HBS2.Hub.Manifest
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
 
@@ -40,6 +42,7 @@ import HBS2.CLI.Run.Internal.Merkle (getTreeContents)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Detect (readLogThrow)
+import HBS2.Net.Auth.Credentials.Sigil (loadSigil,Sigil)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.LWWRef
 import HBS2.Peer.RPC.API.LWWRef
@@ -73,6 +76,19 @@ data ManifestGone =
     -- a sign key, so this is a mailbox nobody outside can write to: the owner
     -- published half the pair.
   | ManifestNoSigil RepoRef HubKey
+    -- | It declares a mailbox and a sigil, and the sigil is somebody else's.
+    --
+    -- THE SIGIL DECIDES WHERE THE LETTER GOES, not the @(mailbox K hub)@
+    -- clause: @resolveKeys@ on the peer takes the recipient's SIGN key out of
+    -- the sigil's own signed box. So an owner who writes their personal sigil
+    -- into the clause gets every contribution delivered to their personal
+    -- mailbox, while @hub inbox --repo K@ reads K and shows nothing, and the
+    -- contributor is told @queued@ and exits 0. Three parties, all behaving
+    -- correctly, and no error anywhere.
+    --
+    -- Carries what was declared and what the sigil actually names, because the
+    -- fix is to change one of the two and the owner has to be able to see which.
+  | ManifestSigilMismatch RepoRef HubKey HashRef HubKey
   deriving stock (Eq,Show)
 
 instance Pretty ManifestGone where
@@ -98,6 +114,19 @@ instance Pretty ManifestGone where
         <> "  a letter is sealed to an encryption key and a mailbox key is not"
         <+> "one, so nothing can be sent there until the owner publishes the"
         <> line <> "  sigil clause. Naming --recipient skips the lookup."
+    ManifestSigilMismatch k mbox href names ->
+      pretty (AsBase58 k) <+> "publishes a sigil for a mailbox that is not the"
+        <+> "one it declares" <> line
+        <> "  declared mailbox " <+> pretty (AsBase58 mbox) <> line
+        <> "  sigil           " <+> pretty href <> line
+        <> "  which names     " <+> pretty (AsBase58 names) <> line
+        <> "  The SIGIL decides where a letter goes, so a letter sent here would"
+        <+> "arrive at the" <> line
+        <> "  second key while the owner reads the first and sees nothing."
+        <+> "Nothing was sent." <> line
+        <> "  The owner fixes it with `hbs2-git3 repo:mailbox:sigil`; naming"
+        <+> "--recipient by hand" <> line <> "  overrides the clause if you"
+        <+> "know which mailbox you mean."
 
 -- | And what a verb that has nowhere else to go should exit with.
 --
@@ -195,18 +224,61 @@ mailboxFor Nothing repo =
 -- A repository that declares a mailbox and no sigil for it is reported as
 -- 'ManifestNoSigil' rather than as having no mailbox: the two are different
 -- mistakes by the owner, and only one of them is "this is not a forge".
+--
+-- AND THE SIGIL IS CHECKED AGAINST THE MAILBOX IT IS PUBLISHED FOR, which
+-- nothing did. The two clauses are written by hand and the sigil is the one
+-- that decides anything: @resolveKeys@ on the peer takes the recipient's sign
+-- key out of the sigil's own box, so @(mailbox-sigil K H)@ where H names some
+-- other key delivers every contribution to that other key's mailbox. The owner
+-- reads K and sees an empty queue, the contributor is told @queued@ and exits
+-- 0, and no layer between them is wrong about anything. 'sigilNames' is exactly
+-- this predicate and was applied on the reply side only.
+--
+-- One block read, and the sigil is about to be read anyway to seal the message.
+--
+-- A SIGIL GIVEN BY HAND IS NOT CHECKED, on the rule the whole family follows: a
+-- caller who names one is not asking to be corrected, and @--recipient@ is the
+-- documented way to mean a mailbox other than the declared one.
+--
+-- A sigil this node cannot read PROCEEDS, matching 'checkReplyChannel' on the
+-- other side: missing bytes are not evidence of a mismatch, and the send fails
+-- on its own if they are really gone.
 sigilFor :: forall m . ( MonadUnliftIO m
                        , HasStorage m
                        , HasClientAPI LWWRefAPI UNIX m
                        )
          => Maybe HashRef -> RepoRef -> m (Either ManifestGone HashRef)
 sigilFor (Just h) _ = pure (Right h)
-sigilFor Nothing repo =
-  readManifest repo <&> \case
+sigilFor Nothing repo = do
+  declared <- readManifest repo <&> \case
     Left e -> Left e
     Right mf -> case mailboxOf mf of
       Nothing -> Left (ManifestNoMailbox repo)
-      Just mbox -> maybe (Left (ManifestNoSigil repo mbox)) Right (sigilOf mbox mf)
+      Just mbox -> maybe (Left (ManifestNoSigil repo mbox))
+                         (Right . (,) mbox)
+                         (sigilOf mbox mf)
+
+  case declared of
+    Left e -> pure (Left e)
+    Right (mbox, href) -> do
+      sto <- getStorage
+      sigilTrouble repo mbox href <$> loadSigil @HubScheme sto href
+
+-- | Whether a sigil the manifest published for a mailbox is that mailbox's.
+--
+-- The decision on its own, so it can be asserted without a peer, an LWWRef and
+-- a storage: what this says is which of two clauses an owner has to change, and
+-- that should be readable without the three calls that fetch them.
+--
+-- 'Nothing' is a sigil this node could not read, and it PROCEEDS: absent bytes
+-- are not evidence of a mismatch, and the send fails on its own if they are
+-- really gone. The same answer 'HBS2.Hub.CLI.Compose.checkReplyChannel' gives
+-- on the other side of the same question.
+sigilTrouble :: RepoRef -> HubKey -> HashRef -> Maybe (Sigil HubScheme)
+             -> Either ManifestGone HashRef
+sigilTrouble repo mbox href msi = case sigilOwner =<< msi of
+  Just names | names /= mbox -> Left (ManifestSigilMismatch repo mbox href names)
+  _                          -> Right href
 
 -- | The ingress mailbox a repository declares, if it declares one.
 --

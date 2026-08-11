@@ -627,6 +627,23 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: a repository could send every contribution to the wrong
+    mailbox, silently.** The manifest carries two clauses written by hand and
+    only one of them decides anything: `resolveKeys` on the peer takes the
+    recipient's sign key out of the SIGIL's own signed box, so
+    `(mailbox-sigil K H)` where `H` names some other key delivered every letter
+    to that other key's mailbox. The owner read `K`, saw an empty queue, and had
+    no reason to doubt it; the contributor was told `queued` and exited 0; no
+    layer between them was wrong about anything. `sigilNames` is exactly the
+    predicate for this and was applied on the reply side only.
+
+    The sigil is checked against the mailbox it was published for, and the
+    refusal names both keys, because the fix is to change one of the two and the
+    owner has to see which. One block read, and the sigil is about to be read
+    anyway to seal the message. A sigil named by hand with `--recipient` is not
+    checked -- that is the documented way to mean a mailbox other than the
+    declared one -- and one this node cannot read proceeds rather than accuses.
+
   - **`hbs2-hub`: the reply channel claimed a privacy it does not have.** Its
     comment said a contributor's mailbox key must not end up in every clone,
     which is why it sits outside the inner box. It does end up there: the

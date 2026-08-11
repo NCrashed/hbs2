@@ -52,6 +52,7 @@ module HBS2.Hub.Letter
   , malformedRef
   , noReplyChannel
   , sigilNames
+  , sigilOwner
   , makeLetter
   , makeAck
   , letterPayload
@@ -468,10 +469,16 @@ noReplyChannel = NoReply
 -- questions without a storage. That is why it could not live next to
 -- 'openLetterAs', which is where it belongs by subject.
 sigilNames :: HubKey -> Maybe (Sigil HubScheme) -> Maybe Bool
-sigilNames k msi = do
-  si <- msi
-  (owner, _) <- unboxSignedBox0 (sigilData si)
-  pure (owner == k)
+sigilNames k msi = (== k) <$> (sigilOwner =<< msi)
+
+-- | Whose sigil this is: the key inside its own signed box.
+--
+-- The half of 'sigilNames' that has an answer rather than a verdict, because a
+-- caller reporting a MISMATCH has to name the key the sigil turned out to be
+-- for. Split out rather than copied, so the two cannot come to disagree about
+-- where a sigil's identity lives.
+sigilOwner :: Sigil HubScheme -> Maybe HubKey
+sigilOwner si = fst <$> unboxSignedBox0 (sigilData si)
 
 -- | A courtesy notification from the owner to a contributor: the number and
 -- status the contributor could not compute themselves. Not canon, carries no
