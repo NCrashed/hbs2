@@ -56,6 +56,7 @@ module HBS2.Hub.CLI.Accept
   , codeCanonUnwritable
   , codeCanonUnplannable
   , codeBundleUnusable
+  , codePartsTooMany
   , bundleOf
   , forkOf
   , partEvidence

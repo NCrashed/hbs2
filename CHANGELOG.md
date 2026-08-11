@@ -627,6 +627,19 @@
 
 ## Fixed
 
+  - **`hbs2-hub --codes`: the exit codes are a table the tool prints.** PEP-22
+    calls them a contract and the manual repeats it; they were defined in
+    fifteen modules, four of them documented nowhere, and the next number was
+    chosen by grepping for the last one -- which is how two would eventually be
+    chosen at once. There is one list now, and it is not copied into the manual:
+    a table in two places disagrees with itself, so this one is generated from
+    the constants the verbs actually exit with and the manual points at it. The
+    constants stay where they are used, since each carries a paragraph about why
+    that refusal is worth its own number, and the list is an enum the two
+    functions over it are total on -- an entry without a number or a sentence
+    does not compile. Six tests, the first of which is that no two share a
+    number.
+
   - **`hbs2-hub issue new`: the positional form is gone.** It took five values,
     four of them base58 blobs, and two PAIRS of those are interchangeable at the
     pattern level -- the repository key and the author key are both signing

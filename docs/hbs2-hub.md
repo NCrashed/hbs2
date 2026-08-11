@@ -453,8 +453,20 @@ its own number, so a hook can tell "the bridge would not bless this
 letter" from "git would not write the commit" without reading the
 message. `hbs2-hub compact` exits `42` for "there was nothing to
 compact", which is not a failure and is the ordinary state of a young
-forge. `hbs2-hub --help` lists the verbs and `hbs2-hub help <verb>`
-documents one.
+forge.
+
+```
+hbs2-hub --codes
+```
+
+prints the whole table with a line each. It is not a copy of one kept
+here: it is generated from the constants the verbs actually exit with, so
+the tool and its documentation cannot come to disagree about a number a
+script branches on. `3` to `16` belong to `hub verify` and say why canon
+could not be read; `hbs2-hub help verify` documents those.
+
+`hbs2-hub --help` lists the verbs and `hbs2-hub help <verb>` documents
+one.
 
 `hbs2-hub --version` prints the build, so a script can ask which
 contract it is talking to.

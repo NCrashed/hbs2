@@ -9,6 +9,7 @@ import HBS2.Hub.Types (safeText)
 import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
+import HBS2.Hub.CLI.Codes (codesDoc)
 import HBS2.Hub.CLI.Comment
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
@@ -310,6 +311,19 @@ main = do
     (w:_, _) | w `elem` ["--version","-V","version"] ->
       putStrLn ("hbs2-hub " <> showVersion Version.version)
 
+    -- THE EXIT CODES, PRINTED BY THE TOOL THAT USES THEM.
+    --
+    -- PEP-22 calls them a contract and the manual repeats it, and they lived in
+    -- fifteen modules with four of them documented nowhere and the next number
+    -- chosen by grep. A table in the manual would be a second copy to disagree
+    -- with; this one is generated from the constants the verbs actually exit
+    -- with, so it cannot.
+    --
+    -- Handled here, like --version, so that it needs no peer, no repository and
+    -- no arguments, and cannot be shadowed.
+    (w:_, _) | w `elem` ["--codes","codes"] ->
+      mapM_ print codesDoc
+
     -- Arguments that name nothing. Distinguished from the empty case, which it
     -- used to share: falling into the stdin branch made a typo exit zero after
     -- printing the help, and on a terminal or in a pipeline it waited for input
@@ -454,8 +468,8 @@ main = do
         putStrLn ("  " <> fmap (\c -> if c == ':' then ' ' else c) (drop 4 v))
       putStrLn ""
       putStrLn "  hbs2-hub help <verb>    what one verb takes"
-      putStrLn "  hbs2-hub --help <text>  search every entry, including the"
-      putStrLn "                          suckless script builtins this shares"
+      putStrLn "  hbs2-hub --codes        every exit code, with a line each"
+      putStrLn "  hbs2-hub --help <text>  search the verbs by name"
 
     -- Whether the dictionary holds a name, as a function.
     --

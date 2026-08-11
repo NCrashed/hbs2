@@ -127,6 +127,7 @@ library hub-ingress
       HBS2.Hub.CLI.Ack
       HBS2.Hub.CLI.Argv
       HBS2.Hub.CLI.Ban
+      HBS2.Hub.CLI.Codes
       HBS2.Hub.CLI.Comment
       HBS2.Hub.CLI.Common
       HBS2.Hub.CLI.Compact
