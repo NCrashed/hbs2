@@ -89,7 +89,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> partSeam >> holes
+spec = spec1 >> spec2 >> spec3 >> partSeam >> holes >> readingOn
 
 spec1 :: Spec
 spec1 = do
@@ -777,3 +777,69 @@ holes =
       said `shouldSatisfy` isInfixOf "Exists"
       said `shouldSatisfy` isInfixOf "Deleted"
       length (lines said) `shouldSatisfy` (< 20)
+
+-- | Paging over a queue whose first page a stranger chose.
+readingOn :: Spec
+readingOn =
+  describe "PEP-22 a queue read a page at a time" $ do
+
+    let inbox msgs gks = servingAll msgs gks
+        aLetter c owner = opened c (letterPayload
+                            (makeLetter (_peerSignPk c) (_peerSignSk c)
+                              (AOpen owner HubIssue "t" [] Nothing Nothing Nothing 1)
+                              noReplyChannel))
+
+    it "walks the whole mailbox in pages that do not repeat or skip" $ do
+      owner <- aKey
+      cs <- mapM (const (newCredentials @'HBS2Basic)) [1 .. 5 :: Int]
+      first' <- aLetter (head cs) owner
+      rest <- mapM (\c -> fst <$> aLetter c owner) (tail cs)
+      let msgs = fst first' : rest
+          ig = inbox msgs (snd first')
+
+      -- One at a time, following the cursor the previous page handed back.
+      let walk after acc n
+            | n > (10 :: Int) = pure (reverse acc, "did not terminate")
+            | otherwise = do
+                r <- readInboxFrom ig owner after 2
+                case irCursor r of
+                  Nothing -> pure (reverse (fmap lvMessage (irLetters r) : acc), "done")
+                  c -> walk c (fmap lvMessage (irLetters r) : acc) (n + 1)
+      (pages, why) <- walk Nothing [] 0
+      why `shouldBe` "done"
+      let seen = concat pages
+      -- every live message, once
+      length seen `shouldBe` 5
+      HS.size (HS.fromList seen) `shouldBe` 5
+
+    -- The bound is still a bound: --limit lowers the cost of a look and cannot
+    -- raise it past what one read will take.
+    it "clamps a limit nobody should be able to raise" $ do
+      owner <- aKey
+      c <- newCredentials @'HBS2Basic
+      (msg, gks) <- aLetter c owner
+      r <- readInboxFrom (inbox [msg] gks) owner Nothing (maxInboxLetters * 100)
+      length (irLetters r) `shouldBe` 1
+      -- and a limit of zero is a page of one rather than a page of none, which
+      -- would hand back a cursor that does not advance
+      r0 <- readInboxFrom (inbox [msg] gks) owner Nothing 0
+      length (irLetters r0) `shouldBe` 1
+
+    -- 'igAllowed' has always said the queue applies the deny-list "because
+    -- triage is a queue a human reads and a banned author's letter should not
+    -- be in it". It was in it, as one more unreadable line.
+    it "keeps a denied author's letter out of the queue, and counts it" $ do
+      owner <- aKey
+      c <- newCredentials @'HBS2Basic
+      (msg, gks) <- aLetter c owner
+      ok <- readInboxFrom (inbox [msg] gks) owner Nothing 10
+      length (irLetters ok) `shouldBe` 1
+      irDenied ok `shouldBe` 0
+
+      let denied = (inbox [msg] gks) { igAllowed = const False }
+      r <- readInboxFrom denied owner Nothing 10
+      irLetters r `shouldBe` []
+      irDenied r `shouldBe` 1
+      -- and the message is still LIVE: a ban bounds what is folded, not what
+      -- the mailbox holds
+      HS.size (irLive r) `shouldBe` 1

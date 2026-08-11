@@ -29,6 +29,7 @@ module HBS2.Hub.Ingress
   , MailboxUnknown(..)
   , liveMessages
   , readInbox
+  , readInboxFrom
   , MailboxLive(..)
   , mailboxLive
   , openMessage
@@ -307,6 +308,31 @@ data InboxRead = InboxRead
     -- and a few hundred megabytes. The canon reader next door carries three
     -- bounds and its own refusal for each; this had none.
   , irOmitted :: Int
+    -- | How many of the letters this page opened were from a denied author.
+    --
+    -- Counted here and kept OUT of 'irLetters', which is what the deny-list was
+    -- supposed to do all along: 'igAllowed' is documented as "asked here as well
+    -- as at accept time, because triage is a queue a human reads and a banned
+    -- author's letter should not be in it", and it was in it -- one line each,
+    -- indistinguishable from a letter that failed to decrypt.
+    --
+    -- The COUNT stays, because a queue that hides them silently is a queue that
+    -- lies about how much of it a stranger is producing, and because a
+    -- maintainer who banned somebody by mistake would have no way to see that
+    -- anything was happening.
+    --
+    -- What this does NOT do is give back the slot: the ban is on the inner
+    -- author, so the letter has to be decrypted before anybody knows whose it
+    -- is. Only 'iaAfter' gets past a page a stranger filled.
+  , irDenied  :: Int
+    -- | The last live message this page looked at, or 'Nothing' for a page that
+    -- looked at none.
+    --
+    -- What @--after@ takes, and it is the last one READ rather than the last one
+    -- shown: a page whose every letter was denied or grouped away would
+    -- otherwise hand back a cursor that does not advance, and paging would loop
+    -- on it forever.
+  , irCursor  :: Maybe HashRef
     -- | Every live message the tree holds, opened or not.
     --
     -- The queue above is bounded and this is not, and the difference is what a
@@ -465,8 +491,37 @@ awaitMailbox ig mbox = do
 
 -- | Fetch, walk and read a mailbox: every live message, opened as far as it
 -- will open.
+-- | A page of the queue: the first 'maxInboxLetters' of the mailbox.
+--
+-- The shape every caller wanted before there was anywhere else to start from.
 readInbox :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
-readInbox ig mbox = do
+readInbox ig mbox = readInboxFrom ig mbox Nothing maxInboxLetters
+
+-- | And a page starting after a message, of a chosen size.
+--
+-- WHY THERE IS A CURSOR AT ALL. The page is the first N of the live set sorted
+-- by hash, and a mailbox is public, so which N those are is a function of what
+-- strangers have sent. Grinding message hashes below the honest ones is a few
+-- thousand signatures and displaces every real letter off the only screen a
+-- maintainer triages from -- permanently, since nothing raised the bound and
+-- the remedy was rejecting junk one hash at a time. @--after@ is what walks
+-- past it.
+--
+-- BY HASH AND NOT BY OFFSET, because the set changes underneath: an offset
+-- names a position in a list that grows, so a letter arriving between two pages
+-- shifts everything after it and a page is skipped. A hash names a place in an
+-- order that does not move.
+--
+-- The bound stays a bound: 'limit' is clamped to 'maxInboxLetters', so a caller
+-- cannot ask for the whole mailbox and pay a keyman lookup and a secretbox open
+-- for every letter a stranger sent.
+readInboxFrom :: MonadUnliftIO m
+              => Ingress m
+              -> HubKey
+              -> Maybe HashRef  -- ^ start after this message
+              -> Int            -- ^ how many to open, clamped
+              -> m InboxRead
+readInboxFrom ig mbox after limit = do
   ml <- mailboxLive ig mbox
   -- Sorted explicitly. This used to be HS.toList with a comment claiming it
   -- was sorted by hash: that is the HAMT traversal order, which is a property
@@ -477,8 +532,13 @@ readInbox ig mbox = do
   -- of the mailbox and not of the order the walk happened to return: a
   -- truncated queue that reshuffles between runs would be worse than a
   -- truncated one.
-  let live = sort (HS.toList (mlLive ml))
-      (taken, left) = List.splitAt maxInboxLetters live
+  let all' = sort (HS.toList (mlLive ml))
+      -- STRICTLY after, so a cursor handed back by the previous page does not
+      -- repeat its last letter -- and so that paging terminates even when the
+      -- cursor names a message that has since been deleted, since the
+      -- comparison is on the order and not on membership.
+      live = maybe all' (\h -> List.dropWhile (<= h) all') after
+      (taken, left) = List.splitAt (max 1 (min maxInboxLetters limit)) live
 
   -- ONE BLOCK READ EACH, then group, then open. A rewrap costs nothing to make
   -- -- see 'lvCopies' -- and every copy used to be its own queue line, its own
@@ -501,10 +561,32 @@ readInbox ig mbox = do
                ]
       firstOf k = listToMaybe [ h | (h, k', _) <- keyed, k' == Just k ]
 
-  lvs <- for groups $ \(h, blk, copies) ->
-           (\lv -> lv { lvCopies = copies }) <$> openBlock ig h blk
+  opened <- for groups $ \(h, blk, copies) ->
+              (\lv -> lv { lvCopies = copies }) <$> openBlock ig h blk
 
-  pure (InboxRead lvs (mlMissing ml) (mlSettled ml) (length left) (mlLive ml))
+  -- AND A DENIED AUTHOR'S LETTER LEAVES THE QUEUE, which is what 'igAllowed'
+  -- has always claimed to do here: "triage is a queue a human reads and a
+  -- banned author's letter should not be in it". It was in it, as one more
+  -- unreadable line, indistinguishable from a letter that would not decrypt.
+  --
+  -- Counted rather than dropped in silence: a queue that hides them says
+  -- nothing about how much of itself a stranger is producing, and a maintainer
+  -- who banned the wrong key would see no sign of it.
+  let denied lv = case lvLetter lv of
+                    Left (BadLetterHere AuthorDenied) -> True
+                    _                                 -> False
+      lvs = [ lv | lv <- opened, not (denied lv) ]
+
+  pure InboxRead
+    { irLetters = lvs
+    , irMissing = mlMissing ml
+    , irSettled = mlSettled ml
+    , irOmitted = length left
+    , irDenied  = length [ () | lv <- opened, denied lv ]
+      -- The last one READ, not the last one shown: see 'irCursor'.
+    , irCursor  = listToMaybe (reverse taken)
+    , irLive    = mlLive ml
+    }
 
 -- | What a mailbox HOLDS, without opening any of it.
 --

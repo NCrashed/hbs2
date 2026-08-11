@@ -627,6 +627,29 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox`: the queue could be pushed off its own first page, and
+    a ban did not take a letter out of it.** Two ways the only screen a
+    maintainer triages from was a stranger's to fill.
+
+    The page is the first N of the live set in hash order, and a mailbox is
+    public, so which N those are is chosen by whoever writes to it: grinding
+    message hashes below the honest ones is a few thousand signatures and
+    displaces every real letter, permanently, since nothing raised the bound
+    and the only remedy was rejecting junk one hash at a time. `--after` walks
+    past it and the truncation note prints the value to continue with; `--limit`
+    lowers how many are opened and is clamped, so it cannot raise the cost past
+    what one read will take. By hash and not by offset, because the set grows
+    underneath and an offset would skip a page.
+
+    And `igAllowed` has always said the queue applies the deny-list "because
+    triage is a queue a human reads and a banned author's letter should not be
+    in it". It was in it, as one more unreadable line. Such letters are left out
+    and COUNTED -- dropping them silently would leave a queue that says nothing
+    about how much of itself a stranger is producing, and no sign at all to a
+    maintainer who banned a key by mistake. The slot is not given back and
+    cannot be: the ban is on the inner author, so the letter is decrypted before
+    anybody knows whose it is.
+
   - **`hbs2-hub inbox accept`: it folded over a mailbox tree it had not read
     whole.** `hub inbox` has said for a long time that a chunk which would not
     read makes its list wrong in BOTH directions -- a missing chunk of `Exists`

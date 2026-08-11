@@ -60,7 +60,7 @@ view :: HashRef -> Maybe HubKey -> Either OpenError (HubKey, AuthorContent, Disp
 view m env letter = LetterView m env letter Nothing []
 
 spec :: Spec
-spec = spec1 >> spec2
+spec = spec1 >> spec2 >> paging
 
 spec1 :: Spec
 spec1 = do
@@ -127,11 +127,11 @@ spec1 = do
       -- "not downloaded yet" are one observation. Reporting nothing, quietly and
       -- with a zero exit, was the answer that made a first run against a live
       -- mailbox look like a mailbox with nothing in it.
-      let notes = fmap shown (inboxNotes False (InboxRead [] [] False 0 mempty))
+      let notes = fmap shown (inboxNotes False (InboxRead [] [] False 0 0 Nothing mempty))
       notes `shouldSatisfy` any (isInfixOf "NOT the same as an empty mailbox")
 
     it "says a settled empty mailbox is empty, by saying nothing" $ do
-      fmap shown (inboxNotes False (InboxRead [] [] True 0 mempty)) `shouldBe` []
+      fmap shown (inboxNotes False (InboxRead [] [] True 0 0 Nothing mempty)) `shouldBe` []
 
     it "tells a still-arriving queue from an incomplete one" $ do
       -- Different notes because they call for different things, and only one of
@@ -141,8 +141,8 @@ spec1 = do
       -- prevent.
       k <- aKey
       let one = [view (mh "m") (Just k) (Left NotForUs)]
-          arriving = fmap shown (inboxNotes False (InboxRead one [] False 0 mempty))
-          holed    = fmap shown (inboxNotes False (InboxRead one [mh "x"] True 0 mempty))
+          arriving = fmap shown (inboxNotes False (InboxRead one [] False 0 0 Nothing mempty))
+          holed    = fmap shown (inboxNotes False (InboxRead one [mh "x"] True 0 0 Nothing mempty))
       arriving `shouldSatisfy` any (isInfixOf "more letters may follow")
       arriving `shouldSatisfy` not . any (isInfixOf "incomplete in both directions")
       holed    `shouldSatisfy` any (isInfixOf "incomplete in both directions")
@@ -155,16 +155,16 @@ spec1 = do
       -- QUIETLY is not: a list missing letters is wrong, not short.
       k <- aKey
       let one = [view (mh "m") (Just k) (Left NotForUs)]
-          cut = fmap shown (inboxNotes False (InboxRead one [] True 42 mempty))
+          cut = fmap shown (inboxNotes False (InboxRead one [] True 42 0 Nothing mempty))
       cut `shouldSatisfy` any (isInfixOf "42 more letter(s)")
       cut `shouldSatisfy` any (isInfixOf "incomplete")
       -- ...and not said when nothing was left out
-      fmap shown (inboxNotes False (InboxRead one [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead one [] True 0 0 Nothing mempty))
         `shouldSatisfy` not . any (isInfixOf "were not opened")
       -- The remedy is the same as for a hole in the tree -- do not treat this as
       -- the mailbox -- so it is the same code.
-      inboxCode (InboxRead one [] True 42 mempty) `shouldBe` 2
-      inboxCode (InboxRead one [] True 0 mempty)  `shouldBe` 0
+      inboxCode (InboxRead one [] True 42 0 Nothing mempty) `shouldBe` 2
+      inboxCode (InboxRead one [] True 0 0 Nothing mempty)  `shouldBe` 0
 
     it "warns when every letter says not-for-us, which a broken keyman also says" $ do
       -- ReadNoGroupKeyAccess is what an unindexed keyman, an unreadable key file
@@ -175,14 +175,14 @@ spec1 = do
       k <- aKey
       let mine  = [view (mh "a") (Just k) (Left NotForUs)]
           mixed = mine <> [view (mh "b") (Just k) (Left NotFetched)]
-      fmap shown (inboxNotes False (InboxRead mine [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead mine [] True 0 0 Nothing mempty))
         `shouldSatisfy` any (isInfixOf "hbs2-keyman list")
       -- Only when EVERY letter says it: that is the shape a broken keyman makes,
       -- and a mailbox where some letters are ours does not.
-      fmap shown (inboxNotes False (InboxRead mixed [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead mixed [] True 0 0 Nothing mempty))
         `shouldSatisfy` not . any (isInfixOf "hbs2-keyman list")
       -- and never on an empty queue, which says nothing about the keyman at all
-      fmap shown (inboxNotes False (InboxRead [] [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead [] [] True 0 0 Nothing mempty))
         `shouldSatisfy` not . any (isInfixOf "hbs2-keyman list")
 
     it "bounds the list of unreadable blocks it prints" $ do
@@ -190,7 +190,7 @@ spec1 = do
       -- verify` got its cap after a measured 369 MB of stdout; this printed one
       -- unbounded line of 45-character hashes.
       let many' = [ mh (fromString (show i)) | i <- [1 :: Int .. maxMissingLines * 3] ]
-          note = concatMap shown (inboxNotes False (InboxRead [] many' True 0 mempty))
+          note = concatMap shown (inboxNotes False (InboxRead [] many' True 0 0 Nothing mempty))
       -- The COUNT of what was left out, not just the word "more", which the
       -- still-arriving note also contains and which a cap of any size satisfies.
       note `shouldSatisfy` isInfixOf ("and " <> show (maxMissingLines * 2) <> " more")
@@ -199,7 +199,7 @@ spec1 = do
     it "prints a missing block hash that is not a hash by its size, too" $ do
       -- These come out of a mailbox entry, which is a stranger's bytes like
       -- everything else in the tree.
-      let note = concatMap shown (inboxNotes False (InboxRead [] [fatRef 40000] True 0 mempty))
+      let note = concatMap shown (inboxNotes False (InboxRead [] [fatRef 40000] True 0 0 Nothing mempty))
       note `shouldSatisfy` isInfixOf "not a hash"
 
     it "warns that a queue line is not permission" $ do
@@ -210,10 +210,10 @@ spec1 = do
       let ac = AOpen k HubIssue "t" [] Nothing Nothing Nothing 1
           folds = [view (mh "m") (Just k) (Right (k, ac, FoldsToCanon))]
           other = [view (mh "m") (Just k) (Right (k, ac, RequestOnly))]
-      fmap shown (inboxNotes False (InboxRead folds [] True 0 mempty))
+      fmap shown (inboxNotes False (InboxRead folds [] True 0 0 Nothing mempty))
         `shouldSatisfy` any (isInfixOf "no deny-list was applied")
       -- ...and not when there is nothing for it to be about
-      fmap shown (inboxNotes False (InboxRead other [] True 0 mempty)) `shouldBe` []
+      fmap shown (inboxNotes False (InboxRead other [] True 0 0 Nothing mempty)) `shouldBe` []
 
     -- And it stops as soon as a list HAS been applied: a warning that never
     -- goes away is one a reader learns to skip, and this one is the difference
@@ -222,7 +222,7 @@ spec1 = do
       k <- aKey
       let ac = AOpen k HubIssue "t" [] Nothing Nothing Nothing 1
           one = [view (mh "m") (Just k) (Right (k, ac, FoldsToCanon))]
-          notes listed = concatMap shown (inboxNotes listed (InboxRead one [] True 0 mempty))
+          notes listed = concatMap shown (inboxNotes listed (InboxRead one [] True 0 0 Nothing mempty))
       notes False `shouldSatisfy` isInfixOf "no deny-list"
       notes True `shouldSatisfy` (not . isInfixOf "no deny-list")
 
@@ -232,11 +232,11 @@ spec1 = do
       -- A hole in the tree makes the list wrong in BOTH directions: a missing
       -- chunk of Exists entries makes letters vanish, one of Deleted entries puts
       -- folded letters back in the queue.
-      inboxCode (InboxRead [] [mh "x"] True 0 mempty) `shouldBe` 2
+      inboxCode (InboxRead [] [mh "x"] True 0 0 Nothing mempty) `shouldBe` 2
       -- Still arriving is a SHORTER answer, not a wrong one. A non-zero exit here
       -- would fire on ordinary use and teach a caller to ignore the code.
-      inboxCode (InboxRead [] [] False 0 mempty) `shouldBe` 0
-      inboxCode (InboxRead [] [] True 0 mempty) `shouldBe` 0
+      inboxCode (InboxRead [] [] False 0 0 Nothing mempty) `shouldBe` 0
+      inboxCode (InboxRead [] [] True 0 0 Nothing mempty) `shouldBe` 0
 
     it "keeps its own codes out of the range hub verify owns" $ do
       -- The numbers are a contract a hook branches on: PEP-22 says they may be
@@ -319,19 +319,21 @@ spec2 =
 
     it "reads either flag, or both, in any order" $ do
       mbox <- aKey ; repo <- aKey
-      inboxArgs (argv ["--mailbox", b58 mbox]) `shouldBe` Just (Just mbox, Nothing)
-      inboxArgs (argv ["--repo", b58 repo]) `shouldBe` Just (Nothing, Just repo)
+      inboxArgs (argv ["--mailbox", b58 mbox])
+        `shouldBe` Just (InboxArgs (Just mbox) Nothing Nothing Nothing)
+      inboxArgs (argv ["--repo", b58 repo])
+        `shouldBe` Just (InboxArgs Nothing (Just repo) Nothing Nothing)
       inboxArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo])
-        `shouldBe` Just (Just mbox, Just repo)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing)
       inboxArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox])
-        `shouldBe` Just (Just mbox, Just repo)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing)
 
     -- BOTH are optional to the reader and not to the verb: a repository alone
     -- resolves its mailbox from the manifest (PEP-18), and neither is a queue
     -- nobody named. The reader cannot tell those apart, so it parses and the
     -- verb refuses.
     it "parses a line naming neither, which the verb then refuses" $ do
-      inboxArgs (argv []) `shouldBe` Just (Nothing, Nothing)
+      inboxArgs (argv []) `shouldBe` Just (InboxArgs Nothing Nothing Nothing Nothing)
 
     it "refuses a positional key, an unknown flag and a repeat" $ do
       mbox <- aKey ; other <- aKey
@@ -339,3 +341,60 @@ spec2 =
       inboxArgs (argv ["--mailbox", b58 mbox, "--all"]) `shouldBe` Nothing
       inboxArgs (argv ["--mailbox", b58 mbox, "--mailbox", b58 other])
         `shouldBe` Nothing
+
+-- | THE PAGE IS THE FIRST N BY HASH, AND A MAILBOX IS PUBLIC.
+--
+-- Which N those are is therefore a stranger's choice: grinding message hashes
+-- below the honest ones is a few thousand signatures and displaces every real
+-- letter off the only screen a maintainer triages from. There was no flag that
+-- raised the bound and no way past the prefix, so the remedy was rejecting junk
+-- one hash at a time.
+paging :: Spec
+paging =
+  describe "PEP-22 hub inbox: reading past the first page" $ do
+
+    it "reads --after and --limit, and refuses a value that is neither" $ do
+      mbox <- aKey
+      let h = mh "cursor"
+          base = ["--mailbox", b58 mbox]
+      fmap iaAfter (inboxArgs (argv (base <> ["--after", show (pretty h)])))
+        `shouldBe` Just (Just h)
+      fmap iaLimit (inboxArgs (argv (base <> ["--limit", "20"])))
+        `shouldBe` Just (Just 20)
+      -- Absent is absent, not a default invented by the reader: the verb owns
+      -- what "no limit given" means.
+      fmap iaLimit (inboxArgs (argv base)) `shouldBe` Just Nothing
+      fmap iaAfter (inboxArgs (argv base)) `shouldBe` Just Nothing
+      -- and a value of the wrong shape is a line that does not parse
+      inboxArgs (argv (base <> ["--limit", "soon"])) `shouldBe` Nothing
+      inboxArgs (argv (base <> ["--after", "not-a-hash"])) `shouldBe` Nothing
+      inboxArgs (argv (base <> ["--after", show (pretty h), "--after", show (pretty h)]))
+        `shouldBe` Nothing
+
+    -- The truncation note is what a maintainer reads when the page ran out, so
+    -- it is where the way forward belongs. Without the cursor the note says the
+    -- list is incomplete and stops there, which is the state this fixes.
+    it "says how to see the next page, whenever there is one" $ do
+      let one = [ view (mh "a") Nothing (Left NotFetched) ]
+          note = concatMap shown
+                   (inboxNotes False (InboxRead one [] True 42 0 (Just (mh "z")) mempty))
+      note `shouldSatisfy` isInfixOf "--after"
+      note `shouldSatisfy` isInfixOf (show (pretty (mh "z")))
+      -- ...and does not offer one when the page held everything
+      concatMap shown (inboxNotes False (InboxRead one [] True 0 0 (Just (mh "z")) mempty))
+        `shouldSatisfy` not . isInfixOf "--after"
+
+    -- A ban is on the INNER author, so the letter is decrypted before anybody
+    -- knows whose it is: the slot is spent either way and only --after gets
+    -- past a page a stranger filled. What the count buys is that a queue which
+    -- hides them does not also lie about how much of itself a stranger is
+    -- producing.
+    it "counts the letters the deny-list took out, rather than hiding them" $ do
+      let one = [ view (mh "a") Nothing (Left NotFetched) ]
+          note = concatMap shown
+                   (inboxNotes False (InboxRead one [] True 0 3 Nothing mempty))
+      note `shouldSatisfy` isInfixOf "3 letter(s)"
+      note `shouldSatisfy` isInfixOf "deny-list"
+      -- said only when there were any
+      concatMap shown (inboxNotes False (InboxRead one [] True 0 0 Nothing mempty))
+        `shouldSatisfy` not . isInfixOf "deny-list"

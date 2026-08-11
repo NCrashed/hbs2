@@ -28,6 +28,7 @@ module HBS2.Hub.CLI.Inbox
   , inboxDoc
   , inboxNotes
   , inboxArgs
+  , InboxArgs(..)
   , utcOf
   , inboxCode
   , inboxUsage
@@ -45,7 +46,7 @@ import HBS2.Hub.Letter
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 
 import HBS2.Hub.CLI.Common
 
@@ -68,7 +69,7 @@ import Data.Text qualified as Text
 
 import Data.Coerce (coerce)
 import Data.List qualified as List
-import Data.Maybe (isJust)
+import Data.Maybe (isJust,fromMaybe)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Time.Format (defaultTimeLocale,formatTime)
 import Data.Word (Word64)
@@ -86,7 +87,8 @@ inboxEntries :: forall c m . ( IsContext c
 inboxEntries = do
 
   brief "list the letters waiting in a hub's ingress mailbox"
-    $ args [arg "string" "[--mailbox] mailbox-key", arg "string" "--repo repo-key"]
+    $ args [ arg "string" "[--mailbox] mailbox-key", arg "string" "--repo repo-key"
+           , arg "string" "[--after message-hash]", arg "string" "[--limit n]" ]
     $ desc ( "Read-only. Waits for the peer's copy of the mailbox to settle,"
              <> line <> "opens every message this node holds a key for, and reports"
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
@@ -111,16 +113,25 @@ inboxEntries = do
              <> line <> "this node's own state keyed by repository and not anything"
              <> line <> "the mailbox knows. Without it the queue is unfiltered and"
              <> line <> "says so: a banned author's letter is in the list with the"
-             <> line <> "same \"(folds)\" as anyone else's." )
+             <> line <> "same \"(folds)\" as anyone else's. With it, a letter whose"
+             <> line <> "author IS on the list is left out and counted."
+             <> line
+             <> line <> "THE LIST IS A PAGE, in hash order, and a mailbox is public:"
+             <> line <> "which letters land on the first page is a stranger's choice,"
+             <> line <> "since grinding hashes below the honest ones is cheap. When"
+             <> line <> "the page runs out the report prints the --after value that"
+             <> line <> "continues it. --limit lowers how many are opened and cannot"
+             <> line <> "raise it past what one read will take." )
     -- Both spellings, because PEP-22 specifies the flag: the bare key is what
     -- the spec calls `--mailbox <key>`, and a form the spec names has to be
     -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
-        [ SignPubKeyLike mbox ] -> lift (listInbox (Just mbox) Nothing)
-        (inboxArgs -> Just (mbox, mrepo))
+        [ SignPubKeyLike mbox ] ->
+          lift (listInbox (InboxArgs (Just mbox) Nothing Nothing Nothing))
+        (inboxArgs -> Just ia)
           -- One of the two, and the reader cannot say which: a queue with
           -- neither a mailbox nor a repository is a queue nobody named.
-          | isJust mbox || isJust mrepo -> lift (listInbox mbox mrepo)
+          | isJust (iaMailbox ia) || isJust (iaRepo ia) -> lift (listInbox ia)
         -- Its own message, not a BadFormException. Two things were wrong with
         -- that: it names an internal Haskell type and a spelling the caller did
         -- not type, which is the defect `hub verify` was already fixed for; and
@@ -131,7 +142,9 @@ inboxEntries = do
         _ -> liftIO (die (show (inboxUsage :: Doc ())))
 
   where
-    listInbox mmbox mrepo = do
+    listInbox ia = do
+      let mmbox = iaMailbox ia
+          mrepo = iaRepo ia
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
 
@@ -168,7 +181,8 @@ inboxEntries = do
       -- Chained, so the second handler covers the first as well as the body.
       -- That is harmless here: 'refuse' leaves through 'exitWith', whose
       -- exception is an ExitCode and is caught by neither.
-      r <- readInbox ((overRpc sto api) { igAllowed = allowed }) mbox
+      r <- readInboxFrom ((overRpc sto api) { igAllowed = allowed }) mbox
+                         (iaAfter ia) (fromMaybe maxInboxLetters (iaLimit ia))
              `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
              `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
@@ -215,8 +229,23 @@ inboxDoc = fmap render . irLetters
 -- A list rather than an action, so that a test can ask what this run would say
 -- without capturing a handle.
 inboxNotes :: Bool -> InboxRead -> [Doc ann]
-inboxNotes listed r = settledNote <> missingNote <> omittedNote <> keymanNote <> policyNote
+inboxNotes listed r =
+  settledNote <> missingNote <> omittedNote <> deniedNote <> keymanNote <> policyNote
   where
+    -- WHAT THE DENY-LIST TOOK OUT, counted. 'igAllowed' has always said the
+    -- queue applies it "because triage is a queue a human reads and a banned
+    -- author's letter should not be in it", and until now such a letter was in
+    -- it as one more unreadable line. Dropping them SILENTLY would be the other
+    -- mistake: the number is how a maintainer sees that somebody is still
+    -- sending, and how they notice a key they banned in error.
+    deniedNote
+      | irDenied r <= 0 = []
+      | otherwise =
+          [ "hub:" <+> pretty (irDenied r) <+> "letter(s) were left out because"
+              <+> "their author is on this repository's deny-list (hub ban)."
+              <+> "They still arrived and still take disk: a ban bounds what is"
+              <+> "folded, not what is stored." ]
+
     -- Truncation, said with a number. A mailbox is public, so how many letters
     -- are in it is a stranger's choice; this reader opens at most
     -- 'maxInboxLetters' of them and used to open all of them and hold every body
@@ -227,8 +256,19 @@ inboxNotes listed r = settledNote <> missingNote <> omittedNote <> keymanNote <>
       | otherwise =
           [ "hub:" <+> pretty (irOmitted r) <+> "more letter(s) in this mailbox"
               <+> "were not opened:" <+> pretty maxInboxLetters <+> "is the most"
-              <+> "one read will take. The list above is a prefix, in hash order,"
-              <+> "and is therefore incomplete." ]
+              <+> "one read will take. The list above is a page, in hash order,"
+              <+> "and is therefore incomplete."
+              -- AND HOW TO SEE THE REST, which is the whole of what was
+              -- missing. The page is the first N by hash and a mailbox is
+              -- public, so which N those are is a stranger's choice: grinding
+              -- hashes below the honest ones is a few thousand signatures and
+              -- displaces every real letter off the only screen a maintainer
+              -- triages from. There was no flag that raised the bound and no
+              -- way past the prefix, so the remedy was rejecting junk one hash
+              -- at a time.
+              <> (case irCursor r of
+                    Nothing -> mempty
+                    Just h -> line <> "  next page: --after" <+> hashDoc h) ]
 
     -- The one this reader CANNOT tell apart, said out loud rather than implied.
     --
@@ -400,15 +440,40 @@ render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body
 -- says so rather than leaving "(folds)" to be read as permission.
 --
 -- Exported and pure, like every other argument reader here.
-inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe (Maybe HubKey, Maybe HubKey)
+-- | What one @hub inbox@ was asked to show.
+data InboxArgs = InboxArgs
+  { iaMailbox :: Maybe HubKey
+  , iaRepo    :: Maybe RepoRef
+    -- | Start the page after this message, in hash order.
+    --
+    -- The page is the first N of the live set sorted by hash, and a mailbox is
+    -- public, so which N those are is a stranger's choice: grinding hashes below
+    -- the honest ones displaces every real letter off the only screen a
+    -- maintainer triages from, and until this there was no way past the prefix
+    -- and no flag that raised the bound.
+    --
+    -- A HASH AND NOT AN OFFSET, because the set changes underneath: an offset
+    -- names a position in a list that grows, so a letter arriving between two
+    -- pages shifts everything after it and a page is skipped.
+  , iaAfter   :: Maybe HashRef
+    -- | How many to open. Clamped to 'maxInboxLetters' by the reader, so this
+    -- lowers the cost of a look and cannot raise it past the bound.
+  , iaLimit   :: Maybe Int
+  }
+  deriving stock (Eq,Show)
+
+inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe InboxArgs
 inboxArgs syn = do
-  kvs  <- flagsOf (repoFlags <> ["--mailbox"]) syn
+  kvs  <- flagsOf (repoFlags <> ["--mailbox","--after","--limit"]) syn
   -- BOTH optional here and not in the verb: a queue named by repository alone
   -- resolves its mailbox from the manifest, and one named by neither is a
   -- usage error the verb reports with its own words.
   mbox <- flagMaybe kvs "--mailbox" asKey
   repo <- flagRepoMaybe asKey kvs
-  pure (mbox, repo)
+  aft  <- flagMaybe kvs "--after" asHash
+  lim  <- fmap (fmap fromIntegral) (flagMaybe kvs "--limit" flagWord)
+  pure (InboxArgs mbox repo aft lim)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    asHash = \case { HashLike h -> Just h ; _ -> Nothing }
 
