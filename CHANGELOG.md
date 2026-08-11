@@ -627,6 +627,21 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: `--key` meant four different kinds of key.** An inner author
+    at `ban`, an envelope key at `block`, a canon signer at `maintainer add`, a
+    person at `assign --to` -- all thirty-two bytes of base58, so every swap
+    between them was well-typed and silent, and each of the four help pages
+    spent a paragraph explaining which layer its own verb was about. The verbs
+    keep their names, which say what they do; the flag says which layer, which
+    is the half that was missing: `--author-key`, `--envelope-key`,
+    `--maintainer-key`, `--assignee`. A reader who has the flag right cannot
+    have the layer wrong.
+
+    The old spellings still work and are no longer printed, on the same terms as
+    `--target`: one release for the scripts that have them. And the same change
+    puts `ban` and `unban` on the shared repository flags, so `--target` works
+    on the verb and not only on `ban list`, which is where it worked before.
+
   - **`hbs2-hub`: the six read verbs refused the flag every writing verb
     takes.** `issue list`, `pr list`, `issue show`, `pr show`, `log` and
     `verify` took the repository positionally and only positionally, so

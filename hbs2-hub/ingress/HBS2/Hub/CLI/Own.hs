@@ -36,7 +36,8 @@ import HBS2.Hub.Fold (frMeta)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
-                         , flagSwitch,flagText,flagWord )
+                         , flagSwitch,flagText,flagWord 
+                         ,flagOneOfMaybe,assigneeFlags)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair)
@@ -83,7 +84,7 @@ ownUsage =
   "usage: hbs2-hub issue|pr close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]"
     <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --label <l>... [--as <key>]"
     <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --clear"
-    <> line <> "       hbs2-hub issue|pr assign --repo <key> --number <n> --to <key> | --clear"
+    <> line <> "       hbs2-hub issue|pr assign --repo <key> --number <n> --assignee <key> | --clear"
 
 redactUsage :: Doc ()
 redactUsage =
@@ -170,7 +171,7 @@ ownEntries = do
     assignVerb name =
       brief "say who is looking at a thread that is in canon"
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-               , arg "string" "--to key | --clear"
+               , arg "string" "--assignee key | --clear"
                , arg "string" "[--as canon-key]" ]
         $ desc ( "Writes an owner-signed set event on the assignee attribute,"
                  <> line <> "which is last-writer-wins like every other (PEP-19): one"
@@ -187,7 +188,7 @@ ownEntries = do
                  <> line <> "on labels: a verb that unassigned because somebody forgot"
                  <> line <> "an argument would publish that into append-only canon." )
         $ entry $ bindMatch name $ nil_ \case
-            (ownArgsFor ["--to"] ["--clear"] -> Just ow)
+            (ownArgsFor assigneeFlags ["--clear"] -> Just ow)
               | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
               | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
             _ -> liftIO (die (show ownUsage))
@@ -311,7 +312,7 @@ ownEntries = do
 -- behind a flag for the reason the whole package's are: a repo key and a
 -- delegate key are the same thirty-two bytes of base58.
 ownArgs :: forall c . IsContext c => [Syntax c] -> Maybe OwnArgs
-ownArgs = ownArgsFor ["--note","--label","--to"] ["--clear"]
+ownArgs = ownArgsFor (["--note","--label"] <> assigneeFlags) ["--clear"]
 
 -- | The same, told which optional flags THIS verb has.
 --
@@ -335,7 +336,10 @@ ownArgsFor extra switches syn = do
   ls    <- traverse (fmap Text.pack . flagText) (flagEvery kvs "--label")
   -- A switch, so it takes no value and cannot swallow the next word.
   clear <- flagSwitch kvs "--clear"
-  to    <- flagMaybe kvs "--to" asKey
+  -- Through 'assigneeFlags': --to named a PERSON while --key named three
+  -- different kinds of key elsewhere, and all four are thirty-two bytes of
+  -- base58. --assignee says which of the four this is.
+  to    <- flagOneOfMaybe asKey assigneeFlags kvs
   pure (OwnArgs repo n note ls clear to as)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

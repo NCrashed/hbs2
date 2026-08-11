@@ -29,7 +29,8 @@ module HBS2.Hub.CLI.Ban
 
 import HBS2.Hub.Types (HubKey,RepoRef)
 import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo
+                         ,flagOneOf,flagOneOfMaybe,authorKeyFlags)
 import HBS2.Hub.CLI.Common (refuse,saying)
 
 import HBS2.CLI.Prelude
@@ -52,7 +53,7 @@ data BanArgs = BanArgs
 
 banUsage :: Doc ()
 banUsage =
-  "usage: hbs2-hub ban|unban --repo <key> --key <author-key>"
+  "usage: hbs2-hub ban|unban --repo <key> --author-key <key>"
     <> line <> "       hbs2-hub ban list --repo <key>"
 
 -- The list itself lives in "HBS2.Hub.Deny": three callers need it and one of
@@ -94,7 +95,7 @@ banEntries = do
 
     banVerb name ban what =
       brief what
-        $ args [arg "string" "--repo repo-key", arg "string" "--key author-key"]
+        $ args [arg "string" "--repo repo-key", arg "string" "--author-key key"]
         -- The sibling's own sentence first. Both verbs shared one description
         -- verbatim, so `hub help unban` opened with a paragraph about what a
         -- ban is and never said what unbanning does.
@@ -172,9 +173,12 @@ banEntries = do
 -- Both behind flags, and both are keys of one type.
 banArgs :: forall c . IsContext c => [Syntax c] -> Maybe BanArgs
 banArgs syn = do
-  kvs  <- flagsOf ["--repo","--key"] syn
-  repo <- flagOnce kvs "--repo" >>= asKey
-  k    <- flagMaybe kvs "--key" asKey
+  -- Through 'repoFlags' and 'authorKeyFlags' rather than two literals: the
+  -- literals are why --target worked on `ban list` and not on `ban`, and why
+  -- --key meant four different key types across the tool.
+  kvs  <- flagsOf (repoFlags <> authorKeyFlags) syn
+  repo <- flagRepo asKey kvs
+  k    <- flagOneOfMaybe asKey authorKeyFlags kvs
   pure (BanArgs repo k)
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

@@ -17,6 +17,12 @@ module HBS2.Hub.CLI.Argv
   , flagRepo
   , flagRepoMaybe
   , repoAndFlags
+  , flagOneOf
+  , flagOneOfMaybe
+  , authorKeyFlags
+  , envelopeKeyFlags
+  , maintainerKeyFlags
+  , assigneeFlags
   , flagMaybe
   , flagText
   , flagWord
@@ -391,3 +397,48 @@ repoAndFlags asKey own syn = case syn of
     kvs  <- flagsOf (repoFlags <> own) syn
     repo <- flagRepo asKey kvs
     pure (repo, kvs)
+
+-- | Read a value however it was spelled, refusing two spellings at once.
+--
+-- The rule 'flagRepo' has always followed, named so that the four values below
+-- can follow it too rather than each growing its own copy. Two spellings of one
+-- value means a line carrying both is a line somebody edited half way, and
+-- choosing between them is the guess this refuses.
+flagOneOf :: (Syntax c -> Maybe a) -> [String] -> [(String, Syntax c)] -> Maybe a
+flagOneOf asKey names kvs = case concatMap (flagEvery kvs) names of
+  [v] -> asKey v
+  _   -> Nothing
+
+-- | The same, for a value the verb may be called without.
+flagOneOfMaybe :: (Syntax c -> Maybe a) -> [String] -> [(String, Syntax c)] -> Maybe (Maybe a)
+flagOneOfMaybe asKey names kvs = case concatMap (flagEvery kvs) names of
+  []  -> Just Nothing
+  [v] -> Just <$> asKey v
+  _   -> Nothing
+
+-- | @--key@ MEANT FOUR DIFFERENT KEYS, and every one of them is thirty-two
+-- bytes of base58, so every swap between them was well-typed and silent.
+--
+--   * @hub ban --key@ is an INNER AUTHOR: the identity inside the signed box,
+--     which survives a rewrap, and which bounds what this node folds.
+--   * @hub block --key@ is an ENVELOPE key, at the peer layer, which bounds
+--     what this peer stores and relays and is evaded by the rewrap the one
+--     above survives.
+--   * @hub maintainer add --key@ is a CANON SIGNER: a key whose events the
+--     fold will admit, published into append-only canon.
+--   * @hub issue assign --to@ is a PERSON.
+--
+-- Two of those are near-synonyms carrying an orthogonal distinction that all
+-- four help pages spend a paragraph correcting. The verbs keep their names --
+-- @ban@ and @block@ say what they do -- and the FLAG says which layer, which is
+-- the half that was missing: a reader who has the flag right cannot have the
+-- layer wrong.
+--
+-- The old spellings still work and are no longer printed, exactly as 'repoFlags'
+-- handles @--target@: they are here for the release in which somebody's script
+-- still has them, and this comment is the reminder to take them out afterwards.
+authorKeyFlags, envelopeKeyFlags, maintainerKeyFlags, assigneeFlags :: [String]
+authorKeyFlags     = ["--author-key", "--key"]
+envelopeKeyFlags   = ["--envelope-key", "--key"]
+maintainerKeyFlags = ["--maintainer-key", "--key"]
+assigneeFlags      = ["--assignee", "--to"]

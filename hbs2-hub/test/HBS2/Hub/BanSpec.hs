@@ -30,7 +30,7 @@ b58 :: HubKey -> String
 b58 = show . pretty . AsBase58
 
 spec :: Spec
-spec = do
+spec = keyNames >> do
 
   describe "PEP-21 triage layer: the list" $ do
 
@@ -100,3 +100,41 @@ spec = do
 
 isLeft :: Either a b -> Bool
 isLeft = either (const True) (const False)
+
+-- | @--key@ MEANT FOUR DIFFERENT KEYS.
+--
+-- An inner author at `ban`, an envelope key at `block`, a canon signer at
+-- `maintainer add`, a person at `assign --to` -- all thirty-two bytes of base58,
+-- so every swap between them was well-typed and silent. The verbs keep their
+-- names, which say what they DO, and the flag says which layer, which is the
+-- half that was missing: a reader who has the flag right cannot have the layer
+-- wrong.
+--
+-- Both spellings, for one release. The old one still works and is no longer
+-- printed, exactly as `--target` is handled.
+keyNames :: Spec
+keyNames =
+  describe "PEP-22 the four keys that were all called --key" $ do
+
+    it "reads a ban under its own name and under the old one" $ do
+      repo <- aKey ; who <- aKey
+      let want = Just (BanArgs repo (Just who))
+      banArgs (argv ["--repo", b58 repo, "--author-key", b58 who]) `shouldBe` want
+      banArgs (argv ["--repo", b58 repo, "--key", b58 who]) `shouldBe` want
+
+    -- The repository's flags come from 'repoFlags' now, and this is the bug
+    -- that fixes: `ban` built its flag list by hand, so --target worked on
+    -- `ban list` and not on `ban`, one verb apart.
+    it "takes --target on the verb as well as on the listing" $ do
+      repo <- aKey ; who <- aKey
+      banArgs (argv ["--target", b58 repo, "--author-key", b58 who])
+        `shouldBe` Just (BanArgs repo (Just who))
+
+    -- Two spellings of one value, so a line carrying both is a line somebody
+    -- edited half way, and choosing between them is a guess.
+    it "refuses both spellings at once" $ do
+      repo <- aKey ; who <- aKey ; other <- aKey
+      banArgs (argv ["--repo", b58 repo, "--author-key", b58 who, "--key", b58 other])
+        `shouldBe` Nothing
+      banArgs (argv ["--repo", b58 repo, "--target", b58 other, "--author-key", b58 who])
+        `shouldBe` Nothing

@@ -37,7 +37,8 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo
+                         ,flagOneOf,maintainerKeyFlags)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -62,7 +63,7 @@ data Maintainer = Maintainer
 
 maintainerUsage :: Doc ()
 maintainerUsage =
-  "usage: hbs2-hub maintainer add|remove --repo <key> --key <key>"
+  "usage: hbs2-hub maintainer add|remove --repo <key> --maintainer-key <key>"
     <> line <> "       hbs2-hub maintainer list --repo <key>"
 
 -- | Who may bless canon, in a fixed order.
@@ -102,7 +103,7 @@ maintainerEntries = do
 
     writeVerb name what mk =
       brief what
-        $ args [arg "string" "--repo repo-key", arg "string" "--key maintainer-key"]
+        $ args [arg "string" "--repo repo-key", arg "string" "--maintainer-key key"]
         $ desc ( (if "add" `List.isInfixOf` show name
                     then "Lets a key bless canon events for this repository."
                     else "Stops a key blessing them. Past events stay admitted.")
@@ -183,9 +184,11 @@ maintainerEntries = do
 -- repository nobody has.
 maintainerArgs :: forall c . IsContext c => [Syntax c] -> Maybe Maintainer
 maintainerArgs syn = do
-  kvs  <- flagsOf ["--repo","--key"] syn
-  repo <- flagOnce kvs "--repo" >>= asKey
-  k    <- flagOnce kvs "--key"  >>= asKey
+  -- Through 'repoFlags' and 'maintainerKeyFlags': see 'authorKeyFlags' for why
+  -- --key could not stay one name for four different kinds of key.
+  kvs  <- flagsOf (repoFlags <> maintainerKeyFlags) syn
+  repo <- flagRepo asKey kvs
+  k    <- flagOneOf asKey maintainerKeyFlags kvs
   pure (Maintainer repo k)
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

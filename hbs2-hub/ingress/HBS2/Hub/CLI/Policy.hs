@@ -44,7 +44,8 @@ module HBS2.Hub.CLI.Policy
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Canon (clausesWith)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord
+                         ,flagOneOfMaybe,envelopeKeyFlags)
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,signerFor,signingPair)
 
@@ -108,7 +109,7 @@ data PolicyArgs = PolicyArgs
 policyUsage :: Doc ()
 policyUsage =
   "usage: hbs2-hub policy show --mailbox <key>"
-    <> line <> "       hbs2-hub block|unblock --mailbox <key> --key <envelope-key>"
+    <> line <> "       hbs2-hub block|unblock --mailbox <key> --envelope-key <key>"
 
 -- | The policy with one sender denied, or allowed again.
 --
@@ -351,7 +352,7 @@ policyEntries = do
 
     denyVerb name deny what =
       brief what
-        $ args [arg "string" "--mailbox mailbox-key", arg "string" "--key envelope-key"]
+        $ args [arg "string" "--mailbox mailbox-key", arg "string" "--envelope-key key"]
         -- Each sibling's own sentence first: one shared description meant
         -- `hub help unblock` never said what unblocking does.
         $ desc ( (if deny then "Denies an envelope key at this mailbox."
@@ -488,9 +489,12 @@ policyEntries = do
 -- Both values behind flags, and both are keys of one type.
 policyArgs :: forall c . IsContext c => [Syntax c] -> Maybe PolicyArgs
 policyArgs syn = do
-  kvs  <- flagsOf ["--mailbox","--key"] syn
+  -- Through 'envelopeKeyFlags': --key meant four different kinds of key across
+  -- the tool, all thirty-two bytes of base58, so every swap was well-typed and
+  -- silent. The verbs keep their names and the flag says which layer.
+  kvs  <- flagsOf (["--mailbox"] <> envelopeKeyFlags) syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
-  k    <- flagMaybe kvs "--key" asKey
+  k    <- flagOneOfMaybe asKey envelopeKeyFlags kvs
   pure (PolicyArgs mbox k)
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
