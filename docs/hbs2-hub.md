@@ -209,6 +209,26 @@ that repository's canon in the clone you are standing in.
 An ack is a courtesy, not authority. Canon is the record; if the two
 ever disagree, canon wins.
 
+### Your mailbox is not private
+
+The letter you sent names the mailbox to reply to, and that name is your
+author key: the two have to be the same, or a hub could be made to send
+maintainer-signed acks to somebody who asked for none of them.
+
+Your author key is in canon, verbatim, in every clone, forever. That is
+what authorship means and it is not something to fix. It follows that
+anyone who reads the repository can name your mailbox and ask their own
+peer to fetch it, and so watch how much traffic it carries and when.
+
+What they cannot do is put anything in it. Sealing a message needs your
+encryption key, which lives in your sigil, and canon does not carry the
+sigil.
+
+So: contributing tells the world that this key wrote this issue, and
+where to reach that key. It does not tell them how. If you want a
+repository not to be linkable to your other work, the thing to vary is
+the author key, not the mailbox.
+
 ## Triage
 
 ```

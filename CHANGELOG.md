@@ -627,6 +627,18 @@
 
 ## Fixed
 
+  - **`hbs2-hub`: the reply channel claimed a privacy it does not have.** Its
+    comment said a contributor's mailbox key must not end up in every clone,
+    which is why it sits outside the inner box. It does end up there: the
+    channel key has to equal the inner author (or a hub could be made to send
+    maintainer-signed acks to somebody who asked for none), and the author key
+    is what canon publishes verbatim, forever. Corrected in the code and in the
+    manual, which now has a section saying it plainly: a reader of canon can
+    NAME your mailbox and watch its tree, and cannot put anything in it --
+    sealing needs the encryption key, which is in your sigil, which canon does
+    not carry. Nothing about identity changes either way, since the author key
+    already correlates a person across everything they have written in.
+
   - **`hbs2-hub inbox`: one letter under many envelopes cost one decision
     each.** Re-signing a captured message under a fresh key needs no key and no
     plaintext: a signed box keeps its payload as opaque bytes and the message

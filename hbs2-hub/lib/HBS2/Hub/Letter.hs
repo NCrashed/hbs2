@@ -383,10 +383,37 @@ malformedRef = \case
 
 -- | Where the owner should send acknowledgements and status updates.
 --
--- This lives OUTSIDE the inner box on purpose: the inner box is published
--- into public canon verbatim, and a contributor's personal mailbox key must
--- not end up in every clone forever. Its authenticity comes from the outer
--- Mailbox signature over the envelope.
+-- This lives OUTSIDE the inner box: the inner box is published into public
+-- canon verbatim, and nothing here needs to be. Its authenticity comes from the
+-- outer Mailbox signature over the envelope.
+--
+-- WHAT THAT KEEPS OUT OF CANON IS THE SIGIL, NOT THE ADDRESS, and this comment
+-- used to claim otherwise -- "a contributor's personal mailbox key must not end
+-- up in every clone forever". It does end up there. 'vetted' below requires the
+-- channel key to equal the inner author, and 'HBS2.Hub.CLI.Ack.sendAck'
+-- addresses through a sigil whose own signer must be that same key, so the
+-- mailbox this names IS the author key -- which canon publishes verbatim,
+-- forever, because authorship is the point of publishing it.
+--
+-- So the honest statement is narrower. Anyone reading canon can NAME a
+-- contributor's mailbox and watch its tree grow; what they cannot do is seal
+-- anything to it, because that needs the encryption key, which is in the sigil,
+-- which canon does not carry. Traffic is observable; delivery is not open.
+--
+-- And the leak is not one of identity: the author key already correlates a
+-- person across every repository they have written in, and a separate reply key
+-- would not change that. Only rotating the author key does.
+--
+-- DECOUPLING THE TWO IS A REAL DESIGN AND IT IS DEFERRED, not forgotten. It
+-- means relaxing 'vetted' and re-deriving the anti-reflection property from a
+-- proof: the channel would carry a signature by the reply key over the inner
+-- box's hash, so naming a mailbox needs its private key, and the reply key
+-- could then be one canon never sees. It is not a one-way door -- this type is
+-- versioned by 'hubMsgWrite' and never reaches canon at all (@acReply@ feeds
+-- 'sendAck' and nothing else), so the cost is a flag day for letters in flight
+-- rather than for canon. It waits on the sigil being checked against its key at
+-- INGRESS, which today happens only on the reply side: while the two keys must
+-- be equal that is tolerable, and the moment they may differ it is load-bearing.
 --
 -- Entirely optional: a drive-by contributor who hosts no mailbox uses
 -- 'noReplyChannel' and simply forgoes notifications. Threading never depends
