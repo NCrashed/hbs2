@@ -134,4 +134,36 @@ mailboxMergeTests = testGroup "mailbox merge (issue #15)"
                 (enqueueMerge (mailboxOf one) (mh "a") mempty)
       fmap HS.toList (HM.lookup (mailboxOf one) q) @?= Just [mh "a"]
       fmap HS.toList (HM.lookup (mailboxOf two) q) @?= Just [mh "b"]
+
+  -- AND STOPS ACCUMULATING SOMEWHERE. One of the three call sites walks a
+  -- downloaded tree and enqueues every Deleted entry in it with no validation;
+  -- another puts an entry back for as long as its proof block is absent. So a
+  -- tree a stranger uploaded bought one permanent queue entry per entry in it,
+  -- and behind each a wip entry the downloader sweeps only on completion and a
+  -- brains row that survives a restart.
+  , testCase "stops taking entries for one mailbox at the cap" do
+      owner <- newCredentials @S
+      let box = mailboxOf owner
+          hs  = [ mh (fromString (show i)) | i <- [1 .. maxMergeQueue + 500] ]
+          q   = foldl' (\m h -> enqueueMerge box h m) mempty hs
+      fmap HS.size (HM.lookup box q) @?= Just maxMergeQueue
+
+  -- The cap is per mailbox and not global: a busy one must not stop this peer
+  -- merging anything for the others it hosts.
+  , testCase "counts one mailbox's entries against that mailbox alone" do
+      one <- newCredentials @S
+      two <- newCredentials @S
+      let full = foldl' (\m h -> enqueueMerge (mailboxOf one) h m) mempty
+                   [ mh (fromString (show i)) | i <- [1 .. maxMergeQueue + 10] ]
+          q    = enqueueMerge (mailboxOf two) (mh "b") full
+      fmap HS.toList (HM.lookup (mailboxOf two) q) @?= Just [mh "b"]
+
+  -- An entry already queued is not a new one, or the cap would be spent by one
+  -- hash re-offered: the re-enqueue path offers the same entry on every poll
+  -- for as long as its proof is missing, which is exactly the loop this bounds.
+  , testCase "does not spend the cap on an entry it already holds" do
+      owner <- newCredentials @S
+      let box = mailboxOf owner
+          q   = foldl' (\m _ -> enqueueMerge box (mh "same") m) mempty [1 .. 100 :: Int]
+      fmap HS.size (HM.lookup box q) @?= Just 1
   ]

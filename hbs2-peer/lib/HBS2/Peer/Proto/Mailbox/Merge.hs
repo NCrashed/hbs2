@@ -17,6 +17,7 @@ module HBS2.Peer.Proto.Mailbox.Merge
   ( MergeVerdict(..)
   , admitDeleted
   , enqueueMerge
+  , maxMergeQueue
   , pattern PlainMessageDelete
   ) where
 
@@ -49,13 +50,47 @@ import Data.Hashable (Hashable)
 -- Accumulating is the whole content of it, and that is what the test asserts:
 -- the interesting property is not what 'HM.insertWith' does, it is that this is
 -- what the callers do.
+--
+-- AND BOUNDED, which it was not. Three call sites feed this queue and one of
+-- them walks a DOWNLOADED TREE, enqueuing every @Deleted@ entry in it with no
+-- validation; a second puts an entry back whenever its proof block is absent,
+-- for as long as it stays absent. So a tree a stranger uploaded -- about ten
+-- megabytes for a hundred thousand entries naming proofs that do not exist --
+-- bought a hundred thousand permanent queue entries, and behind each of them a
+-- 'wip' entry the downloader's sweeper never removes (it removes on completion)
+-- and a row in the brains database that SURVIVES A RESTART, plus one storage
+-- read per entry per poll, forever.
+--
+-- The comment on the re-enqueue bounds WHICH MAILBOX may put entries here --
+-- only ones this peer hosts -- and says nothing about how many. That is the
+-- same mistake the download queue had: the key there is a (version, hash) pair
+-- and the hash is a value the announcer invents.
+--
+-- NOTHING IS LOST OVER THE CAP, which is what makes a cap the right answer
+-- rather than a lesser evil: an entry that does not fit is still in the tree it
+-- came from, and the next status walks that tree again. What the cap buys is
+-- that the three unbounded stores behind this one stop growing.
 enqueueMerge
   :: (Eq k, Hashable k)
   => k
   -> HashRef
   -> HashMap k (HashSet HashRef)
   -> HashMap k (HashSet HashRef)
-enqueueMerge k h = HM.insertWith (<>) k (HS.singleton h)
+enqueueMerge k h m
+  | HS.member h here      = m
+  | HS.size here >= maxMergeQueue = m
+  | otherwise             = HM.insertWith (<>) k (HS.singleton h) m
+  where
+    here = HM.lookupDefault mempty k m
+
+-- | The most entries one mailbox's merge queue will hold at a time.
+--
+-- A judgement, like 'maxMailboxDownloads'. Deletes are rare next to messages,
+-- and this queue is drained every two seconds, so a real mailbox never has
+-- thousands of them outstanding; what the number has to be is comfortably above
+-- any honest burst and small enough that a poll over it stays cheap.
+maxMergeQueue :: Int
+maxMergeQueue = 4096
 
 -- | A delete payload that names exactly one message.
 --

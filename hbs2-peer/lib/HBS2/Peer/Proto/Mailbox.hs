@@ -95,6 +95,26 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   mailboxPoWFloor       :: forall m . MonadIO m => a -> m PoWDifficulty
   mailboxPoWFloor _ = pure 0
 
+  -- | Note that a message was not forwarded because it did not meet the floor.
+  --
+  -- COUNTED RATHER THAN LOGGED, and that is the point of it existing. A sender
+  -- solves for what the MAILBOX charges, which is in the mailbox's signed
+  -- policy; the floor above is a peer's own number and is in nobody's policy.
+  -- So a relay set to 16 does not carry a message that honestly paid the 12 its
+  -- destination asked for, and neither end learns why -- there is no reply on
+  -- this path, and the sender cannot observe a floor they never knew about. The
+  -- only trace was a 'debug' line, which an operator running at the ordinary
+  -- level never sees.
+  --
+  -- A warning per message would be worse than nothing: the floor earns its keep
+  -- exactly when a flood is arriving, which is when a line per message is its
+  -- own denial of service. A counter in the periodic report says the same
+  -- thing in one number, and only a peer that SET a floor can ever raise it.
+  --
+  -- Does nothing by default, so an adapter that keeps no statistics is unchanged.
+  mailboxNotForwarded   :: forall m . MonadIO m => a -> m ()
+  mailboxNotForwarded _ = pure ()
+
   -- | Peers this one takes replication from, for a mailbox that charges work.
   --
   -- A message pulled out of somebody's status tree arrives as 'Replicated' and
@@ -211,6 +231,7 @@ instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxRelayOnce (AnyMailboxAdapter a) = mailboxRelayOnce @s a
   mailboxGetStorage (AnyMailboxAdapter a) = mailboxGetStorage @s a
   mailboxPoWFloor (AnyMailboxAdapter a) = mailboxPoWFloor @s a
+  mailboxNotForwarded (AnyMailboxAdapter a) = mailboxNotForwarded @s a
   mailboxReplicateFrom (AnyMailboxAdapter a) = mailboxReplicateFrom @s a
   mailboxAcceptMessage (AnyMailboxAdapter a) = mailboxAcceptMessage @s a
   mailboxAcceptDelete (AnyMailboxAdapter a) = mailboxAcceptDelete @s a
@@ -357,6 +378,7 @@ mailboxProto inner adapter mess = deferred @p do
         floorD <- lift $ mailboxPoWFloor @s adapter
 
         unless (floorD == 0) do
+          lift $ mailboxNotForwarded @s adapter
           debug $ red "mailbox: unstamped message carries no work to forward"
                     <+> parens ("floor is" <+> pretty floorD <+> "bits")
 
@@ -390,6 +412,7 @@ mailboxProto inner adapter mess = deferred @p do
                     <+> pretty (AsBase58 (msMailbox stamp))
 
         unless (bits >= fromIntegral floorD) do
+          lift $ mailboxNotForwarded @s adapter
           debug $ red "mailbox: stamp too weak to forward"
                     <+> pretty bits <> ", wanted" <+> pretty floorD
 

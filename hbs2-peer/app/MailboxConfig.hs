@@ -34,6 +34,21 @@ import Safe (lastMay)
 --
 -- Absent means zero, which forwards a stamped message on the same terms as a
 -- plain one.
+--
+-- WHAT A NON-ZERO FLOOR COSTS SOMEBODY ELSE, said here because the operator who
+-- sets it is the only one who can weigh it. A sender solves for what the
+-- MAILBOX charges, which is in the mailbox's signed policy; this is a peer's
+-- own number and is in nobody's policy. So a peer with a floor of 16 does not
+-- forward a message that honestly paid the 12 its destination asked for, and
+-- neither end learns why: there is no reply on this path, and the sender cannot
+-- observe a floor they never knew about.
+--
+-- On a peer that HOSTS the mailbox the letter still arrives -- the floor gates
+-- forwarding only, and the mailbox's own policy decides acceptance. The case
+-- that bites is a pure relay: if it is on the only path, the letter is gone.
+-- What makes it visible from this side is 'mpwPoWNotForwarded' in the worker,
+-- which counts it into the periodic report; there is nothing to make it visible
+-- from the sender's, short of a wire format that carries a refusal.
 hbs2MailboxPoWMinOpt :: String
 hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
 

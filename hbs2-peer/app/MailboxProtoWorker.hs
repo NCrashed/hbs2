@@ -94,6 +94,24 @@ import UnliftIO
 maxMailboxDownloads :: Int
 maxMailboxDownloads = 256
 
+-- | How many attachments one accepted message may have this peer fetch.
+--
+-- The count is the sender's to choose and nothing bounded it: the parts of an
+-- accepted message went to 'startDownloadStuff' one by one, on a different path
+-- from the one 'maxMailboxDownloads' guards, so a single message could commit
+-- an unbounded number of downloads -- an entry apiece in the downloader's
+-- working set and a row apiece in the brains database, which outlives a
+-- restart.
+--
+-- SIXTEEN, because that is what the reader on the other end walks: hbs2-hub's
+-- @maxMessageParts@ refuses a letter naming more, so parts past this number are
+-- ones nothing will ever read. The two constants belong to different packages
+-- and different layers -- one bounds triage, this one bounds disk -- so they
+-- are not shared, and a peer serving something other than a hub is the reason
+-- this one has its own name and its own note rather than an import.
+maxPartsFetched :: Int
+maxPartsFetched = 16
+
 newtype PolicyHash = PolicyHash HashRef
                      deriving newtype (Eq,Ord,Show,Hashable,Pretty)
 
@@ -178,6 +196,12 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- 'hbs2MailboxPoWMinOpt'. A TVar because it is read from the config after
     -- the worker exists, the way the database and the probe are.
   , mpwPoWFloor           :: TVar PoWDifficulty
+    -- | How many messages this peer declined to forward for want of work.
+    --
+    -- A counter and not a log line: see 'mailboxNotForwarded'. It is the only
+    -- thing on this side that makes a peer-wide floor visible at all, since a
+    -- sender cannot observe a number that is in nobody's policy.
+  , mpwPoWNotForwarded    :: TVar Int
     -- | Peers this one takes replication from for a charging mailbox, from
     -- 'hbs2MailboxReplicateFromOpt'. Read from the config like the floor above.
   , mpwReplicateFrom      :: TVar (HashSet (PubKey 'Sign s))
@@ -289,6 +313,9 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
   mailboxRelayOnce MailboxProtoWorker{..} = relayOnce mpwRelayed
 
   mailboxPoWFloor MailboxProtoWorker{..} = readTVarIO mpwPoWFloor
+
+  mailboxNotForwarded MailboxProtoWorker{..} =
+    atomically $ modifyTVar mpwPoWNotForwarded succ
 
   mailboxReplicateFrom MailboxProtoWorker{..} = readTVarIO mpwReplicateFrom
 
@@ -980,6 +1007,7 @@ createMailboxProtoWorker pc pe sto = do
     <*> newRelayed
     <*> newPolicyCache
     <*> newTVarIO 0                 -- mpwPoWFloor
+    <*> newTVarIO 0                 -- mpwPoWNotForwarded
     <*> newTVarIO mempty            -- mpwReplicateFrom
     <*> newTVarIO mempty            -- inMessageQueueSeen
     <*> newTVarIO mempty            -- inMessageQueuePeers
@@ -1071,11 +1099,16 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           -- очередей отчитывались, а единственное число, которое означает
           -- потерянное сообщение, -- нет.
           dropped <- readTVar inMessageQueueDropped
+          -- And what a peer-wide floor cost somebody else. The only trace was a
+          -- debug line nobody running at the ordinary level sees, and a warning
+          -- per message would fire hardest exactly when a flood is arriving.
+          notFwd  <- readTVar mpwPoWNotForwarded
           pure $ [ ("mpwFetchQ", fromIntegral mpwFetchQSize)
                  , ("inMessageMergeQueue", fromIntegral inMessageMergeQueueSize)
                  , ("inPolicyDownloadQ", fromIntegral inPolicyDownloadQSize)
                  , ("inMailboxDownloadQ", fromIntegral inMailboxDownloadQSize)
                  , ("inMessageQueueDropped", fromIntegral dropped)
+                 , ("powNotForwarded", fromIntegral notFwd)
                  ]
         acceptReport pro values
         debug $ "I'm" <+> yellow "mailboxProtoWorker"
@@ -1089,6 +1122,32 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       warn $ yellow "mailbox protocol worker exited"
 
   where
+
+    -- ONE MESSAGE'S FAILURE IS ONE MESSAGE'S, and it was the whole batch's.
+    --
+    -- The loop below takes up to 'inQueueDepth' messages OUT of the queue in
+    -- one transaction and then processes them, and everything it does per
+    -- message can throw: sqlite is busy, the storage refuses, a policy read
+    -- fails. There was no handler, so the throw unwound out of 'forever',
+    -- 'waitAnyCancel' tore the worker down, and the rest of the batch went with
+    -- it -- messages that were already out of the queue and in nobody's. Only
+    -- the ones a co-host will send again ('Replicated') ever came back.
+    --
+    -- 'tryAny' AND NOT 'try', which is the part worth being precise about: this
+    -- worker is stopped by cancelling it, so a handler that caught every
+    -- exception would swallow the cancellation and the peer would not shut
+    -- down. 'tryAny' is synchronous-only and rethrows the rest.
+    --
+    -- The failed message is DROPPED and said, not put back. Putting it back
+    -- would retry it on the next batch, and a message that fails because of
+    -- what it IS would then be retried for as long as the peer runs; a
+    -- transient failure costs one message, which the sender can send again and
+    -- which is what happened to the whole batch before.
+    handling m act = tryAny act >>= \case
+      Right () -> pure ()
+      Left e -> err $ red "mailbox: message dropped, processing it failed"
+                  <+> pretty (HashRef (hashObject (serialise m)))
+                  <+> viaShow e
 
     mailboxInQ dbe = do
       let sto = mpwStorage
@@ -1122,7 +1181,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           -- increment can never have.
           writeTVar inMessageQueueInNum 0
           pure xs
-        for_ mess $ \(peer, origin, m, s) -> do
+        for_ mess $ \(peer, origin, m, s) -> handling m do
 
           -- TODO: process-with-policy
 
@@ -1258,7 +1317,24 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
             -- TODO: check-attachment-policy-for-mailbox
 
             -- TODO: ASAP-block-accounting-for-attachment
-            for_ (messageParts s) (startDownloadStuff me)
+            --
+            -- AND NO MORE THAN 'maxPartsFetched' OF THEM. How many parts a
+            -- message names is the sender's to choose and nothing bounded it:
+            -- this is a bare 'addDownload' apiece, on a different path from the
+            -- one 'maxMailboxDownloads' guards, so one accepted message could
+            -- commit an unbounded number of downloads -- each an entry in the
+            -- downloader's working set and a row in the brains database that
+            -- survives a restart.
+            --
+            -- The reader's own bound fires much later and cannot help: hbs2-hub
+            -- walks at most sixteen parts, AT TRIAGE, by which time this peer
+            -- has already paid for all of them.
+            let (wanted, ignored) = splitAt maxPartsFetched (Set.toList (messageParts s))
+            for_ wanted (startDownloadStuff me)
+            unless (null ignored) do
+              warn $ red "mailbox: message names more attachments than this peer fetches"
+                      <+> pretty theMailbox <+> pretty ha
+                      <+> parens (pretty (length ignored) <+> "ignored")
             either (startDownloadStuff me) dontHandle (messageGK0 s)
 
 

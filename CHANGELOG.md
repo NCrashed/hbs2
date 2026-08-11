@@ -627,6 +627,45 @@
 
 ## Fixed
 
+  - **`hbs2-peer`: three unbounded stores behind the mailbox worker, and a
+    batch that took the whole worker down with it.**
+
+    The merge queue took every `Deleted` entry of a downloaded tree with no
+    validation, and put an entry back whenever its proof block was absent, for
+    as long as it stayed absent. So a tree a stranger uploaded -- about ten
+    megabytes for a hundred thousand entries naming proofs that do not exist --
+    bought a hundred thousand permanent queue entries, and behind each of them a
+    `wip` entry the downloader sweeps only on completion and a row in the brains
+    database that survives a restart, plus a storage read per entry per poll.
+    Bounded per mailbox now, in `enqueueMerge`, which is the one function all
+    three call sites go through. Nothing is lost over the cap: an entry that
+    does not fit is still in the tree it came from, and the next status walks
+    that tree again.
+
+    An accepted message's attachments went to the downloader one by one with no
+    cap, on a different path from the one `maxMailboxDownloads` guards, so a
+    single message could commit an unbounded number of downloads. The reader's
+    own bound fires much later and cannot help: hbs2-hub walks at most sixteen
+    parts, at triage, by which time the peer has paid for all of them.
+
+    And the drain took a whole batch out of the queue before processing it, with
+    no handler: any throw -- a busy sqlite, a storage error -- unwound out of
+    the worker, which was then torn down and restarted, and the rest of the
+    batch went with it, already out of the queue and in nobody's. Only messages
+    a co-host will send again ever came back. Confined to the message that
+    raised it, with `tryAny` rather than `try` so that cancelling the worker
+    still stops it.
+
+  - **`hbs2-peer`: a relay's proof-of-work floor was invisible to everyone.** A
+    sender solves for what the MAILBOX charges, which is in its signed policy; a
+    peer's `pow-min` is that peer's own number and is in nobody's policy, so a
+    relay set to 16 does not carry a message that honestly paid the 12 its
+    destination asked for. The only trace was a debug line. It is counted into
+    the periodic report now -- a warning per message would fire hardest exactly
+    when a flood is arriving, which is what the floor is for -- and the option's
+    own documentation says what a non-zero value costs somebody else. The sender
+    still cannot observe the floor it failed; that needs a refusal on the wire.
+
   - **`hbs2-hub`: one event could put a chosen letter beyond folding, forever
     and in silence.** An event's `origin` says "I was folded from the message
     with this hash", and nothing bound the claim to a message that exists -- the
