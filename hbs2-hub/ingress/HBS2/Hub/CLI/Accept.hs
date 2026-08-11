@@ -59,13 +59,14 @@ module HBS2.Hub.CLI.Accept
   , bundleOf
   , forkOf
   , partEvidence
+  , namedParts
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,maxMessageParts
                        ,AckRecord(..),ReplyChannel(..)
-                       ,openLetterAs)
+                       ,openLetterAs,openLetterNoPolicy,MessageData)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
@@ -197,6 +198,33 @@ forkOf = \case
       case prBundle c of
         Just{}  -> Nothing
         Nothing -> pure (src, prSourceTip c, prBase c)
+
+-- | Which of a message's attachments its letter actually names.
+--
+-- The walk below used to take the message's whole part set, while the gate that
+-- reads its result only ever looks up what the CONTENT references. So a letter
+-- naming nothing could still have this node fetch, measure and DECRYPT sixteen
+-- attachments of 64 MiB each, every one of them live at once, for a message
+-- whose event was going to reference none of them. Nothing about that spend was
+-- bounded by anything the sender had to pay for.
+--
+-- Reading the inner box to find out costs a signature check over bytes already
+-- in memory, which is the same check 'acceptLetter' makes a moment later.
+-- Opening it twice is the cheap half of this.
+--
+-- A LETTER THAT WILL NOT OPEN NAMES NOTHING, which is the right answer and not
+-- a fallback: the bridge is about to refuse it for the reason it did not open,
+-- and guessing the whole set here would spend exactly what this avoids on the
+-- letters least worth spending it on.
+--
+-- The message's own order is kept, so what is walked is a subset of what was
+-- declared and not a re-derivation of it.
+namedParts :: MessageData -> [HashRef] -> [HashRef]
+namedParts md carried = [ h | h <- carried, HS.member h named ]
+  where
+    named = case openLetterNoPolicy md of
+              Right (_, _, content, _) -> HS.fromList (fmap ptPart (eventPartRefs content))
+              Left _                   -> mempty
 
 -- | What is known about each attachment a message carries, gathered before the
 -- bridge is asked.
@@ -443,13 +471,16 @@ acceptEntries = do
                                 <> "  nothing was read: the letter is left where it is." ))
                         codePartsTooMany
 
-      opened <- partEvidence ig (lrParts raw)
+      opened <- partEvidence ig (namedParts (lrData raw) (lrParts raw))
 
       let evidence = [ (h, ev) | (h, (ev, _)) <- opened ]
 
+      -- The DECLARED set goes to the bridge whole, not the opened one: it is
+      -- what the gate compares against the letter, and it has to be able to
+      -- refuse a part nobody opened.
       acc <- blessed codeTriageRefused
                (acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
-                             now msg (attachments (lrSecret raw) evidence)
+                             now msg (attachments (lrSecret raw) (lrParts raw) evidence)
                              (lrData raw))
 
       -- THE BUNDLE IS CHECKED BEFORE ANYTHING IS PUBLISHED, which is PEP-20's

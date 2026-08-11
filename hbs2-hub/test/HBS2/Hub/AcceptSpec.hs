@@ -14,6 +14,7 @@ module HBS2.Hub.AcceptSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.CLI.Accept
+import HBS2.Hub.Letter (makeLetter,makeAck,noReplyChannel,AckRecord(..))
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Net.Auth.Credentials
@@ -22,6 +23,7 @@ import HBS2.Hash (hashObject)
 import HBS2.Data.Types.Refs (HashRef(..))
 
 import Data.Config.Suckless
+import Data.Maybe (listToMaybe)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Prettyprinter (pretty)
 import Test.Hspec
@@ -41,7 +43,7 @@ aHash :: String -> HashRef
 aHash s = HashRef (hashObject (LBS.pack s))
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3
+spec = spec1 >> spec2 >> spec3 >> spec4
 
 spec1 :: Spec
 spec1 = do
@@ -226,3 +228,57 @@ spec3 =
         `shouldBe` Nothing
       forkOf (AComment (aHash "thread") Nothing (Just "hi") Nothing 1)
         `shouldBe` Nothing
+
+-- | WHICH ATTACHMENTS GET OPENED, which is to say decrypted.
+--
+-- The walk took the message's whole part set while the gate that reads its
+-- result only ever looks up what the letter references, so a letter naming
+-- nothing could still have this node fetch, measure and decrypt sixteen
+-- attachments of 64 MiB, all of it live at once, for an event that would point
+-- at none of them. The count bound above it ('maxMessageParts') bounds how
+-- many, not whether any of them is wanted.
+spec4 :: Spec
+spec4 =
+  describe "PEP-18 hub inbox accept: what is worth opening" $ do
+
+    let letterNaming who sk refs =
+          makeLetter who sk
+            (AOpen who HubIssue "t" [] Nothing (listToMaybe refs) Nothing 1)
+            noReplyChannel
+
+    it "walks only the parts the letter names" $ do
+      c <- newCredentials @'HBS2Basic
+      let who = _peerSignPk c
+          mine = aHash "mine"
+          extra1 = aHash "extra-1"
+          extra2 = aHash "extra-2"
+          md = letterNaming who (_peerSignSk c) [PartRef mine (PartProof mine)]
+      namedParts md [mine, extra1, extra2] `shouldBe` [mine]
+
+    -- The attack in its plainest form: nothing named, everything carried.
+    it "walks nothing for a letter that names nothing" $ do
+      c <- newCredentials @'HBS2Basic
+      let who = _peerSignPk c
+          md = letterNaming who (_peerSignSk c) []
+      namedParts md [aHash "a", aHash "b"] `shouldBe` []
+
+    -- A letter that will not open names nothing, and that is the answer rather
+    -- than a fallback: the bridge is about to refuse it for the reason it did
+    -- not open, so guessing the whole set would spend exactly what this avoids
+    -- on the letters least worth spending it on.
+    it "walks nothing for a message that is not a letter at all" $ do
+      c <- newCredentials @'HBS2Basic
+      let who = _peerSignPk c
+          notALetter = makeAck (AckRecord who (aHash "t") (Just 1) "open" Nothing Nothing)
+      namedParts notALetter [aHash "a"] `shouldBe` []
+
+    -- The message's order, not a re-derivation of it: what is walked has to be
+    -- a subset of what the message declared, or the intersection has quietly
+    -- become a second source of truth about which parts exist.
+    it "keeps the message's own order and adds nothing to it" $ do
+      c <- newCredentials @'HBS2Basic
+      let who = _peerSignPk c
+          mine = aHash "mine"
+          md = letterNaming who (_peerSignSk c) [PartRef mine (PartProof mine)]
+      -- named but not carried: the bridge answers that one, not this
+      namedParts md [] `shouldBe` []

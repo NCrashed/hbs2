@@ -5,7 +5,8 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.Bridge (PartEvidence(..))
 import HBS2.Hub.CLI.Accept (partEvidence)
 import HBS2.Hub.Letter (maxPartBytes)
-import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel)
+import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel
+                       ,Envelope(..),hubMsgWrite)
 
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject,Hash,HbSync)
@@ -520,6 +521,36 @@ spec3 =
       -- above is the LIST and not the letter
       lv2 <- openMessage (holding msg gks stub) (mh "m")
       lvLetter lv2 `shouldSatisfy` either (const False) (const True)
+
+    -- AND FOR A LETTER OF A SCHEMA THIS BUILD CANNOT READ, which is the one
+    -- case where the envelope key is all there is to ask about. 'openLetterAs'
+    -- has the branch written out with its reasoning and nothing could reach it:
+    -- 'parsePayload' checks the version first, so such a letter never got as
+    -- far as the function that would ban its sender. The tests that "covered"
+    -- it built a MessageData by hand, so they were green over a path production
+    -- does not take.
+    --
+    -- The cost of the gap: an unreadable-version letter is a WAIT, not a
+    -- discard -- rightly, since a newer build folds it -- so one banned sender
+    -- could park one in the queue and every pass would open it again forever.
+    it "bans a letter of a version it cannot read, by the only key it has" $ do
+      alice <- newCredentials @'HBS2Basic
+      -- A payload whose envelope parses and whose version is not one this
+      -- build speaks. The body never has to be decodable: the version is
+      -- checked first, which is exactly why the ban had nowhere to run.
+      let ahead = serialise (Envelope (hubMsgWrite + 7) (B8.pack "a body from the future"))
+      (msg, gks) <- opened alice (LBS.toStrict ahead)
+
+      lvOk <- openMessage (holding msg gks stub) (mh "m")
+      case lvLetter lvOk of
+        Left (BadLetterHere (UnsupportedVersion _)) -> pure ()
+        other -> expectationFailure ("expected an unsupported version, got " <> show other)
+
+      let denied = (holding msg gks stub) { igAllowed = const False }
+      lv <- openMessage denied (mh "m")
+      case lvLetter lv of
+        Left (BadLetterHere AuthorDenied) -> pure ()
+        other -> expectationFailure ("expected the deny-list, got " <> show other)
 
     -- rawMessage is what the ACCEPT path reads: the same bytes as the queue,
     -- and it hands the bridge the message secret and the part list. It had no

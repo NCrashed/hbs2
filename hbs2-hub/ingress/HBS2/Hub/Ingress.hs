@@ -566,6 +566,30 @@ openMessage ig mh = do
             { lvMessage  = mh
             , lvEnvelope = envelope
             , lvLetter   = case (envelope, md) of
+                -- THE ONE CASE WHERE THE ENVELOPE KEY IS ALL THERE IS, and the
+                -- only one where a ban may be asked of it. 'openLetterAs' has
+                -- this branch written out with its reasoning, and it is dead
+                -- code: 'parsePayload' checks the version first, so a letter
+                -- from a schema this build cannot read never reaches the
+                -- function that would ban its sender. The tests reached it by
+                -- building a 'MessageData' by hand, so they were green and the
+                -- guarantee was not there.
+                --
+                -- What that cost: such a letter is a wait, not a discard --
+                -- rightly, since a newer build folds it -- so a banned sender
+                -- could park one in the queue and every later pass would open
+                -- it again, forever, with the ban being the only mechanism that
+                -- would have stopped it and no way to reach the ban.
+                --
+                -- ASKED OF THE ENVELOPE KEY ONLY HERE. Everywhere else the list
+                -- is a list of inner AUTHORS, and it has to stay that way:
+                -- denying content because a banned key relayed it would let
+                -- anyone on the list censor other people's letters by rewrapping
+                -- them. Here there is no inner author to ask about, because
+                -- there is no body this build can open.
+                (Just who, Left (UnsupportedVersion v))
+                  | not (igAllowed ig who) -> Left (BadLetterHere AuthorDenied)
+                  | otherwise -> Left (BadLetterHere (UnsupportedVersion v))
                 (_, Left e)           -> Left (BadLetterHere e)
                 -- REACHABLE, and it was not before the key above was checked for
                 -- being a key: readMessage succeeding means the same unbox

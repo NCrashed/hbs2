@@ -241,6 +241,12 @@ noParts = noMessageParts msgSecret
 here :: HashRef -> (HashRef, PartEvidence)
 here h = (h, PartOpened 1024 secret32)
 
+-- | A message declaring exactly the parts it carries evidence about, which is
+-- what an honest sender builds. The case where the two sets differ is a
+-- refusal with a test of its own; every fixture here is the agreeing shape.
+carrying :: MessageSecret -> [(HashRef, PartEvidence)] -> LetterParts
+carrying msg evs = attachments msg (fmap fst evs) evs
+
 -- An inline body over what triage will carry, in BYTES: half as many
 -- characters as the limit, of two bytes each, plus one. A gate written in
 -- characters would take this and put it in every clone; the limit is about
@@ -632,13 +638,13 @@ step cast st = \case
   StepAttach i ts att ->
     let part = originOf (stStep st + i + 1)
         po = case att of
-               Ready      -> attachments msgSecret [here part]
-               NotFetched -> attachments msgSecret [(part, PartPending 1024)]
+               Ready      -> carrying msgSecret [here part]
+               NotFetched -> carrying msgSecret [(part, PartPending 1024)]
                NotCarried -> noParts
-               NoKey      -> attachments msgSecret [(part, PartLocked 1024)]
-               TooBig     -> attachments msgSecret
+               NoKey      -> carrying msgSecret [(part, PartLocked 1024)]
+               TooBig     -> carrying msgSecret
                                [(part, PartOpened (maxPartBytes + 1) secret32)]
-               Unproven   -> attachments msgSecret [here part]
+               Unproven   -> carrying msgSecret [here part]
         -- The proof is over the part, the secret and the AUTHOR: a letter that
         -- names a part it did not create cannot produce one, however perfect
         -- the evidence about the part is.

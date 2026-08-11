@@ -370,6 +370,19 @@ data TriageError =
     -- be published (PEP-18 'PartRef'), and the only unrepairable half of it is
     -- that canon cannot take a publication back.
   | PartUnproven HashRef
+    -- | The message carries an attachment the letter never names.
+    --
+    -- Refused rather than ignored, because the secret this gate publishes is
+    -- ONE KEY FOR THE WHOLE MESSAGE. PEP-18 argues that publishing it is safe
+    -- on the grounds that it opens what the event points at; that argument is
+    -- only true when the two sets are the same, and nothing compared them. A
+    -- letter naming one part in a message carrying sixteen had the owner sign
+    -- the key to all sixteen into public canon forever.
+    --
+    -- It also makes the unreferenced ones free to refuse: there is no reason to
+    -- fetch or decrypt an attachment no event will ever point at, and this is
+    -- the answer that lets the caller not.
+  | PartNotReferenced HashRef
     -- | The caller passed the no-attachments value for content that names an
     -- attachment, so there is no evidence to judge against. A caller bug: the
     -- builders that carry evidence are the ones with a message behind them.
@@ -544,6 +557,8 @@ instance Pretty TriageError where
     PartNotInMessage h    -> "names a part the message does not carry:" <+> pretty h
     PartUnproven h        -> "names a part its author has not proved is theirs:"
                                <+> pretty h
+    PartNotReferenced h   -> "carries an attachment the letter never names:"
+                               <+> pretty h
     NoAttachmentsSupplied -> "no evidence supplied about the attachments"
     PartNotFetched h      -> "an attachment not fetched yet:" <+> pretty h
     PartTooLarge h        -> "an attachment over what this hub carries:" <+> pretty h
@@ -628,6 +643,10 @@ outcome = \case
   -- it cannot prove is one nobody should keep triaging, and no later state of
   -- this node changes what the sender signed.
   PartUnproven _       -> Discard
+  -- And the same again: what a message carries is fixed by what the sender
+  -- built and signed over, so no later state of this node makes the extra
+  -- attachment accounted for.
+  PartNotReferenced _  -> Discard
   -- The sender chose an attribute name or value that is not in canonical form,
   -- so no owner can honour it as sent and no later pass changes that. Raised
   -- against what triage composes it is 'Composed' instead, which is a stop.
@@ -717,6 +736,15 @@ data PartsOf = PartsOf
     -- event there is no message, and the caller is vouching for what it just
     -- created.
   , poCarried :: HashMap HashRef PartEvidence
+    -- | Every part the MESSAGE declares, opened or not.
+    --
+    -- Separate from 'poCarried' because the two stopped being the same list the
+    -- moment the caller was allowed to open only what the letter names: what is
+    -- carried is evidence, gathered at a cost, and this is a claim that costs
+    -- nothing to read. The gate below needs the second to refuse a message
+    -- whose parts the letter does not account for, and it must be able to do so
+    -- WITHOUT the caller having opened them, which is the whole point.
+  , poNamed   :: [HashRef]
   }
   deriving stock (Eq)
 
@@ -793,7 +821,7 @@ newtype OwnerParts = OwnerParts PartsOf
 -- the parts through is a bug that must. Only 'noOwnAttachments' can say the
 -- second thing now, and on that path there is no message to be wrong about.
 noMessageParts :: MessageSecret -> LetterParts
-noMessageParts msg = LetterParts (PartsOf (Just msg) HM.empty)
+noMessageParts msg = LetterParts (PartsOf (Just msg) HM.empty [])
 
 -- | What the message carries, and what the caller knows about each part.
 --
@@ -806,13 +834,14 @@ noMessageParts msg = LetterParts (PartsOf (Just msg) HM.empty)
 -- enters only through 'PartOpened', attached to the part it opened.
 attachments
   :: MessageSecret                -- ^ the secret @messageData@ was encrypted with, to refuse
-  -> [(HashRef, PartEvidence)]    -- ^ the message's parts
+  -> [HashRef]                    -- ^ every part the message DECLARES
+  -> [(HashRef, PartEvidence)]    -- ^ and what was learned about the ones opened
   -> LetterParts
-attachments msg hs = LetterParts (PartsOf (Just msg) (HM.fromList hs))
+attachments msg named hs = LetterParts (PartsOf (Just msg) (HM.fromList hs) named)
 
 -- | An owner-native event with no attachments.
 noOwnAttachments :: OwnerParts
-noOwnAttachments = OwnerParts (PartsOf Nothing HM.empty)
+noOwnAttachments = OwnerParts (PartsOf Nothing HM.empty [])
 
 -- | Attachments the owner created itself.
 --
@@ -823,7 +852,7 @@ noOwnAttachments = OwnerParts (PartsOf Nothing HM.empty)
 -- other; PEP-19 records deriving the secret from the part tree's own group key
 -- as the fix that would make the question unaskable.
 ownAttachments :: [(HashRef, PartEvidence)] -> OwnerParts
-ownAttachments hs = OwnerParts (PartsOf Nothing (HM.fromList hs))
+ownAttachments hs = OwnerParts (PartsOf Nothing (HM.fromList hs) (fmap fst hs))
 
 -- Refuse to publish a reference to encrypted bytes with no way to read them,
 -- and refuse a reference to bytes that are not there at all.
@@ -841,8 +870,29 @@ requireParts who po content
   | referencesPart content, toldNothing = Left NoAttachmentsSupplied
   | otherwise = do
       secrets <- traverse present (eventPartRefs content)
+      -- AND WHAT THE MESSAGE CARRIES MUST BE WHAT THE LETTER NAMES. See
+      -- 'PartNotReferenced': the secret returned below is one key for every part
+      -- of the message, and PEP-18's argument that publishing it is safe rests
+      -- on these two sets being the same set. Nothing compared them.
+      --
+      -- AFTER the walk, though it needs nothing the walk produces, because the
+      -- two refusals are about opposite halves of the same disagreement and the
+      -- letter's own claim is the one worth answering first: "you named a part
+      -- your message does not carry" tells a sender what to fix, and reaching it
+      -- only after the extras are accounted for would have answered the harder
+      -- half of a mistake nobody made on purpose.
+      --
+      -- Asked of 'poNamed' and not of 'poCarried', which is why that field
+      -- exists: a caller has no reason to open an attachment no event will point
+      -- at, so by the time this runs there is no evidence about the extras, and
+      -- there should not be.
+      case [ h | h <- poNamed po, not (HS.member h referenced) ] of
+        (h:_) -> Left (PartNotReferenced h)
+        []    -> Right ()
       one secrets
   where
+    referenced = HS.fromList (fmap ptPart (eventPartRefs content))
+
     -- Told nothing means exactly that: no parts AND no message behind them. A
     -- message that carried no attachments is not the same thing, and reading it
     -- as one let any stranger wedge the loop by naming a part in a letter whose

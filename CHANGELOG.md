@@ -627,6 +627,38 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox accept`: it decrypted every attachment a message carried,
+    and published a key to all of them.** Two halves of one gap between what a
+    message carries and what its letter names, and nothing compared the two
+    sets.
+
+    The walk took the message's whole part set while the gate that reads its
+    result only ever looks up what the content references, so a letter naming
+    nothing could still have this node fetch, measure and decrypt sixteen
+    attachments of 64 MiB, all of it live at once, for an event that would point
+    at none of them. It reads the inner box first now -- a signature check over
+    bytes already in memory -- and walks only what the letter names.
+
+    And the secret the owner signs into canon is ONE KEY FOR THE WHOLE MESSAGE.
+    PEP-18 argues that publishing it is safe because it opens what the event
+    points at, which is only true when the two sets agree; a letter naming one
+    part in a message carrying sixteen had the owner publish the key to all
+    sixteen, in public append-only canon, forever. A message carrying an
+    attachment its letter never names is refused, which is what makes the
+    argument true. The refusal is decided from what the message DECLARES, so it
+    needs nothing opened.
+
+  - **`hbs2-hub`: a banned sender could park a letter in the queue forever.**
+    `openLetterAs` has a branch that applies the deny-list to the envelope key
+    when a letter's schema is one this build cannot read -- the one case where
+    there is no inner author to ask about -- and it was dead code: the version
+    is checked a layer earlier, so such a letter never reached the function that
+    would ban its sender. The tests reached it by building the value by hand, so
+    they were green over a path production does not take. Since an
+    unreadable-version letter is a wait rather than a discard (rightly: a newer
+    build folds it), every pass opened it again. The check now runs where the
+    version is actually decided.
+
   - **`hbs2-hub compact`: every compaction commit was dated 1970.** The stamp
     is deliberately taken from canon rather than from a clock, so that two
     maintainers compacting one canon produce one commit -- but the field taken
