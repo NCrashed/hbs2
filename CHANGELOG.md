@@ -627,6 +627,29 @@
 
 ## Fixed
 
+  - **`hbs2-hub compact`: every compaction commit was dated 1970.** The stamp
+    is deliberately taken from canon rather than from a clock, so that two
+    maintainers compacting one canon produce one commit -- but the field taken
+    was `frMaxSeq`, a position, where `cnWhen` is documented as epoch
+    milliseconds and the writer divides it by 1000. So a canon holding forty
+    events was published at the epoch while every other canon writer passed a
+    real clock, and a canon whose highest seq passed 2^63-1 could not be
+    compacted at all, git refusing that date. `frLastFolded` is the same
+    determinism and is the value the field asks for; it is bounded by
+    `maxFoldedTs`, which is an admission rule, so no admitted event can carry a
+    date git will not take.
+
+  - **`hbs2-hub pr merge`: the ordinary way of naming a commit was refused.**
+    `--commit` went to a check written for the shape CANON holds -- 40 or 64
+    hex -- so the seven characters `git log --oneline` prints came back as the
+    refusal written for a forged letter ("a signed letter says who wrote a
+    name, not what it is"), at an exit code documented as belonging to
+    `hub pr new`. An abbreviation is resolved through git now, and the whole
+    object name is what canon records: an abbreviation is unambiguous only in
+    the repository it was read in and only while that repository stays this
+    size, and a merge event is permanent. Still hex only, not a branch or tag
+    name, for the same reason.
+
   - **`hbs2-hub`: one canon file could end a repository, and `hub-meta` is 3.**
     A key whose delegation was current spent its stamp outright, so a single
     canon box at `seq = maxBound - 1` put the cursor at the top of its range,

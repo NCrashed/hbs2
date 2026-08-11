@@ -13,7 +13,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Compact
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.Repo
-import HBS2.Hub.Canon (renderMeta,metaAt)
+import HBS2.Hub.Canon (renderMeta,metaAt,renderEvent)
 import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Hub.Fold ( foldEvents,frThreads,frAdmitted,frOrigins,frMaintainers
                      , frMaxSeq,tsAttrs )
@@ -52,6 +52,30 @@ canonOf repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothin
 -- would bury the reason.
 canonWith :: RepoRef -> Word64 -> Maybe HashRef -> EventId -> CanonContent
 canonWith repo sq origin eid = CanonContent repo eid sq Nothing origin Nothing sq Nothing
+
+-- | The same, with the clock said apart from the position.
+--
+-- Every other helper here sets @folded-ts@ to the seq, which is fine when
+-- nothing reads it and is exactly wrong for the one thing that does: a fixture
+-- whose two numbers agree cannot tell a stamp taken off the counter from one
+-- taken off the clock.
+canonAt :: RepoRef -> Word64 -> Maybe Word64 -> Word64 -> EventId -> CanonContent
+canonAt repo sq num folded eid = CanonContent repo eid sq num Nothing Nothing folded Nothing
+
+anIssue :: RepoRef -> Text -> AuthorContent
+anIssue repo t = AOpen repo HubIssue t [] (Just "body") Nothing Nothing 1000
+
+-- | Events as the files a tree holds them in, with the version file beside them.
+--
+-- The seq is given rather than read back off the event, because the path is
+-- what the WRITER chose and a reader that derived it would be checking its own
+-- arithmetic.
+asTree :: ThreadId -> [(Word64, Event)] -> [(BS.ByteString, Text)]
+asTree thr evs =
+  ("version", renderMeta (metaAt hubMetaVersion))
+    : [ ( TextE.encodeUtf8 (Text.pack (threadDir thr <> "/" <> eventFileName sq (eventId e)))
+        , renderEvent e )
+      | (sq, e) <- evs ]
 
 -- | Every thread's attributes, which is what a reader sees and what a
 -- compaction must not change.
@@ -143,6 +167,48 @@ spec = do
       said `shouldSatisfy` isInfixOf "threads/t/junk"
       said `shouldSatisfy` isInfixOf "verify"
       said `shouldSatisfy` isInfixOf "Nothing was written"
+
+  -- A compaction publishes no event, so the stamp on its commit has to come
+  -- from canon or two maintainers compacting one canon get two commit ids. It
+  -- came from 'frMaxSeq', which is a POSITION and not a time: 'cnWhen' is
+  -- documented as epoch milliseconds and the writer divides it by 1000, so
+  -- every compaction was dated 1970 while every other canon writer passed a
+  -- real clock -- and a canon whose highest seq passed 2^63-1 could not be
+  -- compacted at all, git refusing that date.
+  describe "PEP-19 compaction: when the commit says it is" $ do
+
+    it "stamps the commit with the newest folded-ts, not with a counter" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          -- The two fields disagree by construction: seq 1 and 2, a clock in
+          -- milliseconds. A stamp taken off the counter is under a second past
+          -- the epoch, which is the whole defect in one comparison.
+          eOpen = mkEvent alice owner (anIssue repo "t") (canonAt repo 1 (Just 1) 1700000000000)
+          thr = eventId eOpen
+          eCom = mkEvent alice owner
+                   (AComment thr Nothing (Just "a reply") Nothing 2)
+                   (canonAt repo 2 Nothing 1700000001000)
+      st <- readCanon (byPath (asTree thr [(1,eOpen),(2,eCom)])) repo
+              >>= either (fail . show) pure
+      compactionStamp st `shouldBe` 1700000001000
+      -- said the other way round, because the assertion above passes by
+      -- accident on a canon whose two numbers happen to agree
+      compactionStamp st `shouldSatisfy` (/= frMaxSeq (stFold st))
+
+    -- And it stays inside what git will take, which is the second half of the
+    -- old defect: the counter had no ceiling that mattered here, and this does.
+    -- 'maxFoldedTs' is an admission rule, so no admitted event carries a date
+    -- git refuses -- which makes the bound a property of the fold rather than
+    -- something this verb has to check.
+    it "cannot stamp a date git would refuse" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          e0 = mkEvent alice owner (anIssue repo "t") (canonAt repo 1 (Just 1) maxFoldedTs)
+      st <- readCanon (byPath (asTree (eventId e0) [(1,e0)])) repo
+              >>= either (fail . show) pure
+      compactionStamp st `shouldSatisfy` (<= maxFoldedTs)
 
   describe "PEP-19 compaction: what may go" $ do
 

@@ -29,6 +29,7 @@ module HBS2.Hub.CLI.Compact
   , codeNothingToCompact
   , codeNotThisCanon
   , compactable
+  , compactionStamp
   , unreadableDoc
   , codeCanonUnreadableHere
   ) where
@@ -36,7 +37,7 @@ module HBS2.Hub.CLI.Compact
 import HBS2.Hub.Types
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Compact
-import HBS2.Hub.Fold (FoldResult(..),frMaxSeq)
+import HBS2.Hub.Fold (FoldResult(..),frLastFolded)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
@@ -53,6 +54,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
+import Data.Word (Word64)
 import Data.List qualified as List
 import System.Exit (die,exitSuccess,exitWith,ExitCode(..))
 
@@ -77,6 +79,30 @@ import System.Exit (die,exitSuccess,exitWith,ExitCode(..))
 -- admitted and some dropped is ordinary and says nothing.
 ownsCanon :: [a] -> FoldResult -> Bool
 ownsCanon events fr = List.null events || not (HM.null (frAdmitted fr))
+
+-- | The stamp a compaction commit carries.
+--
+-- Derived from what canon holds rather than read off a clock. Every other canon
+-- commit is stamped with the event it publishes; a compaction publishes no
+-- event, so the newest @folded-ts@ canon holds is what "when this canon is"
+-- means. Two maintainers compacting the same canon therefore produce the same
+-- commit, and a retry after a lost answer costs nothing instead of forking the
+-- lineage.
+--
+-- THE FIELD MATTERS AND THIS USED TO BE 'frMaxSeq', which is not a time.
+-- 'cnWhen' is documented as epoch milliseconds and the writer divides it by
+-- 1000, so a canon holding forty events was published with a commit date of
+-- 1970-01-01T00:00:00Z while every other canon writer passed a real clock -- and
+-- a canon whose highest seq passed 2^63-1 could not be compacted at all, since
+-- git refuses that date. 'frLastFolded' is the same determinism (nothing here
+-- reads a clock) and is the value that means what the field says. It is bounded
+-- too: 'maxFoldedTs' is an admission rule, so no admitted event can carry a date
+-- git will not take.
+--
+-- Named and exported rather than left inline, because a value that decides a
+-- commit id should be assertable without running the verb.
+compactionStamp :: CanonState -> Word64
+compactionStamp = frLastFolded . stFold
 
 -- | What canon holds that this build cannot carry forward, if anything.
 --
@@ -305,7 +331,7 @@ compactEntries = do
 
       commit <- withGitSink (\sk ->
                   skRewrite sk (CanonWrite (Just (stCommit st)) (cwFiles plan)
-                                           (message c) (stampOf st)))
+                                           (message c) (compactionStamp st)))
                   >>= either (\e -> liftIO (refuse (show (pretty e)) codeCanonUnwritable))
                              pure
 
@@ -324,13 +350,6 @@ compactEntries = do
 
     message c = "hub: compacted, dropped " <> tshow (length (cpDrop c)) <> " event(s)"
 
-    -- The stamp the new commit carries, derived from what canon holds rather
-    -- than read off a clock. Every other canon commit is stamped with the event
-    -- it publishes; a compaction publishes no event, so the highest seq canon
-    -- holds is the closest thing to "when this canon is". Two maintainers
-    -- compacting the same canon therefore produce the same commit, and a retry
-    -- after a lost answer costs nothing instead of forking the lineage.
-    stampOf st = frMaxSeq (stFold st)
 
     tshow :: Int -> Text
     tshow = fromString . show

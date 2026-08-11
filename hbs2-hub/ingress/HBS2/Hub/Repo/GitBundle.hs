@@ -48,6 +48,8 @@ module HBS2.Hub.Repo.GitBundle
   , BundleError(..)
   , validRefName
   , validSha
+  , validAbbrevSha
+  , resolveCommit
   ) where
 
 import HBS2.Hub.Types (safeText)
@@ -196,6 +198,41 @@ validRefName r =
 -- second would refuse a whole class of repository over a number.
 validSha :: Text -> Bool
 validSha s = Text.length s `elem` [40, 64] && Text.all isHexDigit s
+
+-- | An object name a PERSON typed, which is not the same shape as one a signed
+-- letter carries.
+--
+-- 'validSha' is the shape canon holds and the shape a letter may claim: whole,
+-- 40 or 64 hex. What somebody copies out of @git log --oneline@ is seven
+-- characters, and passing that to a check written for canon refused it in the
+-- letter-shaped words about a signed name and a leading dash. Four is git's own
+-- floor for an abbreviation.
+--
+-- Still narrow on purpose: hex only, so this is an abbreviated OBJECT NAME and
+-- not @HEAD@, @main@ or @v1.2^@. A merge event is a permanent claim about which
+-- commit a proposal landed in, and a name that means something different
+-- tomorrow is not one canon should record.
+validAbbrevSha :: Text -> Bool
+validAbbrevSha s =
+  Text.length s >= 4 && Text.length s <= 64 && Text.all isHexDigit s
+
+-- | Turn one of those into the whole object name it means.
+--
+-- @^{commit}@ rather than a bare rev-parse, for the reason 'acceptBundle' peels
+-- the same way: a tag or a tree resolves happily and is not a commit, and the
+-- caller is about to assert that something is an ancestor of it.
+--
+-- Ambiguity is git's to report and it does, with exit 128 and prose naming the
+-- candidates, which is more use than anything this could say.
+resolveCommit :: MonadUnliftIO m
+              => Maybe FilePath -> Text -> m (Either BundleError Text)
+resolveCommit cwd name = runExceptT do
+  checked "object name" validAbbrevSha name
+  out <- ExceptT $ call cwd smallSeconds "rev-parse"
+           ["rev-parse", "--verify", "--end-of-options"
+           , Text.unpack name <> "^{commit}"]
+  let full = Text.strip (Text.decodeUtf8Lenient out)
+  if validSha full then pure full else throwError (BundleBadName "object name" full)
 
 -- | Build a bundle of @base..source-ref@ (PEP-20 delta path).
 --

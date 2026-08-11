@@ -17,6 +17,7 @@ import HBS2.Hub.Repo.Git (gitToolMessage)
 import Control.Monad (void)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Either (isLeft)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -381,6 +382,44 @@ spec1 = do
       map validSha [ "HEAD", "", Text.replicate 39 "a", Text.replicate 40 "g"
                    , "HEAD~1", Text.replicate 41 "a" ]
         `shouldBe` replicate 6 False
+
+    -- THE SHAPE A PERSON TYPES, which is not the shape canon holds. `git log
+    -- --oneline` prints seven characters, and checking those against the canon
+    -- shape refused the ordinary way of naming a commit in the words written
+    -- for a forged letter.
+    it "takes an abbreviation a person would type, down to git's own floor" $ do
+      map validAbbrevSha [ "beef", Text.replicate 7 "a", Text.replicate 40 "a"
+                         , Text.replicate 64 "a" ]
+        `shouldBe` replicate 4 True
+
+    -- Still hex only. An abbreviation resolves to one commit; @HEAD@ and a
+    -- branch name resolve to whatever they mean today, and a merge event is a
+    -- permanent claim about which commit a proposal landed in.
+    it "refuses a name that is not an object name at all" $ do
+      map validAbbrevSha [ "HEAD", "main", "v1.2", "HEAD~1", "abc", ""
+                         , Text.replicate 65 "a", "--upload-pack=x", "dead beef" ]
+        `shouldBe` replicate 9 False
+
+    it "resolves an abbreviation to the whole object name" $ withWork $ \dir _ tip -> do
+      full <- ok =<< resolveCommit (Just dir) (Text.take 7 tip)
+      full `shouldBe` tip
+      -- and a whole one is already itself
+      (ok =<< resolveCommit (Just dir) tip) >>= (`shouldBe` tip)
+
+    -- Peeled, for the reason acceptBundle peels: the caller is about to assert
+    -- that something is an ancestor of what comes back, and a tag is not a
+    -- commit.
+    it "peels a tag to the commit it points at" $ withWork $ \dir _ tip -> do
+      void $ git dir ["tag", "-a", "v1", "-m", "release"]
+      obj <- Text.pack <$> git dir ["rev-parse", "v1"]
+      obj `shouldSatisfy` (/= tip)
+      -- named by its own object id, since a tag NAME is not an object name
+      (ok =<< resolveCommit (Just dir) obj) >>= (`shouldBe` tip)
+
+    it "refuses a name git does not have, without inventing one" $
+      withWork $ \dir _ _ -> do
+        r <- resolveCommit (Just dir) (Text.replicate 40 "a")
+        r `shouldSatisfy` isLeft
 
 -- A bundle that fetches cleanly and is not what the letter signed for. The
 -- objects are git's own and perfectly valid; what is wrong is whose they are.

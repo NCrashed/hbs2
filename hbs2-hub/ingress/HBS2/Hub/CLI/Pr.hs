@@ -213,6 +213,12 @@ prEntries = do
              <> line <> "commit that does not carry the proposal would be a false"
              <> line <> "statement in every clone forever."
              <> line
+             <> line <> "--commit takes an abbreviation, the seven characters git"
+             <> line <> "log --oneline prints, and canon records the whole object"
+             <> line <> "name it resolves to here. Not a branch or a tag name:"
+             <> line <> "those mean something different tomorrow, and this event"
+             <> line <> "is permanent."
+             <> line
              <> line <> "The merge event sets the status to merged by itself"
              <> line <> "(PEP-19). No second 'set' is written and none should be:"
              <> line <> "canon would claim a merged pull request was open until it"
@@ -302,24 +308,37 @@ prEntries = do
                                             <+> "is not a pull request"))
                                    codeNoSuchPr
 
+      -- WHAT A PERSON TYPED, RESOLVED FIRST. A maintainer merges and copies the
+      -- id out of `git log --oneline`, which is seven characters, and the check
+      -- below it is written for the shape CANON holds: 40 or 64 hex. So the
+      -- ordinary way of naming a commit was refused in the words a forged
+      -- letter gets, under a code documented as belonging to `hub pr new`.
+      --
+      -- And the resolved id is what goes into canon, not what was typed: an
+      -- abbreviation is only unambiguous in the repository it was read in and
+      -- for as long as that repository stays this size, and this event is
+      -- permanent.
+      merged <- resolveCommit Nothing (pmCommit pm)
+                  >>= either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
+
       -- THE CHECK THIS VERB EXISTS FOR. A merge event says a proposal was
       -- integrated; if the commit it names does not contain the tip the
       -- contributor signed for, that sentence is false, and canon is
       -- append-only. git answers it exactly.
       let tip = prSourceTip (psCoords pr)
-      anc <- isAncestor Nothing tip (pmCommit pm)
+      anc <- isAncestor Nothing tip merged
                >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleFailed)) pure
       unless anc $
         liftIO $ refuse (show ( "the commit named does not contain the proposed tip"
                                   <> line <> "  proposed" <+> pretty tip
-                                  <> line <> "  merge   " <+> pretty (pmCommit pm)
+                                  <> line <> "  merge   " <+> pretty merged
                                   <> line <> "  nothing was written" ))
                         codeNotMerged
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
       let ctx = TriageCtx (signingPair creds) (const True) (pmRepo pm)
-          content = AMerge (tsId t) (pmCommit pm) (pmInto pm) now
+          content = AMerge (tsId t) merged (pmInto pm) now
 
       acc <- blessed codeNotMerged
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
