@@ -16,6 +16,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.Letter (makeLetter,makeAck,noReplyChannel,AckRecord(..))
 import HBS2.Hub.CLI.Argv (argvAtom)
+import HBS2.Hub.CLI.Common (Writing(..))
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -54,7 +55,7 @@ spec1 = do
       mbox <- aKey
       repo <- aKey
       let h = aHash "a message"
-          want = Just (AcceptArgs (Just mbox) repo h Nothing False False)
+          want = Just (AcceptArgs (Just mbox) repo h Nothing False False ForReal)
       acceptArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)])
         `shouldBe` want
       acceptArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox, "--message", show (pretty h)])
@@ -69,7 +70,7 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv [ "--mailbox", b58 mbox, "--repo", b58 repo
                        , "--as", b58 bob, "--message", show (pretty h) ])
-        `shouldBe` Just (AcceptArgs (Just mbox) repo h (Just bob) False False)
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h (Just bob) False False ForReal)
 
     -- The letter is dropped from the mailbox after the fold, so the flag that
     -- keeps it has to be a flag and not an absence: an accept that quietly kept
@@ -100,7 +101,19 @@ spec1 = do
       acceptArgs (argv (base <> ["--incomplete", "yes"])) `shouldBe` Nothing
       -- and the two switches do not eat each other
       acceptArgs (argv (base <> ["--keep", "--incomplete"]))
-        `shouldBe` Just (AcceptArgs (Just mbox) repo h Nothing True True)
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h Nothing True True ForReal)
+
+    it "rehearses when asked to" $ do
+      mbox <- aKey
+      repo <- aKey
+      let h = aHash "a message"
+          base = ["--mailbox", b58 mbox, "--repo", b58 repo, "--message", show (pretty h)]
+      fmap aaDry (acceptArgs (argv base)) `shouldBe` Just ForReal
+      fmap aaDry (acceptArgs (argv (base <> ["--dry-run"]))) `shouldBe` Just DryRun
+      acceptArgs (argv (base <> ["--dry-run", "yes"])) `shouldBe` Nothing
+      -- and it does not eat the other two either
+      acceptArgs (argv (base <> ["--dry-run", "--keep", "--incomplete"]))
+        `shouldBe` Just (AcceptArgs (Just mbox) repo h Nothing True True DryRun)
 
     -- The repository is required and the mailbox is not: without one the
     -- manifest is read (PEP-18), and a mailbox named by hand skips that. A
@@ -110,7 +123,7 @@ spec1 = do
       let h = aHash "a message"
       acceptArgs (argv ["--mailbox", b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
       acceptArgs (argv ["--repo", b58 k, "--message", show (pretty h)])
-        `shouldBe` Just (AcceptArgs Nothing k h Nothing False False)
+        `shouldBe` Just (AcceptArgs Nothing k h Nothing False False ForReal)
       acceptArgs (argv [b58 k, b58 k, "--message", show (pretty h)]) `shouldBe` Nothing
 
     it "refuses a form with no message" $ do

@@ -113,6 +113,41 @@
 
 ## Changed
 
+  - **`hbs2-hub`: `--dry-run` on every verb that writes canon.** `inbox
+    accept`, `redact`, `pr merge`, `maintainer add|remove` and the owner verbs
+    (`close`, `reopen`, `label`, `assign`) each mint an owner-signed event from
+    arguments that are thirty-two bytes of base58, into a log that is
+    append-only: a wrong event is answered by another event and never
+    withdrawn. `--dry-run` signs nothing and writes nothing, and prints the
+    event those arguments produce and the file it would go into.
+
+    It stops at the commit and not before it, which is what makes it a
+    rehearsal rather than a restatement of the arguments: canon is read, the
+    event is minted, the bridge is asked, the write is planned, and every
+    refusal along the way is a refusal in the dry run too. Nothing downstream
+    of the commit happens either, so `inbox accept --dry-run` sends no
+    acknowledgement and leaves the letter in the mailbox.
+
+    No prompt, no `--yes`, no `--force`: a prompt in a verb that runs from a
+    git hook is a hang, and a confirmation people type through is not a check.
+
+  - **`hbs2-hub inbox reject`: `--repo` is now required.** It was optional, and
+    the one check this verb makes is against canon: rejecting says the letter
+    was not taken, so a letter canon already holds must not be rejected. With
+    the flag optional, that check ran only when the caller happened to pass a
+    flag they were told they could leave out, and `hub inbox accept` -- which
+    decides about the same letter -- has always required it. A break for
+    anybody scripting it, made before a release rather than after.
+
+  - **`hbs2-hub maintainer add|remove`: an event that would change nothing is
+    refused.** Delegating to a key that is already a maintainer, revoking one
+    that is not, and revoking the owner (whom PEP-19 rule 5 keeps in the set
+    whatever the log says) each mint a well-formed owner-signed event that the
+    fold admits, spends a seq, and leaves the maintainer set exactly as it was.
+    The verb then printed "maintainers are now:" and a list, which reads like
+    it did the thing -- while the usual way to reach one of these three states
+    is a key typed wrong. The set is in the fold the verb already read.
+
   - **`hbs2-hub`: three advisory lines moved off stdout.** `hub ban list` said
     "nobody is banned here" into the stream a script reads keys from, so a
     caller piping it into a loop got one iteration over those four words.

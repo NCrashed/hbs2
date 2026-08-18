@@ -26,6 +26,9 @@ module HBS2.Hub.CLI.Maintainer
   , maintainerListArgs
   , Maintainer(..)
   , maintainerDoc
+  , Delegating(..)
+  , Pointless(..)
+  , pointless
   , codeNotDelegated
   ) where
 
@@ -36,8 +39,9 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop,signerFor,signingPair)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo
+                           ,blessed,committing,oneStop,signerFor,signingPair
+                           ,Writing,writingOf,dryRunHelp)
+import HBS2.Hub.CLI.Argv (flagsOf,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
                          ,flagOneOf,maintainerKeyFlags)
 
 import HBS2.CLI.Prelude
@@ -45,25 +49,90 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 
+import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
-import Data.List qualified as List
 import System.Exit (die)
 
 -- | The event was not written, and canon is unchanged.
 codeNotDelegated :: Int
 codeNotDelegated = 31
 
+-- | Which of the two verbs is running.
+--
+-- A tag and not the event constructor it produces, because the check below has
+-- to ask which verb ran, and @ADelegate@ and @ARevoke@ are two of a dozen
+-- constructors of a type whose other ten have nothing to do with delegation.
+data Delegating = Delegate | Revoke
+  deriving stock (Eq,Show)
+
+-- | Why an owner-signed delegation event would change nothing.
+data Pointless =
+    AlreadyAMaintainer  -- ^ delegating to a key that is one already
+  | NotAMaintainer      -- ^ revoking a key that is not one
+  | OwnerIsAlways       -- ^ revoking the owner, whom admission keeps in the set
+  deriving stock (Eq,Show)
+
+-- | Whether this delegation or revoke would change anything.
+--
+-- ALL THREE WERE WRITTEN HAPPILY. Each of them mints a well-formed owner-signed
+-- event, so the fold admits it, canon grows, the seq is spent -- and the report
+-- then prints a maintainer set identical to the one before it. An operator who
+-- mistyped a key by one character saw "maintainers are now:" and a list without
+-- their key in it, which reads like the tool did the thing and the key was
+-- somehow already there. Canon is append-only, so the no-op cannot be taken
+-- back; it can only be followed by another event.
+--
+-- The owner is the third case and the least obvious: it is in the set by
+-- definition and by no event (see 'maintainerDoc'), because PEP-19 rule 5 reads
+-- the repository key as a maintainer whatever the log says. A revoke of it is
+-- admitted and then ignored, forever.
+--
+-- Pure and exported for the reason "HBS2.Hub.CLI.Common"'s 'signerOf' is: the
+-- call site wants a keyring and a canon, the decision is the whole of the
+-- check, and a check nothing asserts is a check somebody deletes as redundant.
+pointless :: Delegating
+          -> RepoRef        -- ^ who owns the repository
+          -> HubKey         -- ^ the key named
+          -> HashSet HubKey -- ^ who may bless canon as of now
+          -> Maybe Pointless
+pointless kind owner k maintainers = case kind of
+  Revoke   | k == owner    -> Just OwnerIsAlways
+           | not delegated -> Just NotAMaintainer
+  Delegate | delegated     -> Just AlreadyAMaintainer
+  _ -> Nothing
+  where
+    delegated = HS.member k maintainers
+
+-- | The same, in the words the operator gets.
+uselessly :: Pointless -> RepoRef -> Doc ann
+uselessly why owner = case why of
+  OwnerIsAlways ->
+    "that key owns this repository, and the owner cannot be revoked"
+      <> line <> "  admission takes the owner key as a maintainer by definition"
+      <+> "(PEP-19 rule 5),"
+      <> line <> "  so the event would be admitted and change nothing."
+  NotAMaintainer ->
+    "that key is not a maintainer of this repository, so there is nothing"
+      <+> "to revoke"
+      <> line <> "  nothing was written. `hbs2-hub maintainer list --repo"
+      <+> pretty (AsBase58 owner) <> "` says who is."
+  AlreadyAMaintainer ->
+    "that key is already a maintainer of this repository"
+      <> line <> "  nothing was written: a second delegation would be admitted"
+      <+> "and change nothing."
+
 -- | What a maintainer verb was asked to do.
 data Maintainer = Maintainer
   { mnRepo :: RepoRef
   , mnKey  :: HubKey
+  , mnDry  :: Writing
   }
   deriving stock (Eq,Show)
 
 maintainerUsage :: Doc ()
 maintainerUsage =
-  "usage: hbs2-hub maintainer add|remove --repo <key> --maintainer-key <key>"
+  "usage: hbs2-hub maintainer add|remove --repo <key> --maintainer-key <key> [--dry-run]"
     <> line <> "       hbs2-hub maintainer list --repo <key>"
 
 -- | Who may bless canon, in a fixed order.
@@ -83,8 +152,8 @@ maintainerEntries :: forall c m . ( IsContext c
                                   ) => MakeDictM c m ()
 maintainerEntries = do
 
-  writeVerb "hub:maintainer:add" "let a key bless canon events" ADelegate
-  writeVerb "hub:maintainer:remove" "stop a key blessing canon events" ARevoke
+  writeVerb "hub:maintainer:add" "let a key bless canon events" Delegate
+  writeVerb "hub:maintainer:remove" "stop a key blessing canon events" Revoke
 
   brief "list the keys that may bless this repository's canon"
     $ args [arg "string" "--repo repo-key"]
@@ -101,12 +170,13 @@ maintainerEntries = do
 
   where
 
-    writeVerb name what mk =
+    writeVerb name what kind =
       brief what
-        $ args [arg "string" "--repo repo-key", arg "string" "--maintainer-key key"]
-        $ desc ( (if "add" `List.isInfixOf` show name
-                    then "Lets a key bless canon events for this repository."
-                    else "Stops a key blessing them. Past events stay admitted.")
+        $ args [ arg "string" "--repo repo-key", arg "string" "--maintainer-key key"
+               , arg "string" "[--dry-run]" ]
+        $ desc ( (case kind of
+                    Delegate -> "Lets a key bless canon events for this repository."
+                    Revoke   -> "Stops a key blessing them. Past events stay admitted.")
                  <> line
                  <> line <> "Writes an owner-signed event onto canon."
                  <> line
@@ -124,9 +194,12 @@ maintainerEntries = do
                  <> line
                  <> line <> "Revoking does not invalidate what a key blessed before:"
                  <> line <> "admission is judged as of each event's own seq, so past"
-                 <> line <> "events stay admitted." )
+                 <> line <> "events stay admitted."
+                 <> dryRunHelp
+                 <> line <> "A repo key and a maintainer key are the same thirty-two"
+                 <> line <> "bytes of base58, which is what makes it worth running." )
         $ entry $ bindMatch name $ nil_ \case
-            (maintainerArgs -> Just mn) -> lift (write mk mn)
+            (maintainerArgs -> Just mn) -> lift (write kind mn)
             _ -> liftIO (die (show maintainerUsage))
 
     canonOf repo =
@@ -136,7 +209,7 @@ maintainerEntries = do
       -- and this verb had each written the answer themselves.
       withCanon TreatAsEmpty repo withGitCanon
 
-    write mk mn = do
+    write kind mn = do
       -- The repo key, not a key of the caller's choosing: rule 5 admits no
       -- other signer, so taking one would take a value that can only be wrong.
       creds <- signerFor (mnRepo mn)
@@ -156,12 +229,17 @@ maintainerEntries = do
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
       let ctx = TriageCtx (signingPair creds) (const True) (mnRepo mn)
-          content = mk (mnRepo mn) (mnKey mn) now
+          content = eventOf kind (mnRepo mn) (mnKey mn) now
+          eventOf = \case { Delegate -> ADelegate ; Revoke -> ARevoke }
+
+      -- WHAT THE EVENT WOULD DO, ASKED BEFORE IT IS SIGNED. See 'pointless'.
+      for_ (pointless kind (mnRepo mn) (mnKey mn) (frMaintainers fr)) $ \why ->
+        liftIO (refuse (show (uselessly why (mnRepo mn))) codeNotDelegated)
 
       acc <- blessed codeNotDelegated
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
-      commit <- committing (oneStop codeNotDelegated) parent
+      commit <- committing (oneStop codeNotDelegated) (mnDry mn) parent
                   (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
                   "hub: maintainer set" now
 
@@ -186,10 +264,11 @@ maintainerArgs :: forall c . IsContext c => [Syntax c] -> Maybe Maintainer
 maintainerArgs syn = do
   -- Through 'repoFlags' and 'maintainerKeyFlags': see 'authorKeyFlags' for why
   -- --key could not stay one name for four different kinds of key.
-  kvs  <- flagsOf (repoFlags <> maintainerKeyFlags) syn
+  kvs  <- flagsAndSwitches (repoFlags <> maintainerKeyFlags) ["--dry-run"] syn
   repo <- flagRepo asKey kvs
   k    <- flagOneOf asKey maintainerKeyFlags kvs
-  pure (Maintainer repo k)
+  dry  <- flagSwitch kvs "--dry-run"
+  pure (Maintainer repo k (writingOf dry))
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
 

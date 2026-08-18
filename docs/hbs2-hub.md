@@ -285,6 +285,24 @@ hbs2-hub redact       --repo <repo-key> --event <event-id>
 clone, readers stop showing the body. It answers a mistake or abuse, not
 a secret. A secret that reached canon has been published.
 
+Every verb on this page that writes canon takes `--dry-run`. It signs
+nothing and writes nothing: it prints the event your arguments would
+mint and the file it would go into, after running every check the real
+run makes. Worth the second command when the arguments are keys, since
+a repo key, a maintainer key, an author key and a message hash are all
+thirty-two bytes of base58, and canon is append-only.
+
+Turning a letter down is the other half of triage:
+
+```
+hbs2-hub inbox reject --repo <repo-key> --mailbox <mailbox-key> \
+                      --message <message-hash>
+```
+
+`--repo` is required, and the reason is the sentence the verb prints:
+rejecting says the letter was not taken, so it asks canon first and
+refuses when canon already holds it.
+
 ## Publishing
 
 **Nothing above pushes.** Every verb that writes canon writes a git ref
@@ -320,6 +338,12 @@ which is exactly the escalation the rule closes.
 
 Revoking does not invalidate what a key blessed before: admission is
 judged as of each event's own position in the log.
+
+Neither verb writes an event that would change nothing. Delegating to a
+key that is already a maintainer, revoking one that is not, and revoking
+the owner are all refused: each mints a well-formed event the fold
+admits, and the maintainer set afterwards is the one you started with,
+so the usual reason to run one of these is a key typed wrong.
 
 ## Keeping the noise out
 

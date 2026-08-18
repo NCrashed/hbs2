@@ -40,7 +40,8 @@ import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          ,flagOneOfMaybe,assigneeFlags)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop,signerFor,signingPair)
+                           ,blessed,committing,oneStop,signerFor,signingPair
+                           ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 
@@ -66,6 +67,7 @@ data OwnArgs = OwnArgs
     -- | Whom to assign to. Assign only.
   , owTo     :: Maybe HubKey
   , owAs     :: Maybe HubKey   -- ^ a delegate's key; defaults to the repo key
+  , owDry    :: Writing        -- ^ --dry-run
   }
   deriving stock (Eq,Show)
 
@@ -74,6 +76,7 @@ data RedactArgs = RedactArgs
   { rdRepo  :: RepoRef
   , rdEvent :: EventId
   , rdAs    :: Maybe HubKey
+  , rdDry   :: Writing
   }
   deriving stock (Eq,Show)
 
@@ -81,14 +84,14 @@ ownUsage :: Doc ()
 -- Both nouns, because both are bound: a thread is an issue or a pull request
 -- and these ops care about neither.
 ownUsage =
-  "usage: hbs2-hub issue|pr close|reopen --repo <key> --number <n> [--note <text>] [--as <key>]"
-    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --label <l>... [--as <key>]"
-    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --clear"
-    <> line <> "       hbs2-hub issue|pr assign --repo <key> --number <n> --assignee <key> | --clear"
+  "usage: hbs2-hub issue|pr close|reopen --repo <key> --number <n> [--note <text>] [--as <key>] [--dry-run]"
+    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --label <l>... [--as <key>] [--dry-run]"
+    <> line <> "       hbs2-hub issue|pr label --repo <key> --number <n> --clear [--dry-run]"
+    <> line <> "       hbs2-hub issue|pr assign --repo <key> --number <n> --assignee <key> | --clear [--dry-run]"
 
 redactUsage :: Doc ()
 redactUsage =
-  "usage: hbs2-hub redact --repo <key> --event <event-id> [--as <key>]"
+  "usage: hbs2-hub redact --repo <key> --event <event-id> [--as <key>] [--dry-run]"
 
 ownEntries :: forall c m . ( IsContext c
                            , MonadUnliftIO m
@@ -119,7 +122,8 @@ ownEntries = do
     assignVerb (verb noun "assign")
 
   brief "hide an event's content in every clone that folds this canon"
-    $ args [ arg "string" "--repo repo-key", arg "string" "--event event-id" ]
+    $ args [ arg "string" "--repo repo-key", arg "string" "--event event-id"
+           , arg "string" "[--dry-run]" ]
     $ desc ( "DISPLAY-LEVEL, and PEP-19 says so: the event stays in canon and"
              <> line <> "every clone still holds the bytes. What changes is that"
              <> line <> "readers stop showing the body. It is the answer to a"
@@ -127,7 +131,8 @@ ownEntries = do
              <> line <> "reached canon has been published."
              <> line
              <> line <> "The event-id, not a number: a redact names one event, and"
-             <> line <> "the thing worth hiding is as often a comment as an open." )
+             <> line <> "the thing worth hiding is as often a comment as an open."
+             <> dryRunHelp )
     $ entry $ bindMatch "hub:redact" $ nil_ \case
         (redactArgs -> Just rd) -> lift (redactIt rd)
         _ -> liftIO (die (show redactUsage))
@@ -141,7 +146,7 @@ ownEntries = do
       brief "set the labels of a thread that is in canon"
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
                , arg "string" "--label label | --clear"
-               , arg "string" "[--as canon-key]" ]
+               , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
         $ desc ( "Writes an owner-signed set event. The labels REPLACE what the"
                  <> line <> "thread had: PEP-19 makes an attribute last-writer-wins,"
                  <> line <> "and labels are one value, so adding to a set means naming"
@@ -154,7 +159,8 @@ ownEntries = do
                  <> line
                  <> line <> "A LABEL AN AUTHOR ASKED FOR IS NOT A LABEL. A letter's"
                  <> line <> "labels are a request (PEP-18); this is the owner applying"
-                 <> line <> "one, and it is the only thing a reader shows as a label." )
+                 <> line <> "one, and it is the only thing a reader shows as a label."
+                 <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             -- BOTH AT ONCE IS REFUSED, and it used not to be: this admitted the
             -- pair and 'labelIt' then resolved it in favour of the clear, so
@@ -172,7 +178,7 @@ ownEntries = do
       brief "say who is looking at a thread that is in canon"
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
                , arg "string" "--assignee key | --clear"
-               , arg "string" "[--as canon-key]" ]
+               , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
         $ desc ( "Writes an owner-signed set event on the assignee attribute,"
                  <> line <> "which is last-writer-wins like every other (PEP-19): one"
                  <> line <> "thread has one assignee, and assigning replaces."
@@ -186,7 +192,8 @@ ownEntries = do
                  <> line
                  <> line <> "--clear unassigns, and is spelled out for the reason it is"
                  <> line <> "on labels: a verb that unassigned because somebody forgot"
-                 <> line <> "an argument would publish that into append-only canon." )
+                 <> line <> "an argument would publish that into append-only canon."
+                 <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor assigneeFlags ["--clear"] -> Just ow)
               | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
@@ -196,7 +203,8 @@ ownEntries = do
     statusVerb name lead what mk =
       brief what
         $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-               , arg "string" "[--note text]", arg "string" "[--as canon-key]" ]
+               , arg "string" "[--note text]", arg "string" "[--as canon-key]"
+               , arg "string" "[--dry-run]" ]
         $ desc ( lead
                  <> line
                  <> line <> "Writes an owner-signed event onto canon. The status follows"
@@ -210,7 +218,8 @@ ownEntries = do
                  <> line <> "honouring a request is for."
                  <> line
                  <> line <> "--as names a delegate's key (PEP-21); it defaults to"
-                 <> line <> "the repository key." )
+                 <> line <> "the repository key."
+                 <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor ["--note"] [] -> Just ow) -> lift (statusIt mk ow)
             _ -> liftIO (die (show ownUsage))
@@ -231,7 +240,7 @@ ownEntries = do
     statusIt mk ow = do
       (parent, fr) <- canonOf (owRepo ow)
       thr <- threadOfNumber fr (owNumber ow)
-      writeOwn (owRepo ow) (owAs ow) parent fr
+      writeOwn (owRepo ow) (owAs ow) (owDry ow) parent fr
         (\now -> mk thr ow now) "hub: status"
 
     labelIt ow = do
@@ -241,7 +250,7 @@ ownEntries = do
       -- bridge refuses an unnormalized one, and two maintainers applying the
       -- same labels in a different order must produce the same event.
       let value = encodeLabels (if owClear ow then [] else owLabels ow)
-      writeOwn (owRepo ow) (owAs ow) parent fr
+      writeOwn (owRepo ow) (owAs ow) (owDry ow) parent fr
         (ASet thr attrLabels value) "hub: labels"
 
     assignIt ow = do
@@ -264,18 +273,18 @@ ownEntries = do
       -- additive; the singular name would not have.
       let value = encodeLabels
                     (maybe [] (pure . Text.pack . show . pretty . AsBase58) (owTo ow))
-      writeOwn (owRepo ow) (owAs ow) parent fr
+      writeOwn (owRepo ow) (owAs ow) (owDry ow) parent fr
         (ASet thr attrAssignees value) "hub: assignees"
 
     redactIt rd = do
       (parent, fr) <- canonOf (rdRepo rd)
-      writeOwn (rdRepo rd) (rdAs rd) parent fr
+      writeOwn (rdRepo rd) (rdAs rd) (rdDry rd) parent fr
         (ARedact (rdRepo rd) (rdEvent rd)) "hub: redact"
 
     -- The shared tail: sign, mint, plan, commit. The same order 'hub inbox
     -- accept' uses, and for the same reason -- minting writes nothing, so a
     -- refusal anywhere above the commit leaves canon untouched.
-    writeOwn repo mas parent fr mk message = do
+    writeOwn repo mas dry parent fr mk message = do
       let signer = fromMaybe repo mas
 
       creds <- signerFor signer
@@ -294,7 +303,7 @@ ownEntries = do
       acc <- blessed codeTriageRefused
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
 
-      commit <- committing (oneStop codeCanonUnwritable) parent
+      commit <- committing (oneStop codeCanonUnwritable) dry parent
                   (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr) message now
 
       liftIO $ print $ vcat
@@ -328,7 +337,8 @@ ownArgs = ownArgsFor (["--note","--label"] <> assigneeFlags) ["--clear"]
 ownArgsFor :: forall c . IsContext c
            => [String] -> [String] -> [Syntax c] -> Maybe OwnArgs
 ownArgsFor extra switches syn = do
-  kvs   <- flagsAndSwitches (repoFlags <> ["--number","--as"] <> extra) switches syn
+  kvs   <- flagsAndSwitches (repoFlags <> ["--number","--as"] <> extra)
+                            (switches <> ["--dry-run"]) syn
   repo  <- flagRepo asKey kvs
   n     <- flagOnce kvs "--number" >>= flagWord
   note  <- flagMaybe kvs "--note" (fmap Text.pack . flagText)
@@ -340,17 +350,19 @@ ownArgsFor extra switches syn = do
   -- different kinds of key elsewhere, and all four are thirty-two bytes of
   -- base58. --assignee says which of the four this is.
   to    <- flagOneOfMaybe asKey assigneeFlags kvs
-  pure (OwnArgs repo n note ls clear to as)
+  dry   <- flagSwitch kvs "--dry-run"
+  pure (OwnArgs repo n note ls clear to as (writingOf dry))
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
 
 redactArgs :: forall c . IsContext c => [Syntax c] -> Maybe RedactArgs
 redactArgs syn = do
-  kvs  <- flagsOf (repoFlags <> ["--event","--as"]) syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--event","--as"]) ["--dry-run"] syn
   repo <- flagRepo asKey kvs
   e    <- flagOnce kvs "--event" >>= asHash
   as   <- flagMaybe kvs "--as" asKey
-  pure (RedactArgs repo e as)
+  dry  <- flagSwitch kvs "--dry-run"
+  pure (RedactArgs repo e as (writingOf dry))
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }

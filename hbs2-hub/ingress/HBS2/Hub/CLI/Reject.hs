@@ -35,7 +35,7 @@ import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..))
 import HBS2.Hub.Bridge (originFits,viewOf)
 import HBS2.Hub.CLI.Common (overRpc)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,withCanon,OnMissing(..))
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -71,10 +71,16 @@ data Reject = Reject
   , rjMessage :: HashRef
     -- | The repository whose canon to check first.
     --
-    -- Optional, and the help says what skipping it costs: without a repo there
-    -- is nothing to ask whether this letter was folded, so a letter canon holds
-    -- can be rejected here, and the word will be wrong about it.
-  , rjRepo    :: Maybe RepoRef
+    -- REQUIRED, and it was optional. Without it there is nothing to ask whether
+    -- this letter was already folded, so the one check this verb makes ran only
+    -- when the caller happened to pass a flag they were told was optional -- and
+    -- rejecting says the letter was not taken, which is a false sentence about
+    -- something canon holds. `hub inbox accept` has always required it; the two
+    -- verbs decide about the same letter and had different standards for it.
+    --
+    -- Made required before a release rather than after, because afterwards it
+    -- is a break.
+  , rjRepo    :: RepoRef
   }
   deriving stock (Eq,Show)
 
@@ -91,7 +97,8 @@ rejectEntries :: forall c m . ( IsContext c
 rejectEntries = do
 
   brief "drop a letter from the ingress mailbox without folding it"
-    $ args [ arg "string" "--mailbox mailbox-key"
+    $ args [ arg "string" "--repo repo-key"
+           , arg "string" "--mailbox mailbox-key"
            , arg "string" "--message message-hash" ]
     $ desc ( "Writes a tombstone into the mailbox: the queue stops showing"
              <> line <> "the letter. It does NOT free disk. Nothing in this build"
@@ -103,11 +110,12 @@ rejectEntries = do
              <> line <> "delegate's canon key produces a delete against a mailbox"
              <> line <> "nobody has."
              <> line
-             <> line <> "--repo is optional and worth giving: with it, a letter"
-             <> line <> "already folded into canon is refused. Not because the"
-             <> line <> "tombstone would differ (accept writes the same one), but"
-             <> line <> "because rejecting says the letter was not taken, and canon"
-             <> line <> "says it was."
+             <> line <> "--repo is REQUIRED: a letter already folded into canon"
+             <> line <> "is refused here. Not because the tombstone would differ"
+             <> line <> "(accept writes the same one), but because rejecting says"
+             <> line <> "the letter was not taken, and canon says it was. It was"
+             <> line <> "optional, which made the one check this verb makes run"
+             <> line <> "only when the caller happened to pass the flag."
              <> line
              <> line <> "Rejecting is not closing. An unfolded letter has no canon"
              <> line <> "thread, so no event is written; closing a folded thread is"
@@ -126,7 +134,8 @@ rejectEntries = do
       api <- getClientAPI @MailboxAPI @UNIX
       let ig = overRpc sto api
 
-      for_ (rjRepo rj) $ \repo ->
+      do
+        let repo = rjRepo rj
         -- TreatAsEmpty, like `inbox show`: the question is whether canon already
         -- holds this letter, and no canon is no.
         withCanon TreatAsEmpty repo withGitCanon >>= \(_, fr) -> do
@@ -180,9 +189,7 @@ rejectEntries = do
               <> line <> indent 2 (vcat (fmap pretty copies))
           | not (List.null copies) ]
        <> [ "a tombstone was written; the blocks are still on disk"
-          , maybe ("canon was not consulted: no --repo was given")
-                  (const "canon does not hold this letter")
-                  (rjRepo rj)
+          , "canon does not hold this letter"
           ] )
 
 -- Every value behind a flag, and the two keys are one type again.
@@ -191,7 +198,7 @@ rejectArgs syn = do
   kvs  <- flagsOf (repoFlags <> ["--mailbox","--message"]) syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
-  repo <- flagRepoMaybe asKey kvs
+  repo <- flagRepo asKey kvs
   pure (Reject mbox h repo)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

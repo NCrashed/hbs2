@@ -79,7 +79,8 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,withCanon, OnMissing(..)
                            ,blessed, committing, WriteStop(..)
                            ,signerFor, signingPair
-                           ,mailboxHoles, holesDoc, codeMailboxIncomplete)
+                           ,mailboxHoles, holesDoc, codeMailboxIncomplete
+                           ,Writing, writingOf, dryRunHelp)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
@@ -293,12 +294,13 @@ data AcceptArgs = AcceptArgs
     -- block nobody can serve would make a mailbox permanently
     -- unacceptable-from, which is a denial anybody could arrange.
   , aaIncomplete :: Bool
+  , aaDry     :: Writing
   }
   deriving stock (Eq,Show)
 
 acceptUsage :: Doc ()
 acceptUsage =
-  "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep] [--incomplete]"
+  "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep] [--incomplete] [--dry-run]"
 
 -- | @hub inbox accept@.
 acceptEntries :: forall c m . ( IsContext c
@@ -316,7 +318,8 @@ acceptEntries = do
            , arg "string" "--message message-hash"
            , arg "string" "[--as canon-key]"
            , arg "string" "[--keep]"
-           , arg "string" "[--incomplete]" ]
+           , arg "string" "[--incomplete]"
+           , arg "string" "[--dry-run]" ]
     -- It was "Writes. Everything else in this tool reads", and that was true
     -- when accept was the only writer. Six more verbs write canon now, and a
     -- sentence a reader can check against `hub --help` is a sentence that has
@@ -362,7 +365,11 @@ acceptEntries = do
              <> line <> "This node's triage deny-list IS applied (see hub ban):"
              <> line <> "a letter whose INNER author is denied here is refused"
              <> line <> "before anything is minted. That list is local and"
-             <> line <> "unsigned; PEP-21 defers a published ban to a later hub-meta." )
+             <> line <> "unsigned; PEP-21 defers a published ban to a later hub-meta."
+             <> dryRunHelp
+             <> line <> "Nothing downstream of the commit happens either: no"
+             <> line <> "acknowledgement goes out and the letter stays in the"
+             <> line <> "mailbox." )
     $ entry $ bindMatch "hub:inbox:accept" $ nil_ \case
         (acceptArgs -> Just a) -> lift (accept a)
         _ -> liftIO (die (show acceptUsage))
@@ -575,7 +582,7 @@ acceptEntries = do
       let minted = [ (n, t) | Just n <- [acNumber acc], ThreadScope t <- [acScope acc] ]
           numbers = sortOn fst (numberIndexOf fr <> minted)
 
-      commit <- committing (WriteStop codeCanonUnplannable codeCanonUnwritable) parent
+      commit <- committing (WriteStop codeCanonUnplannable codeCanonUnwritable) (aaDry a) parent
                   (frMeta fr) [(eventPath acc, acEvent acc)] numbers (message acc) now
 
       -- AFTER the commit, because staging needs the number and the number is
@@ -750,7 +757,7 @@ acceptEntries = do
 acceptArgs :: forall c . IsContext c => [Syntax c] -> Maybe AcceptArgs
 acceptArgs syn = do
   kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"])
-                           ["--keep","--incomplete"] syn
+                           ["--keep","--incomplete","--dry-run"] syn
   -- Optional, unlike the repository: without it the manifest is read. A
   -- caller who names it is not asking to be corrected, so it wins and costs
   -- no lookup.
@@ -765,7 +772,8 @@ acceptArgs syn = do
   -- A switch, so `--keep --repo K` cannot bind the repository as its value.
   keep <- flagSwitch kvs "--keep"
   inc  <- flagSwitch kvs "--incomplete"
-  pure (AcceptArgs mbox repo h as keep inc)
+  dry  <- flagSwitch kvs "--dry-run"
+  pure (AcceptArgs mbox repo h as keep inc (writingOf dry))
   where
     -- EVERY value is behind a flag, including the message, and nothing is
     -- positional. Not a style choice: a sign key and a hash are both thirty-two

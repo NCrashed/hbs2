@@ -10,6 +10,7 @@ module HBS2.Hub.PrSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Argv (argvAtom)
+import HBS2.Hub.CLI.Common (Writing(..))
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -164,7 +165,7 @@ spec2 =
       repo <- aKey
       prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
                         , "--commit", "abc", "--into", "refs/heads/master" ])
-        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" repo)
+        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" repo ForReal)
 
     it "takes a delegate's key when one is named" $ do
       repo <- aKey ; bob <- aKey
@@ -195,14 +196,23 @@ spec2 =
       -- nobody typed in the commit message it wrote.
       with "18446744073709551617" `shouldBe` Nothing
 
-    -- `--dry-run` is not a flag this verb has, and it was dropped on the floor:
-    -- the merge was minted, signed and committed onto append-only canon by a
-    -- command whose author believed it would not be.
     it "refuses a flag it does not know instead of recording the merge" $ do
       repo <- aKey
       prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
-                        , "--commit", "abc", "--into", "master", "--dry-run" ])
+                        , "--commit", "abc", "--into", "master", "--rehearse" ])
         `shouldBe` Nothing
+
+    -- `--dry-run` used to be the case above: not a flag this verb had, and
+    -- dropped on the floor, so the merge was minted, signed and committed onto
+    -- append-only canon by a command whose author believed it would not be.
+    it "rehearses when asked to" $ do
+      repo <- aKey
+      let with extra = prMergeArgs (argv ([ "--repo", b58 repo, "--number", "7"
+                                          , "--commit", "abc", "--into", "master" ]
+                                          <> extra))
+      fmap pmDry (with []) `shouldBe` Just ForReal
+      fmap pmDry (with ["--dry-run"]) `shouldBe` Just DryRun
+      with ["--dry-run", "yes"] `shouldBe` Nothing
 
     -- About one in twenty-seven seven-character abbreviated shas is all digits.
     it "takes a commit that spells a number" $ do

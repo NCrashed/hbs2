@@ -47,12 +47,14 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe
+                         ,flagsAndSwitches,flagSwitch)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Read (oneNumbered)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
                            ,signerFor,signingPair
-                           ,blessed,committing,oneStop)
+                           ,blessed,committing,oneStop
+                           ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
@@ -201,7 +203,8 @@ prEntries = do
 
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-           , arg "string" "--commit sha", arg "string" "--into ref" ]
+           , arg "string" "--commit sha", arg "string" "--into ref"
+           , arg "string" "[--dry-run]" ]
     $ desc ( "RECORDS a merge; it does not perform one. PEP-20 leaves the"
              <> line <> "integration to whatever policy the repository uses --"
              <> line <> "merge, rebase, squash, fast-forward -- so do that with"
@@ -222,7 +225,8 @@ prEntries = do
              <> line <> "The merge event sets the status to merged by itself"
              <> line <> "(PEP-19). No second 'set' is written and none should be:"
              <> line <> "canon would claim a merged pull request was open until it"
-             <> line <> "arrived." )
+             <> line <> "arrived."
+             <> dryRunHelp )
     $ entry $ bindMatch "hub:pr:merge" $ nil_ \case
         (prMergeArgs -> Just pm) -> lift (prMerge pm)
         _ -> liftIO (die (show prMergeUsage))
@@ -343,7 +347,7 @@ prEntries = do
       acc <- blessed codeNotMerged
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
-      commit <- committing (oneStop codeNotMerged) parent
+      commit <- committing (oneStop codeNotMerged) (pmDry pm) parent
                   (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
                   ("hub: merged #" <> tshow (pmNumber pm)) now
 
@@ -675,12 +679,13 @@ data PrMerge = PrMerge
   , pmCommit :: Text        -- ^ the merge commit, in this repository
   , pmInto   :: Text        -- ^ the branch it landed on
   , pmAs     :: HubKey      -- ^ the canon key; defaults to the repo key
+  , pmDry    :: Writing
   }
   deriving stock (Eq,Show)
 
 prMergeUsage :: Doc ()
 prMergeUsage =
-  "usage: hbs2-hub pr merge --repo <key> --number <n> --commit <sha> --into <ref> [--as <key>]"
+  "usage: hbs2-hub pr merge --repo <key> --number <n> --commit <sha> --into <ref> [--as <key>] [--dry-run]"
 
 -- | Canon holds no such pull request, or the number names something else.
 codeNoSuchPr :: Int
@@ -695,7 +700,8 @@ codeNotMerged = 30
 
 prMergeArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrMerge
 prMergeArgs syn = do
-  kvs  <- flagsOf (repoFlags <> ["--number","--commit","--into","--as"]) syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--number","--commit","--into","--as"])
+                           ["--dry-run"] syn
   repo <- flagRepo asKey kvs
   -- A number, non-negative AND small enough to be the one that was typed:
   -- 'flagWord' owns both ends. `--number 18446744073709551617` used to wrap to
@@ -704,7 +710,8 @@ prMergeArgs syn = do
   sha  <- flagOnce kvs "--commit" >>= asText
   into <- flagOnce kvs "--into"   >>= asText
   as   <- flagMaybe kvs "--as" asKey
-  pure (PrMerge repo n sha into (fromMaybe repo as))
+  dry  <- flagSwitch kvs "--dry-run"
+  pure (PrMerge repo n sha into (fromMaybe repo as) (writingOf dry))
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     -- Through 'flagText': an abbreviated sha can be all digits, and one in

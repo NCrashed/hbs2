@@ -9,6 +9,7 @@ module HBS2.Hub.OwnSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.CLI.Own
 import HBS2.Hub.CLI.Argv (argvAtom)
+import HBS2.Hub.CLI.Common (Writing(..))
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -37,7 +38,7 @@ spec = do
 
     it "reads a complete call, in any order" $ do
       repo <- aKey
-      let want = Just (OwnArgs repo 7 (Just "done") [] False Nothing Nothing)
+      let want = Just (OwnArgs repo 7 (Just "done") [] False Nothing Nothing ForReal)
       ownArgs (argv ["--repo", b58 repo, "--number", "7", "--note", "done"])
         `shouldBe` want
       ownArgs (argv ["--note", "done", "--number", "7", "--repo", b58 repo])
@@ -82,9 +83,22 @@ spec = do
 
     it "refuses a flag it does not know instead of dropping it" $ do
       repo <- aKey
-      ownArgs (argv ["--repo", b58 repo, "--number", "1", "--dry-run"])
+      ownArgs (argv ["--repo", b58 repo, "--number", "1", "--rehearse"])
         `shouldBe` Nothing
       ownArgs (argv ["--repo", b58 repo, "--number", "1", "--nete", "x"])
+        `shouldBe` Nothing
+
+    -- It is a flag this verb HAS now, and this used to be the case above: it
+    -- was dropped on the floor, so an owner-signed event went into append-only
+    -- canon from a command whose author believed it would not.
+    it "rehearses when asked to" $ do
+      repo <- aKey
+      fmap owDry (ownArgs (argv ["--repo", b58 repo, "--number", "1"]))
+        `shouldBe` Just ForReal
+      fmap owDry (ownArgs (argv ["--repo", b58 repo, "--number", "1", "--dry-run"]))
+        `shouldBe` Just DryRun
+      -- A switch, so it cannot swallow the word after it.
+      ownArgs (argv ["--repo", b58 repo, "--number", "1", "--dry-run", "yes"])
         `shouldBe` Nothing
 
     it "refuses a flag standing where a value belongs" $ do
@@ -130,7 +144,7 @@ spec = do
       repo <- aKey
       let e = HashRef (hashObject (LBS.pack "an event"))
       redactArgs (argv ["--repo", b58 repo, "--event", show (pretty e)])
-        `shouldBe` Just (RedactArgs repo e Nothing)
+        `shouldBe` Just (RedactArgs repo e Nothing ForReal)
 
     it "refuses a call with no event, and one whose event is not a hash" $ do
       repo <- aKey

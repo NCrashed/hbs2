@@ -30,6 +30,10 @@ module HBS2.Hub.CLI.Common
   , withCanonState
   , blessed
   , WriteStop(..)
+  , Writing(..)
+  , writingOf
+  , dryRunHelp
+  , rehearsalDoc
   , oneStop
   , committing
   ) where
@@ -40,7 +44,7 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.Repo.Manifest (ManifestGone(..),codeNoManifest)
 import HBS2.Hub.Repo
 import HBS2.Hub.Fold (FoldResult,foldEvents)
-import HBS2.Hub.Types (RepoRef,Event,ThreadId)
+import HBS2.Hub.Types (RepoRef,Event,ThreadId,eventId)
 import HBS2.Hub.CLI.Verify (refusalDoc,codeOf)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Bridge (TriageError)
@@ -62,6 +66,7 @@ import Control.Monad.Except (runExceptT)
 
 import Crypto.Saltine.Class qualified as Saltine
 
+import Data.ByteString.Char8 qualified as BS8
 import Data.Coerce (coerce)
 import Data.List qualified as List
 import HBS2.Base58 (AsBase58(..))
@@ -332,6 +337,41 @@ data WriteStop =
   , wsUnwritable  :: Int  -- ^ git would not write the commit
   }
 
+-- | Whether a canon write actually writes.
+--
+-- WHAT --dry-run IS FOR HERE, and it is not the usual caution about a risky
+-- command. Canon is append-only: a wrong event cannot be taken back, only
+-- answered by another event, and every verb below mints one from an owner or
+-- maintainer signature over arguments that are thirty-two bytes of base58 each.
+-- The rehearsal is how somebody sees which thread they are about to close, or
+-- which key they are about to delegate, before the signature exists.
+--
+-- Named rather than 'Bool', because the argument next to it is also a flag and
+-- @committing stop True parent@ would compile whichever way round they went.
+data Writing = ForReal | DryRun
+  deriving stock (Eq,Show)
+
+-- | What @--dry-run@ means, for the help of every verb that takes it.
+--
+-- ONE WORDING IN ONE PLACE. The switch does the same thing in each of them
+-- (see 'Writing'), and seven help texts written one at a time would be seven
+-- wordings that drift, of which some would end up describing a rehearsal that
+-- skips a check it does not skip.
+dryRunHelp :: Doc ann
+dryRunHelp =
+  line
+    <> line <> "--dry-run signs nothing and writes nothing. It prints the event"
+    <> line <> "these arguments would mint and the file it would go into, after"
+    <> line <> "running every check the real thing runs. Canon is append-only:"
+    <> line <> "a wrong event is answered by another event, never withdrawn."
+
+-- | A parsed @--dry-run@ as the thing it means.
+--
+-- One line, in one place, because every writing verb parses the same switch and
+-- @if dry then ForReal else DryRun@ is a mistake that reads correctly.
+writingOf :: Bool -> Writing
+writingOf dry = if dry then DryRun else ForReal
+
 -- | One code for every way of stopping.
 --
 -- Not a shortcut: @hub pr merge@ and the maintainer verbs each say in their own
@@ -340,6 +380,32 @@ data WriteStop =
 -- spelled once instead of being lost in a pair of identical arguments.
 oneStop :: Int -> WriteStop
 oneStop c = WriteStop c c
+
+-- | What a rehearsal says.
+--
+-- THE EVENT AND THE FILES, which is the half the operator could not work out
+-- from their own command line: the event id is a hash over what was minted, and
+-- the path carries the seq canon gave it. A report that read back the arguments
+-- would tell them what they typed.
+--
+-- Pure and separate for the reason 'signerOf' is: the branch it belongs to sits
+-- directly above a git write in the ambient repository, so a test that called
+-- 'committing' would be one broken branch away from committing into whatever
+-- clone the suite is standing in.
+rehearsalDoc :: Maybe Text            -- ^ the parent it would commit onto
+             -> [(FilePath, Event)]   -- ^ what it would mint
+             -> Text                  -- ^ the commit message
+             -> CanonCommit           -- ^ and the whole tree that would be written
+             -> [Doc ann]
+rehearsalDoc parent files message plan =
+  [ "dry run: nothing was written, and canon is as it was" ]
+    <> [ maybe "this would be the first commit on refs/hbs2/meta"
+               (("onto" <+>) . pretty) parent ]
+    <> [ "would mint" <+> pretty (eventId e) <+> "at" <+> pretty p
+       | (p, e) <- files ]
+    <> [ "would write" <+> pretty (length (cwFiles plan)) <+> "file(s):" ]
+    <> [ "  " <> pretty (BS8.unpack p) | (p, _) <- cwFiles plan ]
+    <> [ "message" <+> pretty message ]
 
 -- | Plan a canon write and commit it: the tail of every verb that writes.
 --
@@ -351,6 +417,7 @@ oneStop c = WriteStop c c
 -- reason for it to write it out at all.
 committing :: MonadUnliftIO m
            => WriteStop
+           -> Writing               -- ^ or a rehearsal of it
            -> Maybe Text            -- ^ the parent, and what the ref must still hold
            -> Maybe Word32          -- ^ the version the tree already declared
            -> [(FilePath, Event)]
@@ -358,11 +425,34 @@ committing :: MonadUnliftIO m
            -> Text                  -- ^ the commit message
            -> Word64                -- ^ now, in milliseconds
            -> m Text                -- ^ the commit written
-committing WriteStop{..} parent declared files numbers message now = do
+committing WriteStop{..} writing parent declared files numbers message now = do
   plan <- either (\e -> liftIO (refuse (show (pretty e)) wsUnplannable)) pure
             -- Fresh events, so no file has a version to preserve: they are
             -- being written under this build's rules and say so.
             (planCanon declared (const Nothing) files numbers)
+
+  -- HERE, WHICH IS AS LATE AS A REHEARSAL CAN STOP AND STILL BE ONE.
+  --
+  -- Everything above this has already happened: the caller has read canon,
+  -- decided, signed, and the event is planned into files. None of it wrote --
+  -- the commit below is the only step that publishes -- so the rehearsal has
+  -- run every check the real thing runs, including the ones that refuse, and
+  -- the operator sees the event id their arguments produced rather than a
+  -- restatement of the arguments.
+  --
+  -- Exits rather than returning, because a verb's remaining work is downstream
+  -- of the commit: `hub inbox accept` acks the letter and drops it, `hub pr
+  -- merge` has a branch to move. Returning a commit that does not exist would
+  -- make every caller decide again what a dry run means, and one of them would
+  -- decide wrong.
+  case writing of
+    ForReal -> pure ()
+    DryRun  -> liftIO do
+      mapM_ print (rehearsalDoc parent files message plan)
+      when (cwIndexOmitted plan > 0) $
+        saying ( "note:" <+> pretty (cwIndexOmitted plan)
+                   <+> "number(s) would not fit index/number.sexp" <> line )
+      exitWith ExitSuccess
 
   commit <- withGitSink (\sk -> skCommit sk (CanonWrite parent (cwFiles plan) message now))
               >>= either (\e -> liftIO (refuse (show (pretty e)) wsUnwritable)) pure

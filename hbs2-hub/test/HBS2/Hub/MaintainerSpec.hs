@@ -10,11 +10,13 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.CLI.Maintainer
 import HBS2.Hub.CLI.Argv (argvAtom)
+import HBS2.Hub.CLI.Common (Writing(..))
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 
 import Data.Config.Suckless
+import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
 import Data.Word (Word64)
 import Prettyprinter (Doc,pretty)
@@ -105,9 +107,9 @@ spec = do
       repo <- fst <$> kp
       k    <- fst <$> kp
       maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k])
-        `shouldBe` Just (Maintainer repo k)
+        `shouldBe` Just (Maintainer repo k ForReal)
       maintainerArgs (argv ["--key", b58 k, "--repo", b58 repo])
-        `shouldBe` Just (Maintainer repo k)
+        `shouldBe` Just (Maintainer repo k ForReal)
 
     -- Both are keys of one type, so the swap is well typed: it would delegate
     -- the repository to itself and name a maintainer nobody has a repo for.
@@ -124,3 +126,49 @@ spec = do
       other <- fst <$> kp
       maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k, "--key", b58 other])
         `shouldBe` Nothing
+
+    it "rehearses when asked to" $ do
+      repo <- fst <$> kp
+      k    <- fst <$> kp
+      fmap mnDry (maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k]))
+        `shouldBe` Just ForReal
+      fmap mnDry (maintainerArgs (argv [ "--repo", b58 repo, "--key", b58 k
+                                       , "--dry-run" ]))
+        `shouldBe` Just DryRun
+      -- A switch, so it cannot swallow the key after it.
+      maintainerArgs (argv ["--repo", b58 repo, "--dry-run", "--key", b58 k])
+        `shouldBe` Just (Maintainer repo k DryRun)
+      maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k, "--dry-run", "x"])
+        `shouldBe` Nothing
+
+  -- WHAT THE EVENT WOULD DO, ASKED BEFORE IT IS SIGNED. Each of these mints a
+  -- well-formed owner-signed event that the fold admits and that then changes
+  -- nothing: canon grows, the seq is spent, and the report prints the same
+  -- maintainer set it would have printed anyway.
+  describe "PEP-21 maintainers: an event that would change nothing" $ do
+
+    it "refuses to delegate to a key that is already a maintainer" $ do
+      owner <- fst <$> kp
+      bob   <- fst <$> kp
+      let set = HS.fromList [owner, bob]
+      pointless Delegate owner bob set `shouldBe` Just AlreadyAMaintainer
+      -- Including the owner, who is in the set with no event behind it.
+      pointless Delegate owner owner set `shouldBe` Just AlreadyAMaintainer
+
+    it "refuses to revoke a key that is not one" $ do
+      owner  <- fst <$> kp
+      stranger <- fst <$> kp
+      pointless Revoke owner stranger (HS.fromList [owner])
+        `shouldBe` Just NotAMaintainer
+
+    -- Admission reads the repository key as a maintainer whatever the log says
+    -- (PEP-19 rule 5), so the event is admitted and then ignored, forever.
+    it "refuses to revoke the owner, whom nothing can revoke" $ do
+      owner <- fst <$> kp
+      pointless Revoke owner owner (HS.fromList [owner]) `shouldBe` Just OwnerIsAlways
+
+    it "lets the two that do something through" $ do
+      owner <- fst <$> kp
+      bob   <- fst <$> kp
+      pointless Delegate owner bob (HS.fromList [owner]) `shouldBe` Nothing
+      pointless Revoke owner bob (HS.fromList [owner, bob]) `shouldBe` Nothing
