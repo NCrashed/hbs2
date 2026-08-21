@@ -510,6 +510,28 @@
 
 ## Security
 
+  - **`hbs2-hub`: `FETCH_HEAD` is no longer used as a private channel.** It is a
+    file in the real git directory that every fetch in the repository rewrites,
+    and nothing in this package takes a lock -- so between writing it and
+    reading it sat a concurrent `hub inbox accept`, a second `hub sync`, or the
+    operator's own `git fetch` in another terminal. `acceptBundle` compared
+    somebody else's ref against the letter's signed tip; `hub sync` was sharper
+    still, since on a clone with no canon yet it did an unconditional
+    `update-ref refs/hbs2/meta` on whatever the file held.
+
+    Neither needed a lock, because each had a better source already in hand.
+    `acceptBundle` reads the tip out of the bundle header, which is a file in a
+    temporary directory of that call's own -- and reads it before the fetch, so
+    a bundle whose tip is not the signed one is refused before a single object
+    is written. `hub sync` takes the tip from the `ls-remote` probe it already
+    ran and was discarding after a test for emptiness.
+
+    That gave the delta path one new rule: a bundle records exactly one ref.
+    PEP-20's delta is `base..source-ref` and git records the one ref that names;
+    picking among several by matching the letter's short name against git's
+    fully-qualified one would be this build guessing at git's refspec rules on a
+    value a stranger chose.
+
   - **`hbs2-hub inbox accept`: a refused pull request no longer leaves its pack
     behind.** The bundle is fetched into a quarantine so that a proposal the
     maintainer turns down writes nothing into their object store -- unreachable

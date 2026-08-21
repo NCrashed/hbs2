@@ -482,8 +482,8 @@ spec2b =
 
 spec2a :: Spec
 spec2a =
-  describe "PEP-20 delta path: the signed claim" $
-    it "refuses a bundle that fetches something other than the signed tip" $
+  describe "PEP-20 delta path: the signed claim" $ do
+    it "refuses a bundle that records something other than the signed tip" $
       withSystemTempDirectory "hub-pair" $ \root -> do
         let ours = root <> "/contributor"
             theirs = root <> "/maintainer"
@@ -504,6 +504,48 @@ spec2a =
         -- signed one tip and shipped the objects for another.
         r <- acceptBundle (Just theirs) (bnBytes b) "feature" base base
         r `shouldBe` Left (BundleTipMismatch base tip)
+
+        -- AND NOTHING OF IT IS IN THE MAINTAINER'S STORE. This is about the
+        -- quarantine and NOT about where the tip is read from: under the old
+        -- placement the fetch went into the quarantine too, so this assertion
+        -- held then as well. What pins the read is the two-ref test below,
+        -- which no FETCH_HEAD can answer.
+        (code, _, _) <- readProcess . setStdin closed
+          =<< pure (setWorkingDir theirs
+                      (proc "git" ["cat-file", "-e", Text.unpack tip]))
+        code `shouldSatisfy` (/= ExitSuccess)
+
+    -- A BUNDLE IS ONE PROPOSAL. `bundleRange` builds base..source-ref and git
+    -- records the one ref that names; several is not that shape, and choosing
+    -- among them by matching the letter's short name against git's
+    -- fully-qualified one would be this build guessing at git's refspec rules
+    -- on a value a stranger chose.
+    it "refuses a bundle that records more than one ref" $
+      withSystemTempDirectory "hub-pair" $ \root -> do
+        let ours = root <> "/contributor"
+            theirs = root <> "/maintainer"
+        void $ git root ["init", "-q", ours]
+        writeFile (ours <> "/a.txt") "one\n"
+        void $ git ours ["add", "a.txt"]
+        void $ git ours ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        void $ git root ["clone", "-q", ours, theirs]
+
+        void $ git ours ["checkout", "-q", "-b", "feature"]
+        writeFile (ours <> "/b.txt") "two\n"
+        void $ git ours ["add", "b.txt"]
+        void $ git ours ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        void $ git ours ["branch", "second"]
+
+        -- Two refs at the same tip, which git records as two lines.
+        void $ git ours [ "bundle", "create", "-q", root <> "/two.bundle"
+                        , Text.unpack base <> "..feature"
+                        , Text.unpack base <> "..second" ]
+        bytes <- BS.readFile (root <> "/two.bundle")
+
+        r <- acceptBundle (Just theirs) bytes "feature" tip base
+        r `shouldBe` Left (BundleNotOneRef 2)
 
 -- The fork point, which is what a contributor's bundle is a range from. It is
 -- computed rather than asked for: too old and the bundle is the whole history,

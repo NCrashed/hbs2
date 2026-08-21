@@ -99,7 +99,12 @@ data BundleError =
     -- | A name or a sha that this will not hand to git. Carries what was
     -- offered, escaped by the printer.
   | BundleBadName Text Text
-    -- | The bundle fetched, and its tip is not the one the letter signed.
+    -- | The bundle records a tip that is not the one the letter signed.
+    --
+    -- Read from the bundle HEADER, before anything is fetched, so a mismatched
+    -- bundle writes nothing at all -- not even into the quarantine.
+    --
+    -- Carries the signed tip and then the recorded one.
   | BundleTipMismatch Text Text
     -- | The bundle records the signed tip and carries none of its objects.
     --
@@ -135,6 +140,14 @@ data BundleError =
     --
     -- Carries both, because the pair is the claim.
   | BundleNotAncestor Text Text
+    -- | The bundle records something other than one ref.
+    --
+    -- PEP-20's delta path is a bundle of @base..source-ref@, and git records
+    -- the one ref that names. Its own case because the alternative -- matching
+    -- the letter's short name against git's fully-qualified one to pick among
+    -- several -- is this build guessing at git's refspec rules, on a value a
+    -- stranger chose.
+  | BundleNotOneRef Int
   deriving stock (Eq,Show)
 
 instance Pretty BundleError where
@@ -153,8 +166,8 @@ instance Pretty BundleError where
                         <+> "and git reads a leading dash as an option" ]
     BundleTipMismatch want got ->
       nest 2 $ vsep [ "the bundle does not carry what the letter signed for"
-                    , "signed" <+> pretty want
-                    , "fetched" <+> pretty got
+                    , "signed  " <+> pretty want
+                    , "recorded" <+> pretty got
                     , "the objects are not the ones the contributor put their"
                         <+> "name to; do not stage them" ]
     BundleCanonClobbered was now ->
@@ -176,6 +189,12 @@ instance Pretty BundleError where
                         <+> "bundle brought nothing:"
                     , "the proposal is somebody else's work, or your own"
                         <+> "unpublished commits. Do not stage it." ]
+    BundleNotOneRef n ->
+      nest 2 $ vsep [ "the bundle records" <+> pretty n <+> "refs, and a"
+                        <+> "proposal is one"
+                    , "a delta is a bundle of base..source-ref, which records"
+                        <+> "exactly one; this is not that shape and nothing"
+                    , "was taken into this repository." ]
     BundleNotAncestor base tip ->
       nest 2 $ vsep [ "the signed base is not an ancestor of the signed tip"
                     , "base" <+> pretty (safeText base)
@@ -343,25 +362,42 @@ acceptBundle cwd bytes ref signedTip base = runExceptT do
 
     _ <- ExceptT (fetch walled)
 
-    -- FETCH_HEAD, which is what the fetch above just wrote, and not the ref
-    -- name: fetching a bundle does not create a local branch, and resolving
-    -- the name would find whatever this repository happens to have under it.
-    -- That is the whole difference between checking what arrived and checking
-    -- what was already here.
+    -- WHAT THE BUNDLE RECORDS, read out of the file itself.
     --
-    -- Resolved INSIDE the quarantine, because that is where the objects it
-    -- names are; outside it the commit does not exist yet.
-    got <- ExceptT $ callWith walled cwd smallSeconds "rev-parse"
-                       ["rev-parse", "FETCH_HEAD^{commit}"]
-             <&> fmap (Text.strip . Text.decodeUtf8Lenient)
+    -- This was @rev-parse FETCH_HEAD@ after the fetch, and FETCH_HEAD is the
+    -- problem: the quarantine covers OBJECTS, and FETCH_HEAD is a file in the
+    -- real git dir that every fetch in this repository rewrites. Between the
+    -- fetch and the read sat a second process -- a concurrent `hub inbox
+    -- accept`, a `hub sync`, or the operator's own @git fetch@ in another
+    -- terminal -- and nothing in this package takes a lock. What the read
+    -- returned was then somebody else's ref, compared against this letter's
+    -- signed tip.
+    --
+    -- The bundle file is in a temporary directory of this call's own, so
+    -- reading the claim from THERE is not shared with anything. It is also
+    -- earlier: a bundle whose tip is not the signed one is now refused before
+    -- a single object is written, quarantine or not.
+    --
+    -- EXACTLY ONE RECORDED REF, which is the shape PEP-20's delta path
+    -- produces: 'bundleRange' builds @base..source-ref@ and git records the
+    -- one ref that names. A bundle recording several is not that shape, and
+    -- picking one of them by matching the letter's short name against git's
+    -- fully-qualified one would be this build guessing at git's own refspec
+    -- rules.
+    heads <- ExceptT $ call cwd smallSeconds "bundle list-heads"
+                         ["bundle", "list-heads", path]
+
+    got <- case recordedTips heads of
+             [t] -> pure t
+             ts  -> throwError (BundleNotOneRef (length ts))
 
     when (got /= signedTip) $ throwError (BundleTipMismatch signedTip got)
 
     -- AND THAT THE OBJECTS ARRIVED, which the check above does not establish
-    -- and the module header used to claim it did. The quarantine has the
-    -- repository's own store as an ALTERNATE, so @FETCH_HEAD^{commit}@ resolves
-    -- through it: a bundle with an empty pack, whose only content is a v2
-    -- header naming a commit this repository already holds, passes
+    -- and the module header used to claim it did. Reading the tip out of the
+    -- bundle header says what the bundle CLAIMS, and a claim costs nothing to
+    -- make: a bundle with an empty pack, whose only content is a v2 header
+    -- naming a commit this repository already holds, passes
     -- @bundle verify@, fetches with exit 0, and produces exactly the signed tip
     -- having transferred nothing. What it proposes is then whatever the
     -- attacker named -- another contributor's accepted tip, or a merge commit
@@ -537,8 +573,9 @@ data SyncedCanon =
 -- CANON IS NOT FORCED, which is where this stops being a wrapper. PEP-22 writes
 -- the refspec with a plus, and a plus here replaces the canon of whoever runs
 -- it: a maintainer who has just accepted a letter holds a commit the remote has
--- not seen. So the remote's tip is fetched into FETCH_HEAD, compared, and the
--- ref is moved only when the move is a fast-forward. A divergence is reported
+-- not seen. So the remote's tip is fetched by a source-only refspec, compared
+-- against what the remote advertised, and the ref is moved only when the move is
+-- a fast-forward. A divergence is reported
 -- and left alone.
 --
 -- THE PULL REFS ARE forced, and the asymmetry is the point: they are a staging
@@ -603,16 +640,35 @@ syncFrom cwd remote = runExceptT do
   here <- ExceptT (refTip cwd "refs/hbs2/meta")
 
   canon <- if BS.null (BS.filter (not . isSpace8) probe) then pure CanonNone else do
-    -- Canon, into FETCH_HEAD only: a source-only refspec updates no local ref,
-    -- which is what makes the comparison below possible at all.
+    -- Canon, by a source-only refspec: it updates no local ref, which is what
+    -- makes the comparison below possible at all.
     _ <- ExceptT $ fetch [Text.unpack remote, "refs/hbs2/meta"]
 
-    there <- ExceptT (refTip cwd "FETCH_HEAD")
+    -- WHAT THE REMOTE ADVERTISED, and not what FETCH_HEAD says.
+    --
+    -- FETCH_HEAD is a file in the real git dir that every fetch in this
+    -- repository rewrites, and nothing in this package takes a lock -- so a
+    -- concurrent `hub inbox accept`, a second `hub sync`, or the operator's own
+    -- @git fetch@ in another terminal lands between the fetch above and the
+    -- read. Here that was the sharpest of the three: on a clone with no canon
+    -- yet, the branch below does an unconditional @update-ref refs\/hbs2\/meta@
+    -- on whatever the file happened to hold.
+    --
+    -- The probe is already in hand and was being thrown away after a test for
+    -- emptiness. It is the same question asked of the same remote, one call
+    -- earlier.
+    --
+    -- If the remote MOVED between the two calls, this names a commit the fetch
+    -- may not have brought, and @update-ref@ then refuses an object that is not
+    -- there -- loudly, with nothing written. A run behind is the worst honest
+    -- answer here, and the next sync closes it.
+    let there = firstField probe
 
     case (here, there) of
-      -- ls-remote said it was there and FETCH_HEAD says it is not, which is a
-      -- ref that vanished between two calls. Reported as absent because that
-      -- is what this clone can see; the next run will say the same or move on.
+      -- The probe was not empty and holds no object name, which is a line git
+      -- printed in a shape this does not read. Reported as absent because that
+      -- is what this clone can establish; the next run will say the same or
+      -- move on.
       (_, Nothing) -> pure CanonNone
       (Nothing, Just t) -> do
         _ <- ExceptT $ call cwd smallSeconds "update-ref"
@@ -925,3 +981,18 @@ firstField bs = case BS.split 0x09 (BS.takeWhile (/= 0x0a) bs) of
   (sha : _) | not (BS.null (BS.filter (not . isSpace8) sha)) ->
     Just (Text.strip (Text.decodeUtf8Lenient sha))
   _ -> Nothing
+
+-- | The object names @git bundle list-heads@ printed, one per recorded ref.
+--
+-- Its own function, and total, because what it parses is the answer this whole
+-- path rests on: git prints @<sha> <refname>@ per line, and a line that is not
+-- that shape must not silently become a tip. A line with no sha is dropped
+-- rather than guessed at; what the caller does with a count that is not one is
+-- the caller's rule, not this one's.
+recordedTips :: ByteString -> [Text]
+recordedTips out =
+  [ sha
+  | l <- BS.split 0x0a out
+  , sha : _ <- [Text.words (Text.decodeUtf8Lenient l)]
+  , validSha sha
+  ]
