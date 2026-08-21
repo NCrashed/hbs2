@@ -39,6 +39,7 @@ module HBS2.Hub.Ingress
   , awaitMailbox
   , maxFetchRounds
   , maxInboxLetters
+  , maxMailboxBlocks
   , fetchRound
   , rpcTimeout
   , bounded
@@ -283,6 +284,15 @@ data InboxRead = InboxRead
     -- on (@hbs2-peer download@ takes one), and the first version of this threw
     -- them at stderr, the second threw them away to gain a counter. Both.
   , irMissing :: [HashRef]
+    -- | Whether the walk gave up at 'maxMailboxBlocks' before reaching the end
+    -- of the tree. 'False' for every ordinary read.
+    --
+    -- NOT 'irOmitted', and the difference is what a caller does next. Omitted
+    -- letters are behind the page: they exist, this reader knows their hashes,
+    -- and @--after@ walks to them. This says the walk itself stopped, so the
+    -- live set is a prefix of the mailbox and no cursor reaches past it -- every
+    -- page of a truncated read is a page of the same partial set.
+  , irTruncated :: Bool
     -- | Whether the peer's copy of the mailbox had stopped changing by the time
     -- it was read. 'False' means the letters below are a snapshot of something
     -- still arriving: not an error, and not something to keep quiet about
@@ -344,6 +354,11 @@ data InboxRead = InboxRead
     -- It costs nothing to carry: the walk materializes this set to compute the
     -- prefix in the first place, so what was bounded was never the set, only
     -- the bodies opened out of it.
+    --
+    -- Bounded by the WALK, which is a different bound and a weaker promise:
+    -- 'maxMailboxBlocks' caps what the tree costs to read, so "every live
+    -- message" means every one the walk reached. 'irTruncated' says when that
+    -- is not all of them.
   , irLive :: HashSet HashRef
   }
   deriving stock (Eq,Show)
@@ -580,6 +595,7 @@ readInboxFrom ig mbox after limit = do
   pure InboxRead
     { irLetters = lvs
     , irMissing = mlMissing ml
+    , irTruncated = mlTruncated ml
     , irSettled = mlSettled ml
     , irOmitted = length left
     , irDenied  = length [ () | lv <- opened, denied lv ]
@@ -600,25 +616,77 @@ readInboxFrom ig mbox after limit = do
 -- stranger's; what is skipped is the keyman lookup, the secretbox open and the
 -- parse, per letter, per accept.
 data MailboxLive = MailboxLive
-  { mlLive    :: HashSet HashRef  -- ^ every live message, unbounded
-  , mlMissing :: [HashRef]        -- ^ tree blocks the walk could not read
-  , mlSettled :: Bool             -- ^ whether the peer's copy had stopped changing
+  { mlLive      :: HashSet HashRef  -- ^ every live message the walk reached
+  , mlMissing   :: [HashRef]        -- ^ tree blocks the walk could not read
+  , mlSettled   :: Bool             -- ^ whether the peer's copy had stopped changing
+    -- | Whether the walk ran out of 'maxMailboxBlocks' before it finished.
+    --
+    -- What it means for the two fields above: 'mlLive' is then a SUBSET of the
+    -- mailbox and not the mailbox, so a membership answer over it is wrong in
+    -- both directions, exactly as a hole is -- an unread chunk of @Exists@
+    -- entries hides letters, an unread chunk of @Deleted@ entries brings
+    -- settled ones back. 'mlMissing' is partial for the same reason, which is
+    -- why 'mailboxDoubt' reports this one FIRST.
+  , mlTruncated :: Bool
   }
   deriving stock (Eq,Show)
+
+-- | The most blocks one mailbox walk will read from the peer.
+--
+-- 'walkMerkleUnique' fixed the SHAPE attack -- a node naming its one child twice
+-- costs 2^depth for depth+1 blocks -- and nothing fixed the SIZE. A mailbox is
+-- public by design: how many entries its tree holds is a number chosen by
+-- whoever writes to it, and this walk runs in full on @hub inbox@, on @hub
+-- inbox show@ and on @hub inbox accept@, every time. Bounding the letters
+-- OPENED ('maxInboxLetters') bounded the keyman lookups and the secretbox
+-- opens; it left one RPC per tree node and one per entry, at the tree's count.
+--
+-- ONE budget over blocks, because a block read is the unit a stranger makes
+-- this pay and both halves of the walk spend it: charging entries alone would
+-- leave a tree of a million empty leaves free, and charging nodes alone would
+-- leave a leaf naming a million entries free. Charged when a leaf is entered
+-- rather than as its entries are read, so a node listing more than the budget
+-- has left is stopped before its entries are fetched.
+--
+-- Running out is not an error and not silence: the walk keeps what it read,
+-- says so through 'mlTruncated', and the verbs that ask a membership question
+-- refuse on it. There is nothing else honest available -- the answer really is
+-- partial, and the only thing that makes it whole again is a smaller mailbox.
+--
+-- 200 times 'maxInboxLetters', which is the line between a triage queue and a
+-- flood rather than where this reader gets tired: a walk of that many blocks is
+-- already minutes of sequential round trips, so a mailbox past it had stopped
+-- being readable as a queue before the bound was reached. What actually keeps a
+-- mailbox under it is retention, which PEP-21 defers: nothing here prunes one,
+-- and triage GROWS it, since rejecting a letter writes a @Deleted@ entry beside
+-- the @Exists@ entry it settles.
+maxMailboxBlocks :: Int
+maxMailboxBlocks = 200000
 
 mailboxLive :: MonadUnliftIO m => Ingress m -> HubKey -> m MailboxLive
 mailboxLive ig mbox = do
   (root, settled) <- awaitMailbox ig mbox
   case root of
-    Nothing   -> pure (MailboxLive mempty [] settled)
+    Nothing   -> pure (MailboxLive mempty [] settled False)
     Just tree -> do
-      (entries, misses) <- readEntries tree
-      pure (MailboxLive (liveMessages entries) misses settled)
+      (entries, misses, cut) <- readEntries tree
+      pure (MailboxLive (liveMessages entries) misses settled cut)
 
   where
     readEntries tree = do
-      acc <- newTVarIO []
-      bad <- newTVarIO []
+      acc  <- newTVarIO []
+      bad  <- newTVarIO []
+      -- One budget for the whole walk, spent by the node reads inside it and by
+      -- the entry reads below, and 'runExceptT' rather than a flag the loop
+      -- checks: 'walkMerkleUnique' has no early exit, so the only way to stop
+      -- it is to leave. What is accumulated so far is kept -- the TVars are
+      -- outside -- and the caller is told the answer is a prefix.
+      left <- newTVarIO maxMailboxBlocks
+      let spend n = atomically do
+            k <- readTVar left
+            if k < n then pure False else True <$ writeTVar left (k - n)
+          charge n = lift (spend n) >>= \ok -> unless ok (throwError ())
+          look h = charge 1 >> lift (igBlock ig (HashRef h))
       -- walkMerkleUnique, because this tree is a stranger's: the mailbox is
       -- public by design and its root is whatever the peer merged. A plain walk
       -- follows every edge, so a chain of nodes each naming its one child twice
@@ -627,17 +695,21 @@ mailboxLive ig mbox = do
       -- this reader wants is the set of entries the tree holds -- the result goes
       -- straight into liveMessages, which is a set difference -- so entering a
       -- node once is the answer to the question being asked.
-      walkMerkleUnique @[HashRef] (coerce tree) (igBlock ig . HashRef) $ \case
-        Left miss -> atomically $ modifyTVar bad (HashRef miss :)
-        Right hs -> do
-          es <- forM hs $ \h -> (h,) <$> readEntry h
-          -- A block that is here but does not decode as an entry counts as a
-          -- miss too: the effect on the answer is the same as not having it, and
-          -- the hash is equally the only thing to act on.
-          atomically do
-            modifyTVar acc ([ e | (_, Just e) <- es ] <>)
-            modifyTVar bad ([ h | (h, Nothing) <- es ] <>)
-      (,) <$> readTVarIO acc <*> (sort <$> readTVarIO bad)
+      cut <- runExceptT $
+        walkMerkleUnique @[HashRef] (coerce tree) look $ \case
+          Left miss -> atomically $ modifyTVar bad (HashRef miss :)
+          Right hs -> do
+            charge (length hs)
+            es <- lift $ forM hs $ \h -> (h,) <$> readEntry h
+            -- A block that is here but does not decode as an entry counts as a
+            -- miss too: the effect on the answer is the same as not having it,
+            -- and the hash is equally the only thing to act on.
+            atomically do
+              modifyTVar acc ([ e | (_, Just e) <- es ] <>)
+              modifyTVar bad ([ h | (h, Nothing) <- es ] <>)
+      (,,) <$> readTVarIO acc
+           <*> (sort <$> readTVarIO bad)
+           <*> pure (either (const True) (const False) cut)
 
     readEntry h = igBlock ig h
                     <&> (>>= either (const Nothing) Just

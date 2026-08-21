@@ -80,7 +80,7 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,withCanon, OnMissing(..)
                            ,blessed, committing, WriteStop(..)
                            ,signerFor, signingPair
-                           ,mailboxHoles, holesDoc, codeMailboxIncomplete
+                           ,mailboxDoubt, doubtDoc, notInMailboxDoc, codeMailboxIncomplete
                            ,Writing, writingOf, dryRunHelp)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
@@ -517,28 +517,18 @@ acceptEntries = do
       -- serve would otherwise make a mailbox permanently unacceptable-from,
       -- which is a denial anybody could arrange.
       unless (aaIncomplete a) $
-        for_ (mailboxHoles inbox) $ \hs ->
-          liftIO $ refuse (show ( holesDoc mbox msg hs <> line
+        for_ (mailboxDoubt inbox) $ \d ->
+          liftIO $ refuse (show ( doubtDoc mbox msg d <> line
                                     <> "  --incomplete accepts anyway, if you know"
                                     <+> "this letter is not settled." ))
                           codeMailboxIncomplete
 
+      -- Said with the caveat, because with --incomplete this refusal is the one
+      -- that may be a lie: the entry naming this message can be in the part of
+      -- the tree that did not read. Shared with `hub inbox show`, which prints
+      -- the same words over the same walk.
       unless (HS.member msg (mlLive inbox)) $
-        liftIO $ refuse (show ( pretty msg <+> "is not in mailbox"
-                                  <+> pretty (AsBase58 mbox)
-                                  <> (if mlSettled inbox
-                                        then mempty
-                                        else ", which had not settled when it was read")
-                                  -- Said HERE too, because with --incomplete
-                                  -- this refusal is the one that may be a lie:
-                                  -- the entry naming this message can be in a
-                                  -- chunk that did not read.
-                                  <> (case mlMissing inbox of
-                                        [] -> mempty
-                                        hs -> ", and" <+> pretty (length hs)
-                                                <+> "block(s) of it could not be read,"
-                                                <+> "so this answer is not reliable") ))
-                        codeLetterUnreadable
+        liftIO $ refuse (show (notInMailboxDoc mbox msg inbox)) codeLetterUnreadable
 
       raw <- rawMessage ig msg
                `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))

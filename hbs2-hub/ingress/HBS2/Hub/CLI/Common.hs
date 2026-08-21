@@ -17,8 +17,10 @@ module HBS2.Hub.CLI.Common
   , utcOf
   , overRpc
   , manifestCode
-  , mailboxHoles
-  , holesDoc
+  , MailboxDoubt(..)
+  , mailboxDoubt
+  , doubtDoc
+  , notInMailboxDoc
   , codeMailboxIncomplete
   , codeMailboxUnknown
   , codePeerSilent
@@ -289,7 +291,7 @@ manifestCode = \case
   ManifestPeerSilent -> codePeerSilent
   _                  -> codeNoManifest
 
--- | The holes in a mailbox tree, when a membership answer over it has any.
+-- | Why a membership answer over a mailbox cannot be believed, when it cannot.
 --
 -- 'hub inbox' has said for a long time that a hole makes its list wrong in BOTH
 -- directions -- a missing chunk of @Exists@ entries makes letters vanish, one of
@@ -298,36 +300,92 @@ manifestCode = \case
 -- and 'mlSettled', so the reasoning stopped at the verb that only lists and did
 -- not reach the one that publishes to every clone forever.
 --
--- One function because the two verbs must not answer this differently, and
--- 'Maybe' rather than a Bool so the caller has the hashes to print: a hash is
--- the one thing anybody can act on.
-mailboxHoles :: MailboxLive -> Maybe [HashRef]
-mailboxHoles ml
-  | List.null (mlMissing ml) = Nothing
-  | otherwise                = Just (mlMissing ml)
+-- One function because the two verbs must not answer this differently, and a
+-- value rather than a Bool so the caller has something to print: for a hole
+-- that is the hashes, which are the one thing anybody can act on.
+data MailboxDoubt
+    -- | The walk gave up at this many blocks. See 'maxMailboxBlocks'.
+  = MailboxTruncated Int
+    -- | These blocks of the tree could not be read.
+  | MailboxHoles [HashRef]
+  deriving stock (Eq,Show)
 
--- | And what to say about them.
+-- | TRUNCATION FIRST, and not because it is worse. The two are the same defect
+-- from the reader's side -- an unread part of the tree -- but a truncated walk
+-- stopped looking, so its list of holes is a count of what it happened to reach
+-- before it gave up. Reporting "3 blocks could not be read" out of a walk that
+-- read a fifth of the tree names a number and hides the reason it is small.
+mailboxDoubt :: MailboxLive -> Maybe MailboxDoubt
+mailboxDoubt ml
+  | mlTruncated ml                 = Just (MailboxTruncated maxMailboxBlocks)
+  | not (List.null (mlMissing ml)) = Just (MailboxHoles (mlMissing ml))
+  | otherwise                      = Nothing
+
+-- | And what to say about it.
 --
 -- Bounded, on the rule every report over a stranger's bytes here follows: the
--- tree is a stranger's and so is the length of this list.
-holesDoc :: HubKey -> HashRef -> [HashRef] -> Doc AnsiStyle
-holesDoc mbox msg hs =
-  pretty (length hs) <+> "block(s) of mailbox" <+> pretty (AsBase58 mbox)
-    <+> "could not be read," <> line
-    <> "  so whether" <+> pretty msg <+> "is in it cannot be answered either way:"
-    <> line
-    <> "  a missing chunk of Exists entries hides letters, one of Deleted"
-      <+> "entries" <> line
-    <> "  brings back letters that were settled." <> line
-    <> indent 2 (vsep (fmap pretty (take 10 hs))) <> line
-    <> "  `hbs2-peer download <hash>` asks for one. Nothing was written."
+-- tree is a stranger's and so is the length of that list.
+doubtDoc :: HubKey -> HashRef -> MailboxDoubt -> Doc AnsiStyle
+doubtDoc mbox msg = \case
+  MailboxHoles hs ->
+    pretty (length hs) <+> "block(s) of mailbox" <+> pretty (AsBase58 mbox)
+      <+> "could not be read," <> line
+      <> "  so whether" <+> pretty msg <+> "is in it cannot be answered either way:"
+      <> line
+      <> "  a missing chunk of Exists entries hides letters, one of Deleted"
+        <+> "entries" <> line
+      <> "  brings back letters that were settled." <> line
+      <> indent 2 (vsep (fmap pretty (take 10 hs))) <> line
+      <> "  `hbs2-peer download <hash>` asks for one. Nothing was written."
+  -- The same two directions, because it is the same defect: part of the tree
+  -- was not read. What differs is the remedy, and there is no fetch that fixes
+  -- this one -- the mailbox is bigger than the walk, and it stays bigger on
+  -- every run until it holds less.
+  MailboxTruncated n ->
+    "mailbox" <+> pretty (AsBase58 mbox) <+> "is larger than" <+> pretty n
+      <+> "blocks," <> line
+      <> "  so the walk stopped before the end of it and whether" <+> pretty msg
+      <> line
+      <> "  is in it cannot be answered either way: the part not read may hold"
+      <> line
+      <> "  Exists entries, which hides letters, or Deleted entries, which"
+        <+> "brings" <> line
+      <> "  back letters that were settled." <> line
+      <> "  No fetch fixes this: every run stops at the same place."
+        <+> "Nothing was written."
 
--- | A membership answer that cannot be believed, over a tree with holes in it.
+-- | And the other direction: the message is not in the live set.
+--
+-- ONE function for the same reason 'mailboxDoubt' is one. Both verbs printed
+-- this refusal, word for word, with the caveat clause spelled out twice; the
+-- caveat is the part that matters, because with @--incomplete@ (or with a doubt
+-- that only warns) this is the answer that may be a lie -- the entry naming
+-- this message can be in the part of the tree that was not read.
+notInMailboxDoc :: HubKey -> HashRef -> MailboxLive -> Doc AnsiStyle
+notInMailboxDoc mbox msg ml =
+  pretty msg <+> "is not in mailbox" <+> pretty (AsBase58 mbox)
+    <> (if mlSettled ml then mempty
+          else ", which had not settled when it was read")
+    <> (case mailboxDoubt ml of
+          Nothing -> mempty
+          Just (MailboxHoles hs) ->
+            ", and" <+> pretty (length hs) <+> "block(s) of it could not be"
+              <+> "read, so this answer is not reliable"
+          Just (MailboxTruncated n) ->
+            ", and it holds more than" <+> pretty n <+> "blocks, so only part"
+              <+> "of it was read and this answer is not reliable")
+
+-- | A membership answer that cannot be believed, over a tree read in part.
 --
 -- Its own code, and NOT 'codeLetterUnreadable': nothing is wrong with the
 -- letter, nothing is wrong with this node, and the remedy is neither retyping
--- the command nor giving up -- it is fetching some blocks. A script sweeping a
--- queue wants to come back to this one rather than treat it as decided.
+-- the command nor giving up -- it is fetching some blocks, or, for the
+-- truncated half, a mailbox that holds less. A script sweeping a queue wants to
+-- come back to this one rather than treat it as decided.
+--
+-- ONE code for both, because the caller's move is the same: this letter was not
+-- decided and the sweep should not record it as decided. The words on stderr
+-- say which of the two it was.
 codeMailboxIncomplete :: Int
 codeMailboxIncomplete = 50
 

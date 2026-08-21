@@ -4,7 +4,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Ingress
 import HBS2.Hub.Bridge (PartEvidence(..))
 import HBS2.Hub.CLI.Accept (partEvidence)
-import HBS2.Hub.CLI.Common (mailboxHoles,holesDoc)
+import HBS2.Hub.CLI.Common (MailboxDoubt(..),mailboxDoubt,doubtDoc,notInMailboxDoc)
 import HBS2.Hub.Letter (maxPartBytes)
 import HBS2.Hub.Letter (LetterError(..),makeLetter,letterPayload,noReplyChannel
                        ,Envelope(..),hubMsgWrite)
@@ -745,30 +745,43 @@ servingAll msgs gks = stub
     treeH   = HashRef (hashObject treeB)
     store   = (treeH, treeB) : entries <> blobs
 
--- | WHAT A MEMBERSHIP ANSWER IS WORTH OVER A TREE WITH HOLES IN IT.
+-- | WHAT A MEMBERSHIP ANSWER IS WORTH OVER A TREE THAT DID NOT READ WHOLE.
 --
 -- `hub inbox` has said for a long time that a hole makes its list wrong in BOTH
 -- directions and exits 2 for it. The two verbs that ask a MEMBERSHIP question
 -- over the same walk read only the live set, so the reasoning stopped at the
 -- verb that lists and did not reach the one that publishes to every clone
 -- forever.
+--
+-- A walk that ran out of its budget is the same defect from the same cause --
+-- part of the tree was not read -- so it goes through the same gate.
 holes :: Spec
 holes =
   describe "PEP-22 a mailbox tree that did not read whole" $ do
 
     it "answers with the holes when there are any, and nothing when there are none" $ do
-      mailboxHoles (MailboxLive mempty [] True) `shouldBe` Nothing
-      mailboxHoles (MailboxLive mempty [mh "a", mh "b"] True)
-        `shouldBe` Just [mh "a", mh "b"]
+      mailboxDoubt (MailboxLive mempty [] True False) `shouldBe` Nothing
+      mailboxDoubt (MailboxLive mempty [mh "a", mh "b"] True False)
+        `shouldBe` Just (MailboxHoles [mh "a", mh "b"])
       -- Settling is a different question and must not answer this one: an
       -- unsettled read is a SHORTER answer, a holed one is a WRONG answer.
-      mailboxHoles (MailboxLive mempty [] False) `shouldBe` Nothing
+      mailboxDoubt (MailboxLive mempty [] False False) `shouldBe` Nothing
+
+    -- A truncated walk stopped looking, so the holes it found are the holes in
+    -- the part it reached. Reporting those as THE holes names a number and
+    -- hides the reason it is small.
+    it "reports a walk that stopped before it reports the holes it did find" $ do
+      mailboxDoubt (MailboxLive mempty [] True True)
+        `shouldBe` Just (MailboxTruncated maxMailboxBlocks)
+      mailboxDoubt (MailboxLive mempty [mh "a"] True True)
+        `shouldBe` Just (MailboxTruncated maxMailboxBlocks)
 
     -- A hash is the one thing anybody can act on, and the tree is a stranger's,
     -- so the list it comes from is a length a stranger chose.
     it "names the blocks and what to run, and does not print all of them" $ do
       k <- aKey
-      let said = show (holesDoc k (mh "m") [ mh (B8.pack (show i)) | i <- [1 .. 50 :: Int] ])
+      let said = show (doubtDoc k (mh "m")
+                        (MailboxHoles [ mh (B8.pack (show i)) | i <- [1 .. 50 :: Int] ]))
       said `shouldSatisfy` isInfixOf "hbs2-peer download"
       said `shouldSatisfy` isInfixOf "Nothing was written"
       said `shouldSatisfy` isInfixOf "50 block(s)"
@@ -777,6 +790,72 @@ holes =
       said `shouldSatisfy` isInfixOf "Exists"
       said `shouldSatisfy` isInfixOf "Deleted"
       length (lines said) `shouldSatisfy` (< 20)
+
+    -- The same two directions, and NOT the same remedy: there is no block to
+    -- fetch. Saying "could not be read" here would send an operator looking for
+    -- a peer that is still downloading, which is the opposite of what happened.
+    it "says a truncated walk is not a fetch away from being complete" $ do
+      k <- aKey
+      let said = show (doubtDoc k (mh "m") (MailboxTruncated 1234))
+      said `shouldSatisfy` isInfixOf "1234"
+      said `shouldSatisfy` isInfixOf "Exists"
+      said `shouldSatisfy` isInfixOf "Deleted"
+      said `shouldSatisfy` isInfixOf "No fetch fixes this"
+      said `shouldSatisfy` isInfixOf "Nothing was written"
+      said `shouldSatisfy` (not . isInfixOf "hbs2-peer download")
+
+    -- The other direction of the same answer, shared by both verbs because both
+    -- printed it word for word. With --incomplete this is the refusal that may
+    -- be a lie, and the caveat is the part that says so.
+    it "carries the caveat into the refusal, in whichever way the read was partial" $ do
+      k <- aKey
+      let plain = show (notInMailboxDoc k (mh "m") (MailboxLive mempty [] True False))
+          holed = show (notInMailboxDoc k (mh "m") (MailboxLive mempty [mh "a"] True False))
+          cut   = show (notInMailboxDoc k (mh "m") (MailboxLive mempty [] True True))
+      plain `shouldSatisfy` isInfixOf "is not in mailbox"
+      plain `shouldSatisfy` (not . isInfixOf "not reliable")
+      holed `shouldSatisfy` isInfixOf "1 block(s) of it could not be read"
+      holed `shouldSatisfy` isInfixOf "not reliable"
+      cut   `shouldSatisfy` isInfixOf (show maxMailboxBlocks)
+      cut   `shouldSatisfy` isInfixOf "not reliable"
+
+    -- THE WALK ITSELF, which is where the cost is. 'walkMerkleUnique' bounded
+    -- the SHAPE -- a node naming its one child twice -- and nothing bounded the
+    -- SIZE: a mailbox is public, how many entries its tree lists is a stranger's
+    -- choice, and this walk runs in full on every inbox, show and accept.
+    it "stops the walk at maxMailboxBlocks and keeps what it read" $ do
+      k <- aKey
+      reads' <- newIORef (0 :: Int)
+      let entryB = serialise (Exists mempty (mh "m1"))
+          entryH = hashObject entryB
+          leafA  = serialise (MLeaf [HashRef entryH] :: MTree [HashRef])
+          leafAH = hashObject leafA
+          -- A leaf naming more entries than the budget has left. They resolve
+          -- to nothing and never need to: the charge is taken when the leaf is
+          -- entered, so the list is refused before its entries are fetched --
+          -- which is the difference between a bound and a bill.
+          leafB  = serialise (MLeaf (replicate (maxMailboxBlocks + 1) (mh "junk"))
+                                :: MTree [HashRef])
+          leafBH = hashObject leafB
+          rootB  = serialise (newMNode 1 [leafAH, leafBH] :: MTree [HashRef])
+          rootH  = HashRef (hashObject rootB)
+          store  = [ (rootH, rootB), (HashRef leafAH, leafA)
+                   , (HashRef leafBH, leafB), (HashRef entryH, entryB) ]
+          ig = stub { igRoot  = const (pure (Just rootH))
+                    , igBlock = \h -> modifyIORef' reads' succ >> pure (lookup h store)
+                    }
+      r <- timeout (60 * 1000000) (mailboxLive ig k)
+      case r of
+        Nothing -> expectationFailure "the mailbox walk did not finish"
+        Just live -> do
+          mlTruncated live `shouldBe` True
+          -- WHAT IT READ IS KEPT. A partial answer said out loud is worth more
+          -- than an empty one, and the verbs that publish refuse on the flag.
+          mlLive live `shouldBe` HS.fromList [mh "m1"]
+      -- The pin that does not depend on the flag: four blocks, not two hundred
+      -- thousand. A store this small answers even the unbounded walk quickly,
+      -- so a test that only watched the clock would pass without the bound.
+      readIORef reads' >>= (`shouldSatisfy` (< 100))
 
 -- | Paging over a queue whose first page a stranger chose.
 readingOn :: Spec

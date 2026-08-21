@@ -215,6 +215,11 @@ statusEntries = do
         Just k -> do
           sto <- getStorage
           api <- getClientAPI @MailboxAPI @UNIX
+          -- A FLOOR and not a count, whenever the read was incomplete: a hole
+          -- in the tree or a walk that ran out of 'maxMailboxBlocks' hides
+          -- letters as well as resurrecting settled ones. This verb prints one
+          -- number per line by design; `hub inbox` is where a read that cannot
+          -- be believed says so, with the hashes and a non-zero exit.
           tryAny (readInbox (overRpc sto api) k) <&> \case
             Left e  -> Left (Text.pack (show e))
             Right r -> Right (length (irLetters r) + irOmitted r + irDenied r)

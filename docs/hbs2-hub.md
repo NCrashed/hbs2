@@ -572,6 +572,11 @@ Worth knowing before you commit to this.
   that is all. There is no query language and no cache; every read folds
   canon in memory.
 
-- **A rejected letter still takes disk.** `hbs2-hub inbox reject` writes
-  a tombstone so the queue stops showing it. Reclaiming the space is not
-  implemented.
+- **A rejected letter still takes disk, and a mailbox has a ceiling.**
+  `hbs2-hub inbox reject` writes a tombstone so the queue stops showing
+  it: triage makes a mailbox bigger, not smaller, and nothing prunes one.
+  Reclaiming the space is not implemented. The reader stops walking at
+  200000 blocks and says so, rather than paying whatever a stranger's
+  tree costs: `hbs2-hub inbox` exits 2 and `hbs2-hub inbox accept`
+  refuses until `--incomplete`. No fetch changes that, and until a purge
+  exists nothing lowers a mailbox back under the line.

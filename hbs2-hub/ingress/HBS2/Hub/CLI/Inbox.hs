@@ -257,8 +257,23 @@ data Width = Short | Long
 -- without capturing a handle.
 inboxNotes :: Bool -> InboxRead -> [Doc ann]
 inboxNotes listed r =
-  settledNote <> missingNote <> omittedNote <> deniedNote <> keymanNote <> policyNote
+  settledNote <> missingNote <> partialNote <> omittedNote <> deniedNote
+    <> keymanNote <> policyNote
   where
+    -- BEFORE the omitted one, because it changes what that one means. "N more
+    -- letters were not opened, here is the cursor" invites a caller to page to
+    -- the end; when the walk stopped early there is no end to page to, and the
+    -- pages are pages of a prefix of the mailbox.
+    partialNote
+      | not (irTruncated r) = []
+      | otherwise =
+          [ "hbs2-hub: this mailbox holds more than" <+> pretty maxMailboxBlocks
+              <+> "blocks, so the walk stopped before the end of it and the"
+              <+> "letters above are part of the mailbox and not the mailbox."
+              <+> "--after pages within what was read and does not reach past"
+              <+> "it, and no fetch changes that: every run stops at the same"
+              <+> "place. `hub inbox accept` refuses on this until --incomplete." ]
+
     -- WHAT THE DENY-LIST TOOK OUT, counted. 'igAllowed' has always said the
     -- queue applies it "because triage is a queue a human reads and a banned
     -- author's letter should not be in it", and until now such a letter was in
@@ -391,16 +406,18 @@ maxMissingLines = 100
 
 -- | 0, or what the caller has to act on.
 --
--- Missing blocks and a truncated read, and deliberately not an unsettled one: an
--- unsettled read is a SHORTER answer, and both of these are WRONG ones. A hole
--- in the tree loses letters and resurrects folded ones; a read that stopped at
--- 'maxInboxLetters' simply does not contain letters that are in the mailbox.
--- Both are 2, because the remedy is the same -- do not treat this list as the
--- mailbox -- and the numbers are a contract that may be added to, not
--- reassigned.
+-- Three ways this list is not the mailbox, and deliberately not a fourth: an
+-- unsettled read is a SHORTER answer and these are WRONG ones. A hole in the
+-- tree loses letters and resurrects folded ones; a walk that ran out of
+-- 'maxMailboxBlocks' does both over a larger piece of the tree, and no fetch
+-- fixes that one; a page that stopped at 'maxInboxLetters' simply does not
+-- contain letters that are in the mailbox. All are 2, because the remedy is the
+-- same -- do not treat this list as the mailbox -- and the numbers are a
+-- contract that may be added to, not reassigned.
 inboxCode :: InboxRead -> Int
 inboxCode r
   | not (List.null (irMissing r)) = 2
+  | irTruncated r                 = 2
   | irOmitted r > 0               = 2
   | otherwise = 0
 
@@ -567,6 +584,11 @@ queueContract r = object
   , "omitted"  .= irOmitted r
   , "cursor"   .= fmap b58 (irCursor r)
   , "missing"  .= fmap b58 (irMissing r)
+    -- Separate from @omitted@ and from @missing@ because it invalidates them
+    -- both: a consumer that pages on @cursor@ until @omitted@ is zero has
+    -- finished reading a prefix of the mailbox, and @missing@ counts only the
+    -- holes in the part that was walked.
+  , "truncated" .= irTruncated r
   , "letters"  .= fmap letter (irLetters r)
   ]
   where

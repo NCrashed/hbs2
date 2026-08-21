@@ -958,6 +958,32 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox`: the mailbox walk has a ceiling.** Entering each node
+    once bounded the SHAPE of a stranger's tree; nothing bounded its SIZE. A
+    mailbox is public, how many entries its tree lists is chosen by whoever
+    writes to it, and that walk runs in full on `inbox`, on `inbox show` and on
+    `inbox accept`, every time -- one call per node and one per entry, at the
+    tree's count. Bounding the letters OPENED bounded the keyman lookups and the
+    secretbox opens and left the walk itself.
+
+    One budget over blocks, spent by both halves, because charging entries alone
+    leaves a million empty leaves free and charging nodes alone leaves one leaf
+    naming a million entries free. It is charged when a leaf is entered, so a
+    list longer than the budget is refused before its entries are fetched.
+
+    A walk that stops is a WRONG answer and not a short one, the way a hole in
+    the tree is: the part not read may hold `Exists` entries, which hides
+    letters, or `Deleted` entries, which brings back letters that were settled.
+    So it goes through the gate holes already go through -- `hub inbox` exits 2
+    and says so, `hub inbox accept` refuses until `--incomplete` -- with its own
+    words, because no fetch fixes this one and telling somebody a block could
+    not be read sends them looking for a peer that is still downloading.
+
+    What keeps a mailbox under the line is retention, and PEP-21 defers it:
+    nothing here prunes a mailbox and triage GROWS one, since rejecting a letter
+    writes a tombstone beside the entry it settles. The bound does not fix that.
+    It makes a mailbox past the line loud instead of slow.
+
   - **`hbs2-hub --codes`: the exit codes are a table the tool prints.** PEP-22
     calls them a contract and the manual repeats it; they were defined in
     fifteen modules, four of them documented nowhere, and the next number was
