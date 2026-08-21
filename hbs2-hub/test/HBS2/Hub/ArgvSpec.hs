@@ -6,6 +6,7 @@ import Data.Config.Suckless
 
 import Prettyprinter (pretty)
 
+import Data.List (isInfixOf)
 import Data.Maybe (isJust)
 import Data.Text qualified as Text
 import Test.Hspec
@@ -173,6 +174,8 @@ spec = do
   argvFlags
   argvSwitches
   argvRepoFlag
+  argvNotes
+  argvHash
 
   describe "PEP-22 argv: which words are the verb" $ do
 
@@ -360,3 +363,81 @@ argvRepoFlag =
       readMay ["--other","x"] `shouldBe` Just Nothing
       readMay ["--repo","K"] `shouldBe` Just (Just "K")
       readMay ["--repo","K","--target","K"] `shouldBe` Nothing
+
+-- | What a refusal tells the caller about the line they typed (PEP-22).
+--
+-- Every reader here answers 'Maybe', so the failure branch of every verb had
+-- one thing to say -- the synopsis -- and said it to both of these:
+--
+-- > hbs2-hub issue list NOTAKEY   -> usage: ...  (exit 1)
+-- > hbs2-hub issue list           -> usage: ...  (exit 1)
+--
+-- Asserted on 'argNotes' rather than on 'badArgs', which ends in exitWith.
+argvNotes :: Spec
+argvNotes =
+  describe "PEP-22 usage errors: the value that was rejected is echoed" $ do
+
+    let notes = fmap show . argNotes . fmap argvAtom
+        aKey = "5KdKq9WTFR9GLuGYKAJqPXk1nGFwJMFRUvXV3E3zKAtN"
+
+    it "says which flag wanted a key, and what it got instead" $ do
+      notes ["--repo","NOTAKEY"]
+        `shouldBe` ["--repo takes thirty-two bytes of base58, and this is not: NOTAKEY"]
+
+    -- One base58 CHARACTER decodes, and a HashRef is a newtype over a
+    -- ByteString: without a width check `--mailbox x` went past saying nothing.
+    it "wants the whole width, not merely base58 characters" $ do
+      notes ["--mailbox","x"] `shouldSatisfy` any (isInfixOf "is not: x")
+
+    it "says nothing about a flag whose value IS a key" $ do
+      notes ["--repo",aKey] `shouldBe` []
+
+    -- The 11.5 case. Grouped rather than judged one by one, because some verbs
+    -- take a positional key and most take none, and this cannot tell which verb
+    -- it is in.
+    it "names the words no flag claimed, and which of them is not a key" $ do
+      notes ["NOTAKEY"]
+        `shouldBe` [ "no flag claimed: NOTAKEY"
+                   , "NOTAKEY is not thirty-two bytes of base58" ]
+
+    -- `hub issue show <key> 7` is a real form, so a note calling 7 a bad key
+    -- would be noise in front of the sentence that matters.
+    it "does not accuse a number of not being a key" $ do
+      notes [aKey,"7"] `shouldBe` ["no flag claimed: " <> aKey <> " 7"]
+
+    it "says a flag was left with nothing after it" $ do
+      notes ["--repo"] `shouldBe` ["--repo was given with nothing after it"]
+
+    it "says a flag was given twice, which is what flagOnce refuses" $ do
+      notes ["--repo",aKey,"--repo",aKey]
+        `shouldBe` ["--repo was given more than once"]
+
+    it "has nothing to add to a line that is only well-formed pairs" $ do
+      notes ["--number","7","--note","done"] `shouldBe` []
+
+    -- A stray word reaches this precisely because nothing could parse it, so it
+    -- is a stranger's bytes on their way to a terminal.
+    it "escapes what it echoes" $ do
+      notes ["\ESC[2K"] `shouldSatisfy` all (not . isInfixOf "\ESC")
+
+-- | The number a listing prints, back in (PEP-22).
+--
+-- `hub issue list` gives @#7@ and `hub issue show K #7` was a usage error, so
+-- the one thing on the line a reader was meant to reuse was the one thing
+-- nothing accepted.
+argvHash :: Spec
+argvHash =
+  describe "PEP-22 argv: the number a listing prints" $ do
+
+    it "takes the form the listing prints" $ do
+      flagWord (argvAtom "#7") `shouldBe` Just 7
+      flagWord (argvAtom "7") `shouldBe` Just 7
+
+    -- Still one number, still bounded at both ends: '#' is a spelling and not
+    -- a licence to read something else.
+    it "is still a number, and still bounded" $ do
+      flagWord (argvAtom "#") `shouldBe` Nothing
+      flagWord (argvAtom "#-1") `shouldBe` Nothing
+      flagWord (argvAtom "#x") `shouldBe` Nothing
+      flagWord (argvAtom "#18446744073709551617") `shouldBe` Nothing
+      flagWord (argvAtom "##7") `shouldBe` Nothing

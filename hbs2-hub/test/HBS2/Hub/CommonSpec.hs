@@ -22,7 +22,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),blessed,oneStop,WriteStop(..)
-                           ,signerOf,signingPair,rehearsalDoc)
+                           ,signerOf,signingPair,rehearsalDoc,saying)
 import HBS2.Hub.Bridge (TriageError(..))
 
 import HBS2.Net.Auth.Credentials
@@ -108,6 +108,17 @@ spec4 =
       -- And it says out loud that it did nothing, because exiting 0 is what a
       -- verb that DID something also does.
       said `shouldSatisfy` any (isInfixOf "nothing was written")
+
+    -- 'saying' FLUSHES STDOUT FIRST, and this is the only shape that shows it:
+    -- on a terminal both handles are line buffered and the order looks right,
+    -- so the bug lived in `hub inbox accept > log 2>&1` -- every CI log of a
+    -- canon write -- where the advice came out above the event it was about.
+    it "cannot let advice overtake the report it is about" $ do
+      said <- bothBy do
+        putStrLn "event 4f2a"
+        putStrLn "commit deadbeef"
+        saying "note: not published yet"
+      lines said `shouldBe` [ "event 4f2a", "commit deadbeef", "note: not published yet" ]
 
     it "says which commit it would be when canon has none yet" $ do
       owner <- newCredentials @'HBS2Basic
@@ -259,3 +270,33 @@ saidBy act = do
   said <- hGetContents' rh
   hClose rh
   pure (either Just (const Nothing) got, said)
+
+-- | The same, with BOTH streams caught, down one pipe, buffered as a redirect
+-- buffers them.
+--
+-- Which is the whole point: stdout block buffered and stderr unbuffered is what
+-- `hub inbox accept > log 2>&1` does, and it is the only arrangement in which
+-- the two can come out in the wrong order. A test that caught stderr alone
+-- could not see it.
+bothBy :: IO a -> IO String
+bothBy act = do
+  (r, w) <- Posix.createPipe
+  rh <- Posix.fdToHandle r
+  wh <- Posix.fdToHandle w
+  bracket ((,) <$> hDuplicate stdout <*> hDuplicate stderr)
+    (\(o, e) -> do hDuplicateTo o stdout
+                   hClose o
+                   hDuplicateTo e stderr
+                   hClose e)
+    (\_ -> do hDuplicateTo wh stdout
+              hDuplicateTo wh stderr
+              hSetBuffering stdout (BlockBuffering Nothing)
+              hSetBuffering stderr NoBuffering
+              _ <- act
+              -- Before the handle goes back to the real stdout, or what is
+              -- still in it lands there instead of in the pipe.
+              hFlush stdout)
+  hClose wh
+  said <- hGetContents' rh
+  hClose rh
+  pure said

@@ -31,11 +31,16 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
-import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..))
+import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..)
+                        ,rawMessage,LetterRaw(..),rpcTimeout)
+import HBS2.Hub.Letter (AckRecord(..),openLetterAs,EnvelopeSigner(..))
+import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
+import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.Bridge (originFits,viewOf)
-import HBS2.Hub.CLI.Common (overRpc)
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent,withCanon,OnMissing(..))
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,repoFlags,flagRepo)
+import HBS2.Hub.CLI.Common (overRpc,refuse,saying,signerFor,codePeerSilent
+                           ,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Argv (badArgs,flagOnce,flagMaybe,flagsAndSwitches,flagSwitch
+                         ,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -50,6 +55,8 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 
 
 import Data.HashSet qualified as HS
+import Data.Maybe (fromMaybe)
+import Data.Text qualified as Text
 import Data.List qualified as List
 import System.Exit (die)
 
@@ -81,12 +88,20 @@ data Reject = Reject
     -- Made required before a release rather than after, because afterwards it
     -- is a break.
   , rjRepo    :: RepoRef
+    -- | The canon key that signs the acknowledgement. Defaults to the repo key.
+  , rjAs      :: Maybe HubKey
+    -- | Do not tell the sender.
+    --
+    -- The escape for the case rejecting is most often FOR: a letter nobody
+    -- wants answered. An ack confirms the address is live and that somebody
+    -- read it, which is the one thing a flood is looking for.
+  , rjSilent  :: Bool
   }
   deriving stock (Eq,Show)
 
 rejectUsage :: Doc ()
 rejectUsage =
-  "usage: hbs2-hub inbox reject --mailbox <key> --message <hash> [--repo <key>]"
+  "usage: hbs2-hub inbox reject --repo <key> --mailbox <key> --message <hash> [--as <key>] [--silent]"
 
 rejectEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
@@ -99,7 +114,8 @@ rejectEntries = do
   brief "drop a letter from the ingress mailbox without folding it"
     $ args [ arg "string" "--repo repo-key"
            , arg "string" "--mailbox mailbox-key"
-           , arg "string" "--message message-hash" ]
+           , arg "string" "--message message-hash"
+           , arg "string" "[--as canon-key]", arg "string" "[--silent]" ]
     $ desc ( "Writes a tombstone into the mailbox: the queue stops showing"
              <> line <> "the letter. It does NOT free disk. Nothing in this build"
              <> line <> "walks a mailbox and deletes blocks, so the bytes stay"
@@ -119,10 +135,28 @@ rejectEntries = do
              <> line
              <> line <> "Rejecting is not closing. An unfolded letter has no canon"
              <> line <> "thread, so no event is written; closing a folded thread is"
-             <> line <> "a different act on a different object." )
+             <> line <> "a different act on a different object."
+             <> line
+             <> line <> "THE SENDER IS TOLD, when their letter asked for an answer"
+             <> line <> "and named a mailbox of their own. Without it a refusal"
+             <> line <> "and a letter nobody has looked at are the same silence"
+             <> line <> "on their side, forever: canon they can fetch says"
+             <> line <> "nothing about a letter that never entered it."
+             <> line
+             <> line <> "That acknowledgement cannot be checked against anything."
+             <> line <> "An accept's can: whoever gets it can fold canon and see"
+             <> line <> "the event. This one is a claim about something canon"
+             <> line <> "does not hold, so all a reader establishes is that a"
+             <> line <> "maintainer of the repository signed it."
+             <> line
+             <> line <> "--silent skips it, which is the case rejecting is most"
+             <> line <> "often for: an ack confirms the address is live and that"
+             <> line <> "somebody read it, and a flood is looking for exactly"
+             <> line <> "that. --as names the canon key that signs it (PEP-21);"
+             <> line <> "the MAILBOX key still signs the delete." )
     $ entry $ bindMatch "hub:inbox:reject" $ nil_ \case
         (rejectArgs -> Just rj) -> lift (reject rj)
-        _ -> liftIO (die (show rejectUsage))
+        other -> liftIO (badArgs rejectUsage other)
 
   where
 
@@ -182,6 +216,27 @@ rejectEntries = do
                                                 codePeerSilent)
           Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
 
+      -- AND THE CONTRIBUTOR IS TOLD, which is the half of a decision this tool
+      -- did not have. `sendAck` had one caller -- the accept -- so a letter that
+      -- was refused and a letter nobody had looked at were the same silence on
+      -- the sender's side, forever: there is no state on their machine that
+      -- changes, and canon they can fetch says nothing about a letter that
+      -- never entered it.
+      --
+      -- UNVERIFIABLE BY CONSTRUCTION, and that is worth being plain about. An
+      -- accept's ack can be checked against canon by whoever gets it; this one
+      -- is a claim about something canon does not hold, so all a reader can
+      -- establish is that a maintainer of the repository signed it. It is a
+      -- courtesy notification, like the other one, and canon remains the
+      -- authority for everything canon has.
+      --
+      -- AFTER the drop, for the reason the accept's ack is after the commit:
+      -- the work is done and a notification that does not go out costs a
+      -- notification.
+      acked <- if rjSilent rj then pure (Left AckNotAsked) else tell rj
+      liftIO $ for_ (either Just (const Nothing) acked) $ \why ->
+        saying ("the sender was not told:" <+> pretty why <> line)
+
       liftIO $ print $ vcat
         ( [ "rejected" <+> pretty (rjMessage rj) ]
        <> [ "and" <+> pretty (length copies)
@@ -190,16 +245,61 @@ rejectEntries = do
           | not (List.null copies) ]
        <> [ "a tombstone was written; the blocks are still on disk"
           , "canon does not hold this letter"
-          ] )
+          ]
+       <> [ "the sender was told:" <+> pretty h | Right h <- [acked] ] )
+
+    -- The acknowledgement itself, which needs a key of its own: the DROP above
+    -- is signed by the mailbox key, and an ack is signed by the canon key,
+    -- because what makes it checkable is that a maintainer of the repository
+    -- signed it (PEP-18). Two keys, two questions, and a node that holds the
+    -- first and not the second still rejects -- it just cannot say so.
+    tell rj = do
+      sto <- getStorage
+      api <- getClientAPI @MailboxAPI @UNIX
+      let ig = overRpc sto api
+          canonKey = fromMaybe (rjRepo rj) (rjAs rj)
+
+      creds <- signerFor canonKey
+      raw <- rawMessage ig (rjMessage rj)
+
+      case (creds, raw) of
+        (Nothing, _) -> pure (Left (AckNotSent ("no signing key here for "
+                                                  <> tshow (pretty (AsBase58 canonKey)))))
+        (_, Left e)  -> pure (Left (AckNotSent (tshow (pretty e))))
+        (Just c, Right lr) ->
+          case openLetterAs (const True) (EnvelopeSigner (lrEnvelope lr)) (lrData lr) of
+            Left e -> pure (Left (AckNotSent (tshow (pretty e))))
+            Right (box, _author, content, reply) -> do
+              -- The thread this letter is about: the one it names, or -- for an
+              -- open, which names none -- the thread it would have started.
+              -- Both are what the sender computed before sending (PEP-18), so
+              -- both are values they can correlate on.
+              let thr = fromMaybe (authorBoxId box) (authorThread content)
+                  rec' = AckRecord { akTarget = rjRepo rj
+                                   , akThread = thr
+                                     -- No number: numbers are minted by canon
+                                     -- and this letter never reached it.
+                                   , akNumber = Nothing
+                                   , akStatus = "rejected"
+                                   , akMergeCommit = Nothing
+                                   , akNote = Nothing
+                                   }
+              sendAck (Outbound sto api rpcTimeout) canonKey c reply rec'
+
+    tshow :: Show a => a -> Text
+    tshow = Text.pack . show
 
 -- Every value behind a flag, and the two keys are one type again.
 rejectArgs :: forall c . IsContext c => [Syntax c] -> Maybe Reject
 rejectArgs syn = do
-  kvs  <- flagsOf (repoFlags <> ["--mailbox","--message"]) syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"])
+                           ["--silent"] syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   h    <- flagOnce kvs "--message" >>= asHash
   repo <- flagRepo asKey kvs
-  pure (Reject mbox h repo)
+  as   <- flagMaybe kvs "--as" asKey
+  q    <- flagSwitch kvs "--silent"
+  pure (Reject mbox h repo as q)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike x -> Just x ; _ -> Nothing }

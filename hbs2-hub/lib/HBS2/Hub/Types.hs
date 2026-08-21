@@ -66,6 +66,7 @@ module HBS2.Hub.Types
   , hashRefBytes
   , hashRefWeight
   , hashDoc
+  , briefly
   , keyDoc
   , PartSecret
   , mkPartSecret
@@ -730,6 +731,22 @@ hashDoc :: HashRef -> Doc ann
 hashDoc h
   | validHashRef h = pretty h
   | otherwise = "(not a hash:" <+> pretty (hashRefWeight h) <+> "bytes)"
+
+-- | The same, elided to its first characters.
+--
+-- WHY A QUEUE SHOWS THESE AND NOT THE WHOLE THING. `hub inbox` is the screen a
+-- maintainer triages from, and a row carried four full base58 values -- around
+-- 180 characters of hash before any of the words -- so no two rows could be
+-- compared by eye and no terminal held one on a line. Eight characters is what
+-- `git log --oneline` shows for the same reason.
+--
+-- IT IS A PREFIX AND NOT AN IDENTITY: nothing in this tool accepts one, and the
+-- verbs that take a hash take all of it. `--long` prints the whole value, which
+-- is what a script pipes.
+briefly :: Int -> Doc ann -> Doc ann
+briefly n d = case show d of
+  s | length s > n -> pretty (take n s) <> ".."
+    | otherwise    -> pretty s
 
 -- | The same for a key, for the same reason.
 --

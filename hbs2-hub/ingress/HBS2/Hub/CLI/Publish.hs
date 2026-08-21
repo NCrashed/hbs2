@@ -36,7 +36,7 @@ module HBS2.Hub.CLI.Publish
 
 import HBS2.Hub.Types (safeText)
 import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..),PublishedPulls(..))
-import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,flagText)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagMaybe,flagText)
 import HBS2.Hub.CLI.Common (refuse)
 
 import HBS2.CLI.Prelude
@@ -119,7 +119,7 @@ publishEntries = do
              <> line <> "where they find that out." )
     $ entry $ bindMatch "hub:publish" $ nil_ \case
         (publishArgs -> Just pa) -> lift (publish pa)
-        _ -> liftIO (die (show publishUsage))
+        other -> liftIO (badArgs publishUsage other)
 
   where
 

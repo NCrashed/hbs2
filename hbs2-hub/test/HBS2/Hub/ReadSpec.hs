@@ -55,7 +55,7 @@ rendered :: [Doc ann] -> String
 rendered = unlines . fmap show
 
 spec :: Spec
-spec = repoFlagForms >> do
+spec = repoFlagForms >> emptyListings >> do
 
   describe "PEP-22 read: what is listed" $ do
 
@@ -534,3 +534,44 @@ b58 = show . pretty . AsBase58
 
 mh :: String -> HashRef
 mh = HashRef . hashObject . LBS.pack
+
+-- | What an empty listing says (PEP-22).
+--
+-- AN EMPTY PROJECT AND A TYPO LOOKED THE SAME, and one of them is much more
+-- likely: a filter is matched literally against attribute values, which are a
+-- stranger's bytes and extensible by design, so `--status closd` is a
+-- well-formed question with no answer -- and so is `--status Open`.
+emptyListings :: Spec
+emptyListings =
+  describe "PEP-22 read: an empty listing says which" $ do
+
+    it "says canon holds none at all, when it holds none" $ do
+      owner <- kp
+      let fr = foldOf owner []
+      show (emptyListing HubIssue noFilter fr)
+        `shouldSatisfy` isInfixOf "no issues at all"
+
+    -- Not a hard-coded vocabulary: the statuses come out of the fold, so a
+    -- repository that invents one gets it named back.
+    it "names what canon does hold, when a filter matched nothing" $ do
+      owner <- kp
+      let repo = fst owner
+          fr = foldOf owner [ (1, Just 1, anIssue repo "one") ]
+          said = show (emptyListing HubIssue (Filter (Just "closd") Nothing) fr)
+      said `shouldSatisfy` isInfixOf "closd"
+      said `shouldSatisfy` isInfixOf "open"
+      said `shouldSatisfy` isInfixOf "1 issues"
+
+    it "counts pull requests as pull requests" $ do
+      owner <- kp
+      let fr = foldOf owner []
+      show (emptyListing HubPR noFilter fr)
+        `shouldSatisfy` isInfixOf "no pull requests at all"
+
+    -- A status is an attribute value, which is to say a stranger's bytes, and
+    -- this prints them back at a terminal.
+    it "escapes the value it echoes" $ do
+      owner <- kp
+      let fr = foldOf owner []
+          said = show (emptyListing HubIssue (Filter (Just "\ESC[2K") Nothing) fr)
+      said `shouldSatisfy` (not . isInfixOf "\ESC")

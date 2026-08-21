@@ -41,7 +41,7 @@ import HBS2.Hub.Fold (FoldResult(..),frLastFolded)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagSwitch,repoFlags,flagRepo)
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,withCanonState,OnMissing(..))
 import HBS2.Hub.CLI.Accept (codeCanonUnwritable)
@@ -231,7 +231,7 @@ compactEntries = do
              <> line <> "it reports the divergence and leaves it." )
     $ entry $ bindMatch "hub:compact" $ nil_ \case
         (compactArgs -> Just ca) -> lift (compact ca)
-        _ -> liftIO (die (show compactUsage))
+        other -> liftIO (badArgs compactUsage other)
 
   where
 

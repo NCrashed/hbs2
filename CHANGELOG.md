@@ -2,6 +2,63 @@
 
 ## Added
 
+  - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
+    Every thread in canon began as a letter, so opening one meant composing a
+    Tier B letter to your own mailbox, waiting for the peer to settle it, and
+    folding it -- a mailbox, a sigil, five verbs and a round trip to write down
+    something you already know. The bridge has always minted an owner-native
+    open and stamped its number; nothing called it.
+
+    Issues only, and not for want of symmetry: a pull request is coordinates and
+    a bundle, so an owner-native `pr open` would have to build one. An owner with
+    the branch in hand has git, so what is missing there is a different verb.
+
+  - **`hbs2-hub inbox honour`: a request can be granted.** A close, reopen or
+    set from a stranger cannot become canon as theirs -- PEP-19 makes those ops
+    owner-authored -- so `inbox accept` refuses one, and refusing was the only
+    answer this tool had: a request could be turned down or ignored and never
+    granted. `honourRequest` and `honourWith` have been in the library since the
+    bridge was written, called from tests and from nothing else.
+
+    Verbatim, and only what carries no words: a closing note would become a
+    comment authored by the signer, and an attribute is the requester's choice
+    of both name and value. Those come back as `NeedsReview`, and the owner
+    writes their own.
+
+  - **`hbs2-hub sent` and `hbs2-hub status`.** The sent log has a header
+    explaining why seeing what you sent matters; its only reader was `hub
+    updates`, as a filter -- the log was kept so an acknowledgement could be
+    matched against it, and there was no way to look at the thing being matched.
+    `hub sent` prints it, and says out loud that an entry is the peer taking a
+    message, not a mailbox accepting it.
+
+    `hub status` answers six questions that were each computable and none of
+    which was askable: the repository, whether this machine can sign for it,
+    what canon here holds, whether that canon has reached the remote, which
+    mailbox the repository declares and how many letters are in it. It pushes
+    nothing -- the publication check is a read-only probe split out of `hub
+    publish` -- and every absence is a line rather than a silence, because a
+    missing mailbox line reads as "nothing waiting".
+
+  - **`hbs2-hub inbox --json`.** The fourth document under the contract counter,
+    and the first that is NOT derived from canon: a thread contract is a
+    function of the fold, so two clones produce the same bytes, while a queue is
+    one mailbox read at one moment by a node holding particular keys, filtered
+    by a deny-list that is local and unsigned. Two maintainers will not agree
+    and neither is wrong. The counts travel with it, so a consumer cannot read
+    `letters` and silently work on a prefix of a mailbox.
+
+  - **`hbs2-hub inbox reject` tells the sender.** `sendAck` had one caller, so a
+    refusal and a letter nobody had looked at were the same silence on the
+    contributor's side, forever: nothing on their machine changes, and canon
+    they can fetch says nothing about a letter that never entered it.
+
+    That acknowledgement cannot be checked against anything, and the help says
+    so: an accept's can be, by folding canon and finding the event, while this
+    one is a claim about something canon does not hold. `--silent` skips it,
+    which is the case rejecting is most often for -- an ack confirms the address
+    is live and that somebody read it.
+
   - **`hbs2-hub issue|pr show --json`: the PEP-22 render contract.** There was
     no machine-readable output at all, so a web layer had nothing to read and
     any other consumer would have had to parse the columns meant for a person.
@@ -112,6 +169,97 @@
     text is pinned from both packages.
 
 ## Changed
+
+  - **`hbs2-hub --help`: the list says what each verb is for, and `hub issue`
+    answers.** Forty-one names in one alphabetical column said which words exist
+    and not which of them a contributor wants -- `issue new` and `pr new` are
+    the whole path in, and they sat between `inbox reject` and `log` with
+    nothing to tell them apart. The list is grouped by noun and carries the same
+    one-line description `help <verb>` prints, so the two cannot disagree, and a
+    verb added to a module appears under its noun by itself.
+
+    `hbs2-hub issue` -- what somebody types before they know the second word --
+    answered "unknown verb: issue" and stopped, with the eight verbs it was
+    asking for sitting in the dictionary under exactly that prefix. It now
+    prints them. And `hbs2-hub help issue` answers in the spelling a command
+    line accepts rather than in `hub:issue:close`.
+
+  - **`hbs2-hub`: a number reads back in the form the listing prints.** `hub
+    issue list` prints `#7` and `hub issue show <key> #7` was a usage error, so
+    the one value on the row a reader was meant to reuse was the one thing
+    nothing accepted. It parses wherever a number does, and is still a number:
+    `#`, `#-1` and `#x` are still refused.
+
+  - **`hbs2-hub`: an empty listing says which kind of empty it is.** An empty
+    project and a mistyped filter printed the same nothing. `--status` and
+    `--label` are matched literally against attribute values, which are a
+    stranger's bytes and extensible by design, so there is no vocabulary to
+    check a value against -- what can be said is what canon holds, and that is
+    what an empty listing now names, on stderr, exiting 0.
+
+    In the same family: `hub log <key> <n>` on a number canon does not hold
+    exited 0 with no output, which is what a thread with no events looks like;
+    it now exits `26` like `issue show`. `maintainer list` in a clone with no
+    canon answered with the owner key and nothing else -- a true sentence about
+    an empty fold and a false one about the repository -- and now refuses like
+    every other read verb. The remedy for missing canon names `hbs2-hub sync`,
+    which fetches all three refs, before the raw refspec that fetches one.
+
+  - **`hbs2-hub`: a refusal says what it could not use.** Every argument reader
+    here answers yes-or-no, so the failure branch of every verb had one thing to
+    say -- the synopsis -- and said it to `hbs2-hub issue list NOTAKEY` and to
+    `hbs2-hub issue list` alike. Every identifier in this tool is forty-four
+    characters of base58 pasted from somewhere else, which makes "that is not a
+    key, and here it is" the highest-value sentence the tool can print.
+
+    It says only what it can know without the verb's own flag list: a key-shaped
+    flag whose value is not thirty-two bytes of base58, a flag with nothing
+    after it, a flag given twice, and the words no flag claimed. Not "unknown
+    flag", which needs the list that lives inside the reader that just failed.
+    The exit code is still 1, which is what PEP-22 gives a usage error.
+
+  - **`hbs2-hub inbox`: the queue fits on a screen and carries the subject.**
+    A row printed four full base58 values -- about a hundred and eighty
+    characters before any of the words -- and the subject was not on it at all:
+    it existed only inside `hub inbox show --message <hash>`, one letter at a
+    time, so deciding what to look at first meant opening every letter in turn.
+    Rows now show the front eight characters of each identifier and the title of
+    an open; `--long` prints the whole values, which is what a script pipes.
+
+    The title goes last, because it is the one field of unbounded width and the
+    only one a stranger writes as prose: everything a maintainer compares
+    between rows stays in the same columns whatever the title does.
+
+  - **`hbs2-hub`: Haskell stops leaking into refusals.** A letter that would not
+    open was reported by its constructor, so `NotFetched` and `NotForUs` -- two
+    states with opposite remedies -- read alike; `hub log` printed `HubIssue`,
+    epoch milliseconds, and a derived `PRCoords` record as the most important
+    line of a pull request. Each of those has a renderer written for a person,
+    and now goes through it.
+
+    Two escaped through the RTS at exit 1, the code the contract reserves for a
+    mistyped flag. A sigil this node has not fetched is a `CreateMessageError`
+    that nothing caught, on a contributor's first command; and every keyman call
+    on a machine that has never run `hbs2-keyman` threw a raw SQLite error --
+    including `hub whoami`, which is the first command in the manual, in the
+    fresh-install case it is written for. Both are caught, both say what to do,
+    and they exit `52` and `51`.
+
+  - **`hbs2-hub`: advice on stderr can no longer overtake the report on stdout.**
+    The streams are buffered differently the moment either is not a terminal, so
+    in `hub inbox accept > log 2>&1` -- every CI log of a canon write -- the note
+    about publishing came out above the event and the commit it was about. On a
+    terminal it looked right, which is why it stayed. The flush moved from
+    `refuse` into `saying`, where it covers everything written to stderr and not
+    only refusals, and the three verbs that wrote to stderr by hand go through
+    it.
+
+  - **`hbs2-hub`: the verbs that send a letter report the same way.** `issue
+    new` printed an s-expression with no trailing newline, so the shell prompt
+    landed on it, in a vocabulary nothing else in the tool used; its three
+    siblings printed lines. All four print lines now, and all four end by saying
+    what happens next: the peer has the letter, nothing is in canon until a
+    maintainer folds it, and `hub updates` is what comes back.
 
   - **`hbs2-hub`: `--dry-run` on every verb that writes canon.** `inbox
     accept`, `redact`, `pr merge`, `maintainer add|remove` and the owner verbs
@@ -361,6 +509,30 @@
     they change is that v2 edits one line.
 
 ## Security
+
+  - **`hbs2-hub`: a path git will not index can no longer become canon.** The
+    reader took any path component that was not `.` or `..`, so
+    `threads/.git/<event>`, `threads/a//b` and `repo/.GIT` folded as events.
+    git's index refuses those, and every canon write reads the parent tree into
+    an index first -- so `read-tree` fails on the whole parent, and one such
+    file anywhere in canon makes the repository unwritable by every verb at
+    once, with no verb here able to remove it. The only barrier was `fsck` on
+    the four fetches: a whole class of writes resting on one config line.
+
+    Refused by shape now, and by a denylist rather than an allowlist. The
+    obvious rule -- accept only the base58 and the digits this layout writes --
+    also refuses a multibyte component, which git indexes and which this package
+    folds on purpose; a reader stricter than git stops folding canon another
+    reader takes, which is a divergence between clones and buys nothing, since
+    the wedge is only about paths git refuses. What is refused is four shapes
+    that are each refused by git and each impossible in a name this build
+    writes: the empty component, anything beginning with a dot, a tilde, and a
+    backslash.
+
+    A tree that already holds one now says what that means -- the repository is
+    unwritable until canon is rewritten, `hub verify` names the file, and
+    `hub compact` writes a lineage without it -- rather than git's `error:
+    invalid path` under a sentence about a command nobody ran.
 
   - **`hbs2-hub`: a redaction hides what it says it hides.** The render
     contract's own header states the rule -- a redacted item carries no text,

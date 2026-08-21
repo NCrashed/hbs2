@@ -15,6 +15,9 @@ import HBS2.Prelude.Plated (Doc,fromString,pretty)
 
 import HBS2.Clock (Timeout(..),TimeoutKind(..),pause)
 
+import Data.Aeson qualified as Aeson
+import Data.HashSet qualified as HS
+import Data.ByteString.Lazy.Char8 qualified as LBS
 import Codec.Serialise (serialise)
 import Codec.Serialise qualified as CBOR
 import Control.Exception (bracket,try)
@@ -22,6 +25,7 @@ import Data.ByteString qualified as BS
 import Control.Monad (forM_)
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
+import Data.Text qualified as Text
 import GHC.IO.Handle (hDuplicate,hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.IO
@@ -60,7 +64,7 @@ view :: HashRef -> Maybe HubKey -> Either OpenError (HubKey, AuthorContent, Disp
 view m env letter = LetterView m env letter Nothing []
 
 spec :: Spec
-spec = spec1 >> spec2 >> paging
+spec = spec1 >> spec2 >> paging >> queueJson
 
 spec1 :: Spec
 spec1 = do
@@ -78,7 +82,7 @@ spec1 = do
       author <- aKey
       let thread = fatRef 40000
           ac = AComment thread Nothing (Just "hi") Nothing 5
-          line = shown (render (view (mh "m") (Just repo) (Right (author, ac, RequestOnly))))
+          line = shown (render Long (view (mh "m") (Just repo) (Right (author, ac, RequestOnly))))
       line `shouldSatisfy` isInfixOf "not a hash"
       -- and the cost was not paid and then thrown away
       length line `shouldSatisfy` (< 400)
@@ -109,7 +113,7 @@ spec1 = do
       -- 'MailboxUnknown's hand-written Show exists to avoid, and it says
       -- nothing about "not a key" on the way past.
       k <- aKey
-      let line = shown (render (view (mh "m") (Just k) (Left NotFetched)))
+      let line = shown (render Long (view (mh "m") (Just k) (Left NotFetched)))
       take 2 (words line) `shouldBe` [show (pretty (mh "m")), show (pretty (AsBase58 k))]
       line `shouldSatisfy` isInfixOf "not fetched yet"
 
@@ -117,8 +121,47 @@ spec1 = do
       -- A forged envelope has no signer to name: the signature is what would
       -- have established one. Checked BY POSITION rather than by "contains a
       -- dash", which a line about anything at all would satisfy.
-      let line = shown (render (view (mh "m") Nothing (Left BadEnvelopeSig)))
+      let line = shown (render Long (view (mh "m") Nothing (Left BadEnvelopeSig)))
       take 2 (words line) `shouldBe` [show (pretty (mh "m")), "-"]
+
+    -- THE SCREEN A MAINTAINER TRIAGES FROM. A row carried four full base58
+    -- values -- about 180 characters before any of the words -- and the subject
+    -- was not on it at all: it existed only inside `hub inbox show --message
+    -- <hash>`, one letter at a time.
+    it "shows the subject, and the front of each identifier" $ do
+      repo <- aKey
+      author <- aKey
+      let ac = AOpen repo HubIssue "the tests hang on aarch64" [] (Just "b")
+                 Nothing Nothing 5
+          row = shown (render Short (view (mh "m") (Just repo)
+                                       (Right (author, ac, FoldsToCanon))))
+      row `shouldSatisfy` isInfixOf "the tests hang on aarch64"
+      -- Eight characters and then a marker, so a prefix cannot be mistaken for
+      -- a value: nothing in this tool accepts one.
+      row `shouldSatisfy` isInfixOf (take 8 (show (pretty (mh "m"))) <> "..")
+      row `shouldSatisfy` (not . isInfixOf (show (pretty (mh "m"))))
+      length row `shouldSatisfy` (< 120)
+
+    -- What a script pipes and what a copy-paste needs.
+    it "prints whole identifiers when asked to" $ do
+      repo <- aKey
+      author <- aKey
+      let ac = AOpen repo HubIssue "a title" [] Nothing Nothing Nothing 5
+          row = shown (render Long (view (mh "m") (Just repo)
+                                      (Right (author, ac, FoldsToCanon))))
+      row `shouldSatisfy` isInfixOf (show (pretty (mh "m")))
+      row `shouldSatisfy` isInfixOf (show (pretty (AsBase58 author)))
+
+    -- A title is a stranger's prose, of a width only the fold bounds, on a row
+    -- whose other fields a maintainer compares against the row above.
+    it "keeps a long title from taking the row with it" $ do
+      repo <- aKey
+      author <- aKey
+      let ac = AOpen repo HubIssue (Text.replicate 400 "x") [] Nothing
+                 Nothing Nothing 5
+          row = shown (render Short (view (mh "m") (Just repo)
+                                       (Right (author, ac, FoldsToCanon))))
+      length row `shouldSatisfy` (< 200)
 
   describe "PEP-22 hub inbox: what it says about the list" $ do
 
@@ -320,20 +363,20 @@ spec2 =
     it "reads either flag, or both, in any order" $ do
       mbox <- aKey ; repo <- aKey
       inboxArgs (argv ["--mailbox", b58 mbox])
-        `shouldBe` Just (InboxArgs (Just mbox) Nothing Nothing Nothing)
+        `shouldBe` Just (InboxArgs (Just mbox) Nothing Nothing Nothing Short False)
       inboxArgs (argv ["--repo", b58 repo])
-        `shouldBe` Just (InboxArgs Nothing (Just repo) Nothing Nothing)
+        `shouldBe` Just (InboxArgs Nothing (Just repo) Nothing Nothing Short False)
       inboxArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo])
-        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False)
       inboxArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox])
-        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False)
 
     -- BOTH are optional to the reader and not to the verb: a repository alone
     -- resolves its mailbox from the manifest (PEP-18), and neither is a queue
     -- nobody named. The reader cannot tell those apart, so it parses and the
     -- verb refuses.
     it "parses a line naming neither, which the verb then refuses" $ do
-      inboxArgs (argv []) `shouldBe` Just (InboxArgs Nothing Nothing Nothing Nothing)
+      inboxArgs (argv []) `shouldBe` Just (InboxArgs Nothing Nothing Nothing Nothing Short False)
 
     it "refuses a positional key, an unknown flag and a repeat" $ do
       mbox <- aKey ; other <- aKey
@@ -398,3 +441,50 @@ paging =
       -- said only when there were any
       concatMap shown (inboxNotes False (InboxRead one [] True 0 0 Nothing mempty))
         `shouldSatisfy` not . isInfixOf "deny-list"
+
+-- | The queue as a document (PEP-22 "Scripting").
+--
+-- A FOURTH DOCUMENT under the contract counter the thread contract's
+-- @document@ field was added for, and the one that is NOT derived from canon:
+-- it is a mailbox read at a moment, by a node holding particular keys, filtered
+-- by a deny-list that is local and unsigned.
+queueJson :: Spec
+queueJson =
+  describe "PEP-22 hub inbox: the queue as a document" $ do
+
+    let render = LBS.unpack . Aeson.encode . queueContract
+        empty' = InboxRead [] [] True 0 0 Nothing HS.empty
+
+    it "says which document it is, and under which contract" $ do
+      let out = render empty'
+      out `shouldSatisfy` isInfixOf "\"contract\":1"
+      out `shouldSatisfy` isInfixOf "\"document\":\"queue\""
+
+    -- A consumer that read `letters` and ignored these would silently work on
+    -- a prefix of a mailbox, which is the failure inboxCode exists to make
+    -- loud on the terminal side.
+    it "carries the counts that say the list is not the mailbox" $ do
+      let out = render empty' { irOmitted = 7, irDenied = 2, irSettled = False }
+      out `shouldSatisfy` isInfixOf "\"omitted\":7"
+      out `shouldSatisfy` isInfixOf "\"denied\":2"
+      out `shouldSatisfy` isInfixOf "\"settled\":false"
+
+    it "carries a readable letter with what it asks for" $ do
+      repo <- aKey
+      author <- aKey
+      let ac = AOpen repo HubIssue "a title" [] (Just "b") Nothing Nothing 5
+          out = render empty' { irLetters =
+                  [ view (mh "m") (Just repo) (Right (author, ac, FoldsToCanon)) ] }
+      out `shouldSatisfy` isInfixOf "\"op\":\"open\""
+      out `shouldSatisfy` isInfixOf "\"disposition\":\"folds\""
+      out `shouldSatisfy` isInfixOf "\"title\":\"a title\""
+      out `shouldSatisfy` isInfixOf (show (pretty (mh "m")))
+
+    -- SAID AS A FIELD and not by leaving the others out: a consumer that has to
+    -- infer "unreadable" from an absence treats a bug in the renderer as a
+    -- readable letter.
+    it "says a letter was unreadable rather than omitting its fields" $ do
+      let out = render empty' { irLetters =
+                  [ view (mh "m") Nothing (Left NotFetched) ] }
+      out `shouldSatisfy` isInfixOf "\"unreadable\":\"not fetched yet\""
+      out `shouldSatisfy` (not . isInfixOf "\"op\"")

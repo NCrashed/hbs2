@@ -166,6 +166,10 @@ spec = do
             (show (pretty u), phrase)
               `shouldSatisfy` \_ -> phrase `Text.isInfixOf`
                                       Text.unlines (drop 1 (Text.lines (render (refusalDoc u))))
+      -- Both remedies: the verb this tool has, and the refspec for somebody who
+      -- wants to know what it does. The verb comes first because it fetches all
+      -- three refs canon needs and the refspec fetches one.
+      says (NoCanonRef "/x/.git") "hbs2-hub sync"
       says (NoCanonRef "/x/.git") "git fetch"
       says (NoRepository "x") "safe.directory"
       says (RefUnresolved (ToolSaid "x")) "unshallow"

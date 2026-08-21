@@ -27,14 +27,18 @@ module HBS2.Hub.CLI.Compose
   , PoWTooHard(..)
   , codeNoWork
   , codeWrongSigil
+  , codeUnsendable
+  , unsendable
+  , queuedNext
   ) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo)
-import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo)
+import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair
+                           ,askingKeyman)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
 
@@ -209,9 +213,14 @@ sendPayload
 sendPayload ob sender rcpts parts payload = do
   flags <- defMessageFlags
 
+  -- CAUGHT, because it used to leave through the RTS: 'CreateMessageError' is
+  -- an exception, nothing on this path handled it, and a sigil this node has
+  -- not fetched came out as a derived Show at exit 1.
   msg <- createMessageWith (services ob) flags Nothing sender (fmap Left rcpts)
            parts
            (letterPayload payload)
+           `catch` \(e :: CreateMessageError) ->
+             liftIO (refuse (show (unsendable e)) (codeFor' e))
 
   -- Stored before it is sent, and this is not belt-and-braces. The peer takes a
   -- Message by value, but everything downstream of it refers to the letter by
@@ -339,7 +348,9 @@ services :: Outbound -> CreateMessageServices HubScheme
 services ob = CreateMessageServices
   (obStorage ob)
   signerFor
-  (runKeymanClientRO . loadKeyRingEntry)
+  -- Through 'askingKeyman' like the signer above it: a machine with no key
+  -- database answers neither, and the sentence is the same one.
+  (askingKeyman . loadKeyRingEntry)
 
 -- | The peer answered and would not take the message.
 --
@@ -365,6 +376,62 @@ codeNoKey = 19
 -- | And what a peer that would not store the message exits with.
 codeNotStored :: Int
 codeNotStored = 20
+
+-- | The letter was not composed, so nothing was sent.
+--
+-- ONE CODE FOR FIVE WAYS, for the reason 'HBS2.Hub.CLI.Common.oneStop' gives:
+-- they all mean the same thing to whoever ran the verb -- no letter exists, no
+-- mailbox has anything, and the repository is untouched. The five sentences are
+-- in 'unsendable' and they do differ; the two that ARE about a missing key keep
+-- 'codeNoKey', because that one has a hook-visible remedy of its own.
+codeUnsendable :: Int
+codeUnsendable = 52
+
+-- | Which code a 'CreateMessageError' leaves with.
+codeFor' :: CreateMessageError -> Int
+codeFor' = \case
+  NoCredentialsFound{} -> codeNoKey
+  NoKeyringFound{}     -> codeNoKey
+  _                    -> codeUnsendable
+
+-- | And what it says, which was a derived 'Show' escaping through the RTS.
+--
+-- @hbs2-hub issue new@ with a sigil this node has not fetched printed
+-- @SigilNotFound 5Kd3...@ and exited 1 -- the code PEP-22 gives to a mistyped
+-- flag -- on a contributor's first command. Every one of these is a real state
+-- with a real remedy, and none of the remedies is "check your arguments".
+unsendable :: CreateMessageError -> Doc ann
+unsendable = \case
+  SigilNotFound h ->
+    "this node does not hold the sigil" <+> pretty h
+      <> line <> "  nothing was sent. A sigil is a block like any other:"
+      <+> "`hbs2-peer download" <+> pretty h <> "`"
+      <> line <> "  fetches it, and `hbs2-hub whoami --sender" <+> pretty h
+      <+> "` says what it names."
+  MalformedSigil h ->
+    "that block is here and is not a sigil" <> maybe mempty ((":" <+>) . pretty) h
+      <> line <> "  nothing was sent. A hash that names something else parses"
+      <+> "as far as this and no further."
+  SenderNoAccesToGroupKey ->
+    "the sender cannot open the group key this letter would be sealed with"
+      <> line <> "  nothing was sent, and a letter sent anyway would be one"
+      <+> "the sender could not read back."
+  NoCredentialsFound s ->
+    "no signing key here for" <+> pretty s
+      <> line <> "  nothing was sent. `hbs2-hub whoami` lists what this machine"
+      <+> "can sign as."
+  NoKeyringFound s ->
+    "no keyring here for" <+> pretty s
+      <> line <> "  nothing was sent. The key is known and the file that holds"
+      <+> "it is not where keyman says."
+  -- The two the CLI cannot produce: every verb here fills both in before it
+  -- gets this far. Said plainly rather than dressed up as a user error,
+  -- because if one is ever seen it is this tool's bug and not the caller's.
+  SenderNotSet ->
+    "no sender was set on the letter, which is this tool's bug: nothing was sent"
+  RecipientsNotSet ->
+    "no recipient was set on the letter, which is this tool's bug:"
+      <+> "nothing was sent"
 
 -- | The mailbox charges more work than this run would spend.
 --
@@ -398,8 +465,14 @@ composeEntries = do
   brief "open an issue: compose a Tier B letter and send it to a hub mailbox"
     $ args [ arg "string" "--repo repo-key"
            , arg "string" "--sender sender-sigil"
-           , arg "string" "--recipient recipient-sigil"
-           , arg "string" "--author author-key", arg "string" "--title title" ]
+           , arg "string" "--author author-key", arg "string" "--title title"
+           -- BOTH OPTIONAL, and both were absent or wrong here: --recipient is
+           -- read from the repository manifest when it is left out (the
+           -- paragraph below says so, and the docs say so), and --body was not
+           -- in the synopsis at all though it is how a body gets in.
+           , arg "string" "[--recipient recipient-sigil]"
+           , arg "string" "[--body text | -]"
+           , arg "string" "[--label label]..." ]
     $ desc ( "Every value is behind a flag, and they may be given in any"
              <> line <> "order. There is no positional form: two of the four values"
              <> line <> "are keys and two are sigils, so a swap within either pair"
@@ -504,25 +577,26 @@ composeEntries = do
           -- will call the thread, and the sender can compute it now, before any
           -- maintainer has looked (PEP-18 "the sender can compute the thread-id
           -- at send time without any handshake").
-          -- Strings, not symbols: a hash is data here, and the argv reader on the
-          -- way back in lexes a bare base58 word as a symbol only by accident of
-          -- it having no punctuation. One convention for hashes across the tool.
-          -- "queued", not "sent", and the word is the finding. The peer's send
-          -- RPC answers @()@ and its handler discards the protocol's own result,
-          -- so what a zero exit here establishes is that the peer took the
-          -- message off our hands -- not that any mailbox accepted it, and not
-          -- that it was delivered. `sent` was a claim about the network that
-          -- nothing in the round trip supports, printed to somebody who would
-          -- then stop watching for it.
-          pure $ mkForm "queued" [ mkForm "message" [mkStr (show (pretty h))]
-                                 , mkForm "thread"  [mkStr (show (pretty (authorBoxId box)))]
-                                 ]
+          --
+          -- PRINTED, and in the same three lines its three siblings print. This
+          -- was an s-expression -- @(queued (message H) (thread T))@ -- returned
+          -- to the script runtime, so it came out with no trailing newline and
+          -- the shell prompt landed on it, in a vocabulary nothing else in the
+          -- tool uses. The verb is typed by people; `hub pr new`, `hub pr
+          -- revise` and `hub comment` all print, and this is the one a
+          -- contributor reaches first.
+          liftIO $ print $ vcat
+            [ "queued" <+> hashDoc h
+            , "thread" <+> hashDoc (authorBoxId box)
+            , queuedNext
+            ]
+          pure (List noContext [])
 
         -- Its own message, for the reason `hub verify` has one: BadFormException
         -- names an internal Haskell type and a spelling the caller did not type,
         -- and its 'show' renders the whole form -- so a wrong-arity call printed
         -- the caller's argv raw, control characters included.
-        _ -> liftIO (die (show (issueUsage :: Doc ())))
+        other -> liftIO (badArgs (issueUsage :: Doc ()) other)
 
   where
     bodyOf = letterBody
@@ -685,3 +759,20 @@ readBody = \case
   Nothing  -> pure ""
   Just "-" -> getContents
   Just t   -> pure t
+
+-- | What happens to a letter after the peer takes it, said by every verb that
+-- queues one.
+--
+-- NONE OF THE FOUR SAID IT. A contributor's `hub issue new` printed two hashes
+-- and exited 0, and the next thing that happens is a maintainer folding it on
+-- another machine, at another time -- so the two questions the report leaves are
+-- "is it there yet" and "how would I know", and neither had an answer anywhere
+-- in the tool's output.
+--
+-- SAID ONCE, because four verbs saying it four ways is how `pr new` came to
+-- call the same value @thread@ and `pr revise` @event@.
+queuedNext :: Doc ann
+queuedNext =
+  "the peer has it, and nothing is in canon until a maintainer folds it;"
+    <> line <> "  `hbs2-hub updates --repo <key> --mailbox <your-mailbox>` is"
+    <+> "what comes back."

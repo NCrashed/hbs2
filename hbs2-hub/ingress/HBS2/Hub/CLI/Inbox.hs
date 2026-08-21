@@ -26,9 +26,11 @@ module HBS2.Hub.CLI.Inbox
     -- reachable from a test too.
   , render
   , inboxDoc
+  , queueContract
   , inboxNotes
   , inboxArgs
   , InboxArgs(..)
+  , Width(..)
   , utcOf
   , inboxCode
   , inboxUsage
@@ -43,10 +45,12 @@ module HBS2.Hub.CLI.Inbox
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
+import HBS2.Hub.Render (contractVersion,renderContract)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagWord,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagWord,repoFlags,flagRepo,flagRepoMaybe
+                         ,flagsAndSwitches,flagSwitch)
 
 import HBS2.Hub.CLI.Common
 
@@ -60,13 +64,15 @@ import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret)
 import HBS2.Net.Auth.GroupKeySymm (pattern ToDecryptBS)
 import HBS2.Storage.Operations.Class (readFromMerkle)
 import Crypto.Saltine.Class qualified as Saltine
 import Control.Monad.Except (runExceptT)
 import Data.Text qualified as Text
 
+import HBS2.Base58 (AsBase58(..))
+import Data.Aeson (Value,object,(.=))
+import Data.ByteString.Lazy qualified as LBS
 import Data.Coerce (coerce)
 import Data.List qualified as List
 import Data.Maybe (isJust,fromMaybe)
@@ -88,7 +94,8 @@ inboxEntries = do
 
   brief "list the letters waiting in a hub's ingress mailbox"
     $ args [ arg "string" "[--mailbox] mailbox-key", arg "string" "--repo repo-key"
-           , arg "string" "[--after message-hash]", arg "string" "[--limit n]" ]
+           , arg "string" "[--after message-hash]", arg "string" "[--limit n]"
+           , arg "string" "[--long]", arg "string" "[--json]" ]
     $ desc ( "Read-only. Waits for the peer's copy of the mailbox to settle,"
              <> line <> "opens every message this node holds a key for, and reports"
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
@@ -127,7 +134,7 @@ inboxEntries = do
     -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
         [ SignPubKeyLike mbox ] ->
-          lift (listInbox (InboxArgs (Just mbox) Nothing Nothing Nothing))
+          lift (listInbox (InboxArgs (Just mbox) Nothing Nothing Nothing Short False))
         (inboxArgs -> Just ia)
           -- One of the two, and the reader cannot say which: a queue with
           -- neither a mailbox nor a repository is a queue nobody named.
@@ -139,7 +146,7 @@ inboxEntries = do
         -- caller's argv RAW. `hub inbox <key> $'x\ESC[2K...'` put a live
         -- erase-line sequence on the terminal, while the sibling path thirty
         -- lines away in Main.hs sent the same bytes through 'safeText'.
-        _ -> liftIO (die (show (inboxUsage :: Doc ())))
+        other -> liftIO (badArgs (inboxUsage :: Doc ()) other)
 
   where
     listInbox ia = do
@@ -195,7 +202,13 @@ inboxEntries = do
         -- the whole verb it would turn a documented refusal whose stderr had
         -- been closed into a silent 141.
         (\_ -> exitWith (ExitFailure 141))
-        (mapM_ print (inboxDoc r))
+        (if iaJson ia
+           -- The whole document or nothing: a JSON consumer that got half a
+           -- document because a pipe closed would parse it as a shorter
+           -- mailbox, which is the one failure the counts in it exist to make
+           -- impossible.
+           then LBS.putStr (renderContract (queueContract r))
+           else mapM_ print (inboxDoc (iaWidth ia) r))
 
       -- What can be said ABOUT the list, said once at the end rather than once
       -- per line: the counts are what matter, and a page of identical warnings
@@ -221,8 +234,22 @@ inboxUsage = "usage: hub inbox [--mailbox <key>] [--repo <key>]" <> line
           <> line <> "  `hub help inbox` says more."
 
 -- | The queue itself: one line per letter, on stdout.
-inboxDoc :: InboxRead -> [Doc ann]
-inboxDoc = fmap render . irLetters
+inboxDoc :: Width -> InboxRead -> [Doc ann]
+inboxDoc w = fmap (render w) . irLetters
+
+-- | Whether a row carries whole identifiers or the front of them.
+--
+-- WHY A QUEUE HAS THIS AT ALL. A row printed four full base58 values -- the
+-- message hash, the envelope key, the author key and the event id -- which is
+-- about a hundred and eighty characters before any of the words, on the one
+-- screen a maintainer triages from. Nothing could be compared against the row
+-- above it and nothing fitted a terminal, so the fields that say what the letter
+-- IS were pushed off the end.
+--
+-- 'Long' is what a script pipes and what a copy-paste needs; 'Short' is what a
+-- person reads. Short is the default, which is the way round `git log` has it.
+data Width = Short | Long
+  deriving stock (Eq,Show)
 
 -- | What is true about the list above, for stderr.
 --
@@ -241,7 +268,7 @@ inboxNotes listed r =
     deniedNote
       | irDenied r <= 0 = []
       | otherwise =
-          [ "hub:" <+> pretty (irDenied r) <+> "letter(s) were left out because"
+          [ "hbs2-hub:" <+> pretty (irDenied r) <+> "letter(s) were left out because"
               <+> "their author is on this repository's deny-list (hub ban)."
               <+> "They still arrived and still take disk: a ban bounds what is"
               <+> "folded, not what is stored." ]
@@ -254,7 +281,7 @@ inboxNotes listed r =
     omittedNote
       | irOmitted r <= 0 = []
       | otherwise =
-          [ "hub:" <+> pretty (irOmitted r) <+> "more letter(s) in this mailbox"
+          [ "hbs2-hub:" <+> pretty (irOmitted r) <+> "more letter(s) in this mailbox"
               <+> "were not opened:" <+> pretty maxInboxLetters <+> "is the most"
               <+> "one read will take. The list above is a page, in hash order,"
               <+> "and is therefore incomplete."
@@ -326,7 +353,7 @@ inboxNotes listed r =
     missingNote
       | List.null (irMissing r) = []
       | otherwise =
-          [ "hub:" <+> pretty (length (irMissing r))
+          [ "hbs2-hub:" <+> pretty (length (irMissing r))
               <+> "block(s) of this mailbox tree could not be read, so the list"
               <+> "above is incomplete in both directions."
               <+> "Missing:" <+> hsep (capped (fmap hashDoc (irMissing r))) ]
@@ -395,9 +422,18 @@ inboxCode r
 -- asking how many there are. base58 is Integer base conversion, so it is
 -- quadratic: a 48 KiB field is 0.7 s of CPU and 67 000 characters, per line, in
 -- a queue anybody can write to.
-render :: LetterView -> Doc ann
-render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body <> copies
+render :: Width -> LetterView -> Doc ann
+render w lv = short (hashDoc (lvMessage lv))
+                <+> maybe "-" (short . keyDoc) (lvEnvelope lv)
+                <+> body <> copies
   where
+    -- 'briefly' on the way to a terminal and never on the way to a decision:
+    -- every verb that takes one of these takes the whole value, and this is a
+    -- prefix, not a name. See 'Width'.
+    short = case w of
+      Long  -> id
+      Short -> briefly 8
+
     -- SAID, not silently collapsed. A rewrap needs no key (see 'lvCopies'), so
     -- one letter can arrive under any number of envelopes, and the queue used
     -- to give each of them a line and a decision. Showing one line is the point;
@@ -411,15 +447,33 @@ render lv = hashDoc (lvMessage lv) <+> maybe "-" keyDoc (lvEnvelope lv) <+> body
     body = case lvLetter lv of
       Left e -> "unreadable:" <+> pretty e
       Right (author, content, disp) ->
-        "author" <+> keyDoc author
-          <+> "event" <+> maybe "?" hashDoc (lvEventId lv)
+        "author" <+> short (keyDoc author)
+          <+> "event" <+> maybe "?" (short . hashDoc) (lvEventId lv)
           -- The author's own clock, advisory and unverifiable (PEP-19), which is
           -- why it is shown and not sorted on: sorting the queue by it would let
           -- a sender choose where in the queue they appear.
           <+> "at" <+> pretty (utcOf (authorTs content))
           <+> opOf content
-          <+> maybe "-" (\t -> "on" <+> hashDoc t) (authorThread content)
+          <+> maybe "-" (\t -> "on" <+> short (hashDoc t)) (authorThread content)
           <+> dispOf disp
+          <> titleOf content
+
+    -- THE SUBJECT, which the queue did not carry at all: it existed only inside
+    -- `hub inbox show --message <hash>`, one letter at a time, so deciding what
+    -- to look at first meant opening every letter in turn.
+    --
+    -- LAST on the row, because it is the one field of unbounded width and the
+    -- only one a stranger writes as prose: everything a maintainer compares
+    -- between rows stays in the same columns whatever the title does. Through
+    -- 'safeText' like every other stranger's text here, and bounded, because
+    -- 'maxTitleBytes' is a fold rule and not a terminal one.
+    titleOf = \case
+      AOpen _ _ t _ _ _ _ _ -> " " <> dquotes (short' (pretty (safeText t)))
+      _                     -> mempty
+      where
+        short' = case w of
+          Long  -> id
+          Short -> briefly 60
 
     opOf = \case
       AOpen{} -> "open"; AComment{} -> "comment"; ARevise{} -> "revise"
@@ -459,12 +513,17 @@ data InboxArgs = InboxArgs
     -- | How many to open. Clamped to 'maxInboxLetters' by the reader, so this
     -- lowers the cost of a look and cannot raise it past the bound.
   , iaLimit   :: Maybe Int
+    -- | Whole identifiers, or the front of them. See 'Width'.
+  , iaWidth   :: Width
+    -- | The queue as a document rather than as rows. See 'queueContract'.
+  , iaJson    :: Bool
   }
   deriving stock (Eq,Show)
 
 inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe InboxArgs
 inboxArgs syn = do
-  kvs  <- flagsOf (repoFlags <> ["--mailbox","--after","--limit"]) syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--after","--limit"])
+                           ["--long","--json"] syn
   -- BOTH optional here and not in the verb: a queue named by repository alone
   -- resolves its mailbox from the manifest, and one named by neither is a
   -- usage error the verb reports with its own words.
@@ -472,8 +531,79 @@ inboxArgs syn = do
   repo <- flagRepoMaybe asKey kvs
   aft  <- flagMaybe kvs "--after" asHash
   lim  <- fmap (fmap fromIntegral) (flagMaybe kvs "--limit" flagWord)
-  pure (InboxArgs mbox repo aft lim)
+  long <- flagSwitch kvs "--long"
+  asJson <- flagSwitch kvs "--json"
+  pure (InboxArgs mbox repo aft lim (if long then Long else Short) asJson)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
 
+
+-- | The queue as a document (PEP-22 "Scripting").
+--
+-- WHY THIS IS A FOURTH DOCUMENT AND NOT A NEW CONTRACT. 'threadContract' put a
+-- @document@ field in the envelope from the start, for exactly this: one
+-- counter over several shapes, so that two documents cannot both call
+-- themselves @contract 1@ and mean different things.
+--
+-- IT IS NOT DERIVED FROM CANON, and that is the difference from every other
+-- document here. A thread contract is a function of the fold, so two clones
+-- produce the same bytes; this is a function of a mailbox read at a moment, by
+-- a node that holds particular keys, filtered by a deny-list that is local and
+-- unsigned. Two maintainers reading the same mailbox will not agree, and
+-- neither of them is wrong. Nothing downstream should treat a row here as
+-- evidence about anything but this node's own view.
+--
+-- THE COUNTS AND THE CURSOR ARE PART OF IT. A consumer that read @letters@ and
+-- ignored @omitted@ would be a consumer that silently works on a prefix of a
+-- mailbox, which is the failure 'inboxCode' exists to make loud on the terminal
+-- side.
+queueContract :: InboxRead -> Value
+queueContract r = object
+  [ "contract" .= contractVersion
+  , "document" .= ("queue" :: Text)
+  , "settled"  .= irSettled r
+  , "denied"   .= irDenied r
+  , "omitted"  .= irOmitted r
+  , "cursor"   .= fmap b58 (irCursor r)
+  , "missing"  .= fmap b58 (irMissing r)
+  , "letters"  .= fmap letter (irLetters r)
+  ]
+  where
+    b58 :: Pretty a => a -> Text
+    b58 = Text.pack . show . pretty
+
+    key58 :: HubKey -> Text
+    key58 = Text.pack . show . pretty . AsBase58
+
+    letter lv = object $
+      [ "message"  .= b58 (lvMessage lv)
+      , "envelope" .= fmap key58 (lvEnvelope lv)
+      , "event"    .= fmap b58 (lvEventId lv)
+      , "copies"   .= fmap b58 (lvCopies lv)
+      ]
+      <> case lvLetter lv of
+           -- SAID AS A FIELD rather than by leaving the others out: a consumer
+           -- that has to infer "unreadable" from an absence is a consumer that
+           -- treats a bug in this renderer as a readable letter.
+           Left e -> [ "unreadable" .= (Text.pack (show (pretty e)) :: Text) ]
+           Right (author, content, disp) ->
+             [ "unreadable"  .= (Nothing :: Maybe Text)
+             , "author"      .= key58 author
+             , "op"          .= opName content
+             , "thread"      .= fmap b58 (authorThread content)
+             , "declared_at" .= authorTs content
+             , "disposition" .= dispName disp
+             ]
+             <> [ "title" .= t | AOpen _ _ t _ _ _ _ _ <- [content] ]
+
+    opName = \case
+      AOpen{} -> "open" :: Text; AComment{} -> "comment"; ARevise{} -> "revise"
+      ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
+      AMerge{} -> "merge"; ARedact{} -> "redact"
+      ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
+
+    dispName = \case
+      FoldsToCanon -> "folds" :: Text
+      RequestOnly  -> "request"
+      OwnerNative  -> "owner-native"

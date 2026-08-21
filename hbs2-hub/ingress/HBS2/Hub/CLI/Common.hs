@@ -24,6 +24,8 @@ module HBS2.Hub.CLI.Common
   , codePeerSilent
   , signerFor
   , signerOf
+  , askingKeyman
+  , codeNoKeyman
   , signingPair
   , OnMissing(..)
   , withCanon
@@ -46,6 +48,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Fold (FoldResult,foldEvents)
 import HBS2.Hub.Types (RepoRef,Event,ThreadId,eventId)
 import HBS2.Hub.CLI.Verify (refusalDoc,codeOf)
+import HBS2.Hub.CLI.Say (saying,refuse)
 import HBS2.Hub.Repo.GitWrite (withGitSink)
 import HBS2.Hub.Bridge (TriageError)
 
@@ -60,7 +63,8 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 import HBS2.Storage.Operations.Class (readFromMerkle)
 import HBS2.Storage.Operations.ByteString
-import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret,loadCredentials)
+import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,extractGroupKeySecret,loadCredentials
+                               ,KeyManClient)
 import HBS2.Net.Auth.Credentials (PeerCredentials,_peerSignPk,_peerSignSk)
 import Control.Monad.Except (runExceptT)
 
@@ -75,31 +79,13 @@ import Data.Word (Word64)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Time.Format (formatTime,defaultTimeLocale)
 import System.Exit (exitWith,ExitCode(..))
-import System.IO.Error (isResourceVanishedError)
 
--- | Say why, on stderr, and leave with the code that says which why.
---
--- The write is GUARDED and the exit is not. A closed stderr is not a reason to
--- lose the exit code: `hub inbox K 2>&1 | head` closes both handles, and an
--- unguarded 'hPutDoc' then leaves through the RTS with 1, which PEP-22 gives to
--- usage errors -- so the hook that 17 and 18 were added for saw the one code
--- they were added to be told apart from.
-refuse :: String -> Int -> IO a
-refuse msg n = do
-  -- STDOUT FIRST, so the refusal does not jump ahead of the report it belongs
-  -- to. The two streams are buffered differently, and a verb that printed three
-  -- lines and then refused showed the refusal above them: `hub whoami --author
-  -- K --sender H` accused the pair before saying what either of them was.
-  hFlush stdout
-  saying ("hbs2-hub:" <+> pretty msg <> line)
-  exitWith (ExitFailure n)
-
--- | Write to stderr, or do not, but do not take the exit code with you.
-saying :: Doc AnsiStyle -> IO ()
-saying d =
-  handleJust (\e -> if isResourceVanishedError e then Just () else Nothing)
-             (\_ -> pure ())
-             (hPutDoc stderr d)
+-- The two writers every verb leaves through are re-exported from here, because
+-- every verb already imports this module for them. They LIVE in
+-- "HBS2.Hub.CLI.Say", which is below this one: the module that prints `hub
+-- verify`'s refusals could not import this (this imports it) and so wrote to
+-- stderr by hand, along with two others. See that module for the two rules a
+-- hand-written write has to remember, and had not.
 
 -- | What the peer not holding the mailbox exits with.
 --
@@ -139,7 +125,42 @@ codePeerSilent = 18
 -- Returns the whole record because one caller needs the keyring to seal an
 -- acknowledgement; 'signingPair' is how the other four get what they wanted.
 signerFor :: (MonadUnliftIO m) => HubKey -> m (Maybe (PeerCredentials HubScheme))
-signerFor k = signerOf k <$> runKeymanClientRO (loadCredentials k)
+signerFor k = signerOf k <$> askingKeyman (loadCredentials k)
+
+-- | What this node exits with when it has no key database at all.
+--
+-- Distinct from every "no key" code, because it is a different sentence with a
+-- different remedy: a key that is not in the database is asked for by name, and
+-- a database that is not there is the fresh install.
+codeNoKeyman :: Int
+codeNoKeyman = 51
+
+-- | Ask keyman, or say why there was nothing to ask.
+--
+-- WHAT THIS CATCHES. keyman is a SQLite file under XDG, created by
+-- @hbs2-keyman@; on a machine that has never run it, every call here throws
+-- whatever the sqlite bindings throw, and it left through the RTS as
+-- @SQLite3 returned ErrorCan't open database file@ at exit 1 -- the code PEP-22
+-- reserves for usage errors. That is `hub whoami`, the first command in the
+-- manual, in the one case the manual is written for.
+--
+-- BROAD ON PURPOSE, and this is the argument for it: everything downstream of
+-- this call is "what keyman answered", and there is no answer this tool can act
+-- on when the call itself did not return. The alternative is naming the sqlite
+-- exception types here, which ties the hub to the bindings a dependency of a
+-- dependency happens to use.
+askingKeyman :: MonadUnliftIO m => KeyManClient m a -> m a
+askingKeyman act =
+  tryAny (runKeymanClientRO act) >>= \case
+    Right a -> pure a
+    Left _  -> liftIO $ refuse (show ( "no key database on this machine"
+                                         <> line <> "  hbs2-keyman keeps the keys this"
+                                         <+> "tool signs and reads with, and has"
+                                         <> line <> "  not been run here. `hbs2-keyman"
+                                         <+> "list` creates it and says what it holds;"
+                                         <> line <> "  `hbs2-hub whoami` then says what"
+                                         <+> "of it this tool can use." ))
+                                codeNoKeyman
 
 -- | The rule itself, without the keyman call around it.
 --

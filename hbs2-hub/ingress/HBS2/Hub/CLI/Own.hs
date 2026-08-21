@@ -26,6 +26,9 @@ module HBS2.Hub.CLI.Own
   , ownArgsFor
 
   , RedactArgs(..)
+  , OpenArgs(..)
+  , openArgs
+  , openUsage
   , redactArgs
   ) where
 
@@ -34,7 +37,7 @@ import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Fold (frMeta)
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.CLI.Argv ( flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
+import HBS2.Hub.CLI.Argv (badArgs, flagsOf,flagsAndSwitches,flagOnce,flagEvery,flagMaybe
                          , repoFlags,flagRepo,flagRepoMaybe
                          , flagSwitch,flagText,flagWord 
                          ,flagOneOfMaybe,assigneeFlags)
@@ -43,6 +46,7 @@ import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
+import HBS2.Hub.CLI.Compose (readBody,letterBody)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
 
 import HBS2.CLI.Prelude
@@ -108,6 +112,14 @@ ownEntries = do
   -- index does not filter on kind, and which nobody guesses. `hub pr comment`
   -- was already bound both ways for exactly this reason; the other four were
   -- not.
+  -- THE OWNER COULD NOT FILE A BUG ON THEIR OWN PROJECT. Every thread in canon
+  -- began as a letter, so opening one meant composing a Tier B letter to your
+  -- own mailbox, waiting for the peer to settle, and folding it -- five verbs,
+  -- a mailbox, a sigil and a round trip, to write down something you already
+  -- know. The bridge has always minted an owner-native @open@ ('ownerEvent'
+  -- takes 'AOpen' and stamps its number); nothing called it.
+  openVerb (verb "issue" "open") HubIssue
+
   for_ ["issue","pr"] $ \noun -> do
 
     statusVerb (verb noun "close") "Marks a thread closed."
@@ -135,12 +147,54 @@ ownEntries = do
              <> dryRunHelp )
     $ entry $ bindMatch "hub:redact" $ nil_ \case
         (redactArgs -> Just rd) -> lift (redactIt rd)
-        _ -> liftIO (die (show redactUsage))
+        other -> liftIO (badArgs redactUsage other)
 
   where
 
     -- `hub:<noun>:<op>`, built rather than written twice.
     verb noun op = fromString ("hub:" <> noun <> ":" <> op)
+
+    -- ISSUES ONLY, and not for want of symmetry. A pull request is coordinates
+    -- and a bundle (PEP-20): `hub pr new` builds the bundle out of a clone and
+    -- ships it as an attachment, and an owner-native open would have to build
+    -- one too. An owner with the branch in hand has git, so what is missing
+    -- there is a different verb and not this one with a flag.
+    openVerb name kind =
+      brief "open an issue in your own repository, without a letter"
+        $ args [ arg "string" "--repo repo-key", arg "string" "--title title"
+               , arg "string" "[--body text | -]", arg "string" "[--label label]..."
+               , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
+        $ desc ( "Writes an owner-signed open straight onto canon, and canon"
+                 <> line <> "mints the number as it does for any other open."
+                 <> line
+                 <> line <> "The path for everybody else is a letter (hub issue"
+                 <> line <> "new) that a maintainer folds. The owner is already"
+                 <> line <> "the one who would fold it, so the letter, the"
+                 <> line <> "mailbox, the sigil and the round trip are ceremony"
+                 <> line <> "around a decision that has already been made."
+                 <> line
+                 <> line <> "It is not the same event, and a reader can tell:"
+                 <> line <> "there is no origin, because no letter asked for it."
+                 <> line
+                 <> line <> "--body reads stdin when given as -, like the letter"
+                 <> line <> "verbs. --label applies labels, which an author may"
+                 <> line <> "only request (PEP-19): here the owner is the author,"
+                 <> line <> "so they are applied."
+                 <> dryRunHelp )
+        $ entry $ bindMatch name $ nil_ \case
+            (openArgs -> Just op) -> lift (openIt kind op)
+            _ -> liftIO (die (show openUsage))
+
+    openIt kind op = do
+      body <- liftIO (readBody (opBody op))
+      -- TreatAsEmpty, like `maintainer add` and unlike every other verb here:
+      -- an open names no thread, and the first issue in a repository is the
+      -- ordinary way canon begins.
+      (parent, fr) <- withCanon TreatAsEmpty (opRepo op) withGitCanon
+      writeOwn (opRepo op) (opAs op) (opDry op) parent fr
+        (\now -> AOpen (opRepo op) kind (opTitle op) (opLabels op)
+                       (letterBody body) Nothing Nothing now)
+        "hub: open"
 
     labelVerb name =
       brief "set the labels of a thread that is in canon"
@@ -172,7 +226,7 @@ ownEntries = do
             (ownArgsFor ["--label"] ["--clear"] -> Just ow)
               | owClear ow, List.null (owLabels ow) -> lift (labelIt ow)
               | not (owClear ow), not (List.null (owLabels ow)) -> lift (labelIt ow)
-            _ -> liftIO (die (show ownUsage))
+            other -> liftIO (badArgs ownUsage other)
 
     assignVerb name =
       brief "say who is looking at a thread that is in canon"
@@ -198,7 +252,7 @@ ownEntries = do
             (ownArgsFor assigneeFlags ["--clear"] -> Just ow)
               | owClear ow, Nothing <- owTo ow -> lift (assignIt ow)
               | Just _ <- owTo ow, not (owClear ow) -> lift (assignIt ow)
-            _ -> liftIO (die (show ownUsage))
+            other -> liftIO (badArgs ownUsage other)
 
     statusVerb name lead what mk =
       brief what
@@ -222,7 +276,7 @@ ownEntries = do
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor ["--note"] [] -> Just ow) -> lift (statusIt mk ow)
-            _ -> liftIO (die (show ownUsage))
+            other -> liftIO (badArgs ownUsage other)
 
     canonOf repo =
       -- Refuse: every verb here names a thread by number, and a repository with
@@ -303,14 +357,23 @@ ownEntries = do
       acc <- blessed codeTriageRefused
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
 
+      -- THE NUMBER THIS MINT ADDS, which is empty for every verb here but the
+      -- open: 'acNumber' carries one only on an open, and the index is
+      -- regenerated from the fold, which does not yet know about the event
+      -- being committed in the same breath. `hub inbox accept` folds it in the
+      -- same way and for the same reason.
+      let minted = [ (n, t) | Just n <- [acNumber acc], ThreadScope t <- [acScope acc] ]
+
       commit <- committing (oneStop codeCanonUnwritable) dry parent
-                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr) message now
+                  (frMeta fr) [(eventPath acc, acEvent acc)]
+                  (List.sortOn fst (numberIndexOf fr <> minted)) message now
 
       liftIO $ print $ vcat
-        [ "event" <+> pretty (eventId (acEvent acc))
-        , "seq" <+> pretty (acSeq acc)
-        , "commit" <+> pretty commit
-        ]
+        ( [ "event" <+> pretty (eventId (acEvent acc)) ]
+       <> [ "number" <+> pretty n | Just n <- [acNumber acc] ]
+       <> [ "seq" <+> pretty (acSeq acc)
+          , "commit" <+> pretty commit
+          ] )
 
       liftIO (saying (notPublishedYet <> line))
 
@@ -366,3 +429,33 @@ redactArgs syn = do
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
+
+-- | What an owner-native open was asked to write.
+data OpenArgs = OpenArgs
+  { opRepo   :: RepoRef
+  , opTitle  :: Text
+  , opBody   :: Maybe String   -- ^ @-@ reads stdin, like the letter verbs
+  , opLabels :: [Text]
+  , opAs     :: Maybe HubKey
+  , opDry    :: Writing
+  }
+  deriving stock (Eq,Show)
+
+openUsage :: Doc ()
+openUsage =
+  "usage: hbs2-hub issue open --repo <key> --title <text> [--body <text>|-] [--label <l>]... [--as <key>] [--dry-run]"
+
+-- | @--repo K --title T [--body B] [--label L]... [--as K] [--dry-run]@.
+openArgs :: forall c . IsContext c => [Syntax c] -> Maybe OpenArgs
+openArgs syn = do
+  kvs   <- flagsAndSwitches (repoFlags <> ["--title","--body","--label","--as"])
+                            ["--dry-run"] syn
+  repo  <- flagRepo asKey kvs
+  title <- flagOnce kvs "--title" >>= fmap Text.pack . flagText
+  body  <- flagMaybe kvs "--body" flagText
+  ls    <- traverse (fmap Text.pack . flagText) (flagEvery kvs "--label")
+  as    <- flagMaybe kvs "--as" asKey
+  dry   <- flagSwitch kvs "--dry-run"
+  pure (OpenArgs repo title body ls as (writingOf dry))
+  where
+    asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

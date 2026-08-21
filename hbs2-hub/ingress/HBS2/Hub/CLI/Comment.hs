@@ -29,7 +29,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (rpcTimeout,PeerSilent(..))
 import HBS2.Hub.Sent (Sent(..),recordSent)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode,withCanon,OnMissing(..)
                            ,signerFor,signingPair)
 import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
@@ -37,7 +37,7 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.Manifest (sigilFor)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
-import HBS2.Hub.CLI.Compose (Outbound(..),sendLetter,letterBody,readBody,codeNoKey
+import HBS2.Hub.CLI.Compose (queuedNext,Outbound(..),sendLetter,letterBody,readBody,codeNoKey
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
 import HBS2.CLI.Prelude
@@ -133,6 +133,8 @@ commentEntries = do
                , arg "string" "--author author-key"
                , arg "string" "--body text"
                , arg "string" "--thread thread-id | --number n"
+               -- --number needs it: a number is scoped to a repository, and
+               -- the reader asks for both together.
                , arg "string" "[--repo repo-key]"
                , arg "string" "[--recipient recipient-sigil]"
                , arg "string" "[--reply-to event-id]" ]
@@ -164,7 +166,7 @@ commentEntries = do
                  <> line <> "maintainer has looked." )
         $ entry $ bindMatch name $ nil_ \case
             (commentArgs -> Just cm) -> lift (comment cm)
-            _ -> liftIO (die (show commentUsage))
+            other -> liftIO (badArgs commentUsage other)
 
     comment cm = do
       body <- liftIO (readBody (fmap Text.unpack (cmBody cm)))
@@ -248,6 +250,7 @@ commentEntries = do
         [ "queued" <+> hashDoc h
         , "event" <+> hashDoc (authorBoxId box)
         , "on" <+> hashDoc thr
+        , queuedNext
         ]
 
 -- | Every value behind a flag.

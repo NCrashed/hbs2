@@ -29,7 +29,7 @@ module HBS2.Hub.CLI.Ban
 
 import HBS2.Hub.Types (HubKey,RepoRef)
 import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo
                          ,flagOneOf,flagOneOfMaybe,authorKeyFlags)
 import HBS2.Hub.CLI.Common (refuse,saying)
 
@@ -87,7 +87,7 @@ banEntries = do
             -- "nobody is banned here".
             then saying ("nobody is banned here" <> line)
             else mapM_ (print . pretty . AsBase58) (sortKeys bans)
-        _ -> liftIO (die (show banUsage))
+        other -> liftIO (badArgs banUsage other)
 
   where
 
@@ -129,7 +129,7 @@ banEntries = do
                  <> line <> "in canon; this refuses future ones." )
         $ entry $ bindMatch name $ nil_ \case
             (banArgs -> Just ba) | Just who <- baKey ba -> lift (setBan ban ba who)
-            _ -> liftIO (die (show banUsage))
+            other -> liftIO (badArgs banUsage other)
 
     readBans repo =
       loadBans repo >>= either

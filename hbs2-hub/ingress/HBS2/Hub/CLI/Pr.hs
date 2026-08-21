@@ -47,7 +47,7 @@ import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe
                          ,flagsAndSwitches,flagSwitch)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Read (oneNumbered)
@@ -56,7 +56,7 @@ import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,
                            ,blessed,committing,oneStop
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.Repo.Manifest (sigilFor)
-import HBS2.Hub.CLI.Compose (Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
+import HBS2.Hub.CLI.Compose (queuedNext,Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
                             ,NotStored(..),codeNotStored,PoWTooHard(..),codeNoWork)
 
 import HBS2.CLI.Prelude
@@ -117,9 +117,14 @@ prEntries = do
 
   brief "propose a change: bundle a range and send it as a Tier B letter"
     $ args [ arg "string" "--repo repo-key", arg "string" "--sender sender-sigil"
-           , arg "string" "--recipient recipient-sigil", arg "string" "--author author-key"
+           , arg "string" "--author author-key"
            , arg "string" "--title title", arg "string" "--onto ref"
-           , arg "string" "--from ref" ]
+           , arg "string" "--from ref"
+           -- The three the parser takes and the synopsis did not name.
+           -- --recipient is optional (the manifest is read without it), and
+           -- --base and --body are how a fork point and a body get in.
+           , arg "string" "[--recipient recipient-sigil]"
+           , arg "string" "[--base ref]", arg "string" "[--body text | -]" ]
     $ desc ( "Builds a git bundle of base..--from in THIS repository and ships"
              <> line <> "it as an encrypted attachment (PEP-20's delta path). The"
              <> line <> "bundle's size is the delta, so proposing a change to a"
@@ -145,13 +150,14 @@ prEntries = do
     $ entry $ bindMatch "hub:pr:new" \case
         (prNewArgs -> Just pn) -> lift (prNew pn)
           >> pure nil
-        _ -> liftIO (die (show prNewUsage))
+        other -> liftIO (badArgs prNewUsage other)
 
   brief "propose new coordinates for a pull request you opened"
     $ args [ arg "string" "--sender sender-sigil"
-           , arg "string" "--recipient recipient-sigil"
            , arg "string" "--author author-key", arg "string" "--thread thread-id"
-           , arg "string" "--onto ref", arg "string" "--from ref" ]
+           , arg "string" "--onto ref", arg "string" "--from ref"
+           , arg "string" "[--recipient recipient-sigil]"
+           , arg "string" "[--repo repo-key]", arg "string" "[--base ref]" ]
     $ desc ( "Builds a fresh bundle and signs coordinates that replace the"
              <> line <> "ones canon holds for this thread (PEP-20). The thread"
              <> line <> "keeps its number, its title and its comments; what"
@@ -173,7 +179,7 @@ prEntries = do
              <> line <> "reading the base this prints." )
     $ entry $ bindMatch "hub:pr:revise" $ nil_ \case
         (prReviseArgs -> Just pr) -> lift (prRevise pr)
-        _ -> liftIO (die (show prReviseUsage))
+        other -> liftIO (badArgs prReviseUsage other)
 
   brief "put a proposed change on a local branch and switch to it"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
@@ -199,7 +205,7 @@ prEntries = do
              <> line <> "moving it would throw them away. Pick another --branch." )
     $ entry $ bindMatch "hub:pr:checkout" $ nil_ \case
         (prCheckoutArgs -> Just pc) -> lift (prCheckout pc)
-        _ -> liftIO (die (show prCheckoutUsage))
+        other -> liftIO (badArgs prCheckoutUsage other)
 
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
@@ -229,7 +235,7 @@ prEntries = do
              <> dryRunHelp )
     $ entry $ bindMatch "hub:pr:merge" $ nil_ \case
         (prMergeArgs -> Just pm) -> lift (prMerge pm)
-        _ -> liftIO (die (show prMergeUsage))
+        other -> liftIO (badArgs prMergeUsage other)
 
   where
 
@@ -423,11 +429,12 @@ prEntries = do
                       }
 
       liftIO $ print $ vcat
-        [ "queued" <+> pretty h
-        , "thread" <+> pretty (authorBoxId box)
+        [ "queued" <+> hashDoc h
+        , "thread" <+> hashDoc (authorBoxId box)
         , "tip" <+> pretty (bnTip b) <+> "base" <+> pretty base
         , "bundle" <+> hashDoc (ptPart part)
             <+> parens (pretty (BS.length (bnBytes b)) <+> "bytes before encryption")
+        , queuedNext
         ]
 
     -- | @hub pr revise@: the same two steps, against a thread that exists.
@@ -470,9 +477,9 @@ prEntries = do
                       }
 
       liftIO $ print $ vcat
-        [ "queued" <+> pretty h
-        , "event" <+> pretty (authorBoxId box)
-        , "on" <+> pretty (pvThread pr)
+        [ "queued" <+> hashDoc h
+        , "event" <+> hashDoc (authorBoxId box)
+        , "on" <+> hashDoc (pvThread pr)
         , "tip" <+> pretty (bnTip b) <+> "base" <+> pretty base
         , "bundle" <+> hashDoc (ptPart part)
             <+> parens (pretty (BS.length (bnBytes b)) <+> "bytes before encryption")
@@ -481,6 +488,7 @@ prEntries = do
         -- unbuilt). The bridge is stricter than the fold about this on purpose.
         , "the author of record signs a revision: a letter signed by anyone else"
             <+> "is refused at triage"
+        , queuedNext
         ]
 
     -- The two steps that make a proposal, shared by both verbs above. The order

@@ -44,10 +44,10 @@ spec =
       let h = aHash "a letter"
       rejectArgs (argv [ "--mailbox", b58 mbox, "--message", show (pretty h)
                        , "--repo", b58 repo ])
-        `shouldBe` Just (Reject mbox h repo)
+        `shouldBe` Just (Reject mbox h repo Nothing False)
       rejectArgs (argv [ "--message", show (pretty h), "--repo", b58 repo
                        , "--mailbox", b58 mbox ])
-        `shouldBe` Just (Reject mbox h repo)
+        `shouldBe` Just (Reject mbox h repo Nothing False)
 
     -- REQUIRED, and it was optional. Without a repository there is no canon to
     -- ask whether this letter was already folded, so the one check this verb
@@ -77,3 +77,19 @@ spec =
       rejectArgs (argv [ "--mailbox", b58 mbox, "--mailbox", b58 other
                        , "--message", show (pretty (aHash "one")) ])
         `shouldBe` Nothing
+
+    -- The half of a decision this verb did not have: without an ack, a refusal
+    -- and a letter nobody has looked at are the same silence on the sender's
+    -- side, and canon they can fetch says nothing about a letter that never
+    -- entered it.
+    it "reads the two flags the acknowledgement needs" $ do
+      mbox <- aKey
+      repo <- aKey
+      as   <- aKey
+      let h = aHash "a letter"
+          base = ["--mailbox", b58 mbox, "--message", show (pretty h), "--repo", b58 repo]
+      fmap rjSilent (rejectArgs (argv base)) `shouldBe` Just False
+      fmap rjSilent (rejectArgs (argv (base <> ["--silent"]))) `shouldBe` Just True
+      fmap rjAs (rejectArgs (argv (base <> ["--as", b58 as]))) `shouldBe` Just (Just as)
+      -- A switch, so it cannot swallow the key after it.
+      rejectArgs (argv (base <> ["--silent", "yes"])) `shouldBe` Nothing

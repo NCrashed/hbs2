@@ -683,25 +683,54 @@ sortCanon entries = (evs, dups <> bad)
       where
         under pfx depth q =
           B8.pack pfx `B8.isPrefixOf` q
-            && ( let cs = Prelude.filter (not . B8.null)
-                            (B8.split '/' (B8.drop (length pfx) q))
-                 in length cs == depth && all plain cs )
+            -- NO FILTERING OF EMPTY COMPONENTS. Dropping them made
+            -- @threads/a//b@ split into two names and pass the count, which is
+            -- exactly a path git will not index: see 'nameLike'.
+            && ( let cs = B8.split '/' (B8.drop (length pfx) q)
+                 in length cs == depth && all nameLike cs )
 
-        -- A COMPONENT IS A NAME, and @.@ and @..@ are not names.
+        -- A COMPONENT IS A NAME GIT WILL PUT IN AN INDEX.
         --
-        -- Counting components was not enough: @threads/../x@ has two of them
-        -- and is not a path this layout has. What made that worth refusing
-        -- rather than reporting is the WRITE side -- a compaction puts back the
-        -- names the tree already had, and git's index answers a path like that
-        -- with "Ignoring path" and exit zero, so the event was dropped from the
-        -- rewrite and the verb said it had succeeded. That half is closed in
-        -- "HBS2.Hub.Repo.GitWrite" too, and independently: this one stops such
-        -- a file being an event, that one stops any planned file going missing
-        -- for any reason.
+        -- WHY IT IS WORTH REFUSING RATHER THAN REPORTING. Every canon write
+        -- reads the parent tree into an index first, and @read-tree@ fails on
+        -- the WHOLE parent when one path in it is unindexable -- so a single
+        -- such file anywhere in canon makes the repository unwritable by every
+        -- verb at once, and no verb here removes it. Not folding it is what
+        -- keeps it out of a rewrite: a compaction writes back the names the
+        -- tree already had, and this is what stops those names being one of
+        -- these. 'CanonUnwritable' carries the other half, for a tree that
+        -- already holds one.
+        --
+        -- A DENYLIST AND NOT AN ALLOWLIST, and the difference is not a style
+        -- one. The layout's own names are base58 and decimal digits, so an
+        -- allowlist of those would be shorter -- and it would refuse a
+        -- multibyte component, which git indexes perfectly well and which two
+        -- tests in this package deliberately fold. Being STRICTER than git
+        -- costs a reader that stops folding canon another reader takes, which
+        -- is a divergence between clones; being LOOSER costs nothing here,
+        -- because the writer never produces any of these.
+        --
+        -- Nor is this @verify_path@ reimplemented: that refuses more than the
+        -- four below, some of it under @core.protectNTFS@ and
+        -- @core.protectHFS@, whose defaults have moved across releases. What
+        -- these four have in common is that each is refused by git AND is a
+        -- shape no name this build writes can have, so widening the refusal to
+        -- them cannot cost a fold:
+        --
+        --   * the empty component -- @threads\/a\/\/b@, and the trailing slash;
+        --   * anything beginning with a dot, which is @.@, @..@, every case of
+        --     @.git@, and the whole HFS family of @.git@ with ignorable code
+        --     points in it, in one line;
+        --   * a tilde, which is the NTFS short-name spelling (@git~1@);
+        --   * a backslash, which protectNTFS reads as a separator.
         --
         -- Not folded is not ignored: a path under these prefixes that is not an
-        -- event is reported by the reader like any other file it will not take.
-        plain c = c /= "." && c /= ".."
+        -- event is reported by the reader like any other file it will not take,
+        -- and `hub verify` names it.
+        nameLike c =
+          not (B8.null c)
+            && B8.head c /= '.'
+            && not (B8.any (\x -> x == '~' || x == '\\') c)
 
 -- | Read canon and fold it.
 --
@@ -1198,6 +1227,22 @@ data CanonUnwritable =
     -- not depend on knowing which paths are bad: what was planned either landed
     -- or nothing is published.
   | WriterDropped Int ByteString
+    -- | Canon holds a path git's index will not take, so no write can start
+    -- from it.
+    --
+    -- ITS OWN CONSTRUCTOR because it is the one refusal here that is about the
+    -- REPOSITORY rather than about the write being attempted. Every other one
+    -- says "this write did not happen"; this one says every write is going to
+    -- fail the same way until somebody rewrites canon, and no verb here
+    -- removes the file. As a plain @WriterRefused "read-tree"@ it came out as
+    -- git's own @error: invalid path '...'@ under a sentence about a command
+    -- the caller did not run, on `hub inbox accept`, `hub pr merge`, the owner
+    -- verbs and the maintainer verbs alike.
+    --
+    -- Reachable only from a tree somebody else wrote: 'isEvent' refuses to fold
+    -- such a path, so this build cannot produce one and a compaction does not
+    -- carry one forward.
+  | WriterUnindexable Told
   deriving stock (Eq,Show)
 
 instance Pretty CanonUnwritable where
@@ -1212,6 +1257,19 @@ instance Pretty CanonUnwritable where
         , "nothing was published" ]
     WriterRefused what t ->
       nest 2 $ vsep [ "git" <+> pretty what <+> "refused", told t ]
+    WriterUnindexable t ->
+      nest 2 $ vsep
+        [ "canon holds a path git will not put in an index"
+        , told t
+        , "every canon write reads the parent tree into an index first, so"
+        , "this repository is unwritable by every verb until that file is gone,"
+        , "and nothing here deletes a file from canon."
+        , "`hbs2-hub verify <repo-key>` names the files this reader will not"
+        , "take. `hbs2-hub compact --repo <key>` writes a new lineage without"
+        , "them -- it commits an orphan root, so it never reads this tree into"
+        , "an index -- and it will only run when there is something superseded"
+        , "to drop."
+        , "nothing was published" ]
     RefMoved want got ->
       nest 2 $ vsep
         [ pretty metaRef <+> "moved while this was being prepared"

@@ -240,6 +240,12 @@ every message you hold a key for, and reports what each asks for.
 Nothing is folded, minted or deleted. Expect it to take a few seconds:
 an empty answer is only believable after the wait.
 
+One row per letter: the message, the envelope key, the author, what the
+letter asks for, and the subject when it opens something. The
+identifiers are shown by their first eight characters, which is enough
+to tell two rows apart and not enough to pass to anything: every verb
+that takes one takes the whole value, and `--long` prints them.
+
 One letter in full, body included:
 
 ```
@@ -254,6 +260,22 @@ ever fetches it.
 hbs2-hub inbox accept --mailbox <mailbox-key> --repo <repo-key> \
                       --message <message-hash>
 ```
+
+A letter that ASKS for something -- close this, reopen that, set a
+label -- cannot be folded as the sender's own event: those are
+owner-authored, so canon would refuse it. Agreeing means authoring the
+same thing yourself, which is one verb:
+
+```
+hbs2-hub inbox honour --repo <repo-key> --message <message-hash>
+```
+
+The event is yours, the time is now, and the letter is kept as the
+origin, so a reader can see what was asked and who asked. It grants only
+what carries no words: a closing note would become a comment in your
+name, and an attribute is the requester's choice of both name and value.
+Those come back as `NeedsReview`, and you write your own with
+`hbs2-hub issue close` and friends.
 
 For a pull request this also verifies the bundle before anything is
 published, and stages the proposed tip at `refs/hbs2/pulls/<n>/head`
@@ -275,6 +297,7 @@ hbs2-hub pr merge --repo <repo-key> --number 7 \
 The owner verbs write canon directly, without a letter:
 
 ```
+hbs2-hub issue open   --repo <repo-key> --title "the tests hang on aarch64"
 hbs2-hub issue close  --repo <repo-key> --number 7 --note "fixed in 1.2"
 hbs2-hub issue label  --repo <repo-key> --number 7 --label bug --label aarch64
 hbs2-hub issue assign --repo <repo-key> --number 7 --to <key>
@@ -302,6 +325,41 @@ hbs2-hub inbox reject --repo <repo-key> --mailbox <mailbox-key> \
 `--repo` is required, and the reason is the sentence the verb prints:
 rejecting says the letter was not taken, so it asks canon first and
 refuses when canon already holds it.
+
+The sender is told, when their letter asked for an answer and named a
+mailbox of their own. That acknowledgement cannot be checked against
+anything -- an accept's can be, by folding canon and finding the event,
+and this one is a claim about something canon does not hold. `--silent`
+skips it, which is what rejecting is most often for: an ack confirms the
+address is live and that somebody read it.
+
+## Where you stand
+
+```
+hbs2-hub status --repo <repo-key>
+```
+
+Six facts, none of which needs a decision from you: the repository,
+whether this machine can sign for it, what canon here holds, whether
+that canon has reached the remote, which mailbox the repository declares
+and how many letters are in it. It pushes nothing; the publication check
+asks the remote and does not write to it.
+
+It says NOT published four ways, because they are four different next
+steps: nothing folded here, the remote holds none, the two agree, and
+the remote holds canon this clone does not have. It will not say "ahead"
+or "behind" -- telling those apart means folding both, which is what
+`hbs2-hub sync` does.
+
+And what you have sent:
+
+```
+hbs2-hub sent
+```
+
+One line per letter this node handed to its peer. That is what the log
+records: not that a mailbox took them, and not that anybody read them.
+`hbs2-hub updates` is what came back.
 
 ## Publishing
 

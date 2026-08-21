@@ -71,7 +71,13 @@ data ManifestGone =
     -- that is not a forge, or one whose owner has not published the clause
     -- yet: PEP-18 makes the mailbox optional, so this is a state and not a
     -- fault.
-  | ManifestNoMailbox RepoRef
+    --
+    -- CARRIES THE FLAG that would have skipped the lookup, because the two
+    -- callers are asking different questions: `hub inbox` wants the mailbox key
+    -- and takes --mailbox, and a composing verb wants the recipient sigil and
+    -- takes --recipient. One sentence for both named --mailbox, so half the
+    -- verbs that print this offered a flag they do not have.
+  | ManifestNoMailbox RepoRef Text
     -- | It declares a mailbox and no sigil for it. A letter cannot be sealed to
     -- a sign key, so this is a mailbox nobody outside can write to: the owner
     -- published half the pair.
@@ -104,10 +110,10 @@ instance Pretty ManifestGone where
       "the repository reference is here and points at nothing this can read"
     ManifestUnreadable e -> "the manifest will not read:" <+> pretty (safeText e)
     ManifestUnparsed -> "the manifest is not a list of clauses"
-    ManifestNoMailbox k ->
+    ManifestNoMailbox k flag ->
       pretty (AsBase58 k) <+> "declares no ingress mailbox" <> line
         <> "  it may not be a forge, or its owner may not have published the"
-        <+> "clause. Naming --mailbox skips the lookup."
+        <+> "clause. Naming" <+> pretty flag <+> "skips the lookup."
     ManifestNoSigil k mbox ->
       pretty (AsBase58 k) <+> "declares mailbox" <+> pretty (AsBase58 mbox)
         <+> "and no sigil for it" <> line
@@ -210,7 +216,7 @@ mailboxFor :: forall m . ( MonadUnliftIO m
            => Maybe HubKey -> RepoRef -> m (Either ManifestGone HubKey)
 mailboxFor (Just k) _ = pure (Right k)
 mailboxFor Nothing repo =
-  readManifest repo <&> (>>= maybe (Left (ManifestNoMailbox repo)) Right . mailboxOf)
+  readManifest repo <&> (>>= maybe (Left (ManifestNoMailbox repo "--mailbox")) Right . mailboxOf)
 
 -- | The sigil a letter should be sealed to: the one it was given, or the one
 -- the repository publishes for its ingress mailbox.
@@ -253,7 +259,7 @@ sigilFor Nothing repo = do
   declared <- readManifest repo <&> \case
     Left e -> Left e
     Right mf -> case mailboxOf mf of
-      Nothing -> Left (ManifestNoMailbox repo)
+      Nothing -> Left (ManifestNoMailbox repo "--recipient")
       Just mbox -> maybe (Left (ManifestNoSigil repo mbox))
                          (Right . (,) mbox)
                          (sigilOf mbox mf)

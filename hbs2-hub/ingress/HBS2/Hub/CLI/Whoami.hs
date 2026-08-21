@@ -32,8 +32,8 @@ module HBS2.Hub.CLI.Whoami
 import HBS2.Hub.Types
 import HBS2.Hub.Letter (sigilNames)
 import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf,sigilOf)
-import HBS2.Hub.CLI.Argv (flagsOf,flagMaybe,repoFlags,flagRepoMaybe)
-import HBS2.Hub.CLI.Common (refuse,saying,signerFor)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagMaybe,repoFlags,flagRepoMaybe)
+import HBS2.Hub.CLI.Common (refuse,saying,signerFor,askingKeyman)
 import HBS2.Hub.CLI.Compose (codeWrongSigil)
 
 import HBS2.CLI.Prelude
@@ -99,7 +99,15 @@ identityDoc keys = vcat
                     <+> "already have." ]
       else vcat ( ("signing keys this machine can author with"
                      <+> parens (pretty (length keys)) <> ":")
-                  : [ "  " <> pretty (AsBase58 k) | k <- keys ] )
+                  : [ "  " <> pretty (AsBase58 k) | k <- keys ]
+                 -- A COLUMN OF BASE58 AND NOTHING ELSE is what this is, and
+                 -- seventeen of them tell nobody which is theirs. What holds
+                 -- the alias, the weight and the FILE each one lives in is
+                 -- keyman, and its own list prints all four -- including the
+                 -- keyring path the sigil step below asks for and this cannot
+                 -- otherwise name.
+                <> [ "  `hbs2-keyman list` says which file, alias and weight"
+                       <+> "each of them has." ] )
   , ""
   , "A letter takes three things, and this can only see the first."
   , ""
@@ -150,7 +158,7 @@ whoamiEntries = do
              <> line <> "is not a forge." )
     $ entry $ bindMatch "hub:whoami" $ nil_ \case
         (whoamiArgs -> Just w) -> lift (whoami w)
-        _ -> liftIO (die (show whoamiUsage))
+        other -> liftIO (badArgs whoamiUsage other)
 
   where
 
@@ -158,7 +166,7 @@ whoamiEntries = do
 
       -- The bare call, which is the one somebody with nothing yet makes.
       when (isNothing whoAuthor && isNothing whoSender && isNothing whoRepo) do
-        keys <- runKeymanClientRO listCredentials
+        keys <- askingKeyman listCredentials
         liftIO $ print (identityDoc keys)
 
       for_ whoAuthor $ \k -> do

@@ -23,6 +23,8 @@ import HBS2.Hub.CLI.Read
 import HBS2.Hub.CLI.Show
 import HBS2.Hub.CLI.Reject
 import HBS2.Hub.CLI.Updates
+import HBS2.Hub.CLI.Sent
+import HBS2.Hub.CLI.Status
 import HBS2.Hub.CLI.Sync
 import HBS2.Hub.CLI.Verify
 import HBS2.Hub.CLI.Whoami
@@ -40,7 +42,7 @@ import Data.Text qualified as Text
 import System.Environment
 import Data.Version (showVersion)
 import Paths_hbs2_hub qualified as Version
-import System.Exit (die)
+import System.Exit (die,exitWith,ExitCode(..))
 import GHC.IO.Encoding qualified as Enc
 import System.IO qualified as IO
 
@@ -87,13 +89,16 @@ silence = do
 -- organised by.
 peerFulNames :: [Id]
 peerFulNames =
-  [ "hub:inbox", "hub:inbox:show", "hub:inbox:accept", "hub:inbox:reject"
+  [ "hub:inbox", "hub:inbox:show", "hub:inbox:accept", "hub:inbox:honour"
+  , "hub:inbox:reject"
   , "hub:issue:new", "hub:issue:comment"
   , "hub:pr:new", "hub:pr:revise", "hub:pr:comment"
   , "hub:updates"
   , "hub:policy:show", "hub:policy:pow", "hub:policy:default"
   , "hub:block", "hub:unblock"
   , "hub:whoami"
+  -- It reads the mailbox: see the mailbox line in its report.
+  , "hub:status"
   ]
 
 main :: IO ()
@@ -190,6 +195,8 @@ main = do
         commentEntries
         compactEntries
         composeEntries
+        sentEntries
+        statusEntries
         syncEntries
         updatesEntries
         verifyEntries
@@ -336,9 +343,23 @@ main = do
     -- "unknown verb: issue", naming a word that IS a verb and saying nothing
     -- about the one that is not, so the reader looks at the half that was
     -- right.
-    (ws, Nothing) -> die ( "unknown verb: "
-                             <> unwords [ Text.unpack (safeText (Text.pack w)) | w <- ws ]
-                             <> "\ntry: hbs2-hub --help" )
+    -- AND THE VERBS UNDER THE NOUN, when the first word IS one. `hub issue` is
+    -- what somebody types before they know the second word, and it answered
+    -- "unknown verb: issue" and stopped -- with the eight verbs it was asking
+    -- for sitting in the dictionary under exactly that prefix.
+    (ws, Nothing) -> do
+      let said = unwords [ Text.unpack (safeText (Text.pack w)) | w <- ws ]
+          (near, noun) = case ws of
+                           (w:_) -> (verbLines dict ("hub:" <> w <> ":"), w)
+                           _     -> ([], "")
+      IO.hPutStrLn IO.stderr ("unknown verb: " <> said)
+      if List.null near
+        then IO.hPutStrLn IO.stderr "try: hbs2-hub --help"
+        else do
+          IO.hPutStrLn IO.stderr ""
+          IO.hPutStrLn IO.stderr (safeString noun <> " takes one of these:")
+          mapM_ (IO.hPutStrLn IO.stderr) near
+      exitWith (ExitFailure 1)
 
     -- recover is what probes for the peer socket and builds the RPC clients;
     -- without it every verb that talks to hbs2-peer fails as "not connected".
@@ -386,7 +407,12 @@ main = do
       -- prefix match against a dictionary of two hundred builtins, on the noun
       -- somebody typed to read about pull requests.
       case [ p | p <- ["hub:" <> fmap colonise s, s], not (List.null (matching dict p)) ] of
-        (p:_) -> helpList False (Just p)
+        -- THE SPELLING SOMEBODY TYPES, through the same lister the top-level
+        -- help uses. `helpList` prints the RAW dictionary keys, so `hub help
+        -- issue` -- the first thing anybody types -- answered in
+        -- `hub:issue:close`, a spelling no command line accepts and the help
+        -- above never prints.
+        (p:_) -> liftIO (mapM_ putStrLn (verbLines dict p))
         -- On stderr and non-zero, like the unknown-verb branch thirty lines up.
         -- This printed the miss on STDOUT and exited 0, so `hub help "$v" || die`
         -- learned nothing and the diagnostic landed in the stream a caller was
@@ -458,18 +484,53 @@ main = do
 
     -- What this tool does, rather than what its interpreter can do.
     hubHelp dict = do
-      let named (Id t) = Text.unpack t
-          verbs = sort [ n | k <- HM.keys dict, let n = named k, "hub:" `isPrefixOf` n ]
       putStrLn "hbs2-hub: a decentralized forge over hbs2 (PEP-17..22)"
       putStrLn ""
       putStrLn "usage: hbs2-hub <noun> <verb> [args]"
       putStrLn ""
-      forM_ verbs $ \v ->
-        putStrLn ("  " <> fmap (\c -> if c == ':' then ' ' else c) (drop 4 v))
+      mapM_ putStrLn (verbLines dict "hub:")
       putStrLn ""
       putStrLn "  hbs2-hub help <verb>    what one verb takes"
       putStrLn "  hbs2-hub --codes        every exit code, with a line each"
       putStrLn "  hbs2-hub --help <text>  search the verbs by name"
+
+    -- The verbs under a prefix, in the spelling somebody types, with what each
+    -- one is for.
+    --
+    -- FORTY-ONE NAMES AND NOTHING ELSE is what this printed, so the list said
+    -- which words exist and not which of them a contributor wants: `issue new`
+    -- and `pr new` are the whole path in, and they sat between `inbox reject`
+    -- and `log` with nothing to tell them apart.
+    --
+    -- GROUPED BY THE NOUN, which is a grouping the dictionary already carries.
+    -- A hand-written taxonomy ("contribute", "maintain") would read better and
+    -- would be a second list to keep in step with the first; this one cannot go
+    -- stale, and a verb added to a module appears under its noun by itself.
+    --
+    -- The brief comes from the same `brief` the verb registers, so `--help` and
+    -- `help <verb>` cannot disagree about what a verb is for.
+    verbLines dict p =
+      let named (Id t) = Text.unpack t
+          typed n = fmap (\c -> if c == ':' then ' ' else c) (drop 4 n)
+          briefOf k = case HM.lookup (fromString k) dict >>= bindMan of
+                        Just Man{manBrief = Just (ManBrief t)} -> Text.unpack t
+                        _                                      -> ""
+          verbs = sort [ (typed n, briefOf n)
+                       | k <- HM.keys dict, let n = named k, p `isPrefixOf` n ]
+          -- The noun, which is the word before the first space, so `log` and
+          -- `verify` are each their own group rather than being lumped under
+          -- whatever sorted next to them.
+          noun = takeWhile (/= ' ') . fst
+          wide = maximum (2 : fmap (length . fst) verbs)
+      in List.intercalate [""]
+           [ [ "  " <> pad wide v <> (if List.null b then "" else "  " <> b)
+             | (v, b) <- g ]
+           | g <- List.groupBy (\a b -> noun a == noun b) verbs ]
+      where
+        pad n s = s <> replicate (n - length s) ' '
+
+    -- A word from argv on its way to a terminal.
+    safeString = Text.unpack . safeText . Text.pack
 
     -- Whether the dictionary holds a name, as a function.
     --

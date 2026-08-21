@@ -84,7 +84,7 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 
@@ -298,6 +298,19 @@ data AcceptArgs = AcceptArgs
   }
   deriving stock (Eq,Show)
 
+-- | Which way a letter becomes canon.
+--
+-- A tag and not a Bool: the two verbs differ in one call, and
+--  True a@ would say nothing about which of them True is.
+data Folding =
+    AsSent    -- ^ the letter's own content, published as its author wrote it
+  | Honoured  -- ^ a request, re-authored verbatim under the canon key
+  deriving stock (Eq,Show)
+
+honourUsage :: Doc ()
+honourUsage =
+  "usage: hbs2-hub inbox honour --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep] [--incomplete] [--dry-run]"
+
 acceptUsage :: Doc ()
 acceptUsage =
   "usage: hbs2-hub inbox accept --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--keep] [--incomplete] [--dry-run]"
@@ -313,9 +326,12 @@ acceptEntries :: forall c m . ( IsContext c
 acceptEntries = do
 
   brief "fold one letter from the ingress mailbox into canon"
-    $ args [ arg "string" "--mailbox mailbox-key"
-           , arg "string" "--repo repo-key"
+    $ args [ arg "string" "--repo repo-key"
            , arg "string" "--message message-hash"
+           -- OPTIONAL, and the synopsis said required while the paragraph
+           -- below said the manifest is read without it. Two help surfaces on
+           -- one verb, disagreeing about the flag a maintainer types most.
+           , arg "string" "[--mailbox mailbox-key]"
            , arg "string" "[--as canon-key]"
            , arg "string" "[--keep]"
            , arg "string" "[--incomplete]"
@@ -371,12 +387,45 @@ acceptEntries = do
              <> line <> "acknowledgement goes out and the letter stays in the"
              <> line <> "mailbox." )
     $ entry $ bindMatch "hub:inbox:accept" $ nil_ \case
-        (acceptArgs -> Just a) -> lift (accept a)
-        _ -> liftIO (die (show acceptUsage))
+        (acceptArgs -> Just a) -> lift (accept AsSent a)
+        other -> liftIO (badArgs acceptUsage other)
+
+  brief "grant a request a letter made, in the words it was made in"
+    $ args [ arg "string" "--repo repo-key"
+           , arg "string" "--message message-hash"
+           , arg "string" "[--mailbox mailbox-key]"
+           , arg "string" "[--as canon-key]"
+           , arg "string" "[--keep]"
+           , arg "string" "[--incomplete]"
+           , arg "string" "[--dry-run]" ]
+    $ desc ( "The other half of triage, and the one that was unreachable."
+             <> line
+             <> line <> "A close, reopen or set from a stranger cannot become"
+             <> line <> "canon as theirs: PEP-19 makes those ops owner-authored,"
+             <> line <> "so the fold would drop the letter. `hub inbox accept`"
+             <> line <> "refuses it for the same reason, and refusing was the"
+             <> line <> "only answer this tool had -- a request could be turned"
+             <> line <> "down or ignored and never granted."
+             <> line
+             <> line <> "What the owner can do is AGREE, which means authoring"
+             <> line <> "the same content themselves. That is this verb: the"
+             <> line <> "event is the canon key's, the declared time is now, and"
+             <> line <> "the letter is kept as the origin, so a reader can see"
+             <> line <> "what was asked and who asked."
+             <> line
+             <> line <> "VERBATIM, and only what carries no words. A closing note"
+             <> line <> "would become a comment authored by the signer, and an"
+             <> line <> "attribute is the requester's choice of both name and"
+             <> line <> "value; those come back as NeedsReview, and the owner"
+             <> line <> "writes their own with `hub issue close` and friends."
+             <> dryRunHelp )
+    $ entry $ bindMatch "hub:inbox:honour" $ nil_ \case
+        (acceptArgs -> Just a) -> lift (accept Honoured a)
+        other -> liftIO (badArgs honourUsage other)
 
   where
 
-    accept a = do
+    accept folding a = do
       let repo = aaRepo a
           msg  = aaMessage a
           canonKey = fromMaybe repo (aaAs a)
@@ -495,7 +544,12 @@ acceptEntries = do
                `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
                `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
              >>= either (\e -> liftIO (refuse (show ("cannot read" <+> pretty msg
-                                                      <> ":" <+> viaShow e))
+                                                      -- 'Pretty OpenError' and not the
+                                                      -- derived Show: NotFetched and
+                                                      -- NotForUs have opposite remedies
+                                                      -- (fetch it; you are not a recipient)
+                                                      -- and read alike as constructors.
+                                                      <> ":" <+> pretty e))
                                               codeLetterUnreadable))
                         pure
 
@@ -536,10 +590,23 @@ acceptEntries = do
       -- The DECLARED set goes to the bridge whole, not the opened one: it is
       -- what the gate compares against the letter, and it has to be able to
       -- refuse a part nobody opened.
-      acc <- blessed codeTriageRefused
-               (acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
-                             now msg (attachments (lrSecret raw) (lrParts raw) evidence)
-                             (lrData raw))
+      -- THE ONE STEP THE TWO VERBS DO NOT SHARE. Everything above this is the
+      -- same work -- resolve the mailbox, sign as the canon key, read canon,
+      -- refuse a mailbox with holes, walk the parts -- and everything below it
+      -- is the same too. What differs is who authors the event: `accept`
+      -- publishes the letter's own content as its author wrote it, and `honour`
+      -- re-authors the request under the canon key (see 'honourRequest').
+      acc <- blessed codeTriageRefused $ case folding of
+        AsSent ->
+          acceptLetter ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
+                       now msg (attachments (lrSecret raw) (lrParts raw) evidence)
+                       (lrData raw)
+        -- No attachments argument, and that is not an omission: a close or a
+        -- reopen carries none, and a request that names one is not one this
+        -- can grant verbatim.
+        Honoured ->
+          honourRequest ctx (EnvelopeSigner (lrEnvelope raw)) (viewOf fr)
+                        now msg (lrData raw)
 
       -- THE BUNDLE IS CHECKED BEFORE ANYTHING IS PUBLISHED, which is PEP-20's
       -- order ("verify privately, fold, stage"): minting is pure and writes
@@ -607,7 +674,7 @@ acceptEntries = do
       staged <- case (stageAt, bundleOf (acContent acc)) of
         (Just n, Just (_, _, tip, _)) -> do
           let notStaged e = do
-                liftIO $ hPutDoc stderr
+                liftIO $ saying
                   ( "hbs2-hub: the event is in canon and the tip is not staged:"
                       <+> pretty e <> line
                       -- NOT "re-run": the same letter mints the same author box

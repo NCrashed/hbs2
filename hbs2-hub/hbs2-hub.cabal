@@ -101,6 +101,7 @@ library hub-ingress
                     , hbs2-peer
                     , hbs2-cli
                     , hbs2-keyman-direct-lib
+                    , aeson
                     , bytestring
                     , serialise
                     , time
@@ -141,6 +142,9 @@ library hub-ingress
       HBS2.Hub.CLI.Pr
       HBS2.Hub.CLI.Publish
       HBS2.Hub.CLI.Read
+      HBS2.Hub.CLI.Say
+      HBS2.Hub.CLI.Sent
+      HBS2.Hub.CLI.Status
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
       HBS2.Hub.CLI.Sync
@@ -219,6 +223,7 @@ test-suite spec
       HBS2.Hub.CompactSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
+      HBS2.Hub.StatusSpec
       HBS2.Hub.SyncSpec
       HBS2.Hub.TextSpec
       HBS2.Hub.FoldSpec

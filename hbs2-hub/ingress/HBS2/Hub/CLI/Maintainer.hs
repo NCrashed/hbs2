@@ -41,7 +41,7 @@ import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair
                            ,Writing,writingOf,dryRunHelp)
-import HBS2.Hub.CLI.Argv (flagsOf,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
                          ,flagOneOf,maintainerKeyFlags)
 
 import HBS2.CLI.Prelude
@@ -164,9 +164,19 @@ maintainerEntries = do
              <> line <> "by definition rather than by any event." )
     $ entry $ bindMatch "hub:maintainer:list" $ nil_ \case
         (maintainerListArgs -> Just repo) -> lift do
-          fr <- snd <$> canonOf repo
+          -- REFUSE, like every other read verb, and unlike the two write verbs
+          -- above it. This shared 'canonOf' with them, so a repository whose
+          -- canon has not been fetched answered with the owner key and nothing
+          -- else -- which is a true sentence about an empty fold and a false
+          -- one about the repository, and indistinguishable from a project that
+          -- really has no delegates.
+          --
+          -- The asymmetry is 'withCanon''s whole point: a verb that needs canon
+          -- to HOLD something refuses, a verb that may CREATE it does not, and
+          -- listing is the first kind.
+          fr <- snd <$> withCanon Refuse repo withGitCanon
           liftIO (mapM_ print (maintainerDoc repo fr))
-        _ -> liftIO (die (show maintainerUsage))
+        other -> liftIO (badArgs maintainerUsage other)
 
   where
 
@@ -200,7 +210,7 @@ maintainerEntries = do
                  <> line <> "bytes of base58, which is what makes it worth running." )
         $ entry $ bindMatch name $ nil_ \case
             (maintainerArgs -> Just mn) -> lift (write kind mn)
-            _ -> liftIO (die (show maintainerUsage))
+            other -> liftIO (badArgs maintainerUsage other)
 
     canonOf repo =
       -- TreatAsEmpty: a delegation may be the first event canon holds. Naming a

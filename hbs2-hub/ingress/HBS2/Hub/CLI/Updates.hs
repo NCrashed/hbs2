@@ -44,7 +44,7 @@ import HBS2.Hub.Repo (readCanon,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
-import HBS2.Hub.CLI.Argv (flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf)
 
@@ -95,7 +95,10 @@ updatesEntries = do
 
   brief "read the acknowledgements a hub sent back to you"
     $ args [ arg "string" "--mailbox own-mailbox-key"
-           , arg "string" "--repo repo-key" ]
+           , arg "string" "--repo repo-key"
+           -- Absent from the synopsis, and it is the flag that changes what the
+           -- verb answers.
+           , arg "string" "[--all]" ]
     $ desc ( "Read-only. Opens your own mailbox and prints the"
              <> line <> "acknowledgements in it: the number a thread got, its"
              <> line <> "status, and the maintainer's note when there was one."
@@ -121,7 +124,7 @@ updatesEntries = do
              <> line <> "when reading this mailbox from another machine." )
     $ entry $ bindMatch "hub:updates" $ nil_ \case
         (updatesArgs -> Just ua) -> lift (updates ua)
-        _ -> liftIO (die (show updatesUsage))
+        other -> liftIO (badArgs updatesUsage other)
 
   where
 
@@ -270,7 +273,7 @@ updatesNotes showAll noMaintainers us =
     -- reader can act on: these are real acks and the log is what did not match.
     unrelatedNote
       | unrelated > 0, not showAll =
-          [ "hub:" <+> pretty unrelated <+> "acknowledgement(s) are about threads"
+          [ "hbs2-hub:" <+> pretty unrelated <+> "acknowledgement(s) are about threads"
               <+> "this node has no record of sending, so they were set aside"
               <+> "(PEP-18: an ack does not tie its thread to its target, so a"
               <+> "maintainer can sign a true one about somebody else's). If you"
@@ -287,7 +290,7 @@ updatesNotes showAll noMaintainers us =
 
     refusedNote
       | refused > 0, acked > 0 =
-          [ "hub:" <+> pretty refused <+> "message(s) were not shown: an"
+          [ "hbs2-hub:" <+> pretty refused <+> "message(s) were not shown: an"
               <+> "acknowledgement this reader will not believe (signed by a key"
               <+> "that is not a maintainer of that repository, or a version this"
               <+> "build does not read). A mailbox is public." ]
@@ -295,7 +298,7 @@ updatesNotes showAll noMaintainers us =
 
     letterNote
       | letters > 0 =
-          [ "hub:" <+> pretty letters <+> "letter(s) are in this mailbox, which"
+          [ "hbs2-hub:" <+> pretty letters <+> "letter(s) are in this mailbox, which"
               <+> "this verb does not show. `hub inbox` reads letters." ]
       | otherwise = []
 

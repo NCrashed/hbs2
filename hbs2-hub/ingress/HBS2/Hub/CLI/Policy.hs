@@ -44,7 +44,7 @@ module HBS2.Hub.CLI.Policy
 
 import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Canon (clausesWith)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,flagText,flagWord
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord
                          ,flagOneOfMaybe,envelopeKeyFlags)
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,signerFor,signingPair)
@@ -295,7 +295,7 @@ policyEntries = do
               [ "version" <+> pretty v
               , pretty (safeText (policyText p))
               ]
-        _ -> liftIO (die (show policyUsage))
+        other -> liftIO (badArgs policyUsage other)
 
   denyVerb "hub:block" True "refuse a sender at the peer layer"
   denyVerb "hub:unblock" False "stop refusing a sender at the peer layer"
@@ -323,7 +323,7 @@ policyEntries = do
              <> line <> "the defaults first with hub policy default." )
     $ entry $ bindMatch "hub:policy:pow" $ nil_ \case
         (powArgs -> Just (mbox, bits)) -> lift (setPoW mbox bits)
-        _ -> liftIO (die (show powUsage))
+        other -> liftIO (badArgs powUsage other)
 
   brief "set what an unlisted sender or peer gets"
     $ args [ arg "string" "--mailbox mailbox-key"
@@ -346,7 +346,7 @@ policyEntries = do
     $ entry $ bindMatch "hub:policy:default" $ nil_ \case
         (defaultArgs -> Just (mbox, sender, peer))
           | isJust sender || isJust peer -> lift (setDefaults mbox sender peer)
-        _ -> liftIO (die (show defaultUsage))
+        other -> liftIO (badArgs defaultUsage other)
 
   where
 
@@ -373,7 +373,7 @@ policyEntries = do
                  <> line <> "bounds canon." )
         $ entry $ bindMatch name $ nil_ \case
             (policyArgs -> Just pa) | Just who <- paKey pa -> lift (setDeny deny pa who)
-            _ -> liftIO (die (show policyUsage))
+            other -> liftIO (badArgs policyUsage other)
 
     -- The policy as it stands, and the version it stands at. These verbs exist
     -- to talk about one mailbox's policy, so every way of not having one is

@@ -33,6 +33,7 @@ module HBS2.Hub.CLI.Read
   , Filter(..)
   , noFilter
   , threadsOf
+  , emptyListing
   , listDoc
   , showDoc
   , logDoc
@@ -56,9 +57,9 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
 import HBS2.Hub.Canon (utf8Length,takeBytes)
 import HBS2.Hub.Repo.GitBundle (validSha)
-import HBS2.Hub.CLI.Argv (flagsOf,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
                          ,repoFlags,flagRepo,repoAndFlags)
-import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),refuse)
+import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),refuse,saying,utcOf)
 import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
@@ -69,6 +70,7 @@ import HBS2.Data.Types.Refs (pattern HashLike, HashRef)
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.List (sortOn)
+import Data.List qualified as List
 import Data.Maybe (fromMaybe,isJust)
 import Control.Applicative ((<|>))
 import System.IO.Error (isResourceVanishedError)
@@ -231,6 +233,38 @@ threadsOf kind f fr =
              ]
   where key t = (tsNumber t, show (pretty (tsId t)))
 
+-- | What an empty listing says, and it used to say nothing at all.
+--
+-- AN EMPTY PROJECT AND A TYPO LOOK THE SAME on stdout, and one of them is much
+-- more likely: @--status@ and @--label@ are matched literally against attribute
+-- values, which are a stranger's bytes and extensible by design, so there is no
+-- vocabulary to check a value against -- @--status closd@ is a well-formed
+-- filter that matches nothing, and so is @--status Open@.
+--
+-- What CAN be said is what canon holds, which is why this takes the fold: the
+-- values in the answer are the ones a filter would have matched. Nothing here
+-- is a hard-coded list of statuses; a repository that invents one gets it named
+-- back the same way.
+--
+-- ON STDERR at the call site, and exit 0: an empty answer to a well-formed
+-- question is an answer. Pure and exported so a test can ask what it says.
+emptyListing :: HubKind -> Filter -> FoldResult -> Doc ann
+emptyListing kind f fr
+  | List.null ofKind = "canon holds no" <+> plural <+> "at all"
+  | otherwise =
+      "no" <+> pretty (kindOf kind) <+> "matches" <+> asked
+        <> line <> "  canon holds" <+> pretty (length ofKind) <+> plural
+        <> "; the statuses in it are:"
+        <+> hsep (punctuate comma (fmap (pretty . safeText) statuses))
+        <> line <> "  a filter is matched literally against what canon says,"
+        <+> "and canon says whatever an owner set."
+  where
+    ofKind = [ t | t <- HM.elems (frThreads fr), tsKind t == kind ]
+    plural = case kind of { HubIssue -> "issues" ; HubPR -> "pull requests" }
+    statuses = List.nub (sortOn id (fmap statusOf ofKind))
+    asked = hsep ( [ "--status" <+> pretty (safeText s) | Just s <- [fStatus f] ]
+                <> [ "--label" <+> pretty (safeText l) | Just l <- [fLabel f] ] )
+
 -- | One line per thread.
 --
 -- The number, the status, the labels and the title. Not the author: a base58
@@ -262,10 +296,15 @@ showDoc t =
          , statusDoc t
          , if tsRedacted t then "(redacted)" else pretty (safeText (tsTitle t)) ]
   , "thread" <+> hashDoc (tsId t)
-  , "kind" <+> viaShow (tsKind t)
+  , "kind" <+> pretty (kindOf (tsKind t))
   , "author" <+> keyDoc (tsAuthor t)
   , "blessed-by" <+> keyDoc (tsCanonBy t)
-  , "created" <+> pretty (tsCreated t) <+> "updated" <+> pretty (tsUpdated t)
+  -- THROUGH 'utcOf', both of them. They were epoch milliseconds, which is what
+  -- the field IS (PEP-19) and what --json carries; this report is read by a
+  -- person, and thirteen digits is not a date anybody compares to another. The
+  -- queue next door has printed them this way from the start.
+  , "created" <+> pretty (utcOf (tsCreated t))
+      <+> "updated" <+> pretty (utcOf (tsUpdated t))
   ]
   -- Only when there is one: an assignment is cleared by setting the attribute
   -- to the empty set (last-writer-wins has no way to remove one), and a line
@@ -305,13 +344,26 @@ showDoc t =
     body x | tsRedacted x = ["", "(body redacted)"]
            | otherwise    = maybe [] (\b -> ["", pretty (safeText b)]) (tsBody x)
 
-    coords p = "pr" <+> viaShow (psCoords p)
+    -- THE FIELDS, not the record. This was the derived Show of 'PRCoords', on
+    -- the most important line of a pull request: what a maintainer wants is the
+    -- branch it lands on and the commit being proposed, and what they got was
+    -- a Haskell constructor with Maybe and Just in it, three quoted strings
+    -- deep. The words are `hub pr show`'s, so the two reports agree.
+    coords p = vcat
+      ( [ "onto" <+> pretty (safeText (prOnto c))
+        , "from" <+> pretty (safeText (prSourceRef c))
+        , "tip"  <+> pretty (safeText (prSourceTip c))
+        , "base" <+> pretty (safeText (prBase c))
+        ]
+     <> [ "source" <+> pretty (safeText s) | Just s <- [prSource c] ]
+     <> [ "bundle" <+> hashDoc (ptPart b) | Just b <- [prBundle c] ] )
+      where c = psCoords p
 
     comment c =
       [ ""
       , "---" <+> hashDoc (cId c)
           <+> "by" <+> keyDoc (cAuthor c)
-          <+> "at" <+> pretty (cFoldedTs c)
+          <+> "at" <+> pretty (utcOf (cFoldedTs c))
           <> maybe mempty (\r -> " in reply to" <+> hashDoc r) (cReplyTo c)
       ]
       <> ( if cRedacted c
@@ -377,9 +429,20 @@ readEntries = do
              <> line
              <> line <> "Give a number to see one thread's events." )
     $ entry $ bindMatch "hub:log" $ nil_ \case
-        (logArgs -> Just (repo, n)) -> lift (withFold repo (out . logDoc n))
-        _ -> liftIO (die ("usage: hub log <repo-key> [<number>]"
-                            <> "\n   or: hub log --repo <key> [--number <n>]"))
+        (logArgs -> Just (repo, n)) -> lift $ withFold repo \fr -> do
+          -- A NUMBER THAT NAMES NO THREAD IS A REFUSAL, like it is in `show`.
+          -- Filtering an empty answer out of the log left this exiting 0 with
+          -- nothing on stdout, which is what a thread with no events would look
+          -- like -- so `hub log K 999` and a real but silent thread were the
+          -- same answer, and the sibling verb already exits 26 for the first.
+          for_ n $ \want ->
+            unless (any ((== Just want) . tsNumber) (HM.elems (frThreads fr))) $
+              liftIO (refuse (show ("canon holds no thread numbered" <+> pretty want))
+                             codeNoSuchThread)
+          out (logDoc n fr)
+        other -> liftIO (badArgs ("usage: hub log <repo-key> [<number>]"
+                                    <> line <> "   or: hub log --repo <key> [--number <n>]")
+                                 other)
 
   where
 
@@ -402,11 +465,18 @@ readEntries = do
                  <> line <> "issue." )
         $ entry $ bindMatch name $ nil_ \case
             (listArgs -> Just (repo, f)) ->
-              lift (withFold repo (out . listDoc . threadsOf kind f))
-            _ -> liftIO (die ("usage: hub " <> spelled name
-                                <> " <repo-key> [--status S] [--label L]"
-                                <> "\n   or: hub " <> spelled name
-                                <> " --repo <key> [--status S] [--label L]"))
+              lift $ withFold repo \fr -> do
+                let ts = threadsOf kind f fr
+                out (listDoc ts)
+                -- On stderr and exit 0: an empty answer to a well-formed
+                -- question is an answer, and this is advice about it.
+                when (List.null ts) $
+                  liftIO (saying (emptyListing kind f fr <> line))
+            other -> liftIO (badArgs ( "usage: hub " <> pretty (spelled name)
+                                         <> " <repo-key> [--status S] [--label L]"
+                                         <> line <> "   or: hub " <> pretty (spelled name)
+                                         <> " --repo <key> [--status S] [--label L]" )
+                                     other)
 
     showVerb name kind =
       brief "show one folded thread with its comments"
@@ -431,10 +501,11 @@ readEntries = do
             (showArgs -> Just (repo, which, asJson)) ->
               lift (withFold repo (pick kind (if asJson then AsJson else AsDoc)
                                              (matches which)))
-            _ -> liftIO (die ("usage: hub " <> spelled name
-                                <> " <repo-key> (<number> | --thread <id>) [--json]"
-                                <> "\n   or: hub " <> spelled name
-                                <> " --repo <key> (--number <n> | --thread <id>) [--json]"))
+            other -> liftIO (badArgs ( "usage: hub " <> pretty (spelled name)
+                                         <> " <repo-key> (<number> | --thread <id>) [--json]"
+                                         <> line <> "   or: hub " <> pretty (spelled name)
+                                         <> " --repo <key> (--number <n> | --thread <id>) [--json]" )
+                                     other)
 
     matches = \case
       ByNumber n -> byNumber n
@@ -453,7 +524,7 @@ readEntries = do
       -- nothing in it are different answers, and only one of them is worth
       -- retrying.
       []    -> liftIO $ do
-                 hPutDoc stderr ("no such thread in canon" <> line)
+                 saying ("no such thread in canon" <> line)
                  exitWith (ExitFailure codeNoSuchThread)
 
     byNumber n t = tsNumber t == Just n

@@ -34,9 +34,10 @@ import HBS2.Hub.Sent (codeNoSentLog)
 import HBS2.Hub.Repo.Manifest (codeNoManifest)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeLetterUnreadable,codeTriageRefused,codePartsTooMany
                           ,codeCanonUnwritable,codeCanonUnplannable,codeBundleUnusable)
-import HBS2.Hub.CLI.Common (codeMailboxUnknown,codePeerSilent,codeMailboxIncomplete)
+import HBS2.Hub.CLI.Common (codeMailboxUnknown,codePeerSilent,codeMailboxIncomplete
+                           ,codeNoKeyman)
 import HBS2.Hub.CLI.Compact (codeNothingToCompact,codeNotThisCanon,codeCanonUnreadableHere)
-import HBS2.Hub.CLI.Compose (codeNoKey,codeNotStored,codeNoWork,codeWrongSigil)
+import HBS2.Hub.CLI.Compose (codeNoKey,codeNotStored,codeNoWork,codeWrongSigil,codeUnsendable)
 import HBS2.Hub.CLI.Maintainer (codeNotDelegated)
 import HBS2.Hub.CLI.Policy (codeNoPolicy,codeNotSet)
 import HBS2.Hub.CLI.Pr (codeBundleFailed,codeNoSuchPr,codeNotMerged,codeNotStaged)
@@ -96,6 +97,8 @@ data Refusal =
   | CanonUnreadableHere
   | AmbiguousNumber
   | MailboxIncomplete
+  | NoKeyman
+  | Unsendable
   deriving stock (Eq,Ord,Show,Enum,Bounded)
 
 -- | Every one of them, by construction.
@@ -143,6 +146,8 @@ codeFor = \case
   CanonUnreadableHere -> codeCanonUnreadableHere
   AmbiguousNumber     -> codeAmbiguousNumber
   MailboxIncomplete   -> codeMailboxIncomplete
+  NoKeyman            -> codeNoKeyman
+  Unsendable          -> codeUnsendable
 
 -- | And what it means, in the one line a script author needs.
 --
@@ -185,6 +190,8 @@ meaning = \case
   CanonUnreadableHere -> "canon holds a file this reader cannot carry forward"
   AmbiguousNumber     -> "canon holds more than one thread with that number"
   MailboxIncomplete   -> "the mailbox tree did not read whole; nothing written"
+  NoKeyman            -> "this machine has no key database (run hbs2-keyman)"
+  Unsendable          -> "the letter was not composed; nothing was sent"
 
 -- | The table, for @hbs2-hub --codes@.
 --

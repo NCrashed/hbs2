@@ -40,12 +40,13 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Bridge (TriageError(..))
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf
                            ,codeMailboxUnknown,codePeerSilent
                            ,withCanon,OnMissing(..)
                            ,mailboxHoles,holesDoc)
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
-import HBS2.Hub.CLI.Argv (flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -136,7 +137,7 @@ showEntries = do
              <> line <> "permission." )
     $ entry $ bindMatch "hub:inbox:show" $ nil_ \case
         (showArgs -> Just sa) -> lift (showIt sa)
-        _ -> liftIO (die (show showUsage))
+        other -> liftIO (badArgs showUsage other)
 
   where
 
@@ -268,8 +269,11 @@ showDoc sw =
 
     canonDoc = case swFolded sw of
       Nothing -> []
-      Just True -> [ field "canon" ("already folded; accept refuses it as"
-                                      <+> "AlreadyInCanon") ]
+      -- The SENTENCE the accept prints, not the constructor it prints it for:
+      -- this line exists to tell a maintainer what the next command will do,
+      -- and 'TriageError' has a hand-written Pretty for exactly that moment.
+      Just True -> [ field "canon" ("already folded; accept refuses it:"
+                                      <+> pretty AlreadyInCanon) ]
       Just False -> [ field "canon" "not folded" ]
 
 -- | What is true ABOUT the report above, for stderr.

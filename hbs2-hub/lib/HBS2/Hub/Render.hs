@@ -36,6 +36,12 @@ module HBS2.Hub.Render
   , DiffAvailability(..)
   , threadContract
   , renderContract
+    -- | @issue@ or @pr@, in the one spelling every surface uses.
+    --
+    -- Exported because there were three: this, `hub issue show`'s own copy, and
+    -- the derived Show that `hub log` printed as @HubIssue@. A word a reader
+    -- filters on cannot be a word each renderer chooses for itself.
+  , kindOf
   ) where
 
 import HBS2.Hub.Types

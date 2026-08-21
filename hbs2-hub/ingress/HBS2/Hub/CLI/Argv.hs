@@ -26,12 +26,21 @@ module HBS2.Hub.CLI.Argv
   , flagMaybe
   , flagText
   , flagWord
+  , keyFlags
+  , argNotes
+  , badArgs
   ) where
 
+import HBS2.Hub.Types (safeText,validHashRef)
+import HBS2.Hub.CLI.Say (saying)
+
 import HBS2.CLI.Prelude
+import HBS2.Data.Types.Refs (pattern HashLike)
 
 import Control.Applicative ((<|>))
 import Data.List (intercalate)
+import Data.Text qualified as Text
+import System.Exit (exitWith,ExitCode(..))
 import Data.List qualified as List
 import Data.Word (Word64)
 import Text.Read (readMaybe)
@@ -248,9 +257,6 @@ flagsAndSwitches known switches syn = do
       StringLike s -> "--" `List.isPrefixOf` s
       _            -> False
 
-    splitFlag s = case List.break (== '=') s of
-      (k, '=' : v) | "--" `List.isPrefixOf` k, length k > 2 -> Just (k, v)
-      _                                                     -> Nothing
 
 -- | The value of a flag that may appear exactly once.
 --
@@ -366,7 +372,11 @@ flagText = \case
 flagWord :: Syntax c -> Maybe Word64
 flagWord x = do
   s <- flagText x
-  n <- readMaybe s
+  -- A LEADING '#', because every listing prints one. `hub issue list` gives
+  -- @#7@, `hub issue show K #7` was a usage error, and the number that came
+  -- back was the one thing on the line the reader was meant to reuse. It is one
+  -- character and it means the same thing in both directions.
+  n <- readMaybe (case s of { '#' : rest -> rest ; _ -> s })
   guard (n >= 0 && n <= toInteger (maxBound :: Word64))
   pure (fromIntegral n)
 
@@ -442,3 +452,127 @@ authorKeyFlags     = ["--author-key", "--key"]
 envelopeKeyFlags   = ["--envelope-key", "--key"]
 maintainerKeyFlags = ["--maintainer-key", "--key"]
 assigneeFlags      = ["--assignee", "--to"]
+
+-- | The flags whose value is thirty-two bytes of base58, across the whole tool.
+--
+-- ONE LIST AND NOT ONE PER VERB, because what it is for is tool-wide: a value
+-- that is not a key is worth naming as such wherever it was given, and a list
+-- kept per verb goes stale one verb at a time. A flag missing from here costs a
+-- diagnosis and nothing else, which is the right way round.
+keyFlags :: [String]
+keyFlags = repoFlags <> authorKeyFlags <> envelopeKeyFlags <> maintainerKeyFlags
+             <> assigneeFlags
+             <> [ "--mailbox", "--message", "--event", "--recipient", "--sender"
+                , "--as", "--thread" ]
+
+-- | One word of a command line, as far as this can tell without the verb.
+data Arg c =
+    Pair String (Syntax c)  -- ^ @--flag value@, or @--flag=value@
+  | Dangling String         -- ^ a flag with nothing after it
+  | Bare (Syntax c)         -- ^ a word that claimed nothing and was claimed by nothing
+
+-- | What is wrong with this command line, in the words the caller typed.
+--
+-- WHY THIS EXISTS. Every reader here answers 'Maybe', so the failure branch of
+-- every verb had exactly one thing to say -- the synopsis -- and said it to both
+-- of these:
+--
+-- > hbs2-hub issue list NOTAKEY   -> usage: ...  (exit 1)
+-- > hbs2-hub issue list           -> usage: ...  (exit 1)
+--
+-- Every identifier in this tool is forty-four characters of base58 pasted from
+-- somewhere else, so "that is not a key, and here it is" is the highest-value
+-- sentence the tool can print, and it did not exist.
+--
+-- PURE, and separate from 'badArgs', because the call site ends in 'exitWith'
+-- and a Doc built inside one cannot be asserted on.
+--
+-- SAYS ONLY WHAT IT KNOWS. It does not have the verb's flag list -- that lives
+-- inside the reader that just failed -- so it cannot say "unknown flag". What it
+-- can say is true of any command line here: a key-shaped flag whose value is not
+-- a key, a flag with no value, a repeated flag, and a bare word, which nothing
+-- in this tool takes.
+argNotes :: forall c ann . IsContext c => [Syntax c] -> [Doc ann]
+argNotes syn = concatMap note args <> bareNotes <> repeats
+  where
+    args = walk syn
+
+    walk = \case
+      [] -> []
+      (StringLike k : rest)
+        | Just (k', v) <- splitFlag k -> Pair k' (mkStr @c v) : walk rest
+      (StringLike k : rest)
+        | "--" `List.isPrefixOf` k ->
+            case rest of
+              (v : more) | not (flagLike v) -> Pair k v : walk more
+              _                             -> Dangling k : walk rest
+      (x : rest) -> Bare x : walk rest
+
+    flagLike = \case
+      StringLike s -> "--" `List.isPrefixOf` s
+      _            -> False
+
+    note = \case
+      Pair k v
+        | k `elem` keyFlags, not (base58ish v) ->
+            [ pretty k <+> "takes thirty-two bytes of base58, and this is not:"
+                <+> word v ]
+      Dangling k -> [ pretty k <+> "was given with nothing after it" ]
+      _ -> []
+
+    -- A FACT ABOUT THE PARSE and not a verdict on each word. Some verbs take a
+    -- positional key ("hub issue list <repo-key>") or a number after it, and
+    -- most take none at all; this cannot tell which verb it is in, so it names
+    -- the words that ended up in no pair and leaves the reader to compare them
+    -- against the synopsis directly above.
+    --
+    -- The second line is the one 11.5 is about, and it IS a verdict, because it
+    -- is checkable without knowing the verb. Not said of a word that reads as a
+    -- number: several verbs take one positionally, and "7 is not thirty-two
+    -- bytes of base58" is noise in front of the sentence that matters.
+    bareNotes
+      | List.null bares = []
+      | otherwise =
+          [ "no flag claimed:" <+> hsep (fmap word bares) ]
+            <> [ word w <+> "is not thirty-two bytes of base58"
+               | w <- bares, not (base58ish w), not (numberish w) ]
+      where
+        bares = [ w | Bare w <- args ]
+        numberish v = maybe False (all (`elem` ("0123456789" :: String))) (flagText v)
+
+    repeats =
+      [ pretty k <+> "was given more than once"
+      | k <- List.nub [ k | Pair k _ <- args ]
+      , length [ () | Pair k' _ <- args, k' == k ] > 1
+      ]
+
+    -- 'validHashRef' and not 'HashLike' alone. A HashRef is a newtype over a
+    -- ByteString, so the pattern decodes any width of base58 and matches: a
+    -- single character is a HashRef of one byte, and `--mailbox x` went past
+    -- this saying nothing.
+    base58ish = \case
+      SignPubKeyLike{} -> True
+      HashLike h       -> validHashRef h
+      _                -> False
+
+    -- THROUGH 'safeText'. This is a stranger's argument on its way to a
+    -- terminal, and it reached here precisely because nothing could parse it.
+    word v = maybe "(not a word)" (pretty . safeText . Text.pack) (flagText v)
+
+-- | The synopsis, plus 'argNotes', and exit 1.
+--
+-- Exit 1 because PEP-22 gives 1 to a usage error and this is one: what changes
+-- is what the caller is told, not what a hook branches on.
+badArgs :: forall c a ann . IsContext c => Doc ann -> [Syntax c] -> IO a
+badArgs usage syn = do
+  saying (vcat (unAnnotate usage : fmap ("  " <>) (argNotes syn)) <> line)
+  exitWith (ExitFailure 1)
+
+-- | @--flag=value@ split on the FIRST @=@, so a value may contain one.
+--
+-- Top level because two things read it: the parser that binds the pair, and the
+-- diagnosis that has to see the same shape the parser saw.
+splitFlag :: String -> Maybe (String, String)
+splitFlag s = case List.break (== '=') s of
+  (k, '=' : v) | "--" `List.isPrefixOf` k, length k > 2 -> Just (k, v)
+  _                                                     -> Nothing

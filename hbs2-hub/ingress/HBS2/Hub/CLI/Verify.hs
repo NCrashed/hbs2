@@ -39,7 +39,8 @@ module HBS2.Hub.CLI.Verify
   ) where
 
 import HBS2.Hub.Types (pathText,HubKey)
-import HBS2.Hub.CLI.Argv (repoAndFlags)
+import HBS2.Hub.CLI.Argv (repoAndFlags,badArgs)
+import HBS2.Hub.CLI.Say (saying)
 import HBS2.Hash (hashObject,HbSync)
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Hub.Fold
@@ -71,7 +72,7 @@ verifyEntries = do
              <> line
              <> line <> "Fetch canon first; a plain clone does not bring it, since"
              <> line <> "git's default refspec covers only heads and tags:"
-             <> line <> "  git fetch <remote> '+refs/hbs2/meta:refs/hbs2/meta'"
+             <> line <> "  hbs2-hub sync"
              <> line
              <> line <> "The repository key is an argument because the tree cannot"
              <> line <> "be trusted to say whose it is: the owner key is the root of"
@@ -90,7 +91,7 @@ verifyEntries = do
         -- `hub verify --help` -- landed on "hbs2-hub: BadFormException
         -- (hub:verify --help)", which names an internal type and a spelling the
         -- caller did not type.
-        _ -> liftIO (die (show (usage :: Doc ())))
+        other -> liftIO (badArgs (usage :: Doc ()) other)
 
 asKey :: forall c . IsContext c => Syntax c -> Maybe HubKey
 asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
@@ -112,7 +113,7 @@ usage = "usage: hub verify <repo-key>" <> line
 -- future were the same event.
 refused :: CanonUnreadable -> IO ()
 refused u = do
-  hPutDoc stderr (refusalDoc u <> line)
+  saying (refusalDoc u <> line)
   exitWith (ExitFailure (codeOf u))
 
 -- Is this a problem with the CLONE rather than with the tree? Both mean "not
@@ -142,7 +143,11 @@ notHere = \case
 
 -- | What a refusal says: the reason, and what to do about it.
 refusalDoc :: CanonUnreadable -> Doc ann
-refusalDoc u = "hub:" <+> pretty u <> advice u
+-- 'hbs2-hub' and not 'hub', which is what 'refuse' has always printed and what
+-- the binary is called. `hub` is a symlink this flake installs and a widely
+-- installed GitHub tool, so a message naming it is a message about somebody
+-- else's program on most machines.
+refusalDoc u = "hbs2-hub:" <+> pretty u <> advice u
   where
     -- Total, and the wildcard is gone with the Werror above holding it that way.
     -- Two of these used to fall into it and print a bare complaint: a repository
@@ -150,6 +155,13 @@ refusalDoc u = "hub:" <+> pretty u <> advice u
     -- is least likely to work out unaided.
     advice = \case
       NoCanonRef _ -> line <> "  Fetch it, which a plain clone does not:" <> line
+                      -- THIS TOOL'S OWN VERB FIRST. It fetches all three refs
+                      -- canon needs (see `hub sync`), and the raw refspec below
+                      -- fetches one of them -- so the shorter advice was also
+                      -- the incomplete one, offered to somebody who has just
+                      -- learned this tool exists.
+                      <> "    hbs2-hub sync" <> line
+                      <> "  or by hand, which fetches only the one ref:" <> line
                       <> "    git fetch <remote> '+" <> pretty metaRef
                       <> ":" <> pretty metaRef <> "'" <> line
                       -- Three causes, and git gives this reader no way to tell

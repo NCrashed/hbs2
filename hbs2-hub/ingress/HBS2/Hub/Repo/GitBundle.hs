@@ -40,6 +40,7 @@ module HBS2.Hub.Repo.GitBundle
   , Synced(..)
   , SyncedCanon(..)
   , publishTo
+  , remoteCanon
   , Published(..)
   , PublishedCanon(..)
   , PublishedPulls(..)
@@ -678,10 +679,9 @@ publishTo cwd remote = runExceptT do
       -- inferred from the push failing, because "the remote is ahead" and "the
       -- remote refused for some other reason" are two different sentences and
       -- git says them both the same way.
-      probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
-                 ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
+      theirs0 <- ExceptT (remoteCanon cwd remote)
 
-      case theirTip probe of
+      case theirs0 of
         Nothing -> push mine
         Just theirs
           | theirs == mine -> pure (PublishedSame mine)
@@ -746,11 +746,6 @@ publishTo cwd remote = runExceptT do
       pure PullsMoved
 
     -- ls-remote answers a line of "<sha>\t<ref>", or nothing at all.
-    theirTip bs = case BS.split 0x09 (BS.takeWhile (/= 0x0a) bs) of
-      (sha : _) | not (BS.null (BS.filter (not . isSpace8) sha)) ->
-        Just (Text.strip (Text.decodeUtf8Lenient sha))
-      _ -> Nothing
-
 -- | Move the canon ref, through what it currently holds.
 --
 -- The one write 'hub sync' makes, and it is a compare-and-swap for the reason
@@ -858,3 +853,30 @@ refusal what c e0
 -- transport.
 isSpace8 :: Word8 -> Bool
 isSpace8 w = w `elem` [0x20, 0x09, 0x0a, 0x0d]
+
+-- | What a remote holds for @refs\/hbs2\/meta@, without writing anything.
+--
+-- SPLIT OUT OF 'publishTo' rather than reimplemented beside it: `hub status`
+-- wants the same probe and must not push to get it, and two ls-remote parsers
+-- would be two answers to "is this published". 'publishTo' calls this and then
+-- decides; this only asks.
+--
+-- 'Nothing' is the remote holding no canon, which is not an error: a remote
+-- nobody has published to is the ordinary state of a fresh repository.
+remoteCanon :: MonadUnliftIO m
+            => Maybe FilePath -> Text -> m (Either BundleError (Maybe Text))
+remoteCanon cwd remote = runExceptT do
+  -- A REMOTE NAME REACHES A COMMAND LINE, so it is checked here as well as in
+  -- the caller: this is exported and the rule in this module is that every
+  -- string on a command line was checked by whoever put it there.
+  checked "remote name" validRefName remote
+  probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
+             ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
+  pure (firstField probe)
+
+-- The sha at the head of an ls-remote line, which is tab-separated.
+firstField :: BS.ByteString -> Maybe Text
+firstField bs = case BS.split 0x09 (BS.takeWhile (/= 0x0a) bs) of
+  (sha : _) | not (BS.null (BS.filter (not . isSpace8) sha)) ->
+    Just (Text.strip (Text.decodeUtf8Lenient sha))
+  _ -> Nothing

@@ -44,6 +44,7 @@ import Control.Monad.Except (ExceptT(..),runExceptT,throwError)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Bifunctor (first)
 import Data.HashSet qualified as HS
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -119,7 +120,13 @@ sink cwd indexFile = CanonSink
       -- orphan root PEP-19 asks for.
       _ <- case parent of
              Nothing -> pure ""
-             Just p  -> ExceptT (run whenMs "read-tree" ["read-tree", Text.unpack p] mempty)
+             -- AND ITS FAILURE IS ITS OWN. read-tree fails on the WHOLE
+             -- parent when one path in it is unindexable, and every verb that
+             -- writes canon starts here -- so the state is "this repository
+             -- cannot be written until somebody rewrites canon" and not "this
+             -- command failed". See 'WriterUnindexable'.
+             Just p  -> ExceptT ( run whenMs "read-tree" ["read-tree", Text.unpack p] mempty
+                                    <&> first unindexable )
 
       _ <- ExceptT (run whenMs "update-index" ["update-index", "-z", "--index-info"]
                         (LBS.fromStrict (indexInfo (zip (fmap fst (cnFiles cw)) oids))))
@@ -286,3 +293,13 @@ sink cwd indexFile = CanonSink
       Left (GitUnstartable e) -> Left (WriterFailed e)
       Left (GitStalled e)     -> Left (WriterStalled e)
       Right r                 -> Right r
+
+-- | read-tree's refusal, as the state it actually describes.
+--
+-- Only that ONE command's, and only its refusal: a read-tree that could not be
+-- started or that stalled is what it says it is, and neither of those is a
+-- statement about what canon holds.
+unindexable :: CanonUnwritable -> CanonUnwritable
+unindexable = \case
+  WriterRefused _ t -> WriterUnindexable t
+  e                 -> e

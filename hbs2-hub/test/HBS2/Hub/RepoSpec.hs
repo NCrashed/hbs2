@@ -628,6 +628,74 @@ spec = eventVersions >> do
         , ("threads/x", FileUnexpected)
         ]
 
+    -- ONE OF THESE IN CANON MAKES THE REPOSITORY UNWRITABLE BY EVERY VERB.
+    -- git's index refuses the path, and every canon write reads the parent tree
+    -- into an index first, so read-tree fails on the whole parent -- and no
+    -- verb here deletes a file from canon. Not folding them is what keeps a
+    -- compaction from writing the names back.
+    --
+    -- The counting rule was not enough on its own: `threads/a//b` has two
+    -- non-empty components once the empty one is dropped, which is how it
+    -- passed.
+    --
+    -- A DENYLIST is what this pins, and the test next door pins the other side
+    -- of that choice: a multibyte component is NOT in here, because git indexes
+    -- one and a reader stricter than git stops folding canon another reader
+    -- takes.
+    it "will not fold a path git's index refuses" $ do
+      owner <- kp
+      let bad = [ "threads/.git/00000000000000000001-abc"
+                , "threads/a//b"
+                , "repo/.GIT"
+                , "threads/git~1/0001-x"
+                , "threads/t/a\\b"
+                , "threads/t/"
+                , "threads//0001-x"
+                -- The two the old rule did catch, kept so that narrowing it
+                -- cannot lose them.
+                , "threads/../x"
+                , "threads/t/."
+                ]
+          src = inMem (pure (Right "deadbeef"))
+                  (const (pure (Right
+                    ( TreeEntry versionPath (Blob "v" 13)
+                    : [ TreeEntry p (Blob "b" 4) | p <- bad ] ))))
+                  (\oid -> pure (BlobText (if oid == "v"
+                                             then renderMeta (metaAt hubMetaVersion)
+                                             else "junk")))
+      st <- readOk src (fst owner)
+      -- ON THE PROBLEM AND NOT ON THE PATH, which is the difference between
+      -- pinning this and pinning nothing. These fixtures carry junk, so a path
+      -- that IS taken for an event lands in stBad anyway -- as a file that
+      -- would not parse. Asserting the list of paths therefore passed whether
+      -- or not the classifier had been narrowed at all, which is what the first
+      -- version of this test did.
+      --
+      -- FileUnexpected is the answer that means "the layout does not have this
+      -- path", and it is the one that keeps the name out of a rewrite.
+      stBad st `shouldMatchList` [ (p, FileUnexpected) | p <- bad ]
+      stEvents st `shouldBe` []
+
+    -- The other half of the same rule: narrowing must not stop the layout's own
+    -- names being events. Both prefixes, because they have different depths.
+    it "still folds the names this layout writes" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          ev = mkEvent alice owner
+                 (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                 (canon repo 1 (Just 1))
+          thr = eventId ev
+          dele = mkEvent owner owner (ADelegate repo (fst alice) 2000)
+                   (canon repo 2 Nothing)
+          files = [ ("version", renderMeta (metaAt hubMetaVersion))
+                  , (threadDir thr <> "/" <> eventFileName 1 thr, renderEvent ev)
+                  , (repoDir <> "/" <> eventFileName 2 (eventId dele), renderEvent dele)
+                  ]
+      st <- readOk (inMemory files) (fst owner)
+      stBad st `shouldBe` []
+      length (stEvents st) `shouldBe` 2
+
     it "says a version file is missing rather than only implying it" $ do
       owner <- kp
       -- PEP-19 requires the file. The tree still folds, under the oldest rules,
