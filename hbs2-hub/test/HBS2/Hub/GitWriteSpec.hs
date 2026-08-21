@@ -370,7 +370,7 @@ spec1 = do
     it "gives up on a git that will not finish, and says that is what happened" $ do
       let waits = ["-c", "alias.z=!sleep 30", "z"]
       t0 <- getCurrentTime
-      r <- gitRun Nothing [] 2 "slow" waits mempty
+      r <- gitRun Nothing [] 2 maxBound "slow" waits mempty
       t1 <- getCurrentTime
       case r of
         Left (GitStalled said) ->
@@ -380,6 +380,27 @@ spec1 = do
       -- Well inside the thirty seconds the child asked for: the bound plus the
       -- teardown's own escalation, and nothing waiting on the child itself.
       diffUTCTime t1 t0 `shouldSatisfy` (< 15)
+
+    -- THE CEILING ON WHAT GIT MAY SAY, which was @maxBound@ for every caller
+    -- under a sentence that is true of one of them (stdout of `bundle create -`
+    -- IS the bundle). So `bundle verify` on a header-only bundle of 20000 refs
+    -- -- a small text file somebody attaches -- answered with 1 169 009 bytes
+    -- at exit zero, and `git diff` was bounded by nothing but its 30 s timeout.
+    it "refuses an answer longer than the caller allowed for, and keeps the prefix" $ do
+      let says = ["-c", "alias.z=!printf 'aaaaaaaaaa'", "z"]
+      r <- gitRun Nothing [] 10 4 "loud" says mempty
+      case r of
+        Left (GitTooMuch what n kept) -> do
+          what `shouldBe` "loud"
+          n `shouldBe` 4
+          -- The prefix is kept and the rest is dropped as it arrives: a caller
+          -- whose stream is a report shows this much and says it is truncated.
+          kept `shouldBe` "aaaa"
+        other -> expectationFailure ("expected GitTooMuch, got " <> show other)
+      -- ...and an answer that fits is not touched
+      gitRun Nothing [] 10 64 "quiet" says mempty >>= \case
+        Right (ExitSuccess, out, _) -> out `shouldBe` "aaaaaaaaaa"
+        other -> expectationFailure ("expected the whole answer, got " <> show other)
 
     -- THE PUBLISH REFUSING, which nothing exercised. The test above is caught
     -- by the pre-check -- a stale parent, refused before anything is written --

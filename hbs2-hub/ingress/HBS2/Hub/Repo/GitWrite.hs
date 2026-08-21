@@ -319,9 +319,14 @@ sink cwd indexFile = CanonSink
   raw :: Word64 -> Text -> [String] -> LBS.ByteString
       -> m (Either CanonUnwritable (ExitCode, ByteString, ByteString))
   raw whenMs what args input =
-    gitRun cwd (extraEnv whenMs) callSeconds what args input <&> \case
+    gitRun cwd (extraEnv whenMs) callSeconds maxListingBytes what args input <&> \case
       Left (GitUnstartable e) -> Left (WriterFailed e)
       Left (GitStalled e)     -> Left (WriterStalled e)
+      -- A listing of canon longer than the reader will take. Its own sentence
+      -- and not a git refusal: git did what it was asked and this build is the
+      -- one that stopped, which is what ReaderSays is for.
+      Left (GitTooMuch w n _) -> Left (WriterRefused w (ReaderSays
+            ("answered with more than " <> Text.pack (show n) <> " bytes")))
       Right r                 -> Right r
 
 -- | read-tree's refusal, as the state it actually describes.

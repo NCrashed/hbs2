@@ -54,7 +54,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Render
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
-import HBS2.Hub.Repo.Git (withGitCanon,gitRun)
+import HBS2.Hub.Repo.Git (withGitCanon,gitRun,GitTrouble(..))
 import HBS2.Hub.Canon (utf8Length,takeBytes)
 import HBS2.Hub.Repo.GitBundle (validSha)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
@@ -578,15 +578,23 @@ readEntries = do
       Nothing -> pure Nothing
       Just pr -> do
         let co = psCoords pr
+        -- BOUNDED AT THE PIPE, and the bound is this contract's own. It used to
+        -- be taken whole -- `gitRun` kept stdout with no ceiling at all -- and
+        -- truncated afterwards, so a proposal of a hundred megabytes of
+        -- generated files was a hundred megabytes held in memory to print 256
+        -- KiB of it. What comes back over the bound is the prefix, which is
+        -- exactly what this rendered before, and 'GitTooMuch' is what says the
+        -- flag must be set.
         r <- case diffArgv co of
                Nothing -> pure (Left ())
-               Just as -> Right <$> gitRun Nothing [] 30 "the diff of a proposal" as mempty
+               Just as -> Right <$> gitRun Nothing [] 30 maxDiffBytes
+                                          "the diff of a proposal" as mempty
         pure $ Just $ case r of
           Right (Right (ExitSuccess, o, _)) ->
-            let txt = Text.decodeUtf8With Text.lenientDecode o
-            in if utf8Length txt > maxDiffBytes
-                 then PRDiff DiffAvailable True (takeBytes maxDiffBytes txt)
-                 else PRDiff DiffAvailable False txt
+            PRDiff DiffAvailable False (Text.decodeUtf8With Text.lenientDecode o)
+          Right (Left (GitTooMuch _ _ kept)) ->
+            PRDiff DiffAvailable True
+                   (takeBytes maxDiffBytes (Text.decodeUtf8With Text.lenientDecode kept))
           -- git could not answer, or was never asked because the coordinates
           -- are not object names. Whether the objects can be got back is what
           -- canon says: a bundle part is a way, a fork pointer is not one this

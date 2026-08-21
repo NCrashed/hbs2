@@ -55,6 +55,7 @@ module HBS2.Hub.Repo.GitBundle
   ) where
 
 import HBS2.Hub.Types (safeText,validRefName,validSha,validAbbrevSha)
+import HBS2.Hub.Letter (maxPartBytes)
 import HBS2.Hub.Repo (Told(..), told)
 import HBS2.Hub.Repo.Git (gitRun, GitTrouble(..))
 
@@ -151,12 +152,30 @@ data BundleError =
     -- several -- is this build guessing at git's refspec rules, on a value a
     -- stranger chose.
   | BundleNotOneRef Int
+    -- | git said more on stdout than the answer it was asked for may weigh.
+    --
+    -- Carries what was asked for and the bound it went past. Not a refusal by
+    -- git and not a mistake by the caller: every one of these commands is asked
+    -- about a stranger's bytes -- a bundle somebody attached, a repository
+    -- somebody published -- and how much git says about them is that stranger's
+    -- choice. A header-only bundle of 20000 refs, which is a small text file, is
+    -- 1 169 009 bytes out of `bundle verify` at exit zero.
+  | BundleTooMuch Text Int
   deriving stock (Eq,Show)
 
 instance Pretty BundleError where
   pretty = \case
     BundleUnstartable e -> "could not run git:" <+> pretty e
     BundleStalled e     -> "git did not finish:" <+> pretty e
+    BundleTooMuch what n ->
+      nest 2 $ vsep [ "git" <+> pretty what <+> "answered with more than"
+                        <+> pretty n <+> "bytes"
+                    , "for a bundle of your own range, that is more than a"
+                        <+> "letter may carry: propose a smaller one"
+                    , "for anything else, what git was asked about is a"
+                        <+> "stranger's and so is how much there is to say"
+                        <+> "about it"
+                    , "nothing was kept past the bound and nothing was written" ]
     BundleRefused what t -> nest 2 $ vsep [ "git" <+> pretty what <+> "refused", told t ]
     BundleEmpty ->
       nest 2 $ vsep [ "there is nothing between the base and the source ref"
@@ -256,7 +275,7 @@ bundleRange cwd base ref = runExceptT do
   -- advice this error carries. Pinned for this ONE call rather than in
   -- 'forcedEnv', because everywhere else git's own words are shown to a human
   -- and translating them for that human is the right behaviour.
-  out <- ExceptT $ callWith [("LC_ALL","C")] cwd bundleSeconds "bundle create"
+  out <- ExceptT $ callKeeping [("LC_ALL","C")] (fromIntegral maxPartBytes) cwd bundleSeconds "bundle create"
            ["bundle", "create", "-", Text.unpack base <> ".." <> Text.unpack ref]
            `orEmpty` "empty bundle"
 
@@ -597,7 +616,7 @@ syncFrom cwd remote = runExceptT do
   -- folded anything yet is the ordinary state of a new one rather than an
   -- error. A wildcard would be quiet, and would also mirror whatever else ever
   -- appears under refs/hbs2; ls-remote asks the question that is being asked.
-  probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
+  probe <- ExceptT $ callKeeping [] gitListing cwd fetchSeconds "ls-remote"
              ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
 
   here <- ExceptT (refTip cwd "refs/hbs2/meta")
@@ -784,7 +803,7 @@ publishTo cwd remote = runExceptT do
   -- And the staged proposals, when there are any. A push with no matching
   -- source refspec is an error from git, and a repository nobody has proposed
   -- anything to is not an error, so the question is asked first.
-  staged <- ExceptT $ call cwd smallSeconds "for-each-ref"
+  staged <- ExceptT $ callKeeping [] gitListing cwd smallSeconds "for-each-ref"
               ["for-each-ref", "--format=%(refname)", "refs/hbs2/pulls/"]
 
   let anyStaged = not (BS.null (BS.filter (not . isSpace8) staged))
@@ -861,6 +880,23 @@ smallSeconds  = 60
 checked :: Monad m => Text -> (Text -> Bool) -> Text -> ExceptT BundleError m ()
 checked what ok v = unless (ok v) (throwError (BundleBadName what v))
 
+-- | What an answer of each kind may weigh on stdout.
+--
+-- THE CEILING IS A PARAMETER NOW, and these are what it is set to. It used to
+-- be @maxBound@ inside 'gitRun', under a sentence that is true of exactly one
+-- caller: stdout of `bundle create -` IS the bundle, so a bound there truncates
+-- an artifact. Every other command here answers with a ref, an object name, a
+-- size or a listing, about bytes a stranger published.
+--
+-- 'gitAnswer' is the default because it is the safe one: a new caller that says
+-- nothing gets the bound, not the absence of one. Two commands answer with a
+-- listing whose length is a function of the CHANGE rather than of a stranger's
+-- imagination -- the objects a proposal adds, the refs a remote publishes --
+-- and those say so.
+gitAnswer, gitListing :: Int
+gitAnswer  = 64 * 1024
+gitListing = 8 * 1024 * 1024
+
 run :: MonadUnliftIO m
     => Maybe FilePath -> Int -> Text -> [String]
     -> m (Either BundleError (ExitCode, ByteString, ByteString))
@@ -870,11 +906,18 @@ run = runWith []
 runWith :: MonadUnliftIO m
         => [(String,String)] -> Maybe FilePath -> Int -> Text -> [String]
         -> m (Either BundleError (ExitCode, ByteString, ByteString))
-runWith env cwd secs what args =
-  gitRun cwd env secs what args mempty <&> \case
-    Left (GitUnstartable e) -> Left (BundleUnstartable e)
-    Left (GitStalled e)     -> Left (BundleStalled e)
-    Right r                 -> Right r
+runWith env = runKeeping env gitAnswer
+
+-- | And the same again, for an answer that is allowed to be larger.
+runKeeping :: MonadUnliftIO m
+           => [(String,String)] -> Int -> Maybe FilePath -> Int -> Text -> [String]
+           -> m (Either BundleError (ExitCode, ByteString, ByteString))
+runKeeping env keep cwd secs what args =
+  gitRun cwd env secs keep what args mempty <&> \case
+    Left (GitUnstartable e)   -> Left (BundleUnstartable e)
+    Left (GitStalled e)       -> Left (BundleStalled e)
+    Left (GitTooMuch w n _)   -> Left (BundleTooMuch w n)
+    Right r                   -> Right r
 
 -- The common case: a non-zero exit is a refusal, and stdout is the answer.
 call :: MonadUnliftIO m
@@ -884,8 +927,14 @@ call = callWith []
 callWith :: MonadUnliftIO m
          => [(String,String)] -> Maybe FilePath -> Int -> Text -> [String]
          -> m (Either BundleError ByteString)
-callWith env cwd secs what args =
-  runWith env cwd secs what args <&> \case
+callWith env = callKeeping env gitAnswer
+
+-- | The same, for an answer that is allowed to be larger than 'gitAnswer'.
+callKeeping :: MonadUnliftIO m
+            => [(String,String)] -> Int -> Maybe FilePath -> Int -> Text -> [String]
+            -> m (Either BundleError ByteString)
+callKeeping env keep cwd secs what args =
+  runKeeping env keep cwd secs what args <&> \case
     Left e -> Left e
     Right (ExitSuccess, out, _)     -> Right out
     Right (ExitFailure c, _, e0)    -> Left (refusal what c e0)
@@ -934,7 +983,7 @@ remoteCanon cwd remote = runExceptT do
   -- the caller: this is exported and the rule in this module is that every
   -- string on a command line was checked by whoever put it there.
   checked "remote name" validRefName remote
-  probe <- ExceptT $ call cwd fetchSeconds "ls-remote"
+  probe <- ExceptT $ callKeeping [] gitListing cwd fetchSeconds "ls-remote"
              ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
   pure (firstField probe)
 
@@ -990,7 +1039,7 @@ addedBytes cwd base tip = runExceptT do
   checked "object name" validSha base
   checked "object name" validSha tip
 
-  objs <- ExceptT $ call cwd bundleSeconds "rev-list"
+  objs <- ExceptT $ callKeeping [] gitListing cwd bundleSeconds "rev-list"
             [ "rev-list", "--objects", "--end-of-options"
             , Text.unpack base <> ".." <> Text.unpack tip ]
 
@@ -1018,8 +1067,9 @@ stdinTo :: MonadUnliftIO m
         => Maybe FilePath -> Int -> Text -> [String] -> LBS.ByteString
         -> m (Either BundleError ByteString)
 stdinTo cwd secs what args input =
-  gitRun cwd [] secs what args input <&> \case
+  gitRun cwd [] secs gitListing what args input <&> \case
     Left (GitUnstartable e) -> Left (BundleUnstartable e)
     Left (GitStalled e)     -> Left (BundleStalled e)
+    Left (GitTooMuch w n _) -> Left (BundleTooMuch w n)
     Right (ExitSuccess, out, _)  -> Right out
     Right (ExitFailure c, _, e0) -> Left (refusal what c e0)

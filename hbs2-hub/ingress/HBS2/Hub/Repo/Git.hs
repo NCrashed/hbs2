@@ -945,7 +945,7 @@ gitCanonWith bounds cwd = do
       answer <- newIORef Nothing
       r <- tryAny
         ( withGit piped $ \p ->
-            withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA -> do
+            withAsync (fmap fst . drain (gbToolMessage bounds) $ getStderr p) $ \errA -> do
               out <- upTo (gbListingBytes bounds) (getStdout p)
               a <- case out of
                      Left (why, seen, took) -> pure (ListedStalled why seen took)
@@ -1107,9 +1107,9 @@ gitCanonWith bounds cwd = do
                withAsync (drain (gbToolMessage bounds) (getStdout p)) $ \out ->
                withAsync (drain (gbToolMessage bounds) (getStderr p)) $ \errA ->
                  timeout (gbCallSeconds bounds * 1000000) do
-                   o <- wait out
+                   (o, _) <- wait out
                    code <- waitExitCode p
-                   e <- wait errA
+                   (e, _) <- wait errA
                    pure (code, if code == ExitSuccess then o else e)
       pure case r of
         -- THIS READER'S OWN WORDS FIRST, then the runtime's as evidence. It used
@@ -1415,6 +1415,16 @@ whichRepository = [ "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"
 data GitTrouble =
     GitUnstartable Text   -- ^ git could not be started, or stopped being there
   | GitStalled Text       -- ^ git ran and did not finish in the time allowed
+    -- | git ran and said more on stdout than the caller allowed for.
+    --
+    -- The THIRD answer that is not about the command, and it belongs here for
+    -- the same reason as the other two: it is a statement about this runner's
+    -- bound, not about what git decided. Carries what was asked for, the bound
+    -- it went past, and the prefix that was kept -- a caller whose stream is a
+    -- report (the diff in the PEP-22 contract) shows the prefix and says it is
+    -- truncated, and every other caller here refuses, because a listing read
+    -- half way is a wrong answer wearing a right one's clothes.
+  | GitTooMuch Text Int ByteString
   deriving stock (Eq,Show)
 
 -- | Run one git command to completion, bounded.
@@ -1449,11 +1459,12 @@ gitRun :: MonadUnliftIO m
        => Maybe FilePath          -- ^ which repository, or the discovered one
        -> [(String,String)]       -- ^ forced environment, see 'gitIn'
        -> Int                     -- ^ seconds before giving up
+       -> Int                     -- ^ the most stdout this answer may be
        -> Text                    -- ^ what to call it if it does not answer
        -> [String]
        -> LBS.ByteString          -- ^ stdin
        -> m (Either GitTrouble (ExitCode, ByteString, ByteString))
-gitRun cwd extra secs what args input = do
+gitRun cwd extra secs keep what args input = do
   cfg <- gitIn cwd extra (proc "git" args)
   let piped = setStdin (byteStringInput input)
                 (setStdout createPipe (setStderr createPipe cfg))
@@ -1463,26 +1474,31 @@ gitRun cwd extra secs what args input = do
            -- BEFORE the teardown closes the handles they are sitting on. A bare
            -- async here is the deadlock described above.
            --
-           -- Both drained to EOF, and only one of them kept whole. stdout of
-           -- `bundle create -` IS the bundle, so a keep-bound there would be a
-           -- truncated artifact rather than a bounded message.
+           -- Both drained to EOF, and neither kept past its bound.
            --
-           -- STDERR IS A MESSAGE, and that distinction is the one this call
-           -- used to miss: the sentence above was written about stdout and the
-           -- @maxBound@ was applied to both, so a tool asked about a stranger's
-           -- bytes could answer with as many as it liked. `git bundle verify`
-           -- does exactly that, one line per missing prerequisite, and every
-           -- one of those bytes was then decoded, escaped, split into a 'Doc'
-           -- per line and rendered to a 'String' before anything was printed.
-           -- The reader half of this module has capped the identical stream at
-           -- 'gbToolMessage' all along.
-           withAsync (gitDrain maxBound (getStdout p)) $ \out ->
+           -- STDERR IS A MESSAGE, and stdout is an ANSWER: that distinction is
+           -- what this call used to miss in both directions. The @maxBound@ was
+           -- applied to both, so a tool asked about a stranger's bytes could
+           -- answer with as many as it liked. `git bundle verify` does exactly
+           -- that, one line per ref, and every one of those bytes was then
+           -- decoded, escaped, split into a 'Doc' per line and rendered to a
+           -- 'String' before anything was printed -- a header-only bundle of
+           -- 20000 refs, which is a small text file somebody attaches, measured
+           -- at 1 169 009 bytes on stdout at exit zero.
+           --
+           -- The @maxBound@ carried a sentence justifying it -- stdout of
+           -- `bundle create -` IS the bundle, so a keep-bound there truncates
+           -- an artifact -- and that sentence is true of ONE caller. It is a
+           -- parameter now, and that caller passes its own bound (which is the
+           -- size the attachment may be), while every other one says what an
+           -- answer of its kind may weigh.
+           withAsync (gitDrain keep (getStdout p)) $ \out ->
            withAsync (gitDrain gitToolMessage (getStderr p)) $ \errA ->
              timeout (secs * 1000000) do
-               o <- wait out
+               (o, cut) <- wait out
                code <- waitExitCode p
-               e <- wait errA
-               pure (code, o, e)
+               (e, _) <- wait errA
+               pure (code, o, cut, e)
   pure case r of
     -- The runtime's words are kept as evidence, for the reason the reader
     -- states at length: they are the only thing that tells a git that is not
@@ -1492,7 +1508,8 @@ gitRun cwd extra secs what args input = do
     Right Nothing ->
       Left (GitStalled ( "git " <> what <> " did not finish in "
                            <> Text.pack (show secs) <> "s" ))
-    Right (Just (code, out, err)) -> Right (code, out, err)
+    Right (Just (_, out, True, _)) -> Left (GitTooMuch what keep out)
+    Right (Just (code, out, False, err)) -> Right (code, out, err)
 
 -- | How much of a tool's complaint is worth keeping, in bytes.
 --
@@ -1589,12 +1606,18 @@ teardownGit secs p = do
 -- reading is what deadlocks the writer. @maxBound@ is therefore a legitimate
 -- argument and not a missing bound: it says the stream is data rather than a
 -- message.
-gitDrain :: MonadIO m => Int -> Handle -> m ByteString
+--
+-- AND IT SAYS WHETHER IT CUT, which is the difference between a bound and a
+-- silent truncation. Keeping a prefix of a MESSAGE is fine and nobody needs to
+-- be told; keeping a prefix of an ANSWER -- a listing, a bundle, a set of
+-- object names -- is a wrong answer that looks like a right one, and the caller
+-- is the only one that knows which of the two it asked for.
+gitDrain :: MonadIO m => Int -> Handle -> m (ByteString, Bool)
 gitDrain n h = go 0 []
   where
     go seen chunks = do
       c <- liftIO (BS.hGetSome h 65536)
       if BS.null c
-        then pure (BS.concat (List.reverse chunks))
+        then pure (BS.concat (List.reverse chunks), seen > n)
         else go (seen + BS.length c)
                (if seen < n then BS.take (n - seen) c : chunks else chunks)

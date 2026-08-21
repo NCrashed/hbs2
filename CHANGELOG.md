@@ -958,6 +958,24 @@
 
 ## Fixed
 
+  - **git could answer with as much as it liked.** The runner kept stdout with
+    no ceiling at all, under a sentence that is true of exactly one caller:
+    stdout of `git bundle create -` IS the bundle, so a bound there truncates an
+    artifact. Every other caller is asked about bytes somebody else published.
+    `git bundle verify` on a header-only bundle of 20000 refs -- a small text
+    file, attached to a letter -- answers with 1.1 MB at exit zero, and every
+    one of those bytes was then decoded, escaped, split into a line apiece and
+    rendered before anything was printed. `git diff` for the JSON contract was
+    bounded by nothing but its timeout, and then truncated to 256 KiB after the
+    whole of it had been held.
+
+    The ceiling is a parameter now, and the reader says whether it cut: a prefix
+    of a message needs no announcement, a prefix of an ANSWER is a wrong answer
+    that looks like a right one, so over the bound the call fails instead of
+    returning half a listing. `bundle create` passes the size a letter may
+    carry, which also closes the other half of this: a bundle too large to send
+    is refused as it is produced rather than built whole and held.
+
   - **A repository's manifest and a mailbox's policy were fetched whole before
     anything asked how big they were.** Both carried a byte bound and both
     bounds were arguments to the PARSER: by the time the parser saw the file,
