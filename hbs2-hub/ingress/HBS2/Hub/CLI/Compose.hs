@@ -237,6 +237,12 @@ sendPayload ob sender rcpts parts payload = do
   -- it. The copies are the same bytes -- the stamp rides beside the message,
   -- not inside it -- so what multiplies is the gossip, not the storage, and a
   -- mailbox that has already taken one copy drops the rest as merged.
+  --
+  -- THAT IS ALSO WHY THE PEER'S QUEUE KEYS ITS DEDUP ON RECIPIENTS. The copies
+  -- hash alike, so a queue that remembered only "a copy of this letter is
+  -- already in flight, and it pays" kept whichever stamp arrived first and
+  -- dropped the rest -- and a letter to two charging mailboxes reached one of
+  -- them. Nothing hostile was involved: it is what this loop sends.
   stamps <- stampsFor ob msg
 
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and

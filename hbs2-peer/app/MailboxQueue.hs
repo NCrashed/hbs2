@@ -21,6 +21,8 @@
 module MailboxQueue
   ( QueueRefusal(..)
   , paidFor
+  , paidRecipients
+  , heldBy
   , admitTo
   , takesASlot
   , inQueueDepth
@@ -88,12 +90,39 @@ paidFor :: forall k .
         -> Bool
 paidFor known ok rs
   | null rs = True
-  | otherwise = any pays rs
-  where
-    pays r = case known r of
-      Nothing -> True
-      Just d | d == 0    -> True
-             | otherwise -> ok d r
+  -- NOTHING HERE TO CHARGE FOR. This peer holds a policy for none of them, so
+  -- it has no opinion to enforce and the drain will say what it says. Failing
+  -- open here is what keeps a cold peer, and a relay that holds none of these
+  -- mailboxes, behaving as they did.
+  | null (heldBy known rs) = True
+  | otherwise = not (null (paidRecipients known ok rs))
+
+-- | The recipients of this message that this peer holds a policy for.
+--
+-- SEPARATE FROM THE FAIL-OPEN, because the two used to be the same answer and
+-- that was the hole: `any pays` over the raw list treated an UNKNOWN recipient
+-- as a payment, so a letter naming one charging mailbox and one key nobody has
+-- ever heard of read as paid with no stamp at all. Padding the recipient list
+-- was free, and the slot is what the work is supposed to buy.
+--
+-- An unknown recipient is not a payment and is not a refusal either: it is a
+-- recipient this peer has no policy for, which the drain will answer for.
+heldBy :: (k -> Maybe PoWDifficulty) -> [k] -> [(k, PoWDifficulty)]
+heldBy known rs = [ (r, d) | r <- rs, Just d <- [known r] ]
+
+-- | Which of them this copy actually pays for.
+--
+-- WHICH AND NOT WHETHER, because a copy's value is per recipient: one stamp
+-- pays for one mailbox (PEP-21), and a letter to two charging mailboxes is two
+-- copies of one message carrying two stamps. Answering yes-or-no made those two
+-- copies indistinguishable to the queue, so the second was deduped away as a
+-- repeat and its mailbox never got the letter. See 'takesASlot'.
+paidRecipients :: (k -> Maybe PoWDifficulty)
+               -> (PoWDifficulty -> k -> Bool)
+               -> [k]
+               -> [k]
+paidRecipients known ok rs =
+  [ r | (r, d) <- heldBy known rs, d == 0 || ok d r ]
 
 -- | May this message have a slot?
 --
@@ -132,9 +161,21 @@ admitTo queued held paid
 -- that does not. One extra slot, once per message per batch -- after it the
 -- map says paid and every further copy is free again. Everything else is a
 -- repeat and costs nothing, which is what the dedup is for.
-takesASlot :: Maybe Bool   -- ^ whether a copy is in flight, and whether it pays
-           -> Bool         -- ^ whether THIS copy pays
+-- WHICH RECIPIENTS, and not whether it pays. A stamp pays for ONE mailbox
+-- (PEP-21), so a letter to two charging mailboxes is two copies of one message
+-- carrying two stamps -- and `hbs2-hub` sends exactly that. Under a yes-or-no
+-- map the first copy recorded "paid" and the second was a repeat, so whichever
+-- stamp arrived first was the only mailbox that ever got the letter. No
+-- attacker needed for that one: it is what this tool's own sender does.
+--
+-- Keyed on the set instead, a copy is admitted when it pays for a recipient no
+-- queued copy has paid for yet, and is a repeat when it does not. The bound is
+-- the same shape as before -- at worst one slot per recipient per message per
+-- batch, and a message's recipient list is bounded by the format.
+takesASlot :: Eq k
+           => Maybe [k]    -- ^ what queued copies of this message already pay for
+           -> [k]          -- ^ what THIS copy pays for
            -> Bool
-takesASlot inflight paid = case inflight of
-  Nothing              -> True
-  Just wasPaid         -> paid && not wasPaid
+takesASlot inflight mine = case inflight of
+  Nothing   -> True
+  Just seen -> any (`notElem` seen) mine

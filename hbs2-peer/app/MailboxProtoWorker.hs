@@ -208,10 +208,13 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- | What is in the queue right now, by message hash. Not a dedup of
     -- everything ever seen: see 'mailboxAcceptMessage' for why it is exactly
     -- as long-lived as one batch.
-    -- The value is whether the QUEUED copy pays its way. A stamp is not part of
-    -- the message it pays for, so two copies of one letter hash alike and only
-    -- this tells them apart; see 'mailboxAcceptMessage'.
-  , inMessageQueueSeen    :: TVar (HashMap HashRef Bool)
+    -- The value is WHICH RECIPIENTS the queued copies pay for. A stamp is not
+    -- part of the message it pays for, so two copies of one letter hash alike
+    -- and only this tells them apart -- and one stamp buys one mailbox, so a
+    -- letter to two charging mailboxes is two copies with two stamps and the
+    -- pair is not interchangeable. A Bool here delivered to whichever of them
+    -- arrived first; see 'mailboxAcceptMessage'.
+  , inMessageQueueSeen    :: TVar (HashMap HashRef [PubKey 'Sign s])
     -- | How much of the queue each sender holds right now.
     --
     -- Cleared with the batch, like the set above, and for the same reason: it
@@ -352,12 +355,28 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
     -- either, for the reason the drain does not charge it: a co-host has none
     -- to offer.
     known <- readTVarIO mpwPoWKnown
-    let paid = case origin of
+    -- WHICH RECIPIENTS THIS COPY PAYS FOR, and not merely whether it pays.
+    -- One stamp buys one mailbox (PEP-21), so a letter to two charging
+    -- mailboxes is two copies of one message with two stamps -- and the queue
+    -- has to be able to tell them apart. See 'takesASlot'.
+    --
+    -- Replication carries no stamp and is not charged, for the reason the drain
+    -- does not charge it: a co-host has none to offer. It counts as paying for
+    -- everyone, which is what makes a replicated copy dedup every other one, as
+    -- it always did.
+    let rcpts = Set.toList (messageRecipients c)
+        mine = case origin of
+          Replicated -> rcpts
+          Submitted stamp ->
+            paidRecipients (`HM.lookup` known)
+                           (\d r -> maybe False (stampOk d r m) stamp)
+                           rcpts
+        paid = case origin of
           Replicated -> True
           Submitted stamp ->
             paidFor (`HM.lookup` known)
                     (\d r -> maybe False (stampOk d r m) stamp)
-                    (Set.toList (messageRecipients c))
+                    rcpts
 
     verdict <- atomically do
       inflight <- readTVar inMessageQueueSeen
@@ -378,7 +397,7 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
       -- after the upgrade the map says paid and every further copy is free
       -- again. The drain handles the pair in either order -- whichever is taken
       -- second finds the merge already recorded and skips.
-      if not (takesASlot (HM.lookup h inflight) paid)
+      if not (takesASlot (HM.lookup h inflight) mine)
         -- Queued already, by a copy no worse than this one.
         then pure (Right True)
         else do
@@ -394,7 +413,8 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
             Right () -> do
               writeTBQueue inMessageQueue (peer, origin, m, c)
               modifyTVar   inMessageQueueInNum succ
-              writeTVar    inMessageQueueSeen (HM.insert h paid inflight)
+              writeTVar    inMessageQueueSeen
+                             (HM.insertWith (<>) h mine inflight)
               for_ peer $ \p -> modifyTVar inMessageQueuePeers (HM.insertWith (+) p 1)
               pure (Right True)
 

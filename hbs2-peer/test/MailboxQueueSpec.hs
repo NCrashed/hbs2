@@ -33,13 +33,30 @@ tests = testGroup "mailbox: what gets a queue slot"
       , testCase "a message naming nobody is not refused for want of work" $ do
           paidFor (const (Just 12)) (\_ _ -> False) ([] :: [String]) @?= True
 
-      -- ANY and not ALL: a letter to a charging inbox and a free one is paid
-      -- for as far as the free one is concerned, and the drain still decides
-      -- each recipient separately.
+      -- ANY and not ALL among the ones this peer HOLDS: a letter to a charging
+      -- inbox and a free one is paid for as far as the free one is concerned,
+      -- and the drain still decides each recipient separately.
       , testCase "one paid recipient out of two buys the slot" $ do
           let charges r = if r == "paid" then Just 0 else Just 12
           paidFor charges (\_ _ -> False) ["free", "paid"] @?= True
           paidFor charges (\_ _ -> False) ["free", "other"] @?= False
+
+      -- AND AN UNKNOWN RECIPIENT IS NOT A PAYMENT. Failing open on the whole
+      -- message is right when this peer holds none of the mailboxes named; it
+      -- was wrong per recipient, because padding the list with a key nobody has
+      -- ever heard of then bought the slot that the work is supposed to buy.
+      , testCase "padding the list with an unknown key does not buy a slot" $ do
+          let charges r = if r == "known" then Just 12 else Nothing
+          paidFor charges (\_ _ -> False) ["known", "nobody"] @?= False
+          -- ...and the fail-open is still there for the message this peer has
+          -- no opinion about at all.
+          paidFor charges (\_ _ -> False) ["nobody", "other"] @?= True
+
+      , testCase "which recipients a copy pays for, and not merely whether" $ do
+          let charges r = if r == "free" then Just 0 else Just 12
+              stamped d r = d == 12 && r == "paid"
+          paidRecipients charges stamped ["free", "paid", "unpaid", "nobody"]
+            @?= ["free", "paid"]
 
       -- The whole point, said as the case it exists for: distinct messages
       -- carrying no work, to a mailbox that charges, do not get in.
@@ -85,12 +102,12 @@ tests = testGroup "mailbox: what gets a queue slot"
       [ -- The dedup this replaced, and the half it still is: a repeat of what
         -- is queued costs nothing.
         testCase "a message nobody has queued takes a slot" $ do
-          takesASlot Nothing False @?= True
-          takesASlot Nothing True  @?= True
+          takesASlot Nothing ([] :: [String]) @?= True
+          takesASlot Nothing ["a"]            @?= True
 
       , testCase "a repeat of a queued copy takes none" $ do
-          takesASlot (Just False) False @?= False
-          takesASlot (Just True)  True  @?= False
+          takesASlot (Just []) ([] :: [String]) @?= False
+          takesASlot (Just ["a"]) ["a"]         @?= False
 
       -- THE ONE THIS EXISTS FOR. A stamp is not part of the message it pays
       -- for, so a stripped copy and the paid one hash alike. Anybody who has
@@ -98,12 +115,24 @@ tests = testGroup "mailbox: what gets a queue slot"
       -- copy first in each drain window, and have the honest one deduped away
       -- -- after which the drain refuses the queued copy for want of work.
       , testCase "a paid copy is admitted beside an unpaid one already queued" $ do
-          takesASlot (Just False) True @?= True
+          takesASlot (Just []) ["a"] @?= True
 
-      -- And only once: after the upgrade the map says paid, so the next copy
-      -- is a repeat like any other. One extra slot per message per batch is
-      -- the whole cost.
+      -- And only once: after it the set names that recipient, so the next copy
+      -- paying for the same one is a repeat like any other.
       , testCase "an unpaid copy does not displace a paid one" $ do
-          takesASlot (Just True) False @?= False
+          takesASlot (Just ["a"]) ([] :: [String]) @?= False
+
+      -- ONE STAMP BUYS ONE MAILBOX (PEP-21), so a letter to two charging
+      -- mailboxes is two copies of one message carrying two stamps -- which is
+      -- what hbs2-hub itself sends. Under a yes-or-no map the second was a
+      -- repeat, and whichever stamp arrived first was the only mailbox that
+      -- ever got the letter. No attacker needed.
+      , testCase "the second stamp of a two-mailbox letter is not a repeat" $ do
+          takesASlot (Just ["a"]) ["b"] @?= True
+
+      , testCase "and after both, a third copy of either is" $ do
+          takesASlot (Just ["a","b"]) ["a"] @?= False
+          takesASlot (Just ["a","b"]) ["b"] @?= False
+          takesASlot (Just ["a","b"]) ["a","b"] @?= False
       ]
   ]

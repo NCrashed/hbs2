@@ -510,6 +510,27 @@
 
 ## Security
 
+  - **`hbs2-peer`: a letter to two charging mailboxes reaches both.** A stamp
+    pays for one mailbox (PEP-21), so a letter to two of them is two copies of
+    one message carrying two stamps -- which is exactly what `hbs2-hub` sends.
+    The queue's dedup remembered only whether a copy of that message was in
+    flight and whether it paid, and the copies hash alike (a stamp is not part
+    of what the sender signs), so the second was dropped as a repeat and only
+    whichever stamp arrived first was ever delivered. No attacker involved.
+
+    The dedup is keyed on the recipients a copy pays for now, and a copy is
+    admitted when it covers one no queued copy has. The bound is the shape it
+    was: at worst one slot per recipient per message per batch, over a recipient
+    list the message format bounds.
+
+    In the same place: an unknown recipient no longer counts as payment. The
+    admission check fails open by design -- it runs on a cache and the drain is
+    the authority -- but it failed open per recipient, so padding the list with
+    a key nobody has heard of bought the slot the proof-of-work is supposed to
+    buy. The fail-open now applies to the message as a whole: when this peer
+    holds a policy for none of the mailboxes named it has no opinion, and among
+    the ones it does hold, an unknown key is neither a payment nor a refusal.
+
   - **`hbs2-hub`: a pull request says what it weighs.** A bundle is a pack, so
     what a contributor sends is compressed at whatever ratio the content
     allows -- 512 MiB of zeros bundles to about 522 KiB, near 1000:1 -- and the
