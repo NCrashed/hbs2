@@ -31,6 +31,7 @@ module HBS2.Hub.Repo.Git
 
 import HBS2.Hub.Repo
 import HBS2.Hub.Canon (maxEventBytes)
+import HBS2.Hub.Types (validSha)
 
 import HBS2.CLI.Prelude hiding (filter)
 
@@ -1268,9 +1269,12 @@ sizeOf b
 -- count of each other. A guard that admits @DEADBEEF@ and @dead@ is weaker than
 -- the invariant the protocol rests on, so an id that could never round-trip
 -- would have been read as a desync rather than as the bad id it is.
+--
+-- IT IS 'validSha' NOW, and this is a name for it rather than a second copy:
+-- the rule above and the one the letter gate applies are the same sentence, and
+-- they were two predicates that had already drifted apart in case-sensitivity.
 isObjectId :: Text -> Bool
-isObjectId t = (Text.length t == 40 || Text.length t == 64) && Text.all hex t
-  where hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+isObjectId = validSha
 
 -- | Parse the output of @ls-tree -r -z -l@.
 --

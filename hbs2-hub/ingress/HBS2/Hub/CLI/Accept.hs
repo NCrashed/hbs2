@@ -66,12 +66,12 @@ module HBS2.Hub.CLI.Accept
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,maxMessageParts
-                       ,AckRecord(..),ReplyChannel(..)
+                       ,ReplyChannel(..)
                        ,openLetterAs,openLetterNoPolicy,MessageData)
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef
+import HBS2.Hub.Repo.GitBundle (acceptBundle,stagePull,pullTip,pullRef
                                ,addedBytes)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Publish (notPublishedYet)
@@ -85,7 +85,7 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
-import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 
@@ -100,12 +100,11 @@ import HBS2.Peer.RPC.Client
 import HBS2.Storage
 
 import Data.ByteString.Lazy qualified as LBS
-import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe,listToMaybe)
-import System.Exit (die,exitWith,ExitCode(..))
+import System.Exit (exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
 
 -- | And what a machine with no key for the canon identity exits with.
@@ -728,29 +727,23 @@ acceptEntries = do
                     Right (_, _, _, rc) -> rc
                     Left _              -> NoReply
 
-          thread = case acScope acc of { ThreadScope t -> Just t ; _ -> Nothing }
-
-          -- What canon says the thread's status is now. An open is open by
-          -- definition; anything else inherits what the thread already had,
-          -- which is the value this event did not change.
-          statusNow t = case acContent acc of
-            AOpen{} -> "open"
-            _ -> maybe "open" (fromMaybe "open" . HM.lookup "status" . tsAttrs)
-                       (HM.lookup t (frThreads fr))
-
-      acked <- case thread of
+      -- THROUGH 'ackFor', which is where the rule lives.
+      --
+      -- This built the record by hand, from the fold as it was BEFORE the
+      -- accept, and got three things wrong that the bridge's own function has
+      -- right. The status came out of `frThreads fr`, which does not yet hold
+      -- this event, so it was the value before it -- patched with a special
+      -- case for an open, which is the shape of a derivation done twice.
+      -- `akMergeCommit` and `akNote` were hardwired to Nothing, so a
+      -- maintainer's closing note -- already public in canon, and the one thing
+      -- that saves a contributor from going to read canon to find out why --
+      -- reached nobody. `akNote` had no reachable caller at all.
+      --
+      -- `ackFor` was exported, documented as the one place an ack is assembled,
+      -- and tested. What it did not have was this call.
+      acked <- case ackFor acc of
         Nothing -> pure (Left AckNotAsked)
-        Just t -> do
-          let ackRec = AckRecord { akTarget = repo
-                                 , akThread = t
-                                   -- The number a person will use, which for a
-                                   -- comment is the thread's and not this
-                                   -- event's: only an open mints one.
-                                 , akNumber = stageAt
-                                 , akStatus = statusNow t
-                                 , akMergeCommit = Nothing
-                                 , akNote = Nothing
-                                 }
+        Just ackRec ->
           sendAck (Outbound sto api rpcTimeout) canonKey creds reply ackRec
 
       -- LAST, and only now: everything above can refuse, and a letter dropped

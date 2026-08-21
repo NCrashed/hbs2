@@ -102,7 +102,7 @@ secretOf b = fromMaybe (error "bad fixture secret")
                (mkPartSecret (BS.replicate typicalKeyLength b))
 
 spec :: Spec
-spec = spec3 >> coordShapes >> specMain
+spec = spec3 >> coordShapes >> objectNames >> specMain
 
 specMain :: Spec
 specMain = do
@@ -624,3 +624,46 @@ coordShapes =
       malformedName (AClose thr Nothing 1) `shouldBe` Nothing
   where
     anOpen pk c = AOpen pk HubPR "t" [] Nothing Nothing (Just c) 1
+
+-- | An object name is hex in the case git writes, and only that.
+--
+-- WHAT THE LOOSE VERSION COST, in two places. `Data.Char.isHexDigit` admits
+-- @A-F@, which is what git accepts when a PERSON types an id; nothing that
+-- reaches canon is typed by a person. On the delta path the fetched tip is
+-- compared to the signed one as text, so an upper-case letter was a mismatch
+-- reported as "the objects are not the ones the contributor put their name to"
+-- -- true of the bytes and false about what happened. On the FORK path nothing
+-- fetches at all, so it reached canon, and `hub pr checkout` compares the same
+-- way: that number could never be checked out, in any clone, forever.
+objectNames :: Spec
+objectNames =
+  describe "PEP-20 object names: the case git writes, and only that" $ do
+
+    it "takes what git prints" $ do
+      validSha (Text.replicate 40 "a") `shouldBe` True
+      validSha (Text.replicate 64 "f") `shouldBe` True
+      validSha "0123456789abcdef0123456789abcdef01234567" `shouldBe` True
+
+    it "refuses the case a person types" $ do
+      validSha (Text.replicate 40 "A") `shouldBe` False
+      validSha "0123456789ABCDEF0123456789abcdef01234567" `shouldBe` False
+
+    it "still refuses what it always refused" $ do
+      validSha "" `shouldBe` False
+      validSha (Text.replicate 39 "a") `shouldBe` False
+      validSha (Text.replicate 40 "z") `shouldBe` False
+
+    -- AND A COORDINATE INHERITS IT, which is the half that matters: the fork
+    -- path never fetches, so this gate is the only one an upper-case tip meets.
+    it "keeps an upper-case tip out of canon" $ do
+      (pk,_) <- kp
+      let bad = coords { prSourceTip = Text.replicate 40 "A" }
+      malformedName (AOpen pk HubPR "t" [] Nothing Nothing (Just bad) 1)
+        `shouldBe` Just "source-tip"
+
+    -- What a PERSON types is a different shape and keeps its own rule: `hub pr
+    -- merge --commit ABC1234` is resolved through rev-parse, which answers in
+    -- the canonical case, and the answer is what canon records.
+    it "leaves the abbreviation a person types alone" $ do
+      validAbbrevSha "ABC1234" `shouldBe` True
+      validAbbrevSha "abc1234" `shouldBe` True

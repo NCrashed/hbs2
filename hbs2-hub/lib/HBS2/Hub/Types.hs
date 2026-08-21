@@ -725,12 +725,34 @@ validRefName r =
                  || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
                  || (c >= '0' && c <= '9')
 
--- | An object name this will pass to git: hex, and the length a hash is.
+-- | An object name: hex in the case git writes, and the length a hash is.
 --
 -- Both lengths, because a repository may be sha1 or sha256 and refusing the
 -- second would refuse a whole class of repository over a number.
+--
+-- LOWER CASE ONLY, and that is the half this used to get wrong.
+-- @Data.Char.isHexDigit@ admits @A-F@, which is what git accepts when a HUMAN
+-- types an id; nothing that reaches here is typed by a human. Every id this
+-- build handles comes out of @rev-parse@, out of the object column of
+-- @ls-tree@, or out of a signed letter that was built from one of those, and
+-- git writes the canonical lower-case form in all three.
+--
+-- What the loose version cost, in two places. On the delta path the fetched tip
+-- is compared to the signed one as TEXT, so @143284B8...@ against
+-- @143284b8...@ was a mismatch reported as "the objects are not the ones the
+-- contributor put their name to" -- true of the bytes and false about what
+-- happened. On the FORK path nothing fetches at all, so an upper-case
+-- @source-tip@ went into canon, and @hub pr checkout@ compares canon's tip to
+-- the staged ref the same way: that number could never be checked out, in any
+-- clone, forever.
+--
+-- The batch object reader states the same rule for its own reason -- it
+-- compares the id git echoes to the one it wrote byte for byte, and an id that
+-- cannot round-trip would read as the two of them having lost count of each
+-- other. That was a second predicate saying this; there is one now.
 validSha :: Text -> Bool
-validSha s = Text.length s `elem` [40, 64] && Text.all isHexDigit s
+validSha s = Text.length s `elem` [40, 64] && Text.all hex s
+  where hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 -- | An object name a PERSON typed, which is not the same shape as one a signed
 -- letter carries.

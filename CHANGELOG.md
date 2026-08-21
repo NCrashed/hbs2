@@ -510,6 +510,24 @@
 
 ## Security
 
+  - **`hbs2-hub`: an object name is the case git writes it in.** `isHexDigit`
+    admits `A-F`, which is what git accepts when a person types an id; nothing
+    that reaches canon is typed by a person. On the delta path an upper-case tip
+    was compared to the signed one as text and reported as "the objects are not
+    the ones the contributor put their name to" -- true of the bytes and false
+    about what happened. On the fork path nothing fetches at all, so it reached
+    canon, and `hub pr checkout` compares the same way: that number could never
+    have been checked out, in any clone, ever. Two predicates said this rule and
+    had drifted apart in exactly this; there is one now.
+
+  - **`hbs2-hub inbox accept`: an acknowledgement carries the maintainer's
+    note.** The ack was assembled by hand beside a function written, documented
+    and tested to assemble it, and the hand-built one was wrong in three ways:
+    the status came from the fold as it was BEFORE the accept, and the merge
+    commit and the note were hardwired absent -- so a closing note, already
+    public in canon and the one thing that saves a contributor from going to
+    read canon to find out why, reached nobody.
+
   - **`hbs2-core`: a stream frame is no longer as long as the far end says.**
     Both stream transports read a four-byte length and then that many bytes, as
     given: `recv sock n` allocates a buffer of n, so a peer declaring 4 GiB had
