@@ -46,6 +46,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Bifunctor (first)
 import Data.HashSet qualified as HS
+import Data.List qualified as List
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
@@ -148,8 +149,7 @@ sink cwd indexFile = CanonSink
       -- publishes is canon with an event gone and a success on stdout.
       --
       -- Asked of the TREE and not of the index, because the tree is what the
-      -- commit will hold. Inclusion and not equality: read-tree seeded the
-      -- index from the parent, so everything canon already had is in here too.
+      -- commit will hold.
       landed <- ExceptT (run whenMs "ls-tree"
                              ["ls-tree", "-r", "--name-only", "-z", Text.unpack tree]
                              mempty)
@@ -158,6 +158,36 @@ sink cwd indexFile = CanonSink
       for_ (fmap fst (cnFiles cw)) $ \p ->
         unless (HS.member p landed) $
           throwError (WriterDropped (length (cnFiles cw)) p)
+
+      -- AND WHAT THE PARENT HELD IS STILL THERE, which is the direction this
+      -- did not check. It said inclusion was enough because "read-tree seeded
+      -- the index from the parent, so everything canon already had is in here
+      -- too", and that is the assumption update-index breaks: an entry is
+      -- added with OK_TO_REPLACE, so writing threads/<id>/1.event into an index
+      -- holding a FILE at threads/<id> REMOVES that file. Exit zero, nothing on
+      -- stderr, and the planned path lands -- so the loop above is satisfied
+      -- and the publish goes ahead with a file of canon gone. Reproduced on git
+      -- 2.46 with read-tree of a tree holding `threads/abc` and --index-info
+      -- with `threads/abc/1.event`: write-tree returns a tree of one file.
+      --
+      -- One more ls-tree per canon commit, which is the price of the guarantee
+      -- the haddock above was already claiming.
+      --
+      -- ONLY WHERE THERE IS A PARENT TO KEEP. A rewrite legitimately drops
+      -- files and gets its own emptiness honestly: skRewrite passes Nothing
+      -- here, so no read-tree ran and there is nothing to have kept.
+      inherited <- case parent of
+        Nothing -> pure mempty
+        Just p  -> ExceptT (run whenMs "ls-tree"
+                                ["ls-tree", "-r", "--name-only", "-z", Text.unpack p]
+                                mempty)
+                     <&> HS.fromList . filter (not . BS.null) . BS.split 0x00
+
+      -- Sorted, so which path a report names is a function of the trees and not
+      -- of a HashSet's traversal order.
+      for_ (List.sort (HS.toList inherited)) $ \p ->
+        unless (HS.member p landed) $
+          throwError (WriterLost (HS.size inherited) p)
 
       -- -c commit.gpgsign=false, because this machine's owner may well sign
       -- their own commits and a canon commit is not theirs to sign. Unattended

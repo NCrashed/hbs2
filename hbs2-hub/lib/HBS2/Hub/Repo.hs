@@ -1227,6 +1227,24 @@ data CanonUnwritable =
     -- not depend on knowing which paths are bad: what was planned either landed
     -- or nothing is published.
   | WriterDropped Int ByteString
+    -- | git built a tree that does not hold a file the PARENT had, and nothing
+    -- was published.
+    --
+    -- Carries how many the parent held and one of the paths that is gone.
+    --
+    -- THE OTHER DIRECTION, and the one the writer used to assume came free:
+    -- "read-tree seeded the index from the parent, so everything canon already
+    -- had is in here too". It does not. @update-index@ adds an entry with
+    -- @OK_TO_REPLACE@, so writing @threads\/\<id\>\/1.event@ into an index that
+    -- holds a FILE at @threads\/\<id\>@ removes that file: exit zero, nothing
+    -- on stderr, and the planned path lands, so 'WriterDropped' is satisfied
+    -- and the commit is published with a file of canon gone. Reproduced on git
+    -- 2.46.
+    --
+    -- Nothing this sink commits is meant to remove a path -- canon is
+    -- append-only -- and the rewrite that legitimately drops files starts from
+    -- an empty index, so it never reads a parent to compare against.
+  | WriterLost Int ByteString
     -- | Canon holds a path git's index will not take, so no write can start
     -- from it.
     --
@@ -1254,6 +1272,17 @@ instance Pretty CanonUnwritable where
         [ "git did not take every file it was given"
         , "planned" <+> pretty n <> ", and this one is not in the tree:"
         , "  " <> pretty (pathText p)
+        , "nothing was published" ]
+    WriterLost n p ->
+      nest 2 $ vsep
+        [ "git dropped a file canon already held"
+        , "the parent tree had" <+> pretty n <> ", and this one is not in the"
+            <+> "new tree:"
+        , "  " <> pretty (pathText p)
+        , "the index replaces an entry that stands where a new path needs a"
+        , "directory, so a file canon holds under a name the layout uses as one"
+        , "is enough. `hbs2-hub verify <repo-key>` names the files this reader"
+        , "will not take."
         , "nothing was published" ]
     WriterRefused what t ->
       nest 2 $ vsep [ "git" <+> pretty what <+> "refused", told t ]

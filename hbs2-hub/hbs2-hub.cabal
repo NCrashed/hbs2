@@ -232,6 +232,7 @@ test-suite spec
       HBS2.Hub.BanSpec
       HBS2.Hub.BridgeSpec
       HBS2.Hub.CanonSpec
+      HBS2.Hub.CodesSpec
       HBS2.Hub.MaintainerSpec
       HBS2.Hub.OwnSpec
       HBS2.Hub.PolicySpec

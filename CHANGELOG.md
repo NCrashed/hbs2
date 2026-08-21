@@ -958,6 +958,21 @@
 
 ## Fixed
 
+  - **The canon writer checked that the planned file landed, not that the
+    inherited one survived.** `update-index --index-info` adds an entry with
+    `OK_TO_REPLACE`, so writing `threads/<id>/1.event` into an index that holds
+    a FILE at `threads/<id>` removes that file: exit zero, nothing on stderr,
+    and the planned path lands -- so the check that was there was satisfied and
+    the commit was published with a file of canon silently gone. Reproduced on
+    git 2.46 before it was fixed.
+
+    One more `ls-tree -r`, on the parent, and its own refusal beside the
+    existing one: a planned file that did not land and a file canon already had
+    are different facts. Only where there is a parent to keep, so `hub compact`
+    is untouched -- it commits an orphan root from an empty index and drops
+    files on purpose. The writer's own haddock had been claiming this direction
+    came free from `read-tree`, which is what made the half-check look whole.
+
   - **`hbs2-hub log <repo> <n>` walked every thread once per line.** The
     resolution from a number to the threads carrying it sat inside the
     comprehension's guard, so it ran per LOG ENTRY, over a canon bounded at

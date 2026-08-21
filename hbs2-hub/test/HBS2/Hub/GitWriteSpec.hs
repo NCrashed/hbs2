@@ -153,6 +153,45 @@ spec1 = do
         parent <- withGitSinkIn (Just dir) (skParent >=> either (fail . show) pure)
         parent `shouldBe` Nothing
 
+    -- THE OTHER DIRECTION, and the one the writer assumed came free from
+    -- read-tree. update-index adds an entry with OK_TO_REPLACE, so a path whose
+    -- directory is a FILE in the index removes that file: exit zero, nothing on
+    -- stderr at all, and the PLANNED path lands -- so the check above is
+    -- satisfied and the publish goes ahead with a file of canon gone.
+    it "refuses to publish a commit that lost a file the parent held" $
+      withRepo $ \dir -> do
+        owner <- kp
+        alice <- kp
+        (_, cw1) <- anOpen alice owner 1 "first"
+        (e2, cw2) <- anOpen alice owner 2 "second"
+
+        -- Canon holding a FILE exactly where the next event needs a directory.
+        -- Not a shape this build writes -- the reader will not fold it -- and
+        -- one somebody else's tree can hold, which is the case a compaction
+        -- meets: it writes back the names the tree already had.
+        let clash = BS8.pack (threadDir (eventId e2))
+        c1 <- withGitSinkIn (Just dir) $ \sk ->
+                skCommit sk (CanonWrite Nothing
+                                        (cwFiles cw1 <> [(clash, "not an event")])
+                                        "canon" 1000)
+                  >>= either (fail . show) pure
+
+        r <- withGitSinkIn (Just dir) $ \sk ->
+               skCommit sk (CanonWrite (Just c1) (cwFiles cw2) "canon" 2000)
+        case r of
+          Left (WriterLost _ p) -> p `shouldBe` clash
+          other -> expectationFailure
+                     ("expected WriterLost, got " <> show (fmap Text.unpack other))
+
+        -- Nothing was published: canon is still the commit that has the file.
+        parent <- withGitSinkIn (Just dir) (skParent >=> either (fail . show) pure)
+        parent `shouldBe` Just c1
+
+        -- And the advice in the refusal is checkable rather than hopeful: the
+        -- reader already reports this file, so `hub verify` names it.
+        st <- readBack dir (fst owner)
+        (fmap fst (stBad st) <> fmap fst (stMisnamed st)) `shouldSatisfy` elem clash
+
     it "creates canon the reader folds back" $ withRepo $ \dir -> do
       owner <- kp
       alice <- kp
