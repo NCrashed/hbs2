@@ -120,7 +120,7 @@ spec1 = do
     -- to a String before anything reached the terminal. At the attachment
     -- bound that was tens of megabytes.
     it "keeps only as much of git's complaint as a person would read" $
-      withWork $ \dir _ _ -> do
+      withWork $ \dir base _ -> do
         -- Enough prerequisites that git's answer is comfortably past the bound
         -- on its own. Nothing here is a real object; that is the point, and it
         -- is what makes the file cheap to build and expensive to be answered
@@ -132,7 +132,7 @@ spec1 = do
                       <> [ sha 1 <> " refs/heads/feature" ] )
             bogus = Text.encodeUtf8 (header <> "\n")
 
-        r <- acceptBundle (Just dir) bogus "feature" (Text.replicate 40 "0")
+        r <- acceptBundle (Just dir) bogus "feature" (Text.replicate 40 "0") base
         case r of
           Left (BundleRefused _ (ToolSaid said)) ->
             -- The bound is on bytes kept, so what is asserted is bytes. Loose
@@ -178,7 +178,7 @@ spec1 = do
         (ExitFailure _, _, _) <- readProcess . setStdin closed
           =<< pure (setWorkingDir theirs (proc "git" ["cat-file", "-e", Text.unpack tip]))
 
-        got <- ok =<< acceptBundle (Just theirs) (bnBytes b) "feature" tip
+        got <- ok =<< acceptBundle (Just theirs) (bnBytes b) "feature" tip base
         got `shouldBe` tip
         -- and the objects really are here now
         void $ git theirs ["cat-file", "-e", Text.unpack tip]
@@ -221,13 +221,13 @@ spec1 = do
         -- The control: this bundle is good, and the maintainer takes it. If
         -- this line ever fails the negative below has stopped meaning anything,
         -- which is exactly how the old version of this test died.
-        (ok =<< acceptBundle (Just theirs) bytes "feature" tip) >>= (`shouldBe` tip)
+        (ok =<< acceptBundle (Just theirs) bytes "feature" tip base) >>= (`shouldBe` tip)
 
         let n = BS.length bytes `div` 2
             broken = BS.concat [ BS.take n bytes
                                , BS.singleton (BS.index bytes n + 1)
                                , BS.drop (n + 1) bytes ]
-        r <- acceptBundle (Just other) broken "feature" tip
+        r <- acceptBundle (Just other) broken "feature" tip base
         case r of
           Left BundleRefused{} -> pure ()
           other -> expectationFailure ("expected a refusal, got " <> show other)
@@ -262,7 +262,7 @@ spec1 = do
 
         bytes <- bnBytes <$> (ok =<< bundleRange (Just ours) base "feature")
 
-        r <- acceptBundle (Just theirs) bytes "feature" (Text.replicate 40 "a")
+        r <- acceptBundle (Just theirs) bytes "feature" (Text.replicate 40 "a") base
         case r of
           Left (BundleTipMismatch _ got) -> got `shouldBe` tip
           other -> expectationFailure ("expected a tip mismatch, got " <> show other)
@@ -311,7 +311,7 @@ spec1 = do
               , Text.encodeUtf8 "\n"
               , pack ]
 
-        r <- acceptBundle (Just theirs) bytes "evil" victim
+        r <- acceptBundle (Just theirs) bytes "evil" victim victim
         case r of
           Left (BundleNoObjects t) -> t `shouldBe` victim
           other -> expectationFailure
@@ -426,7 +426,62 @@ spec1 = do
 -- This is the one check the delta path rests on, so it is refused inside
 -- acceptBundle rather than left for a caller to remember.
 spec2 :: Spec
-spec2 =
+spec2 = spec2a >> spec2b
+
+-- | The base a letter signed has to be an ancestor of the tip it signed, and
+-- the objects must not be here when it is not.
+--
+-- WHERE the check runs is the whole of this test. It existed before, in the
+-- caller, AFTER acceptBundle had returned -- which is after the second fetch --
+-- so a range that was not one had already written its pack into the
+-- maintainer's store, where unreachable objects outlive `git gc` by its
+-- two-week grace. Every refused proposal was a fortnight of disk a stranger
+-- chose, which is the exact cost the quarantine exists to avoid.
+spec2b :: Spec
+spec2b =
+  describe "PEP-20 delta path: the range the letter claims" $
+    it "refuses a base that is not an ancestor, and keeps the objects out" $
+      withSystemTempDirectory "hub-pair" $ \root -> do
+        let ours = root <> "/contributor"
+            theirs = root <> "/maintainer"
+        void $ git root ["init", "-q", ours]
+        writeFile (ours <> "/a.txt") "one\n"
+        void $ git ours ["add", "a.txt"]
+        void $ git ours ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        void $ git root ["clone", "-q", ours, theirs]
+
+        -- A SECOND ROOT, which is a real commit and an ancestor of nothing.
+        -- The maintainer has it (it is fetched below), so the check can be
+        -- asked and the answer is no -- which is the case worth pinning: a
+        -- base git cannot resolve at all would fail for a different reason.
+        void $ git ours ["checkout", "-q", "--orphan", "other"]
+        writeFile (ours <> "/c.txt") "three\n"
+        void $ git ours ["add", "c.txt"]
+        void $ git ours ["commit", "-q", "-m", "elsewhere"]
+        stray <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+
+        void $ git ours ["checkout", "-q", "-b", "feature", Text.unpack base]
+        writeFile (ours <> "/b.txt") "two\n"
+        void $ git ours ["add", "b.txt"]
+        void $ git ours ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+
+        b <- ok =<< bundleRange (Just ours) base "feature"
+        void $ git theirs ["fetch", "-q", ours, "other:refs/heads/other"]
+
+        r <- acceptBundle (Just theirs) (bnBytes b) "feature" tip stray
+        r `shouldBe` Left (BundleNotAncestor stray tip)
+
+        -- AND THE PACK IS NOT HERE. This is the half the old placement lost:
+        -- the refusal was the same, and the objects were already written.
+        (code, _, _) <- readProcess . setStdin closed
+          =<< pure (setWorkingDir theirs
+                      (proc "git" ["cat-file", "-e", Text.unpack tip]))
+        code `shouldSatisfy` (/= ExitSuccess)
+
+spec2a :: Spec
+spec2a =
   describe "PEP-20 delta path: the signed claim" $
     it "refuses a bundle that fetches something other than the signed tip" $
       withSystemTempDirectory "hub-pair" $ \root -> do
@@ -447,7 +502,7 @@ spec2 =
 
         -- The base is a real commit and a wrong answer: a contributor who
         -- signed one tip and shipped the objects for another.
-        r <- acceptBundle (Just theirs) (bnBytes b) "feature" base
+        r <- acceptBundle (Just theirs) (bnBytes b) "feature" base base
         r `shouldBe` Left (BundleTipMismatch base tip)
 
 -- The fork point, which is what a contributor's bundle is a range from. It is

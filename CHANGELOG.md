@@ -510,6 +510,21 @@
 
 ## Security
 
+  - **`hbs2-hub inbox accept`: a refused pull request no longer leaves its pack
+    behind.** The bundle is fetched into a quarantine so that a proposal the
+    maintainer turns down writes nothing into their object store -- unreachable
+    objects outlive `git gc` by its two-week grace, so every refusal was disk a
+    stranger chose, for a fortnight, in somebody else's repository. One check
+    was outside it: that the base the letter signed really is an ancestor of the
+    tip it signed ran in the caller, after `acceptBundle` had returned, which is
+    after the quarantine was released. A range that is not a range was refused
+    with its pack already written.
+
+    The check moved inside, between the tip comparison and the second fetch, and
+    the base is an argument now for the reason the signed tip already was: a
+    check the caller performs is a check the caller can omit, and the caller
+    that omits it stages objects no fork point explains.
+
   - **`hbs2-hub`: a path git will not index can no longer become canon.** The
     reader took any path component that was not `.` or `..`, so
     `threads/.git/<event>`, `threads/a//b` and `repo/.GIT` folded as events.

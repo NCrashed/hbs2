@@ -628,19 +628,15 @@ acceptEntries = do
                                         <+> "not carry:" <+> pretty part))
                                codeBundleUnusable
 
-        _ <- acceptBundle Nothing bytes ref tip
+        -- THE BASE GOES IN WITH THE REST OF THE CLAIM. The ancestor check used
+        -- to be here, after the bundle had been taken into the repository --
+        -- so a range that was not one had already written its pack into the
+        -- maintainer's object store, where unreachable objects outlive `git gc`
+        -- by its two-week grace. It is inside 'acceptBundle' now, in the
+        -- quarantine, which is where every other check on these objects is.
+        _ <- acceptBundle Nothing bytes ref tip base
                >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleUnusable)) pure
-
-        -- The ancestor relation is guaranteed by how the bundle was built
-        -- (base..source-ref), and it is checked anyway: the construction is
-        -- the CONTRIBUTOR's, and this is the maintainer deciding whether to
-        -- publish a number for it.
-        anc <- isAncestor Nothing base tip
-                 >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleUnusable)) pure
-        unless anc $
-          liftIO $ refuse (show ("the signed base is not an ancestor of the signed"
-                                   <+> "tip; the range is not what it says it is"))
-                          codeBundleUnusable
+        pure ()
 
       -- The index is regenerated from the fold, plus the number this accept
       -- just minted. Derived rather than re-folded because the derivation is

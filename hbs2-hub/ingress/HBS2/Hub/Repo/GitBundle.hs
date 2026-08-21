@@ -126,6 +126,15 @@ data BundleError =
     -- update to the first of those and nothing else is lost: the objects are
     -- still in the repository.
   | BundleCanonClobbered Text (Maybe Text)
+    -- | The signed base is not an ancestor of the signed tip.
+    --
+    -- The letter says its bundle is the range @base..source-ref@, and this is
+    -- that claim checked rather than believed: the construction is the
+    -- CONTRIBUTOR's, and a range that is not one puts objects under a number
+    -- that no fork point explains.
+    --
+    -- Carries both, because the pair is the claim.
+  | BundleNotAncestor Text Text
   deriving stock (Eq,Show)
 
 instance Pretty BundleError where
@@ -167,6 +176,12 @@ instance Pretty BundleError where
                         <+> "bundle brought nothing:"
                     , "the proposal is somebody else's work, or your own"
                         <+> "unpublished commits. Do not stage it." ]
+    BundleNotAncestor base tip ->
+      nest 2 $ vsep [ "the signed base is not an ancestor of the signed tip"
+                    , "base" <+> pretty (safeText base)
+                    , "tip " <+> pretty (safeText tip)
+                    , "the range is not what the letter says it is; nothing"
+                        <+> "was taken into this repository." ]
 
 -- | Where PEP-19 stages a proposed tip.
 pullRef :: Word64 -> Text
@@ -274,7 +289,8 @@ bundleRange cwd base ref = runExceptT do
 -- message about the fetch. And fsck is turned on explicitly, twice, because
 -- git leaves it off and these are a stranger's objects.
 --
--- THE SIGNED TIP IS AN ARGUMENT, not something the caller checks afterwards.
+-- THE SIGNED TIP AND THE SIGNED BASE ARE ARGUMENTS, not something the caller
+-- checks afterwards.
 -- It is step 2 of PEP-20's "Fetch and verify" and it is the step the whole
 -- delta path rests on: git's object hashing binds the content to the tip, so
 -- a bundle that produces the signed tip is the objects the contributor put
@@ -286,10 +302,12 @@ acceptBundle :: MonadUnliftIO m
              -> ByteString      -- ^ the bundle
              -> Text            -- ^ @source-ref@, from the signed box
              -> Text            -- ^ @source-tip@, from the signed box
+             -> Text            -- ^ @base@, the fork point the letter signed
              -> m (Either BundleError Text)
-acceptBundle cwd bytes ref signedTip = runExceptT do
+acceptBundle cwd bytes ref signedTip base = runExceptT do
   checked "ref name" validRefName ref
   checked "object name" validSha signedTip
+  checked "object name" validSha base
 
   -- git will not read a bundle from a pipe: it seeks in it. So it goes to a
   -- file, in a directory of this call's own that goes away with it.
@@ -360,6 +378,23 @@ acceptBundle cwd bytes ref signedTip = runExceptT do
                         ["cat-file", "-e", Text.unpack signedTip <> "^{commit}"]
     when (isLeft brought) $ throwError (BundleNoObjects signedTip)
 
+    -- AND THE RANGE IS THE RANGE THE LETTER SIGNED, asked HERE and not by the
+    -- caller.
+    --
+    -- The check itself is not new; where it ran was the defect. It sat after
+    -- this function returned, which is after the second fetch, so a bundle
+    -- whose base is not an ancestor of its tip had already been written into
+    -- the maintainer's object store -- and unreachable objects outlive `git
+    -- gc` by its two-week grace. Every refused proposal was a fortnight of
+    -- disk a stranger chose, which is the exact cost the quarantine above
+    -- exists to avoid, paid on the one path that reaches it.
+    --
+    -- Inside the quarantine, because the tip is only there; the base resolves
+    -- through the alternate, since it is a commit this repository already has.
+    -- See 'isAncestorWith'.
+    anc <- ExceptT (isAncestorWith walled cwd base signedTip)
+    unless anc $ throwError (BundleNotAncestor base signedTip)
+
     -- Only now, into the repository proper.
     _ <- ExceptT (fetch [])
     pure got
@@ -386,10 +421,20 @@ mergeBase cwd a b = runExceptT do
 -- distinction that makes this its own function rather than a call site.
 isAncestor :: MonadUnliftIO m
            => Maybe FilePath -> Text -> Text -> m (Either BundleError Bool)
-isAncestor cwd a b = runExceptT do
+isAncestor = isAncestorWith []
+
+-- | The same, in an object store the caller names.
+--
+-- 'acceptBundle' asks this INSIDE the quarantine, where the tip exists and the
+-- repository's own store is an alternate, so the base still resolves. Outside
+-- it the answer would be about a commit that is not there yet.
+isAncestorWith :: MonadUnliftIO m
+               => [(String,String)] -> Maybe FilePath -> Text -> Text
+               -> m (Either BundleError Bool)
+isAncestorWith env cwd a b = runExceptT do
   checked "object name" validSha a
   checked "object name" validSha b
-  r <- ExceptT (run cwd smallSeconds "merge-base"
+  r <- ExceptT (runWith env cwd smallSeconds "merge-base"
                     ["merge-base", "--is-ancestor", Text.unpack a, Text.unpack b])
   case r of
     (ExitSuccess, _, _)     -> pure True
