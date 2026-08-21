@@ -40,7 +40,7 @@ import HBS2.Hub.CLI.Compact (codeNothingToCompact,codeNotThisCanon,codeCanonUnre
 import HBS2.Hub.CLI.Compose (codeNoKey,codeNotStored,codeNoWork,codeWrongSigil,codeUnsendable)
 import HBS2.Hub.CLI.Maintainer (codeNotDelegated)
 import HBS2.Hub.CLI.Policy (codeNoPolicy,codeNotSet)
-import HBS2.Hub.CLI.Pr (codeBundleFailed,codeNoSuchPr,codeNotMerged,codeNotStaged)
+import HBS2.Hub.CLI.Pr (codeBundleFailed,codeNoSuchPr,codeNotMerged,codeNotStaged,codeTooBig)
 import HBS2.Hub.CLI.Publish (codeNotPublished,codePublishFailed)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,codeAmbiguousNumber)
 import HBS2.Hub.CLI.Reject (codeAlreadyFolded,codeNotRejected)
@@ -99,6 +99,7 @@ data Refusal =
   | MailboxIncomplete
   | NoKeyman
   | Unsendable
+  | TooBig
   deriving stock (Eq,Ord,Show,Enum,Bounded)
 
 -- | Every one of them, by construction.
@@ -148,6 +149,7 @@ codeFor = \case
   MailboxIncomplete   -> codeMailboxIncomplete
   NoKeyman            -> codeNoKeyman
   Unsendable          -> codeUnsendable
+  TooBig              -> codeTooBig
 
 -- | And what it means, in the one line a script author needs.
 --
@@ -192,6 +194,7 @@ meaning = \case
   MailboxIncomplete   -> "the mailbox tree did not read whole; nothing written"
   NoKeyman            -> "this machine has no key database (run hbs2-keyman)"
   Unsendable          -> "the letter was not composed; nothing was sent"
+  TooBig              -> "the proposal writes more than a checkout will take"
 
 -- | The table, for @hbs2-hub --codes@.
 --

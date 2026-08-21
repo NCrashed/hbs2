@@ -69,7 +69,7 @@ ok :: Show e => Either e a -> IO a
 ok = either (fail . show) pure
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> spec4 >> spec5
+spec = spec1 >> spec2 >> spec3 >> spec4 >> spec5 >> spec6
 
 spec1 :: Spec
 spec1 = do
@@ -756,3 +756,66 @@ spec5 =
         case r of
           Left (BundleBadName what _) -> what `shouldBe` "remote name"
           other -> expectationFailure ("expected a refusal, got " <> show other)
+
+-- | What a proposal weighs once git is not compressing it.
+--
+-- THE NUMBER NOTHING PRINTED. A bundle is a pack: 512 MiB of zeros bundles to
+-- about half a megabyte, and the fetch is cheap because git keeps the pack as
+-- it arrived. `hub pr checkout` is where it becomes files, and there was no
+-- size anywhere between the mailbox and a reviewer's working tree.
+spec6 :: Spec
+spec6 =
+  describe "PEP-20 delta path: what a proposal weighs" $ do
+
+    it "counts what the range adds, not what the repository holds" $
+      withSystemTempDirectory "hub-weigh" $ \dir -> do
+        void $ git dir ["init", "-q", "."]
+        -- A megabyte on master, which must NOT be counted: a repository is
+        -- legitimately large and its maintainer expects a tree that size.
+        writeFile (dir <> "/big.txt") (replicate (1024 * 1024) 'a')
+        void $ git dir ["add", "big.txt"]
+        void $ git dir ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git dir ["rev-parse", "HEAD"]
+
+        -- And a quarter of a megabyte on the branch, which is the proposal.
+        void $ git dir ["checkout", "-q", "-b", "feature"]
+        writeFile (dir <> "/added.txt") (replicate (256 * 1024) 'b')
+        void $ git dir ["add", "added.txt"]
+        void $ git dir ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git dir ["rev-parse", "HEAD"]
+
+        n <- ok =<< addedBytes (Just dir) base tip
+        -- The blob, plus a tree and a commit, and nothing from master.
+        n `shouldSatisfy` (>= 256 * 1024)
+        n `shouldSatisfy` (< 512 * 1024)
+
+    -- COMPRESSIBLE CONTENT IS THE WHOLE POINT: the pack is a fraction of this,
+    -- and the pack is what the size checks upstream of here can see.
+    it "is the size git will write, not the size git shipped" $
+      withSystemTempDirectory "hub-weigh" $ \dir -> do
+        void $ git dir ["init", "-q", "."]
+        writeFile (dir <> "/a.txt") "one\n"
+        void $ git dir ["add", "a.txt"]
+        void $ git dir ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git dir ["rev-parse", "HEAD"]
+
+        void $ git dir ["checkout", "-q", "-b", "feature"]
+        writeFile (dir <> "/zeros.txt") (replicate (4 * 1024 * 1024) '0')
+        void $ git dir ["add", "zeros.txt"]
+        void $ git dir ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git dir ["rev-parse", "HEAD"]
+
+        n <- ok =<< addedBytes (Just dir) base tip
+        n `shouldSatisfy` (>= 4 * 1024 * 1024)
+
+        -- And the bundle of the same range is a small fraction of it, which is
+        -- the ratio that makes the number worth printing at all.
+        b <- ok =<< bundleRange (Just dir) base "feature"
+        toInteger (BS.length (bnBytes b)) `shouldSatisfy` (< n `div` 100)
+
+    -- An empty range weighs nothing, and must not be a refusal: the caller
+    -- treats a failure to measure as "no answer" and this is an answer.
+    it "answers zero for a range with nothing in it" $
+      withWork $ \dir _ tip -> do
+        n <- ok =<< addedBytes (Just dir) tip tip
+        n `shouldBe` 0

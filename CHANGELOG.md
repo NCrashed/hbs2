@@ -510,6 +510,24 @@
 
 ## Security
 
+  - **`hbs2-hub`: a pull request says what it weighs.** A bundle is a pack, so
+    what a contributor sends is compressed at whatever ratio the content
+    allows -- 512 MiB of zeros bundles to about 522 KiB, near 1000:1 -- and the
+    fetch is cheap because git keeps the pack as it arrived. `hub pr checkout`
+    is where it becomes files, and no number appeared anywhere between the
+    mailbox and a reviewer's working tree. The attachment bound this hub
+    accepts, at that ratio, buys tens of gigabytes.
+
+    `hub inbox accept` now prints what the proposal adds, and `hub pr checkout`
+    refuses above half a gigabyte with `--anyway` to proceed. The two differ
+    because the moments differ: the accept has already taken the objects, and
+    the checkout is where they are written out.
+
+    The number is what git will write, not what git shipped -- the packed size
+    is precisely what hides this. And it is measured over `base..tip`, so a
+    large project's own history does not count towards the bound and the same
+    figure means the same thing in a small repository and in a large one.
+
   - **`hbs2-hub`: `FETCH_HEAD` is no longer used as a private channel.** It is a
     file in the real git directory that every fetch in the repository rewrites,
     and nothing in this package takes a lock -- so between writing it and

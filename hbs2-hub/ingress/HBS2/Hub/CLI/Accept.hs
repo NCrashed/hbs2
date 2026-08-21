@@ -71,7 +71,8 @@ import HBS2.Hub.Letter (EnvelopeSigner(..),maxPartBytes,maxMessageParts
 import HBS2.Hub.Bridge
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef)
+import HBS2.Hub.Repo.GitBundle (acceptBundle,isAncestor,stagePull,pullTip,pullRef
+                               ,addedBytes)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
@@ -636,7 +637,23 @@ acceptEntries = do
         -- quarantine, which is where every other check on these objects is.
         _ <- acceptBundle Nothing bytes ref tip base
                >>= either (\e -> liftIO (refuse (show (pretty e)) codeBundleUnusable)) pure
-        pure ()
+
+        -- AND WHAT IT WEIGHS, said out loud rather than discovered by a
+        -- reviewer whose disk fills up. A bundle is a pack, so what arrives is
+        -- compressed at whatever ratio the content allows -- about 1000:1 on
+        -- the right content -- and nothing between the mailbox and a checkout
+        -- had a number in it. See 'addedBytes'.
+        --
+        -- Advice, not a gate: this verb has already taken the objects, and the
+        -- verb that writes them into a working tree is where the refusal is
+        -- ('hub pr checkout'). A git that cannot answer is not a reason to
+        -- refuse a fold.
+        addedBytes Nothing base tip >>= \case
+          Left _  -> pure ()
+          Right n -> liftIO $ saying
+            ( "note: this proposal adds" <+> pretty n
+                <+> "bytes of objects; `hub pr checkout` writes them out"
+                <> line )
 
       -- The index is regenerated from the fold, plus the number this accept
       -- just minted. Derived rather than re-folded because the derivation is

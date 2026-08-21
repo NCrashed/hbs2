@@ -28,6 +28,8 @@ module HBS2.Hub.CLI.Pr
   , PrRevise(..)
   , codeBundleFailed
   , codeNotStaged
+  , codeTooBig
+  , maxCheckoutBytes
   , prCheckoutUsage
   , prCheckoutArgs
   , PrCheckout(..)
@@ -183,7 +185,7 @@ prEntries = do
 
   brief "put a proposed change on a local branch and switch to it"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
-           , arg "string" "--branch name" ]
+           , arg "string" "[--branch name]", arg "string" "[--anyway]" ]
     $ desc ( "Reads canon for what #n proposes, checks that against what is"
              <> line <> "staged at refs/hbs2/pulls/<n>/head in this repository,"
              <> line <> "and puts a branch there. --branch names it; the default"
@@ -202,7 +204,16 @@ prEntries = do
              <> line
              <> line <> "It will not move a branch that exists and points"
              <> line <> "elsewhere: that name may carry somebody's commits, and"
-             <> line <> "moving it would throw them away. Pick another --branch." )
+             <> line <> "moving it would throw them away. Pick another --branch."
+             <> line
+             <> line <> "AND IT ASKS WHAT THE PROPOSAL WEIGHS FIRST. A bundle is"
+             <> line <> "a pack, so what a contributor sends is compressed at"
+             <> line <> "whatever ratio the content allows -- about 1000:1 on the"
+             <> line <> "right content -- and this verb is where it becomes files."
+             <> line <> "A proposal that adds more than half a gigabyte of objects"
+             <> line <> "is refused with the number; --anyway proceeds. The objects"
+             <> line <> "are in this repository either way: what is being spent"
+             <> line <> "here is the working tree." )
     $ entry $ bindMatch "hub:pr:checkout" $ nil_ \case
         (prCheckoutArgs -> Just pc) -> lift (prCheckout pc)
         other -> liftIO (badArgs prCheckoutUsage other)
@@ -288,7 +299,34 @@ prEntries = do
                                     <> "  Nothing was checked out: reviewing the wrong"
                                     <+> "one of these is silent." ))
                           codeNotStaged
-        Just got ->
+        Just got -> do
+          -- BEFORE THE WORKING TREE IS TOUCHED, which is the only place this
+          -- can be asked and the only place it matters: the objects arrived at
+          -- accept and are compressed in a pack, and a checkout is where they
+          -- become files. See 'addedBytes' for the ratio that makes this worth
+          -- a call.
+          --
+          -- A failure to MEASURE is not a refusal. The number is advice, the
+          -- objects are already here, and a git that cannot answer must not
+          -- stop a reviewer from reading a pull request.
+          weight <- addedBytes Nothing (prBase (psCoords pr)) got
+                      <&> either (const Nothing) Just
+
+          for_ weight $ \n ->
+            when (n > maxCheckoutBytes && not (pcAnyway pc)) $
+              liftIO $ refuse (show ( "#" <> pretty (pcNumber pc) <+> "adds"
+                                        <+> pretty n <+> "bytes of objects, and"
+                                        <+> "a checkout writes them out"
+                                      <> line <> "  a bundle compresses about"
+                                        <+> "1000:1 on the right content, so"
+                                        <+> "what was cheap to send"
+                                      <> line <> "  is not cheap to check out."
+                                        <+> "Nothing was written."
+                                      <> line <> "  `--anyway` proceeds; the"
+                                        <+> "objects are already in this"
+                                        <+> "repository either way." ))
+                              codeTooBig
+
           checkoutBranch Nothing branch got >>= \case
             Right () -> liftIO $ print $ vcat
               [ "on branch" <+> pretty branch
@@ -660,20 +698,23 @@ data PrCheckout = PrCheckout
     -- | The branch to make. Defaults to @pr/\<n\>@, which is a name a reviewer
     -- can guess and this verb will reuse on the next run.
   , pcBranch :: Maybe Text
+    -- | Check out a proposal bigger than 'maxCheckoutBytes' anyway.
+  , pcAnyway :: Bool
   }
   deriving stock (Eq,Show)
 
 prCheckoutUsage :: Doc ()
 prCheckoutUsage =
-  "usage: hbs2-hub pr checkout --repo <key> --number <n> [--branch <name>]"
+  "usage: hbs2-hub pr checkout --repo <key> --number <n> [--branch <name>] [--anyway]"
 
 prCheckoutArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrCheckout
 prCheckoutArgs syn = do
-  kvs    <- flagsOf (repoFlags <> ["--number","--branch"]) syn
+  kvs    <- flagsAndSwitches (repoFlags <> ["--number","--branch"]) ["--anyway"] syn
   repo   <- flagRepo asKey kvs
   n      <- flagOnce kvs "--number" >>= flagWord
   branch <- flagMaybe kvs "--branch" asText
-  pure (PrCheckout repo n branch)
+  anyway <- flagSwitch kvs "--anyway"
+  pure (PrCheckout repo n branch anyway)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     -- Through 'flagText', so a branch that spells a number is one. The shape
@@ -725,3 +766,30 @@ prMergeArgs syn = do
     -- Through 'flagText': an abbreviated sha can be all digits, and one in
     -- twenty-seven of the seven-character ones is.
     asText = fmap Text.pack . flagText
+
+-- | How much a proposal may add to a working tree before this asks first.
+--
+-- NOT A LIMIT ON THE REPOSITORY, which is the reason this can have a value at
+-- all: 'addedBytes' asks about @base..tip@, so a large project's own history
+-- does not count towards it and the same number means the same thing in a
+-- five-megabyte repository and in a five-gigabyte one. What it bounds is one
+-- contributor's contribution.
+--
+-- HALF A GIGABYTE, which is far above any honest patch series and far below
+-- what the compression ratio makes affordable to send: a bundle expands at
+-- about 1000:1 on compressible content, so the attachment bound this hub
+-- accepts ('maxPartBytes', 64 MiB) buys tens of gigabytes in a reviewer's
+-- working tree.
+--
+-- A REFUSAL WITH A FLAG and not a hard ceiling. The objects are already in this
+-- repository by the time anybody runs this -- the accept fetched them -- so the
+-- disk this protects is the WORKING TREE, and a maintainer who has looked at
+-- the number and wants it anyway is not making a mistake. That is a different
+-- case from the canon writers, where the answer to "are you sure" is a dry run:
+-- nothing here is published and nothing is signed.
+maxCheckoutBytes :: Integer
+maxCheckoutBytes = 512 * 1024 * 1024
+
+-- | The proposal is bigger than 'maxCheckoutBytes' and @--anyway@ was not given.
+codeTooBig :: Int
+codeTooBig = 53

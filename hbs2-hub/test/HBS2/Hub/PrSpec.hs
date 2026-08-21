@@ -308,9 +308,9 @@ spec4 =
     it "reads a complete call, and defaults the branch to nothing" $ do
       repo <- aKey
       prCheckoutArgs (argv ["--repo", b58 repo, "--number", "7"])
-        `shouldBe` Just (PrCheckout repo 7 Nothing)
+        `shouldBe` Just (PrCheckout repo 7 Nothing False)
       prCheckoutArgs (argv ["--number", "7", "--repo", b58 repo, "--branch", "review"])
-        `shouldBe` Just (PrCheckout repo 7 (Just "review"))
+        `shouldBe` Just (PrCheckout repo 7 (Just "review") False)
 
     it "refuses a call with no repository or no number" $ do
       repo <- aKey

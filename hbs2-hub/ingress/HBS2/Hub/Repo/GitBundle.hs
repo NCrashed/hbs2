@@ -51,6 +51,7 @@ module HBS2.Hub.Repo.GitBundle
   , validSha
   , validAbbrevSha
   , resolveCommit
+  , addedBytes
   ) where
 
 import HBS2.Hub.Types (safeText)
@@ -61,6 +62,8 @@ import HBS2.CLI.Prelude hiding (filter)
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as B8
+import Data.ByteString.Lazy qualified as LBS
 import Control.Monad.Except (ExceptT(..),runExceptT,throwError)
 import Data.Either (isLeft)
 import Data.Char (isHexDigit)
@@ -996,3 +999,67 @@ recordedTips out =
   , sha : _ <- [Text.words (Text.decodeUtf8Lenient l)]
   , validSha sha
   ]
+
+-- | What a proposal adds, in bytes, once git is not compressing it.
+--
+-- WHY A SIZE IS WORTH ASKING FOR AT ALL. A bundle is a pack, and a pack is
+-- compressed: 512 MiB of zeros bundles to about 522 KiB, a ratio near 1000:1.
+-- The fetch is cheap, because git keeps the pack as it arrived -- so nothing
+-- upstream of a checkout notices, and @hub pr checkout@ is where the tree is
+-- materialised into somebody's working directory. An attachment at the bound
+-- this hub accepts, at that ratio, is tens of gigabytes.
+--
+-- THE OBJECTS THIS PROPOSAL ADDS, and not the tree at the tip. A repository is
+-- legitimately large and its maintainer expects a working tree that size; what
+-- nobody expects is one proposal adding more than the repository holds. Asking
+-- @base..tip@ makes the number about the contributor's contribution, so the
+-- bound below means the same thing in a small repository and in a large one.
+--
+-- An UPPER bound on what a checkout writes: it counts every new object, and a
+-- working tree materialises only the blobs still present at the tip. Bounding
+-- from above is the right direction for a gate, and the exact figure would cost
+-- a second walk to compute.
+--
+-- Two calls and no shell: @rev-list --objects@ names them, @cat-file
+-- --batch-check@ weighs them, and the second reads the first's output as stdin.
+-- Both are bounded by the size of the DELTA rather than of the repository,
+-- which is what makes this affordable to run before every checkout.
+addedBytes :: MonadUnliftIO m
+           => Maybe FilePath -> Text -> Text -> m (Either BundleError Integer)
+addedBytes cwd base tip = runExceptT do
+  checked "object name" validSha base
+  checked "object name" validSha tip
+
+  objs <- ExceptT $ call cwd bundleSeconds "rev-list"
+            [ "rev-list", "--objects", "--end-of-options"
+            , Text.unpack base <> ".." <> Text.unpack tip ]
+
+  -- THE FIRST TOKEN OF EACH LINE. `rev-list --objects` prints the object name
+  -- and then, for a blob or a tree, the path it was found at -- and a path is a
+  -- stranger's bytes, which must not reach cat-file's stdin as though it were
+  -- an object name. Not `--no-object-names`, which says the same thing and was
+  -- added in git 2.26: this parse is stable across every version that has
+  -- `--objects` at all.
+  let names = [ n | l <- BS.split 0x0a objs, n : _ <- [B8.words l] ]
+
+  if Prelude.null names then pure 0 else do
+    sizes <- ExceptT $ stdinTo cwd bundleSeconds "cat-file"
+               [ "cat-file", "--batch-check=%(objectsize)" ]
+               (LBS.fromStrict (BS.intercalate "\n" names <> "\n"))
+    pure (sum [ n | l <- BS.split 0x0a sizes, Just n <- [readSize l] ])
+  where
+    readSize l = case B8.words l of
+      [w] | not (BS.null w), BS.all (\c -> c >= 0x30 && c <= 0x39) w ->
+        Just (read (Text.unpack (Text.decodeUtf8Lenient w)) :: Integer)
+      _ -> Nothing
+
+-- The same as 'call', for a command that reads its work from stdin.
+stdinTo :: MonadUnliftIO m
+        => Maybe FilePath -> Int -> Text -> [String] -> LBS.ByteString
+        -> m (Either BundleError ByteString)
+stdinTo cwd secs what args input =
+  gitRun cwd [] secs what args input <&> \case
+    Left (GitUnstartable e) -> Left (BundleUnstartable e)
+    Left (GitStalled e)     -> Left (BundleStalled e)
+    Right (ExitSuccess, out, _)  -> Right out
+    Right (ExitFailure c, _, e0) -> Left (refusal what c e0)
