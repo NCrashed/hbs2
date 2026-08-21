@@ -387,7 +387,9 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
         void $ readFromSocket so 4 <&> LBS.toStrict
         ssize <- readFromSocket so 4 <&> LBS.toStrict
         let size = word32 ssize & fromIntegral
-        bs <- readFromSocket so size
+        -- Through 'readFrame': the length is the far end's to choose, and this
+        -- read sits behind a four-byte cookie and nothing else.
+        bs <- readFrame so size
         -- re-tag the frame if this connection's peer has adopted a routable
         -- name (see 'tcpAdoptName'); otherwise deliver under its own peer
         canon <- readTVarIO _tcpPeerAlias <&> HM.findWithDefault peer peer

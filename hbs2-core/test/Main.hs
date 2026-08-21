@@ -9,6 +9,7 @@ import TestMerkleWalk
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
+import TestFrameBound
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -34,6 +35,14 @@ main =
               testKeyEncodingUnchanged
           , testCase "is refused when it is not the length its scheme wants"
               testKeyEncodingRefusesBadLength
+          ]
+      , testGroup "a stream frame is as long as the far end says"
+          [ testCase "refuses a length no frame this build produces could have"
+              testFrameRefusesHugeDeclaredLength
+          , testCase "reads a frame the size this build actually sends"
+              testFrameTakesWhatThisBuildSends
+          , testCase "ends with the stream when a promised frame stops arriving"
+              testFrameDoesNotAllocateWhatWasPromised
           ]
       , testGroup "an encrypted flow belongs to the peer, not to the flow key"
           [ testCase "is not taken over by a stranger who names the nonce first"

@@ -510,6 +510,20 @@
 
 ## Security
 
+  - **`hbs2-core`: a stream frame is no longer as long as the far end says.**
+    Both stream transports read a four-byte length and then that many bytes, as
+    given: `recv sock n` allocates a buffer of n, so a peer declaring 4 GiB had
+    the process try to hold 4 GiB before a byte of it arrived. On TCP that sits
+    behind a four-byte cookie handshake and nothing else; on the UNIX socket it
+    is anybody who can open the path.
+
+    Frames now go through one reader with a ceiling (`defMaxFrame`, 16 MiB --
+    two orders above anything this codebase sends, since a block is 256 KiB and
+    travels in chunks), and the read is chunked, so even a permitted length is
+    allocated as it arrives. A frame above the ceiling drops the connection
+    rather than being skipped: the length is how a reader finds the next frame,
+    so skipping one would be guessing where the stream resumes.
+
   - **`hbs2-hub`: a pull request coordinate has to be a git name.** The five
     coordinates and a merge's two fields were bounded by SIZE and by nothing
     else, and a coordinate is not a quantity of bytes: it is a ref name or an

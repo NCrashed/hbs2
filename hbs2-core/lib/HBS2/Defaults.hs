@@ -9,6 +9,29 @@ defMaxDatagram = 4096
 defMaxDatagramRPC :: Int
 defMaxDatagramRPC = 4096
 
+
+-- | The largest frame a stream transport will read before hanging up.
+--
+-- WHY A CEILING EXISTS AT ALL. A stream frame is a four-byte length and then
+-- that many bytes, and the length is a number the far end chose. Reading it as
+-- given means an unauthenticated peer can declare 4 GiB and have this process
+-- try to hold it: on TCP that is past a four-byte cookie handshake and nothing
+-- else, and on the UNIX socket it is anybody who can open the path.
+--
+-- ABOVE ANY FRAME THIS CODEBASE SENDS, by two orders. A block is
+-- 'defBlockSize' (256 KiB) and never travels whole -- it is requested in chunks
+-- bounded by the datagram ceiling -- and the largest single protocol payload is
+-- a mailbox message, which its own layer bounds well below this. So the number
+-- is not a tuning knob: it is the line between "a frame this software could
+-- have produced" and "a length somebody typed".
+--
+-- IT IS NOT A MEMORY BUDGET. One connection may still hold this much, and a
+-- hundred connections a hundred times it; what bounds THAT is how many peers a
+-- node talks to, which is a different decision in a different place. What this
+-- removes is the part where one peer picks the number.
+defMaxFrame :: Int
+defMaxFrame = 16 * 1024 * 1024
+
 defMessageQueueSize :: Integral a => a
 defMessageQueueSize = 65536*10
 

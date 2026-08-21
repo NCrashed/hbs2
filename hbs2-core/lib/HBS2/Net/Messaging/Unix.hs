@@ -249,7 +249,10 @@ runMessagingUnix env = do
               -- answer to watchdog message
               liftIO $ sendAll so $ bytestring32 0
             else do
-              frame    <- liftIO $ readFromSocket so frameLen --  <&> LBS.toStrict
+              -- Through 'readFrame' like the TCP reader, and for the same reason:
+              -- the length is the far end's to choose. Here the far end is
+              -- anybody who can open the socket path.
+              frame    <- liftIO $ readFrame so frameLen
               maybe1 mq none $ \q -> do
                 atomically $ writeTQueue q (From that, frame)
 
@@ -335,7 +338,7 @@ runMessagingUnix env = do
 
               getTimeCoarse >>= (atomically . writeTVar tseen)
 
-              frame    <- liftIO $ readFromSocket sock frameLen
+              frame    <- liftIO $ readFrame sock frameLen
 
               -- when (frameLen > 0) do
                 -- сообщения кому? **МНЕ**
