@@ -271,8 +271,13 @@ coords :: Bool -> PRCoords
 -- A fork-pointer PR. PEP-20 requires one of the two ways to fetch the
 -- change, so the unreachable variant (neither fork nor bundle) must be
 -- refused rather than minted (reachableCoords).
+-- The object names are FORTY HEX, which they have to be: a coordinate is a ref
+-- name or an object name ('malformedName'), so a toy value here would generate
+-- letters no hub can fold -- and the coverage requirement below is what said so
+-- when this fixture still read "aaaa".
 coords ok = PRCoords (if ok then Just "hbs23://fork" else Nothing)
-              "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+              "refs/heads/f" (Text.replicate 40 "a")
+              "refs/heads/master" (Text.replicate 40 "b") Nothing
 
 -- | The keys a run is played with, and the two folding contexts built from
 -- them. A record rather than five positional arguments, three of which are

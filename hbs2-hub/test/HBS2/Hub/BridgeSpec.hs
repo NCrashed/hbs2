@@ -117,10 +117,20 @@ here h = (h, PartOpened 1024 secret32)
 carrying :: MessageSecret -> [(HashRef, PartEvidence)] -> LetterParts
 carrying msg evs = attachments msg (fmap fst evs) evs
 
+-- Object names are FORTY HEX, and this fixture used to say "aaaa".
+--
+-- A coordinate is a ref name or an object name ('malformedName'), so a toy
+-- value is one canon cannot hold -- and a fixture built out of values canon
+-- cannot hold tests a letter no hub would ever fold. Spelled out here rather
+-- than generated, so the shapes are visible in the fixture that uses them.
+forkTip, forkBase :: Text.Text
+forkTip  = Text.replicate 40 "a"
+forkBase = Text.replicate 40 "b"
+
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
-coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+coords = PRCoords (Just "hbs23://fork") "refs/heads/f" forkTip "refs/heads/master" forkBase Nothing
 
 -- The thread an accepted event landed in.
 scopeOf :: Accepted -> ThreadId
@@ -396,7 +406,7 @@ spec = do
       aPR <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let evil = makeLetter (fst mallory) (snd mallory)
-                   (ARevise (scopeOf aPR) coords { prSourceTip = "dead" } 2) noReplyChannel
+                   (ARevise (scopeOf aPR) coords { prSourceTip = Text.replicate 40 "d" } 2) noReplyChannel
       expectErr NotAuthorOfRecord
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory)) (acView aPR) 2 origin2 noParts evil)
 
@@ -502,7 +512,7 @@ spec = do
       aPR <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts pr)
       let rev = makeLetter (fst alice) (snd alice)
-                  (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2) noReplyChannel
+                  (ARevise (scopeOf aPR) coords { prSourceTip = Text.replicate 40 "c" } 2) noReplyChannel
       aRev <- expectRight
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (acView aPR) 2 o2 noParts rev)
       let rebuilt = viewOf (foldEvents repo (map acEvent [aPR, aRev]))
@@ -664,7 +674,7 @@ spec = do
         (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
       expectOwn (BadContent PROnlyOnIssue)
         (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments
-           (AMerge (scopeOf aOpen) "cafe" "refs/heads/master" 2))
+           (AMerge (scopeOf aOpen) (Text.replicate 40 "e") "refs/heads/master" 2))
 
     it "refuses honouring the same request twice" $ do
       alice <- kp
@@ -911,7 +921,7 @@ spec = do
       -- two parts opened with two different keys cannot both be carried, since
       -- canon has one field for it, and the refusal names the one that differed
       let two = AOpen repo HubPR "att" [] Nothing (Just (proven (fst alice) part))
-                  (Just (PRCoords Nothing "refs/heads/f" "aa" "refs/heads/master" "bb"
+                  (Just (PRCoords Nothing "refs/heads/f" forkTip "refs/heads/master" forkBase
                            (Just (provenWith otherSecret (fst alice) other)))) 1
           twoLetter = makeLetter (fst alice) (snd alice) two noReplyChannel
       expectErr (PartSecretsDiffer other)
@@ -923,7 +933,7 @@ spec = do
       -- because a proof is over the secret: the letter above claims one part
       -- under each secret, and claiming both under one is a different claim.
       let same = AOpen repo HubPR "att" [] Nothing (Just (proven (fst alice) part))
-                   (Just (PRCoords Nothing "refs/heads/f" "aa" "refs/heads/master" "bb"
+                   (Just (PRCoords Nothing "refs/heads/f" forkTip "refs/heads/master" forkBase
                             (Just (proven (fst alice) other)))) 1
       _ <- expectRight
         (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin
@@ -1052,7 +1062,7 @@ spec = do
           req = makeLetter (fst alice) (snd alice) (AClose tid Nothing 2) noReplyChannel
       origin2 <- someHash
       expectErr (Composed (NotAcceptable OwnerNative))
-        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (AMerge tid "abc" "master" 2) req)
+        (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (AMerge tid (Text.replicate 40 "e") "master" 2) req)
       expectErr (Composed (NotAcceptable OwnerNative))
         (honourWith (ctxOf owner) env (acView aOpen) 2 origin2 (ARedact repo tid 2) req)
       either outcome (const Decide)
@@ -1296,6 +1306,33 @@ spec = do
                     Nothing Nothing 1) noReplyChannel
       _ <- expectRight (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts ok)
       pure ()
+
+    -- AND THE SHAPE, which the size gate above cannot see. A coordinate is a
+    -- ref name or an object name (PEP-20); `--output=sub/` is a git option,
+    -- well under every size bound, and it was admissible canon -- in every
+    -- clone forever, waiting for a reader that put it on a command line.
+    --
+    -- HERE AND NOT ONLY IN LetterSpec. That module asks 'malformedName' what it
+    -- answers; this asks whether the bridge CALLS it, which is the half that
+    -- unwiring the gate would leave green.
+    it "refuses a coordinate that is not a git name" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          env = EnvelopeSigner (fst alice)
+          letterWith c = makeLetter (fst alice) (snd alice)
+                           (AOpen repo HubPR "pr" [] Nothing Nothing (Just c) 1)
+                           noReplyChannel
+      expectErr (MalformedName "base")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letterWith coords { prBase = "--output=sub/" }))
+      expectErr (MalformedName "onto")
+        (acceptLetter (ctxOf owner) env (emptyView repo) 1 origin noParts
+           (letterWith coords { prOnto = "-x" }))
+      -- Discard and not Retry: no later pass changes what the sender signed,
+      -- and no hub anywhere would fold it.
+      outcome (MalformedName "base") `shouldBe` Discard
 
     it "does not raise a decision on a letter it already folded" $ do
       alice <- kp
@@ -1725,8 +1762,9 @@ spec = do
       -- ...and a merge reports the status the fold will show, and the commit
       aMerge <- expectRight
         (ownerEvent (ctxOf owner) (acView aCmt) 3 noOwnAttachments
-           (AMerge thr "cafe" "refs/heads/master" 3))
-      ackFor aMerge `shouldBe` Just (AckRecord repo thr (Just 1) "merged" (Just "cafe") Nothing)
+           (AMerge thr (Text.replicate 40 "e") "refs/heads/master" 3))
+      ackFor aMerge `shouldBe`
+        Just (AckRecord repo thr (Just 1) "merged" (Just (Text.replicate 40 "e")) Nothing)
       -- a close carries the words the maintainer wrote with it
       aClose <- expectRight
         (ownerEvent (ctxOf owner) (acView aMerge) 5 noOwnAttachments
@@ -2185,7 +2223,7 @@ spec = do
       -- a revise that keeps a way to fetch is fine
       _ <- expectRight
         (ownerEvent (ctxOf owner) (acView aPR) 2 noOwnAttachments
-           (ARevise (scopeOf aPR) coords { prSourceTip = "cccc" } 2))
+           (ARevise (scopeOf aPR) coords { prSourceTip = Text.replicate 40 "c" } 2))
       pure ()
 
     it "refuses a view built for another repo" $ do
@@ -2259,10 +2297,10 @@ spec = do
                   (AComment (scopeOf a1) Nothing (Just "hi") Nothing 2) noReplyChannel
       a2 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a1) 2 o2 noParts cmt)
       let rev = makeLetter (fst alice) (snd alice)
-                  (ARevise (scopeOf a1) coords { prSourceTip = "cccc" } 3) noReplyChannel
+                  (ARevise (scopeOf a1) coords { prSourceTip = Text.replicate 40 "c" } 3) noReplyChannel
       a3 <- expectRight (acceptLetter (ctxOf owner) (EnvelopeSigner env) (acView a2) 3 o3 noParts rev)
       a4 <- expectRight (ownerEvent (ctxOf owner) (acView a3) 4 noOwnAttachments
-                          (AMerge (scopeOf a1) "cafe" "refs/heads/master" 4))
+                          (AMerge (scopeOf a1) (Text.replicate 40 "e") "refs/heads/master" 4))
       let fr = foldEvents repo (map acEvent [a1,a2,a3,a4])
       frDropped fr `shouldBe` []
       HM.lookup "status" (tsAttrs (threadOf fr (scopeOf a1))) `shouldBe` Just "merged"

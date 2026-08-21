@@ -73,7 +73,10 @@ someHash = do
 coords :: PRCoords
 -- A fork-pointer PR: PEP-20 requires one of the two ways to fetch the
 -- change, so a coords with neither is refused (reachableCoords).
-coords = PRCoords (Just "hbs23://fork") "refs/heads/f" "aaaa" "refs/heads/master" "bbbb" Nothing
+-- Object names are forty hex: a coordinate is a ref name or an object name
+-- ('malformedName'), so a toy value here would be one canon cannot hold.
+coords = PRCoords (Just "hbs23://fork") "refs/heads/f" (Text.replicate 40 "a")
+                  "refs/heads/master" (Text.replicate 40 "b") Nothing
 
 -- A group secret is raw key bytes of a fixed size, and the constructor checks
 -- only that; telling the parts secret from the message secret is what the
@@ -99,7 +102,7 @@ secretOf b = fromMaybe (error "bad fixture secret")
                (mkPartSecret (BS.replicate typicalKeyLength b))
 
 spec :: Spec
-spec = spec3 >> specMain
+spec = spec3 >> coordShapes >> specMain
 
 specMain :: Spec
 specMain = do
@@ -550,3 +553,74 @@ spec3 =
       -- decide which of two disagreeing copies is the real one.
       provesPart (PartRef p2 (partProofFor p1 secretA (fst alice)))
                  secretA (fst alice) `shouldBe` False
+
+-- | A coordinate is a ref name or an object name (PEP-20), and nothing else.
+--
+-- WHAT SIZE COULD NOT SAY. 'oversizedField' bounds the five coordinates by
+-- 'maxRef' and by nothing else, so a signed letter whose @base@ was
+-- @--output=sub/@ -- a git option, well under any size bound -- was admissible
+-- canon, in every clone forever, waiting for a reader that put it on a command
+-- line. One such reader existed and was fixed on its own side; this is the rule
+-- that keeps the next one from mattering.
+coordShapes :: Spec
+coordShapes =
+  describe "PEP-20 coordinates: the shape, not only the size" $ do
+
+    it "takes the coordinates this build writes" $ do
+      (pk,_) <- kp
+      thr <- someHash
+      malformedName (anOpen pk coords) `shouldBe` Nothing
+      malformedName (ARevise thr coords 1) `shouldBe` Nothing
+
+    -- THE ONE IT EXISTS FOR, as a shape rather than as the string: what is
+    -- refused is everything that is not an object name, and the exploit is one
+    -- member of that set.
+    it "refuses a coordinate that is a git option" $ do
+      (pk,_) <- kp
+      malformedName (anOpen pk coords { prBase = "--output=sub/" })
+        `shouldBe` Just "base"
+      malformedName (anOpen pk coords { prSourceTip = "--upload-pack=sh" })
+        `shouldBe` Just "source-tip"
+
+    it "refuses an abbreviation where canon records a whole object name" $ do
+      (pk,_) <- kp
+      malformedName (anOpen pk coords { prSourceTip = "cafe" })
+        `shouldBe` Just "source-tip"
+      malformedName (anOpen pk coords { prBase = "HEAD" }) `shouldBe` Just "base"
+
+    it "refuses a ref name git would not take" $ do
+      (pk,_) <- kp
+      malformedName (anOpen pk coords { prOnto = "-x" }) `shouldBe` Just "onto"
+      malformedName (anOpen pk coords { prSourceRef = "a..b" })
+        `shouldBe` Just "source-ref"
+      malformedName (anOpen pk coords { prOnto = "" }) `shouldBe` Just "onto"
+
+    -- The fork pointer is neither shape: PEP-20 spells it hbs23://<fork-key>.
+    it "refuses a fork pointer that is not one" $ do
+      (pk,_) <- kp
+      let src s = anOpen pk coords { prSource = s }
+      malformedName (src (Just "/etc/passwd")) `shouldBe` Just "source"
+      malformedName (src (Just "hbs23://")) `shouldBe` Just "source"
+      malformedName (src (Just "hbs23://a b")) `shouldBe` Just "source"
+      malformedName (src (Just "hbs23://5KdKq9")) `shouldBe` Nothing
+      -- Absent is not malformed: the delta path carries no fork pointer.
+      malformedName (src Nothing) `shouldBe` Nothing
+
+    -- A merge is a permanent claim about which commit a proposal landed in, on
+    -- a branch that has a name.
+    it "holds a merge to the same two shapes" $ do
+      thr <- someHash
+      let sha = Text.replicate 40 "e"
+      malformedName (AMerge thr sha "refs/heads/master" 1) `shouldBe` Nothing
+      malformedName (AMerge thr "cafe" "refs/heads/master" 1)
+        `shouldBe` Just "merge-commit"
+      malformedName (AMerge thr sha "--exec=sh" 1) `shouldBe` Just "merged-into"
+
+    -- The ops that carry no name at all, said out loud: a wildcard here would
+    -- swallow a new constructor that does carry one.
+    it "has nothing to say about the ops with no names in them" $ do
+      thr <- someHash
+      malformedName (AComment thr Nothing (Just "hi") Nothing 1) `shouldBe` Nothing
+      malformedName (AClose thr Nothing 1) `shouldBe` Nothing
+  where
+    anOpen pk c = AOpen pk HubPR "t" [] Nothing Nothing (Just c) 1

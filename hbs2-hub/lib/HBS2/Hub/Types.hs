@@ -58,6 +58,9 @@ module HBS2.Hub.Types
   , normalizedAttr
   , validAttrName
   , validHashRef
+  , validRefName
+  , validSha
+  , validAbbrevSha
   , validHubKey
   , safeText
   , safeWith
@@ -101,7 +104,7 @@ import Codec.Serialise qualified as CBOR
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Char (isAsciiLower,isDigit)
+import Data.Char (isAsciiLower,isDigit,isHexDigit)
 import Data.Char qualified as Char
 import Data.Maybe (isJust)
 import Data.List qualified as List
@@ -693,6 +696,59 @@ pad w n = replicate (max 0 (w - length s)) '0' <> s
 -- The width is the digest's, and it is also what the box-size budget assumes
 -- (see @maxBoxBytes@): four kilobytes of slack covers a handful of hashes only
 -- while a hash is a hash.
+
+-- | A ref name this build will pass to git.
+--
+-- Narrower than @git check-ref-format@ on purpose. That accepts a great deal,
+-- including names this has no reason to carry, and running it would mean
+-- putting the name on a command line to find out whether the name may go on a
+-- command line. This is the shape a branch or a tag has.
+--
+-- HERE AND NOT BESIDE THE GIT CALLS. It lived in "HBS2.Hub.Repo.GitBundle",
+-- which is the ingress library, so the one gate that decides what a signed
+-- letter may CARRY -- 'HBS2.Hub.Letter.malformedName', in this library -- could
+-- not reach it. Two shapes for one field is how the two come to disagree, and
+-- the disagreement that mattered was that a coordinate was bounded by SIZE at
+-- the letter and by SHAPE only when it reached a command line.
+validRefName :: Text -> Bool
+validRefName r =
+  not (Text.null r)
+    && Text.length r <= 255
+    && Text.all ok r
+    && not ("-" `Text.isPrefixOf` r)
+    && not ("/" `Text.isPrefixOf` r)
+    && not (".." `Text.isInfixOf` r)
+    && not ("//" `Text.isInfixOf` r)
+    && not ("." `Text.isSuffixOf` r)
+    && not (".lock" `Text.isSuffixOf` r)
+  where ok c = c `elem` ("/_-." :: String)
+                 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                 || (c >= '0' && c <= '9')
+
+-- | An object name this will pass to git: hex, and the length a hash is.
+--
+-- Both lengths, because a repository may be sha1 or sha256 and refusing the
+-- second would refuse a whole class of repository over a number.
+validSha :: Text -> Bool
+validSha s = Text.length s `elem` [40, 64] && Text.all isHexDigit s
+
+-- | An object name a PERSON typed, which is not the same shape as one a signed
+-- letter carries.
+--
+-- 'validSha' is the shape canon holds and the shape a letter may claim: whole,
+-- 40 or 64 hex. What somebody copies out of @git log --oneline@ is seven
+-- characters, and passing that to a check written for canon refused it in the
+-- letter-shaped words about a signed name and a leading dash. Four is git's own
+-- floor for an abbreviation.
+--
+-- Still narrow on purpose: hex only, so this is an abbreviated OBJECT NAME and
+-- not @HEAD@, @main@ or @v1.2^@. A merge event is a permanent claim about which
+-- commit a proposal landed in, and a name that means something different
+-- tomorrow is not one canon should record.
+validAbbrevSha :: Text -> Bool
+validAbbrevSha s =
+  Text.length s >= 4 && Text.length s <= 64 && Text.all isHexDigit s
+
 validHashRef :: HashRef -> Bool
 validHashRef h = hashRefWeight h == hashRefBytes
 

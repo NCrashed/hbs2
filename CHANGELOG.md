@@ -510,6 +510,22 @@
 
 ## Security
 
+  - **`hbs2-hub`: a pull request coordinate has to be a git name.** The five
+    coordinates and a merge's two fields were bounded by SIZE and by nothing
+    else, and a coordinate is not a quantity of bytes: it is a ref name or an
+    object name. What that permitted was a signed letter whose `base` was
+    `--output=sub/` -- a git option, well under any bound, admissible canon in
+    every clone forever, waiting for any reader that put it on a command line.
+    One such reader existed and was fixed on its own side; this is the rule that
+    keeps the next one from mattering.
+
+    An admission rule, so it lands before a release: narrowing what canon may
+    hold is a break once anything has been published under the old one. The
+    shape checks moved out of the git module into the pure library in the
+    process, because the gate that decides what a signed letter may carry could
+    not reach a check that lived beside the git calls -- which is how one field
+    came to have two shapes.
+
   - **`hbs2-peer`: a letter to two charging mailboxes reaches both.** A stamp
     pays for one mailbox (PEP-21), so a letter to two of them is two copies of
     one message carrying two stamps -- which is exactly what `hbs2-hub` sends.

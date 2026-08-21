@@ -419,6 +419,12 @@ data TriageError =
     -- fifty kilobytes past every size gate, into a signed author box, and into
     -- a canon file no reader would ever accept again.
   | MalformedRef Text
+    -- | A name-shaped field that is not a name, named.
+    --
+    -- Its own case beside 'MalformedRef' because the sentence differs: that one
+    -- is "not a hash" and this one is "not a ref name or an object name", and
+    -- the sender fixes them in different places.
+  | MalformedName Text
     -- | Only the repo owner key may delegate or revoke (PEP-19 rule 5), and
     -- this folding key is a delegate. Distinct from 'UnauthorizedForRepo':
     -- that one another folder can satisfy, this one nobody but the owner can,
@@ -570,6 +576,8 @@ instance Pretty TriageError where
     BodyTooLarge f        -> "field" <+> pretty (safeText f) <+> "is over what triage carries inline"
     -- The field NAMES above are ours; only the attribute name is a stranger's.
     MalformedRef f        -> "field" <+> pretty (safeText f) <+> "is not a hash"
+    MalformedName f       -> "field" <+> pretty (safeText f)
+                               <+> "is not a git name: a ref name or an object name"
     OwnerKeyRequired      -> "only the owner key may do this"
     NeedsReview           -> "carries words the owner would be signing as their own"
     UnnormalizedValue k   -> "attribute" <+> pretty (safeText k) <+> "is not in canonical form"
@@ -674,6 +682,9 @@ outcome = \case
   -- Not a threshold: nobody can fold this letter, here or anywhere, and no
   -- later pass changes what the sender signed.
   MalformedRef _     -> Discard
+  -- The same answer and the same reason: a coordinate that is not a git name
+  -- is not one anywhere, and the shape is inside what the sender signed.
+  MalformedName _    -> Discard
   -- The letter is intact and the caller can supply what is missing.
   MissingPartSecret _ -> Retry
   PartNotFetched _   -> Retry
@@ -1001,7 +1012,12 @@ requireSize content = maybe (Right ()) (Left . BodyTooLarge) (oversizedField con
 -- than inside it because it is not a threshold: the field is malformed, no hub
 -- would take it, and a letter carrying one can never be folded anywhere.
 requireRefs :: AuthorContent -> Either TriageError ()
-requireRefs content = maybe (Right ()) (Left . MalformedRef) (malformedRef content)
+requireRefs content =
+  maybe (Right ()) (Left . MalformedRef) (malformedRef content)
+    -- AND THE NAME-SHAPED ONES, which were bounded by size and by nothing else.
+    -- A coordinate is a ref name or an object name; @--output=sub/@ is under
+    -- every size bound and is a git option. See 'malformedName'.
+    >> maybe (Right ()) (Left . MalformedName) (malformedName content)
 
 -- Refuse to sign a multi-valued attribute the caller did not canonicalize.
 -- The fold cannot fix one (the value is inside a signed author box) and must

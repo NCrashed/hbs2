@@ -50,6 +50,7 @@ module HBS2.Hub.Letter
   , textSize
   , oversizedField
   , malformedRef
+  , malformedName
   , noReplyChannel
   , sigilNames
   , sigilOwner
@@ -381,6 +382,77 @@ malformedRef = \case
     named name = (>>= partRef name)
     proofRef (PartProof h) = h
     coordsRefs c = named "bundle-part" (prBundle c)
+
+-- | Which name-shaped field is not a name, if any.
+--
+-- THE OTHER HALF OF 'malformedRef'. That one is about the fields whose type is
+-- a hash or a key, which take any width off the wire; this one is about the
+-- fields whose type is 'Text' and whose meaning is a git name. Both are shape
+-- rules and both run in the same place ('HBS2.Hub.Bridge.requireRefs'); they
+-- are separate functions because the answers are different sentences.
+--
+-- WHY SIZE WAS NOT ENOUGH. 'oversizedField' bounds these five by
+-- 'maxRef' and by nothing else, and a coordinate is not a quantity of bytes: it
+-- is a ref name or an object name, and the two shapes are the whole of what a
+-- coordinate can be. What that permitted was a signed letter whose @base@ was
+-- @--output=sub/@ -- a git option, under 255 bytes, sitting in canon in every
+-- clone forever, waiting for any reader that put it on a command line. One such
+-- reader existed ('HBS2.Hub.CLI.Read.diffArgv', fixed on its own side), and the
+-- rule that keeps the next one from mattering is that the value never becomes
+-- canon at all.
+--
+-- SO IT IS AN ADMISSION RULE and not a local policy: no hub anywhere should
+-- fold one of these, the same way none should fold a fifty-kilobyte
+-- @reply-to@. Added before a release rather than after, because a rule that
+-- narrows what canon may hold is a break once anything has been published under
+-- the old one.
+--
+-- The merge fields are here too, for the same reason and with the same shapes:
+-- @merge-commit@ is an object name and @merged-into@ is a ref name, they are a
+-- permanent claim about what landed where, and nothing else checks them.
+malformedName :: AuthorContent -> Maybe Text
+malformedName = \case
+  AOpen _ _ _ _ _ _ coords _ -> coords >>= coordShape
+  ARevise _ coords _         -> coordShape coords
+  AMerge _ mc into _         -> sha "merge-commit" mc <|> ref "merged-into" into
+  AComment{}                 -> Nothing
+  ASet{}                     -> Nothing
+  AClose{}                   -> Nothing
+  AReopen{}                  -> Nothing
+  ARedact{}                  -> Nothing
+  ADelegate{}                -> Nothing
+  ARevoke{}                  -> Nothing
+  where
+    ref name t | validRefName t = Nothing
+               | otherwise      = Just name
+    sha name t | validSha t     = Nothing
+               | otherwise      = Just name
+
+    coordShape c =
+          ref "source-ref" (prSourceRef c)
+      <|> sha "source-tip" (prSourceTip c)
+      <|> ref "onto" (prOnto c)
+      <|> sha "base" (prBase c)
+      <|> (source =<< prSource c)
+
+    -- THE FORK POINTER, which is neither of the two shapes: PEP-20 spells it
+    -- @hbs23:\/\/\<fork-key\>@. Checked for the scheme and for base58 after it,
+    -- and not decoded to a key -- nothing in this build resolves one yet, and a
+    -- rule stricter than the code that reads it would refuse letters this build
+    -- has no way to be sure are wrong.
+    --
+    -- What it does close is the class the coordinates were open to: a value
+    -- beginning with a dash, holding a space, a slash, or a path.
+    source s
+      | not ("hbs23://" `Text.isPrefixOf` s) = Just "source"
+      | Text.null rest                       = Just "source"
+      | Text.all base58 rest                 = Nothing
+      | otherwise                            = Just "source"
+      where
+        rest = Text.drop 8 s
+        -- The base58 alphabet: no 0, O, I or l, which is what makes it base58
+        -- rather than "alphanumeric".
+        base58 c = c `Text.elem` "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 -- | Where the owner should send acknowledgements and status updates.
 --

@@ -54,7 +54,7 @@ module HBS2.Hub.Repo.GitBundle
   , addedBytes
   ) where
 
-import HBS2.Hub.Types (safeText)
+import HBS2.Hub.Types (safeText,validRefName,validSha,validAbbrevSha)
 import HBS2.Hub.Repo (Told(..), told)
 import HBS2.Hub.Repo.Git (gitRun, GitTrouble(..))
 
@@ -209,50 +209,10 @@ instance Pretty BundleError where
 pullRef :: Word64 -> Text
 pullRef n = "refs/hbs2/pulls/" <> Text.pack (show n) <> "/head"
 
--- | A ref name this will pass to git.
---
--- Narrower than @git check-ref-format@ on purpose. That accepts a great deal,
--- including names this has no reason to carry, and running it would mean
--- putting the name on a command line to find out whether the name may go on a
--- command line. This is the shape a branch or a tag has.
-validRefName :: Text -> Bool
-validRefName r =
-  not (Text.null r)
-    && Text.length r <= 255
-    && Text.all ok r
-    && not ("-" `Text.isPrefixOf` r)
-    && not ("/" `Text.isPrefixOf` r)
-    && not (".." `Text.isInfixOf` r)
-    && not ("//" `Text.isInfixOf` r)
-    && not ("." `Text.isSuffixOf` r)
-    && not (".lock" `Text.isSuffixOf` r)
-  where ok c = c `elem` ("/_-." :: String)
-                 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                 || (c >= '0' && c <= '9')
-
--- | An object name this will pass to git: hex, and the length a hash is.
---
--- Both lengths, because a repository may be sha1 or sha256 and refusing the
--- second would refuse a whole class of repository over a number.
-validSha :: Text -> Bool
-validSha s = Text.length s `elem` [40, 64] && Text.all isHexDigit s
-
--- | An object name a PERSON typed, which is not the same shape as one a signed
--- letter carries.
---
--- 'validSha' is the shape canon holds and the shape a letter may claim: whole,
--- 40 or 64 hex. What somebody copies out of @git log --oneline@ is seven
--- characters, and passing that to a check written for canon refused it in the
--- letter-shaped words about a signed name and a leading dash. Four is git's own
--- floor for an abbreviation.
---
--- Still narrow on purpose: hex only, so this is an abbreviated OBJECT NAME and
--- not @HEAD@, @main@ or @v1.2^@. A merge event is a permanent claim about which
--- commit a proposal landed in, and a name that means something different
--- tomorrow is not one canon should record.
-validAbbrevSha :: Text -> Bool
-validAbbrevSha s =
-  Text.length s >= 4 && Text.length s <= 64 && Text.all isHexDigit s
+-- The three name shapes moved to "HBS2.Hub.Types" and are re-exported here,
+-- because every caller in this module already imports it from here. They moved
+-- because the gate that decides what a signed LETTER may carry is in the pure
+-- library and could not reach them: see 'HBS2.Hub.Letter.malformedName'.
 
 -- | Turn one of those into the whole object name it means.
 --
