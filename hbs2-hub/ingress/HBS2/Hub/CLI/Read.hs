@@ -69,6 +69,8 @@ import HBS2.Data.Types.Refs (pattern HashLike, HashRef)
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HS
 import Data.List (sortOn)
 import Data.List qualified as List
 import Data.Maybe (fromMaybe,isJust)
@@ -380,17 +382,36 @@ showDoc t =
 -- "Surviving" is the word PEP-22 uses and it is load-bearing: compaction drops
 -- superseded @set@ events, so this is what canon still holds and not
 -- everything that ever happened.
-logDoc :: Maybe Word64 -> FoldResult -> [Doc ann]
-logDoc mnum fr =
+--
+-- THE THREADS AND NOT THE NUMBER, which is the whole of the fix. This took the
+-- number and resolved it inside the comprehension's guard, so the traversal of
+-- every thread in canon ran once per LOG ENTRY -- over a tree somebody else
+-- published, bounded by 'maxCanonFiles' at 200000 in each direction. Taking the
+-- resolved set instead makes the quadratic version unwritable rather than
+-- merely absent: there is no number here to resolve and no fold to resolve it
+-- against, so the guard is a hash lookup and nothing else.
+--
+-- A SET, because how many threads share a number is not this reader's choice:
+-- @DupNumber@ is an anomaly the fold reports and does not drop, so a hostile
+-- canon can number every thread alike and a list membership would be the same
+-- defect one layer down.
+--
+-- An event with no thread is not in a filtered log. It never was -- the old
+-- guard compared against @Just@ ids -- and it is said here because the shape
+-- that said it went away.
+logDoc :: Maybe (HashSet ThreadId) -> FoldResult -> [Doc ann]
+logDoc only fr =
   [ hsep [ fill 6 (pretty (lgSeq e))
          , pretty (opOf (lgContent e))
          , hashDoc (lgEvent e)
          , "by" <+> keyDoc (lgAuthor e) ]
   | e <- frLog fr
-  , maybe True (\n -> lgThread e `elem` fmap Just (threadsNumbered n)) mnum
+  , wanted (lgThread e)
   ]
   where
-    threadsNumbered n = [ tsId t | t <- HM.elems (frThreads fr), tsNumber t == Just n ]
+    wanted = case only of
+      Nothing  -> const True
+      Just ids -> maybe False (`HS.member` ids)
 
     opOf = \case
       AOpen{}     -> "open"     ; AComment{}  -> "comment"
@@ -435,11 +456,18 @@ readEntries = do
           -- nothing on stdout, which is what a thread with no events would look
           -- like -- so `hub log K 999` and a real but silent thread were the
           -- same answer, and the sibling verb already exits 26 for the first.
-          for_ n $ \want ->
-            unless (any ((== Just want) . tsNumber) (HM.elems (frThreads fr))) $
-              liftIO (refuse (show ("canon holds no thread numbered" <+> pretty want))
-                             codeNoSuchThread)
-          out (logDoc n fr)
+          --
+          -- RESOLVED ONCE, HERE, and by the function every other resolver in
+          -- the package uses. The refusal and the filter are one question asked
+          -- once instead of two answers spelled two ways: this walked the whole
+          -- thread map to decide whether to refuse, and then the renderer
+          -- walked it again per log entry with a second copy of the rule.
+          only <- for n $ \want -> case threadsNumbered want fr of
+            []  -> liftIO (refuse (show ("canon holds no thread numbered"
+                                           <+> pretty want))
+                                  codeNoSuchThread)
+            ids -> pure (HS.fromList ids)
+          out (logDoc only fr)
         other -> liftIO (badArgs ("usage: hub log <repo-key> [<number>]"
                                     <> line <> "   or: hub log --repo <key> [--number <n>]")
                                  other)

@@ -958,6 +958,18 @@
 
 ## Fixed
 
+  - **`hbs2-hub log <repo> <n>` walked every thread once per line.** The
+    resolution from a number to the threads carrying it sat inside the
+    comprehension's guard, so it ran per LOG ENTRY, over a canon bounded at
+    200000 files in each direction and published by somebody else. It is
+    resolved once now, and by the same function every other resolver in the
+    package uses: the renderer takes the threads rather than the number, which
+    makes the quadratic version unwritable instead of merely absent. The
+    refusal for a number canon does not hold used to ask the same question a
+    second way, a few lines above, and now shares the one answer. `hub log <n>`
+    had no test; nothing asked what the filter answered, so nothing noticed
+    what answering it cost.
+
   - **`hbs2-hub inbox`: the mailbox walk has a ceiling.** Entering each node
     once bounded the SHAPE of a stranger's tree; nothing bounded its SIZE. A
     mailbox is public, how many entries its tree lists is chosen by whoever

@@ -20,6 +20,7 @@ import HBS2.Hash (hashObject)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 
 import Data.Config.Suckless (C,Syntax)
+import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
 import Data.List qualified as List
 import Data.Maybe (isJust)
@@ -395,6 +396,37 @@ spec = repoFlagForms >> emptyListings >> do
       fmap (take 6) out `shouldBe` ["1     ", "2     "]
       out !! 0 `shouldSatisfy` ("open" `isInfixOf`)
       out !! 1 `shouldSatisfy` ("comment" `isInfixOf`)
+
+    -- `hub log <repo> <n>` had NO test at all, which is part of how the
+    -- resolution behind it came to run once per log entry: nothing asked what
+    -- the filter answered, so nothing noticed what it cost to answer.
+    it "narrows the log to the threads asked for, and drops the repo-scope ops" $ do
+      owner <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "one") (canonOf repo 1 (Just 1))
+          e2 = mkEvent owner owner (anIssue repo "two") (canonOf repo 2 (Just 2))
+          c1 = mkEvent owner owner
+                 (AComment (eventId e1) Nothing (Just "on one") Nothing 2000)
+                 (canonOf repo 3 Nothing)
+          c2 = mkEvent owner owner
+                 (AComment (eventId e2) Nothing (Just "on two") Nothing 2001)
+                 (canonOf repo 4 Nothing)
+          -- Repo-scope: 'lgThread' is Nothing for it, so a filtered log has no
+          -- line for it whichever thread was asked for.
+          dl = mkEvent owner owner (ADelegate repo (fst owner) 2002)
+                 (canonOf repo 5 Nothing)
+          fr = foldEvents repo [e1, e2, c1, c2, dl]
+          shown only = fmap (take 6) (lines (rendered (logDoc only fr)))
+      -- All five, so that the counts below are about the FILTER and not about
+      -- an event the fold quietly dropped.
+      shown Nothing `shouldBe` ["1     ", "2     ", "3     ", "4     ", "5     "]
+      shown (Just (HS.fromList (threadsNumbered 1 fr))) `shouldBe` ["1     ", "3     "]
+      shown (Just (HS.fromList (threadsNumbered 2 fr))) `shouldBe` ["2     ", "4     "]
+      -- Both at once, because the set is a set: canon can hold two threads
+      -- under one number and the log then covers both.
+      shown (Just (HS.fromList (threadsNumbered 1 fr <> threadsNumbered 2 fr)))
+        `shouldBe` ["1     ", "2     ", "3     ", "4     "]
+      shown (Just mempty) `shouldBe` []
 
     -- A filter that silently does not run is worse than one that refuses: the
     -- caller reads the output as filtered. Both of these came back as
