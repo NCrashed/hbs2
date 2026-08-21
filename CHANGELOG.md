@@ -958,6 +958,28 @@
 
 ## Fixed
 
+  - **A repository's manifest and a mailbox's policy were fetched whole before
+    anything asked how big they were.** Both carried a byte bound and both
+    bounds were arguments to the PARSER: by the time the parser saw the file,
+    the tree had been concatenated into memory and copied strict. So the bound
+    said what would be parsed and nothing said what would be fetched, against a
+    tree whose size is chosen by whoever published it. A manifest is read by
+    `issue new`, `pr new`, `comment` and `whoami --repo` from a key the caller
+    typed; a policy is read once per recipient on every send.
+
+    Both are weighed first now: one walk, a byte budget and a block budget, leaf
+    sizes taken from the block index and no leaf content read at all -- a tree
+    naming a hundred gigabytes is refused having moved none of them. The block
+    budget is the half a byte budget misses, since a leaf naming ten thousand
+    empty blocks weighs nothing and costs ten thousand lookups.
+
+    The manifest's LOG was read whole to take its first entry, and now stops
+    after that entry. It also no longer throws: the ref can be fetched while
+    the log under it is not, which is what a peer that has just seen a
+    repository looks like, and `hbs2-hub issue new --repo <key>` against one
+    died with a raw `MerkleHashNotFound` rather than saying which block it was
+    waiting for.
+
   - **The canon writer checked that the planned file landed, not that the
     inherited one survived.** `update-index --index-info` adds an entry with
     `OK_TO_REPLACE`, so writing `threads/<id>/1.event` into an index that holds

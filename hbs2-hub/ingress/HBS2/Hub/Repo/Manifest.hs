@@ -34,14 +34,15 @@ import HBS2.Hub.Types (HubKey,HubScheme,RepoRef,safeText)
 import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.Letter (sigilOwner)
 import HBS2.Hub.Manifest
-import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
+import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..),TreeWeight(..),weighTree)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 import HBS2.CLI.Run.Internal.Merkle (getTreeContents)
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Detect (readLogThrow)
+import HBS2.Data.Detect (streamMerkle,WalkMerkleError'(..),tryDetect,BlobType(..)
+                       ,MTree(..),MTreeAnn(..),walkMerkleTree)
 import HBS2.Net.Auth.Credentials.Sigil (loadSigil,Sigil)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.LWWRef
@@ -50,10 +51,12 @@ import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
-import Control.Monad.Except (runExceptT)
+import Control.Monad.Except (runExceptT,throwError)
+import Data.Coerce (coerce)
+import Data.Maybe (listToMaybe)
 import Data.Text.Encoding qualified as Text
 import Data.ByteString.Lazy qualified as LBS
-import Data.Maybe (listToMaybe)
+import Streaming.Prelude qualified as S
 
 -- | Why this node cannot say what a repository declares.
 --
@@ -67,6 +70,17 @@ data ManifestGone =
   | ManifestEmpty                 -- ^ the ref is here and names nothing readable
   | ManifestUnreadable Text       -- ^ the tree would not read
   | ManifestUnparsed              -- ^ it read and is not a list of clauses
+    -- | The tree behind it is bigger than this reader will take, or spread over
+    -- more blocks than it will visit.
+    --
+    -- MEASURED BEFORE ANYTHING IS PULLED, which is the whole of the point.
+    -- 'maxManifestBytes' was consulted by the PARSER, one call after the tree
+    -- had already been concatenated into memory and copied strict: the bound
+    -- said what would be parsed and nothing said what would be fetched, and
+    -- what a repository key points at is a stranger's choice. Reached by
+    -- @issue new@, @pr new@, @comment@ and @whoami --repo@, which is to say by
+    -- every verb that resolves a key it was handed.
+  | ManifestTooBig
     -- | It read, it parsed, and it declares no ingress mailbox. A repository
     -- that is not a forge, or one whose owner has not published the clause
     -- yet: PEP-18 makes the mailbox optional, so this is a state and not a
@@ -110,6 +124,15 @@ instance Pretty ManifestGone where
       "the repository reference is here and points at nothing this can read"
     ManifestUnreadable e -> "the manifest will not read:" <+> pretty (safeText e)
     ManifestUnparsed -> "the manifest is not a list of clauses"
+    ManifestTooBig ->
+      "the manifest is larger than this reader will take" <> line
+        <> "  a manifest is a short declaration -- a mailbox, a sigil, whatever"
+        <+> "else the repo" <> line
+        <> "  format puts there -- and this one is over"
+        <+> pretty maxManifestBytes <+> "bytes or spread over" <> line
+        <> "  more than" <+> pretty maxManifestBlocks <+> "blocks."
+        <+> "Nothing was fetched." <> line
+        <> "  Naming the mailbox or the sigil directly skips this lookup."
     ManifestNoMailbox k flag ->
       pretty (AsBase58 k) <+> "declares no ingress mailbox" <> line
         <> "  it may not be a forge, or its owner may not have published the"
@@ -162,30 +185,83 @@ readManifest repo = do
       -- BOUNDED, like every other storage read in this package: the storage
       -- client's getBlock has no timeout of its own, so a peer that answers the
       -- ref service and then stalls would hang the verb rather than fail it.
-      entries <- bounded rpcTimeout "the repository manifest"
-                   (readLogThrow (getBlock sto) (lwwValue lww))
+      --
+      -- AND THE FIRST ENTRY IS ALL THAT IS TAKEN. This read the WHOLE log --
+      -- an eager 'S.toList_' over every entry the ref names -- to hand it to
+      -- 'listToMaybe'. How long that log is is chosen by whoever the key
+      -- belongs to. 'S.next' abandons the stream after one step, so the walk
+      -- reads the nodes it takes to produce one entry and stops.
+      --
+      -- AND IT NO LONGER THROWS. 'readLogThrow' does what its name says, on a
+      -- read that is routine to fail: the ref can be fetched while the log
+      -- under it is not, which is what a peer that has just seen a repository
+      -- looks like. Nothing here caught it, so `hub issue new --repo <key>`
+      -- against a half-fetched repository died with a raw @MerkleHashNotFound@
+      -- instead of the sentence this type exists to produce.
+      step <- bounded rpcTimeout "the repository manifest"
+                (S.next (streamMerkle @HashRef (getBlock sto)
+                                      (fromHashRef (lwwValue lww))))
 
-      case listToMaybe entries of
-        Nothing -> pure (Left ManifestEmpty)
-        Just mfref -> do
-          r <- bounded rpcTimeout "the manifest tree"
-                 (runExceptT (getTreeContents sto mfref))
-          case r of
-            Left e -> pure (Left (ManifestUnreadable (tshow e)))
-            -- BOUNDED, through the same reader canon files go through. A
-            -- manifest is fetched from wherever the repository key points, so
-            -- it is a stranger's S-expression exactly as an event file is, and
-            -- this handed it straight to 'parseTop': no byte bound, no clause
-            -- bound, and 'parseTop' is superlinear in the number of top-level
-            -- items (see 'scanText' -- 128 KB of bare atoms measured at 36 s).
-            -- Every verb that resolves a repo key by hand reaches this.
-            Right lbs ->
-              pure $ either (const (Left ManifestUnparsed)) Right
-                       (clausesWith maxManifestBytes maxManifestClauses
-                          (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
+      case step of
+        Left (Left e)   -> pure (Left (ManifestUnreadable (walkText e)))
+        Left (Right ()) -> pure (Left ManifestEmpty)
+        Right (mfref, _) -> do
+          -- WEIGHED BEFORE IT IS PULLED. See 'ManifestTooBig': the bound below
+          -- is the parser's, and by the time the parser saw it the tree had
+          -- been concatenated into memory and copied strict.
+          weighed <- bounded rpcTimeout "the manifest tree" (manifestWeight sto mfref)
+          case weighed of
+           Left e -> pure (Left e)
+           Right () -> do
+            r <- bounded rpcTimeout "the manifest tree"
+                   (runExceptT (getTreeContents sto mfref))
+            case r of
+              Left e -> pure (Left (ManifestUnreadable (tshow e)))
+              -- BOUNDED, through the same reader canon files go through. A
+              -- manifest is fetched from wherever the repository key points, so
+              -- it is a stranger's S-expression exactly as an event file is, and
+              -- this handed it straight to 'parseTop': no byte bound, no clause
+              -- bound, and 'parseTop' is superlinear in the number of top-level
+              -- items (see 'scanText' -- 128 KB of bare atoms measured at 36 s).
+              -- Every verb that resolves a repo key by hand reaches this.
+              Right lbs ->
+                pure $ either (const (Left ManifestUnparsed)) Right
+                         (clausesWith maxManifestBytes maxManifestClauses
+                            (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
   where
     tshow :: Show e => e -> Text
     tshow = fromString . show
+
+    -- The walk's own error, said as a sentence with the hash in it. Its Show is
+    -- a constructor name, and the one thing anybody can act on here is the
+    -- hash: a log block that is not here yet is the routine case, and it is
+    -- fetchable.
+    hashText :: Pretty a => a -> Text
+    hashText = fromString . show . pretty
+
+    walkText = \case
+      MerkleHashNotFound h ->
+        "block " <> hashText h <> " of the manifest log is not here yet"
+          <> " (`hbs2-peer download " <> hashText h <> "` asks for it)"
+      MerkleDeserialiseFailure h _ ->
+        "block " <> hashText h <> " of the manifest log is not a merkle node"
+
+-- | Whether the manifest's tree is small enough to read.
+--
+-- The gate 'maxManifestBytes' was supposed to be and could not be from where it
+-- stood: it is an argument to the PARSER, and by the time the parser runs
+-- 'getTreeContents' has concatenated every leaf into memory and 'LBS.toStrict'
+-- has copied the result. So the bound described what would be parsed, and
+-- nothing at all described what would be fetched -- against a tree whose size
+-- is chosen by whoever the repository key belongs to.
+manifestWeight :: forall m . MonadUnliftIO m
+               => AnyStorage -> HashRef -> m (Either ManifestGone ())
+manifestWeight sto href =
+  weighTree (getBlock sto) (hasBlock sto) maxManifestBytes maxManifestBlocks href
+    <&> \case
+      TreeFits         -> Right ()
+      TreeTooBig       -> Left ManifestTooBig
+      TreeUnreadable e -> Left (ManifestUnreadable e)
 
 -- | What a manifest may weigh, and how many clauses it may have.
 --
@@ -198,9 +274,12 @@ readManifest repo = do
 -- Refusing one is not refusing the repository, the same way refusing an index
 -- is not: the caller answers 'ManifestUnparsed' and a verb given the mailbox by
 -- hand never reads it at all.
-maxManifestBytes, maxManifestClauses :: Int
+maxManifestBytes, maxManifestClauses, maxManifestBlocks :: Int
 maxManifestBytes   = 256 * 1024
 maxManifestClauses = 1024
+-- Room for the whole of the above written in 256-byte blocks, which nothing
+-- does: a manifest is one or two blocks at the default size.
+maxManifestBlocks  = 1024
 
 -- | The mailbox a verb should read: the one it was given, or the one the
 -- repository declares.

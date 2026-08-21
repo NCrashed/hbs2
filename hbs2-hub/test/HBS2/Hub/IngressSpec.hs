@@ -30,7 +30,8 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
-import Data.List (isInfixOf)
+import Data.List (isInfixOf,sort)
+import Data.Text qualified as Text
 import Crypto.Saltine.Core.SecretBox qualified as SK
 import Crypto.Saltine.Class qualified as Saltine
 import Data.IORef
@@ -89,7 +90,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> partSeam >> holes >> readingOn
+spec = spec1 >> spec2 >> spec3 >> partSeam >> weighing >> holes >> readingOn
 
 spec1 :: Spec
 spec1 = do
@@ -744,6 +745,83 @@ servingAll msgs gks = stub
     treeB   = serialise (MLeaf (fmap fst entries) :: MTree [HashRef])
     treeH   = HashRef (hashObject treeB)
     store   = (treeH, treeB) : entries <> blobs
+
+-- | THE GATE TWO READERS THOUGHT THEY HAD.
+--
+-- A manifest and a mailbox policy are both fetched from a merkle tree somebody
+-- else published, and both carried a byte bound that was an argument to the
+-- PARSER: by the time the parser saw it, the tree had been concatenated into
+-- memory and copied strict. So the bound said what would be parsed and nothing
+-- said what would be fetched.
+--
+-- Takes two functions rather than a storage, which is what makes the whole of
+-- it answerable here without a peer.
+weighing :: Spec
+weighing =
+  describe "PEP-18 weighing a stranger's tree before reading it" $ do
+
+    let leafOf hs = serialise (MLeaf hs :: MTree [HashRef])
+        nodeOf hs = serialise (newMNode 1 hs :: MTree [HashRef])
+        wired store bytes = do
+          reads' <- newIORef []
+          sizes' <- newIORef []
+          let look h = modifyIORef' reads' (HashRef h :) >> pure (lookup (HashRef h) store)
+              size h = modifyIORef' sizes' (HashRef h :) >> pure (bytes (HashRef h))
+          pure (look, size, reads', sizes')
+
+    -- THE PROPERTY THE WHOLE THING RESTS ON: a leaf's size is a lookup and not
+    -- a transfer, so a tree naming a hundred gigabytes is refused having moved
+    -- none of them.
+    it "asks the size of every leaf and reads the content of none" $ do
+      let l  = leafOf [mh "a", mh "b"]
+          lh = HashRef (hashObject l)
+      (look, size, reads', sizes') <- wired [(lh, l)] (const (Just 10))
+      weighTree look size 100 10 lh `shouldReturn` TreeFits
+      -- the root, and nothing else
+      readIORef reads' >>= (`shouldBe` [lh])
+      readIORef sizes' >>= (\s -> sort s `shouldBe` sort [mh "a", mh "b"])
+
+    it "refuses a tree whose leaves weigh more than the bound" $ do
+      let l  = leafOf [mh "a", mh "b"]
+          lh = HashRef (hashObject l)
+      (look, size, _, _) <- wired [(lh, l)] (const (Just 60))
+      weighTree look size 100 10 lh `shouldReturn` TreeTooBig
+
+    -- THE BOUND A BYTE BOUND MISSES. How many blocks a tree spreads itself over
+    -- is as much a stranger's choice as how many bytes it holds, and a leaf
+    -- naming ten thousand empty blocks weighs nothing and costs ten thousand
+    -- lookups.
+    it "refuses a tree spread over more blocks than it will visit" $ do
+      let l  = leafOf [ mh (B8.pack (show i)) | i <- [1 .. 200 :: Int] ]
+          lh = HashRef (hashObject l)
+      (look, size, _, sizes') <- wired [(lh, l)] (const (Just 0))
+      weighTree look size (1024 * 1024) 32 lh `shouldReturn` TreeTooBig
+      -- and it stopped rather than finished: the budget is spent as the leaf is
+      -- walked, not counted up at the end.
+      readIORef sizes' >>= (\s -> length s `shouldSatisfy` (< 200))
+
+    it "says which block of it is missing rather than reading half a tree" $ do
+      let l  = leafOf [mh "a"]
+          lh = hashObject l
+          n  = nodeOf [lh]
+          nh = HashRef (hashObject n)
+      -- the node is here, the leaf under it is not
+      (look, size, _, _) <- wired [(nh, n)] (const (Just 1))
+      weighTree look size 100 10 nh >>= \case
+        TreeUnreadable e -> e `shouldSatisfy` Text.isInfixOf (Text.pack (show (pretty lh)))
+        other -> expectationFailure ("expected TreeUnreadable, got " <> show other)
+
+    it "tells a root that is not here from one that is not a tree" $ do
+      (look, size, _, _) <- wired [] (const (Just 1))
+      weighTree look size 100 10 (mh "absent") >>= \case
+        TreeUnreadable e -> e `shouldSatisfy` Text.isInfixOf "not here yet"
+        other -> expectationFailure ("expected TreeUnreadable, got " <> show other)
+      let blob = "not a merkle tree at all" :: LBS.ByteString
+          bh = HashRef (hashObject blob)
+      (look', size', _, _) <- wired [(bh, blob)] (const (Just 1))
+      weighTree look' size' 100 10 bh >>= \case
+        TreeUnreadable e -> e `shouldSatisfy` Text.isInfixOf "does not name a tree"
+        other -> expectationFailure ("expected TreeUnreadable, got " <> show other)
 
 -- | WHAT A MEMBERSHIP ANSWER IS WORTH OVER A TREE THAT DID NOT READ WHOLE.
 --

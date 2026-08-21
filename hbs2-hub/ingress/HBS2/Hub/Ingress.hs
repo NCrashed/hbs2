@@ -50,6 +50,8 @@ module HBS2.Hub.Ingress
   , PartTrouble(..)
   , measurePart
   , maxPartBlocks
+  , TreeWeight(..)
+  , weighTree
   ) where
 
 import HBS2.Hub.Types
@@ -58,12 +60,12 @@ import HBS2.Hub.Letter
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,walkMerkle,MTreeAnn(..)
+import HBS2.Merkle ( walkMerkleUnique,walkMerkleTree,walkMerkle,MTreeAnn(..),MTree(..)
                    , pattern EncryptGroupNaClSymm )
 import HBS2.Data.Detect (tryDetect,BlobType(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.Refs (HashRef(..))
-import HBS2.Hash (hashObject)
+import HBS2.Hash (hashObject,Hash,HbSync)
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
@@ -81,7 +83,7 @@ import Data.List (sort)
 import Data.List qualified as List
 import Data.Word (Word64)
 import Data.Text qualified as Text
-import Data.Maybe (isJust,listToMaybe)
+import Data.Maybe (isJust,listToMaybe,fromMaybe)
 import Streaming.Prelude qualified as S
 import Control.Monad.Except (runExceptT,throwError)
 
@@ -1120,6 +1122,90 @@ measurePart ig h = do
             { pfSize = fromIntegral (sum [ s | Just s <- sizes ])
             , pfHere = all isJust sizes
             }
+
+-- | Whether a tree is small enough to read, decided before a byte of it moves.
+data TreeWeight
+  = TreeFits
+  | TreeTooBig             -- ^ over the byte bound or the block bound
+  | TreeUnreadable Text    -- ^ a block of it is not here, or it is not a tree
+  deriving stock (Eq,Show)
+
+-- | Weigh a tree without pulling it.
+--
+-- THE GATE TWO READERS ALREADY THOUGHT THEY HAD. A manifest and a mailbox
+-- policy are both fetched from a merkle tree somebody else published, and both
+-- carried a byte bound -- 'maxManifestBytes', 'maxPolicyBytes' -- that was an
+-- argument to the PARSER. By the time the parser saw it the tree had been
+-- concatenated into memory and copied strict, so the bound said what would be
+-- parsed and nothing said what would be fetched. A manifest is reached by
+-- @issue new@, @pr new@, @comment@ and @whoami --repo@ from a key the caller
+-- typed; a policy is read per recipient on every send.
+--
+-- SIZES AND NOT CONTENT. A leaf's size is one 'hasBlock', which is a lookup and
+-- not a transfer, so a tree naming a hundred gigabytes is refused having moved
+-- none of them. The same shape 'measurePart' uses on the attachment path.
+--
+-- BOTH BOUNDS COME OUT OF ONE WALK, and the block budget is not decoration: how
+-- many blocks a tree spreads itself over is as much a stranger's choice as how
+-- many bytes it holds, and a million empty leaves weigh nothing and cost a
+-- million lookups.
+--
+-- FUNCTIONS AND NOT A STORAGE, like everything else here that has to be
+-- testable without a peer -- and it is what lets this live below the two
+-- readers that need it rather than beside either.
+--
+-- An encrypted tree is weighed by its CIPHERTEXT, which is what a reader can
+-- see before it holds a key, and the group key tree below the annotation is not
+-- weighed. That is a residue and it is written down: reaching it needs a tree
+-- sealed to a group this node is in, which is not the anonymous key that makes
+-- the rest of this reachable. 'measurePart', whose input IS always encrypted,
+-- weighs both.
+weighTree :: forall m . MonadUnliftIO m
+          => (Hash HbSync -> m (Maybe LBS.ByteString))  -- ^ a block, if it is here
+          -> (Hash HbSync -> m (Maybe Integer))         -- ^ its size, without reading it
+          -> Int                                        -- ^ the most bytes
+          -> Int                                        -- ^ the most blocks
+          -> HashRef
+          -> m TreeWeight
+weighTree look size maxBytes maxBlocks href = do
+  root <- look (coerce href)
+  case root of
+    Nothing -> pure (TreeUnreadable (nameOf href <> " is not here yet"))
+    Just bs -> case tryDetect (coerce href) bs of
+      Merkle t                           -> weigh t
+      MerkleAnn MTreeAnn{ _mtaTree = t } -> weigh t
+      -- A blob, a link or a sequential ref. The readers below answer
+      -- @UnsupportedFormat@ for all three, and saying so before the fetch
+      -- costs nothing.
+      _ -> pure (TreeUnreadable (nameOf href <> " does not name a tree"))
+
+  where
+    nameOf :: Pretty a => a -> Text
+    nameOf = fromString . show . pretty
+
+    weigh :: MTree [HashRef] -> m TreeWeight
+    weigh t = do
+      -- The root above is read already, which is what the budget starts at.
+      blocks <- newTVarIO (1 :: Int)
+      bytes  <- newTVarIO (0 :: Integer)
+      let spend = do
+            n <- atomically (modifyTVar' blocks (+1) >> readTVar blocks)
+            when (n > maxBlocks) (throwError TreeTooBig)
+          look' h = spend >> lift (look h)
+          sink = \case
+            -- A node of the tree that is not here. It cannot be weighed, so it
+            -- is not read either: the reader below would fail on the same
+            -- block, one full fetch later.
+            Left miss -> throwError (TreeUnreadable ("block " <> nameOf miss
+                                                       <> " of it is not here yet"))
+            Right hs -> for_ hs $ \h -> do
+              spend
+              -- A leaf nothing has answered for weighs nothing here and fails
+              -- the read below. This is a bound, not a completeness check.
+              s <- lift (size (coerce h))
+              n <- atomically (modifyTVar' bytes (+ fromMaybe 0 s) >> readTVar bytes)
+              when (n > fromIntegral maxBytes) (throwError TreeTooBig)
+      runExceptT (walkMerkleTree t look' sink) <&> either id (const TreeFits)
 
 -- | Bound one call to the peer, and say which call it was if it does not answer.
 --

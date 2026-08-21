@@ -46,7 +46,7 @@ import HBS2.Hub.Types (HubKey,HubScheme,safeText)
 import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord
                          ,flagOneOfMaybe,envelopeKeyFlags)
-import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..))
+import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..),TreeWeight(..),weighTree)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,signerFor,signingPair)
 
 import HBS2.CLI.Prelude
@@ -88,9 +88,12 @@ import System.Exit (die,exitSuccess)
 --
 -- Refusing one reads as 'PolicyUnparsed', which is deny/deny: a policy this
 -- node cannot read is one the owner wrote and this node must not guess at.
-maxPolicyBytes, maxPolicyClauses :: Int
+maxPolicyBytes, maxPolicyClauses, maxPolicyBlocks :: Int
 maxPolicyBytes   = 4 * 1024 * 1024
 maxPolicyClauses = 8192
+-- Room for the whole of the above at a sixteenth of the default block size,
+-- which is well past how anything writes one.
+maxPolicyBlocks  = 4096
 
 -- | The mailbox has no policy to read, or it will not read.
 codeNoPolicy :: Int
@@ -176,6 +179,14 @@ data PolicyGone =
   | PolicyNotHere HubKey      -- ^ this peer does not hold that mailbox
   | PolicyUnreadable String   -- ^ the policy file would not read
   | PolicyUnparsed            -- ^ ...or would not parse
+    -- | ...or is bigger than this reader will take.
+    --
+    -- WEIGHED BEFORE IT IS PULLED, which is what 'maxPolicyBytes' could not do
+    -- from where it stood: it is an argument to the parser, and by the time the
+    -- parser ran 'readFromMerkle' had already concatenated every leaf into
+    -- memory. This path runs per recipient on every send, against a tree the
+    -- mailbox owner published.
+  | PolicyTooBig
 
 instance Pretty PolicyGone where
   pretty = \case
@@ -184,6 +195,10 @@ instance Pretty PolicyGone where
     PolicyNotHere mbox   -> "this peer does not hold mailbox" <+> pretty (AsBase58 mbox)
     PolicyUnreadable e   -> "the policy will not read:" <+> pretty e
     PolicyUnparsed       -> "the policy file will not parse"
+    PolicyTooBig         ->
+      "the policy file is over" <+> pretty maxPolicyBytes <+> "bytes or spread"
+        <+> "over more than" <+> pretty maxPolicyBlocks <+> "blocks,"
+        <+> "so it was not fetched"
 
 -- | And what a verb that has nowhere else to go should exit with.
 policyGoneCode :: PolicyGone -> Int
@@ -243,6 +258,18 @@ readPolicyWith sto api mbox = runExceptT do
     -- all` back.
     Nothing -> pure Nothing
     Just (_, spp) -> do
+      -- WEIGHED BEFORE IT IS PULLED, for the reason 'PolicyTooBig' gives: the
+      -- bound below is the parser's, and 'readFromMerkle' concatenates every
+      -- leaf into memory before the parser is reached. The same gate the
+      -- manifest reader uses, and the same walk: sizes, no content.
+      lift (bounded rpcTimeout "the policy file"
+              (weighTree (getBlock sto) (hasBlock sto)
+                         maxPolicyBytes maxPolicyBlocks (sppPolicyRef spp)))
+        >>= \case
+              TreeFits         -> pure ()
+              TreeTooBig       -> throwError PolicyTooBig
+              TreeUnreadable e -> throwError (PolicyUnreadable (Text.unpack e))
+
       lbs <- lift (bounded rpcTimeout "the policy file"
                      (liftIO (runExceptT (readFromMerkle sto (SimpleKey (coerce (sppPolicyRef spp)))))))
                >>= either (throwError . PolicyUnreadable . show . viaShow) pure
