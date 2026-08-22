@@ -18,6 +18,8 @@ import Data.Config.Suckless
 import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
 import Prettyprinter (pretty)
+import Data.Text qualified as Text
+import Data.Time.Clock (getCurrentTime,diffUTCTime)
 import Test.Hspec
 
 aKey :: IO HubKey
@@ -55,6 +57,38 @@ spec = keyNames >> do
       parseBans (good <> "(ban not-a-key)\n") `shouldSatisfy` isLeft
       parseBans (good <> "(banish x)\n") `shouldSatisfy` isLeft
       parseBans "«" `shouldSatisfy` isLeft
+
+    -- WHY THE READER TAKES A LINE AT A TIME. `parseTop` is superlinear in the
+    -- number of forms handed to it at once: this file measured 42 ms at 1024
+    -- bans, 136 ms at 2048 and 1.97 s at 8192, and `loadBans` runs on every
+    -- accept, so a hub that bans steadily paid a quadratic for it. Line by line
+    -- it is linear: 0.41 s at 16384, where the whole-file reader would be
+    -- around eight seconds.
+    --
+    -- A clock in a test is a blunt instrument, so the threshold sits between
+    -- the two by a wide margin in both directions: what it catches is the shape
+    -- going back, not a machine having a bad day.
+    it "reads a long deny-list in time linear in its length" $ do
+      a <- aKey
+      let txt = Text.concat (replicate 16384 (Text.pack ("(ban " <> b58 a <> ")\n")))
+      t0 <- getCurrentTime
+      parseBans txt `shouldBe` Right (HS.fromList [a])
+      t1 <- getCurrentTime
+      diffUTCTime t1 t0 `shouldSatisfy` (< 3)
+
+    -- The bound is on the LINE and not on the file, which is the difference
+    -- between this list and a stranger's manifest: it is the operator's own and
+    -- grows by them using the verb that writes it, so a bound on the file would
+    -- eventually stop an accept over a list nobody did anything wrong with.
+    it "reads several bans on one line, and refuses a line past the bound" $ do
+      a <- aKey ; b <- aKey
+      let one k = Text.pack ("(ban " <> b58 k <> ")")
+      parseBans (one a <> " " <> one b) `shouldBe` Right (HS.fromList [a,b])
+      -- Over the byte bound: still every clause well formed, and still refused,
+      -- with the reason named rather than "the file will not read".
+      case parseBans (one a <> " ; " <> Text.replicate 300 "x") of
+        Left e -> Text.unpack e `shouldSatisfy` isInfixOf "over the bound"
+        Right _ -> expectationFailure "a line past the byte bound was read"
 
     it "lets everybody through when nobody is banned" $ do
       a <- aKey

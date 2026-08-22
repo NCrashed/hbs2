@@ -958,6 +958,19 @@
 
 ## Fixed
 
+  - **The deny-list and the sent log were read whole, and reading them is
+    quadratic.** The S-expression parser is superlinear in the number of forms
+    handed to it at once: the deny-list measured 42 ms at 1024 bans, 1.97 s at
+    8192 and 8.86 s at 16384. It is read on every `hbs2-hub inbox accept`, and
+    the sent log grows by one record per letter sent with nothing trimming it.
+    Both are read a line at a time now, which is what they are written as, and
+    the cost is linear: 0.41 s for the 16384 bans that took 8.86 s.
+
+    Not bounded, which would have been the other way to fix it: both files are
+    the operator's own and both grow by the tool working normally, so a ceiling
+    on the file would eventually refuse an accept over a list nobody did
+    anything wrong with. What is bounded is the line.
+
   - **A rewrite could drop a delegation and the revoke that undid it, and still
     look like the same canon.** The check that decides whether somebody else's
     rewritten canon is a compaction or a fork compared the maintainer set as of

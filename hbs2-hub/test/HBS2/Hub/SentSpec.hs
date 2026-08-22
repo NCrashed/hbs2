@@ -10,6 +10,7 @@ module HBS2.Hub.SentSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Sent
+import HBS2.Hub.Letter (maxTitle)
 
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject)
@@ -58,6 +59,19 @@ spec = do
       let a = opened repo author
           b = a { seThread = mh "other", seWhat = "comment" }
       parseSent (renderSent a <> "\n" <> renderSent b) `shouldBe` Right [a, b]
+
+    -- THE LINE BOUND AGAINST THE LARGEST RECORD THIS CAN WRITE. The reader
+    -- takes a line at a time, because the parser is superlinear in the forms it
+    -- is handed at once and this log grows by one record per letter with
+    -- nothing trimming it. That makes the bound a per-line one, and a per-line
+    -- bound smaller than a record this build produces would refuse the log for
+    -- working normally.
+    it "reads back a record carrying a title of the largest size a letter may" $ do
+      repo <- aKey ; author <- aKey
+      -- Every character escaped, which is the worst case for the size and not
+      -- the ordinary one: a quote becomes two bytes on the way out.
+      let s = (opened repo author) { seTitle = Just (Text.replicate maxTitle "\"") }
+      parseSent (renderSent s) `shouldBe` Right [s]
 
     -- A title is whatever somebody typed and this file is read with cat far
     -- more often than with a parser: a raw escape sequence in it rewrites what

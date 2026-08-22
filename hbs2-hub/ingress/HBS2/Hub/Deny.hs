@@ -29,6 +29,7 @@ module HBS2.Hub.Deny
   ) where
 
 import HBS2.Hub.Types (HubKey,safeText)
+import HBS2.Hub.Canon (clausesWith)
 
 import HBS2.CLI.Prelude
 
@@ -73,15 +74,44 @@ renderBans ks =
 -- | And back. An unreadable line is an error rather than a skip: a deny-list
 -- that quietly drops what it cannot read is one an attacker shortens by
 -- writing something odd into it.
+--
+-- A LINE AT A TIME, through the bounded reader the rest of this package uses.
+-- 'parseTop' is superlinear in the number of top-level forms -- measured on
+-- this file at 42 ms for 1024 bans, 136 ms for 2048 and 1.97 s for 8192 -- and
+-- 'loadBans' runs on every accept, so a hub that bans steadily was paying a
+-- quadratic for it. A ban IS a line ('renderBans' writes them with
+-- 'Text.unlines' and a base58 key holds no newline), so parsing one line at a
+-- time makes the cost linear in the number of bans.
+--
+-- LINEAR AND NOT BOUNDED, which is the difference between this file and a
+-- manifest. A manifest is a stranger's and a bound on it is a refusal to be
+-- imposed on; this list is the operator's own and grows by them using the verb
+-- that writes it, so a wall would eventually stop an accept over a file nobody
+-- did anything wrong with. What is bounded is the LINE, which nothing legitimate
+-- makes long.
+--
+-- Several clauses on one line still read: 'clausesWith' answers with every form
+-- the line opens, which is what keeps a hand-edited file working.
 parseBans :: Text -> Either Text (HashSet HubKey)
-parseBans txt = do
-  syn <- either (const (Left "the file is not a list of clauses")) Right
-           (parseTop (Text.unpack txt))
-  fmap HS.fromList (traverse one [ s | s <- syn ])
+parseBans txt =
+  fmap HS.fromList . traverse one . concat =<< traverse line (Text.lines txt)
   where
+    line l = either (\e -> Left (Text.pack (show (pretty e)) <> ": " <> safeText l)) Right
+               (clausesWith maxBanLineBytes maxBanLineClauses l)
+
     one = \case
       ListVal [SymbolVal "ban", SignPubKeyLike k] -> Right k
       other -> Left ("not a ban clause: " <> safeText (Text.pack (show (pretty other))))
+
+-- | What one line of the list may weigh, and how many clauses it may open.
+--
+-- A ban is @(ban \<44 base58 characters\>)@, which is 52 bytes. The bound is the
+-- number index's, for the same reason and out of the same measurements: nothing
+-- that writes this file writes a long line, and the cost being defended against
+-- is the parser's, not the disk's.
+maxBanLineBytes, maxBanLineClauses :: Int
+maxBanLineBytes   = 256
+maxBanLineClauses = 4
 
 -- | The predicate the triage loop wants: may this author be folded?
 --

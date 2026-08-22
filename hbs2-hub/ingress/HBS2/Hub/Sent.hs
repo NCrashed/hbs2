@@ -39,6 +39,7 @@ module HBS2.Hub.Sent
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter (sexpStr)
+import HBS2.Hub.Canon (clausesWith)
 
 import HBS2.CLI.Prelude
 
@@ -140,12 +141,21 @@ renderSent s = "(sent " <> Text.intercalate " " (fixed <> optional) <> ")"
 -- opposite decision and the right one for the opposite reason: this file is
 -- written by one version of this tool and read by the next, and a field added
 -- later must not make every record before it unreadable.
+--
+-- A LINE AT A TIME, for the reason 'HBS2.Hub.Deny.parseBans' is and with more
+-- of it: 'parseTop' is superlinear in the number of top-level forms (42 ms for
+-- 1024, 1.97 s for 8192, measured on the deny-list next door), and this file
+-- grows by one form per letter sent and nothing ever trims it. A record IS one
+-- line -- 'renderSent' says so and assembles it by hand for exactly that
+-- reason -- so a line at a time makes reading the log linear in what it holds
+-- rather than quadratic. Bounding the file instead would put a wall in front of
+-- a log the tool fills by working.
 parseSent :: Text -> Either Text [Sent]
-parseSent txt = do
-  syn <- either (const (Left "the file is not a list of clauses")) Right
-           (parseTop (Text.unpack txt))
-  traverse one syn
+parseSent txt = traverse one . concat =<< traverse line (Text.lines txt)
   where
+    line l = either (\e -> Left (Text.pack (show (pretty e)) <> ": " <> safeText l)) Right
+               (clausesWith maxSentLineBytes maxSentLineClauses l)
+
     one s@(ListVal (SymbolVal "sent" : clauses)) = do
       let clause k = List.lookup k [ (n, vs) | ListVal (SymbolVal (Id n) : vs) <- clauses ]
 
@@ -179,6 +189,22 @@ parseSent txt = do
     keyOf  = \case { [SignPubKeyLike k] -> Just k ; _ -> Nothing }
     textOf = \case { [StringLike t] -> Just (Text.pack t) ; _ -> Nothing }
     intOf  = \case { [LitIntVal n] | n >= 0 -> Just (fromIntegral n) ; _ -> Nothing }
+
+-- | What one record may weigh, and how many clauses it may open.
+--
+-- Larger than the deny-list's line, because a record carries a title and a
+-- title is whatever somebody typed, escaped: eight kilobytes is an order over
+-- 'HBS2.Hub.Letter.maxTitle' escaped character for character, and still refuses
+-- a line nothing here could have written.
+--
+-- The form count is not the number of records: the counter counts every form a
+-- line opens, at any depth, and a record opens nine of them (one per clause
+-- plus its own). Thirty-two is room for fields added later and for a file
+-- somebody has re-flowed by hand, and still nothing next to what makes the
+-- parser slow.
+maxSentLineBytes, maxSentLineClauses :: Int
+maxSentLineBytes   = 8 * 1024
+maxSentLineClauses = 32
 
 -- | Everything this node remembers sending, or why it could not be read.
 --
