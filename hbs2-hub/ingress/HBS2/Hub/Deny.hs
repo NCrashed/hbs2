@@ -25,6 +25,9 @@ module HBS2.Hub.Deny
   , parseBans
   , allowedBy
   , loadBans
+  , saveBans
+  , denyingFor
+  , denyUnreadable
   , codeNoBanList
   ) where
 
@@ -41,8 +44,9 @@ import Data.List (sort)
 import Data.Text qualified as Text
 import Data.Text.Encoding.Error (UnicodeException)
 import Data.Text.IO qualified as Text
-import System.Directory (doesFileExist,getXdgDirectory,XdgDirectory(..))
-import System.FilePath ((</>))
+import System.Directory (doesFileExist,createDirectoryIfMissing,getXdgDirectory
+                        ,renameFile,XdgDirectory(..))
+import System.FilePath ((</>),takeDirectory)
 
 -- | The list could not be read, and this build will not guess at it.
 --
@@ -142,3 +146,51 @@ loadBans repo = do
     else liftIO (try @_ @UnicodeException (Text.readFile p)) <&> \case
            Left e -> Left ("the deny-list is not UTF-8: " <> Text.pack (show e))
            Right t -> parseBans t
+
+-- | And back to disk, atomically.
+--
+-- BESIDE THE READER, because the two halves are one argument. A torn in-place
+-- write leaves a file that is SHORTER and still parses -- every line is one
+-- key, so half a file is a valid deny-list with keys missing -- and that is the
+-- one failure this design is otherwise built to exclude: 'loadBans' refuses a
+-- file it cannot read ENTIRELY, precisely so that a list an attacker shortened
+-- is a refusal rather than a shorter list. An interrupted write does the
+-- shortening for them.
+--
+-- rename is atomic within a filesystem, and the temporary is made in the same
+-- directory so that it is the same one.
+--
+-- Answers with the path, which is what the verb prints.
+saveBans :: MonadIO m => HubKey -> HashSet HubKey -> m FilePath
+saveBans repo bans = do
+  p <- banPath repo
+  liftIO do
+    createDirectoryIfMissing True (takeDirectory p)
+    let tmp = p <> ".new"
+    Text.writeFile tmp (renderBans bans)
+    renameFile tmp p
+  pure p
+
+-- | The predicate the triage path applies, for the repository it was given.
+--
+-- THE WHOLE WIRE, in one place: which repository, to a file, to a set, to the
+-- question the loop asks about an author. Three verbs built it by hand out of
+-- 'loadBans' and 'allowedBy' -- @hub inbox@, @hub inbox show@ and @hub inbox
+-- accept@ -- and the tests proved that the PREDICATE refuses a banned author
+-- without ever proving the predicate is built from the file. That is the whole
+-- of PEP-21 banning hanging on one unasserted wire, in three copies.
+--
+-- 'Nothing' is "no repository was named", which is the form that reads a
+-- mailbox by key: there is no list to apply and no ban is a claim about anyone.
+denyingFor :: MonadIO m => Maybe HubKey -> m (Either Text (HubKey -> Bool))
+denyingFor = \case
+  Nothing   -> pure (Right (const True))
+  Just repo -> fmap allowedBy <$> loadBans repo
+
+-- | What a verb says about a deny-list it could not read.
+--
+-- One sentence, because three verbs wrote it out and two of them escaped the
+-- reason while the third printed it raw -- and the reason quotes a line of a
+-- file, which is the sort of thing that carries an escape sequence.
+denyUnreadable :: Text -> Doc ann
+denyUnreadable e = "the deny-list will not read:" <+> pretty (safeText e)

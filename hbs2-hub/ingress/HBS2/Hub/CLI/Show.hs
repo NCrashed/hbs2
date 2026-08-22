@@ -39,7 +39,7 @@ import HBS2.Hub.Letter (Disposition(..),maxMessageParts)
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
-import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Bridge (TriageError(..))
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf
                            ,codeMailboxUnknown,codePeerSilent
@@ -148,13 +148,9 @@ showEntries = do
       -- The deny-list, when the caller says which repository's. Applied through
       -- the ingress like the queue applies it, so that a denied author reads as
       -- denied HERE rather than as a letter that would fold.
-      allowed <- case shRepo sa of
-        Nothing -> pure (const True)
-        Just repo -> loadBans repo >>= \case
-          Right bans -> pure (allowedBy bans)
-          Left e -> liftIO (refuse (show ("the deny-list will not read:"
-                                            <+> pretty (safeText e)))
-                                   codeNoBanList)
+      allowed <- denyingFor (shRepo sa)
+                   >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
+                              pure
 
       let ig = (overRpc sto api) { igAllowed = allowed }
           mbox = shMailbox sa

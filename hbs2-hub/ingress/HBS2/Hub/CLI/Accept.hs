@@ -86,7 +86,7 @@ import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo)
-import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 
 import HBS2.CLI.Prelude
@@ -467,14 +467,11 @@ acceptEntries = do
       -- Read before anything is opened, and a damaged list stops the accept:
       -- carrying on with an empty one would fold exactly the letters somebody
       -- took the trouble to ban.
-      bans <- loadBans repo
-                >>= either (\e -> liftIO (refuse (show ("the deny-list will not read:"
-                                                          <+> pretty e))
-                                                 codeNoBanList))
-                           pure
+      allowed <- denyingFor (Just repo)
+                   >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
+                              pure
 
-      let allowed = allowedBy bans
-          ig = overRpc sto api
+      let ig = overRpc sto api
 
       -- THE LETTER MUST BE IN THIS MAILBOX. Reading it by hash alone would
       -- work, and would accept any message-shaped block the peer has ever

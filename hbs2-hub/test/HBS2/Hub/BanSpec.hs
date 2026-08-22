@@ -20,6 +20,12 @@ import Data.List (isInfixOf)
 import Prettyprinter (pretty)
 import Data.Text qualified as Text
 import Data.Time.Clock (getCurrentTime,diffUTCTime)
+import Control.Exception (bracket)
+import Data.Text.IO qualified as Text
+import System.Directory (createDirectoryIfMissing)
+import System.Environment (lookupEnv,setEnv,unsetEnv)
+import System.FilePath (takeDirectory)
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 aKey :: IO HubKey
@@ -32,7 +38,7 @@ b58 :: HubKey -> String
 b58 = show . pretty . AsBase58
 
 spec :: Spec
-spec = keyNames >> do
+spec = keyNames >> theWire >> do
 
   describe "PEP-21 triage layer: the list" $ do
 
@@ -172,3 +178,66 @@ keyNames =
         `shouldBe` Nothing
       banArgs (argv ["--repo", b58 repo, "--target", b58 other, "--author-key", b58 who])
         `shouldBe` Nothing
+
+-- | THE WIRE, FROM THE FILE TO THE ANSWER.
+--
+-- Every case above proves that a PREDICATE refuses a banned author, and none
+-- of them proved the predicate is ever built out of the file: `loadBans` could
+-- be made to answer "nobody is banned" with the whole suite green. That is the
+-- one thing PEP-21's banning consists of, in three verbs, unasserted.
+--
+-- Against a real filesystem, under a temporary XDG root, because the path is
+-- part of the wire: two hubs serving one repository keep separate lists, and
+-- one hub serving two repositories must not confuse them.
+theWire :: Spec
+theWire =
+  describe "PEP-21 triage layer: from the file to the answer" $ do
+
+    it "builds the predicate the triage loop applies out of the file on disk" $
+      inXdg $ \_ -> do
+        repo <- aKey ; alice <- aKey ; bob <- aKey
+        _ <- saveBans repo (HS.fromList [alice])
+        allowed <- denyingFor (Just repo) >>= either (fail . Text.unpack) pure
+        allowed alice `shouldBe` False
+        allowed bob `shouldBe` True
+
+    -- Keyed by repository, which is what the path is for: a node may serve two
+    -- and must not answer one repository's question with the other's list.
+    it "keeps two repositories' lists apart" $ inXdg $ \_ -> do
+      one <- aKey ; two <- aKey ; alice <- aKey
+      _ <- saveBans one (HS.fromList [alice])
+      here  <- denyingFor (Just one) >>= either (fail . Text.unpack) pure
+      there <- denyingFor (Just two) >>= either (fail . Text.unpack) pure
+      here alice `shouldBe` False
+      there alice `shouldBe` True
+
+    -- A missing file is "nobody has banned anybody here", and a damaged one is
+    -- NOT: a deny-list that reads as empty when it is broken is a deny-list
+    -- that stops working silently, which is the failure this layer exists to
+    -- prevent.
+    it "reads a missing list as empty and refuses a damaged one" $ inXdg $ \_ -> do
+      repo <- aKey ; alice <- aKey
+      denyingFor (Just repo) >>= \case
+        Right allowed -> allowed alice `shouldBe` True
+        Left e -> expectationFailure ("a missing list refused: " <> Text.unpack e)
+      p <- banPath repo
+      createDirectoryIfMissing True (takeDirectory p)
+      Text.writeFile p "(ban not-a-key)\n"
+      denyingFor (Just repo) >>= \case
+        Left _  -> pure ()
+        Right _ -> expectationFailure "a damaged list read as a predicate"
+
+    -- No repository named is not an empty list: it is "there is no list to
+    -- apply", which is the form that reads a mailbox by key alone.
+    it "applies nothing when no repository was named" $ do
+      alice <- aKey
+      denyingFor Nothing >>= either (fail . Text.unpack) (\f -> f alice `shouldBe` True)
+
+-- The XDG root the store reads, pointed at a temporary directory for the
+-- length of one case and put back afterwards.
+inXdg :: (FilePath -> IO a) -> IO a
+inXdg act =
+  withSystemTempDirectory "hub-ban" $ \dir ->
+    bracket (lookupEnv "XDG_DATA_HOME")
+            (maybe (unsetEnv "XDG_DATA_HOME") (setEnv "XDG_DATA_HOME"))
+            (const (setEnv "XDG_DATA_HOME" dir >> act dir))

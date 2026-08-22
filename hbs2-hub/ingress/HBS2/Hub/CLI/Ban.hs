@@ -28,7 +28,7 @@ module HBS2.Hub.CLI.Ban
   ) where
 
 import HBS2.Hub.Types (HubKey,RepoRef)
-import HBS2.Hub.Deny (loadBans,renderBans,banPath,codeNoBanList)
+import HBS2.Hub.Deny (loadBans,saveBans,codeNoBanList)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,repoFlags,flagRepo
                          ,flagOneOf,flagOneOfMaybe,authorKeyFlags)
 import HBS2.Hub.CLI.Common (refuse,saying)
@@ -146,24 +146,10 @@ banEntries = do
         saying ("nothing to change" <> line)
         exitSuccess
 
-      p <- banPath (baRepo ba)
+      -- Written beside the file and renamed over it, never in place: see
+      -- 'saveBans', which is next to the reader whose refusal depends on it.
+      p <- saveBans (baRepo ba) bans'
       liftIO do
-        createDirectoryIfMissing True (takeDirectory p)
-        -- WRITTEN BESIDE IT AND RENAMED OVER IT, never in place.
-        --
-        -- A torn in-place write leaves a file that is SHORTER and still
-        -- parses -- every line is one key, so half a file is a valid
-        -- deny-list with keys missing. That is the one failure this design is
-        -- otherwise built to exclude: 'loadBans' refuses a file it cannot
-        -- read entirely, precisely so that a list an attacker shortened is a
-        -- refusal rather than a shorter list. An interrupted write did the
-        -- shortening for them.
-        --
-        -- rename is atomic within a filesystem, and the temporary is made in
-        -- the same directory so that it is the same one.
-        let tmp = p <> ".new"
-        Text.writeFile tmp (renderBans bans')
-        renameFile tmp p
         print $ vcat
           [ (if ban then "banned" else "unbanned") <+> pretty (AsBase58 who)
           , pretty (HS.size bans') <+> "author(s) denied, in" <+> pretty p

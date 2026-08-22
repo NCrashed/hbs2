@@ -47,7 +47,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Render (contractVersion,renderContract)
 import HBS2.Hub.Ingress
-import HBS2.Hub.Deny (loadBans,allowedBy,codeNoBanList)
+import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagWord,repoFlags,flagRepo,flagRepoMaybe
                          ,flagsAndSwitches,flagSwitch)
@@ -169,16 +169,13 @@ inboxEntries = do
       -- source for it and says so below. Applied HERE and not only at accept,
       -- because triage is a queue a human reads and a banned author's letter
       -- should not be in front of them at all.
-      allowed <- case mrepo of
-        Nothing -> pure (const True)
-        Just repo -> loadBans repo >>= \case
-          Right bans -> pure (allowedBy bans)
-          -- The same refusal `hub inbox accept` makes: a deny-list that reads
-          -- as empty when it is damaged stops working silently, which is the
-          -- failure this layer exists to prevent.
-          Left e -> liftIO (refuse (show ("the deny-list will not read:"
-                                            <+> pretty (safeText e)))
-                                   codeNoBanList)
+      --
+      -- The same refusal `hub inbox accept` makes: a deny-list that reads as
+      -- empty when it is damaged stops working silently, which is the failure
+      -- this layer exists to prevent.
+      allowed <- denyingFor mrepo
+                   >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
+                              pure
 
       -- Each with its own exit code. PEP-22 gives 1 to "a bad argument, an
       -- unknown verb", and neither of these is one: the key was well formed both
