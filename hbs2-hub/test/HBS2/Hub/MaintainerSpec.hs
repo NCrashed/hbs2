@@ -90,6 +90,41 @@ spec = do
       rendered (maintainerDoc repo fr) `shouldSatisfy` (not . (b58 (fst carol) `isInfixOf`))
       fmap drWhy (frDropped fr) `shouldBe` [UnauthorizedDelegate]
 
+    -- RULE 5 HAS TWO HALVES AND ONLY ONE OF THEM WAS EVER EXERCISED. Every
+    -- delegation in the suite was signed `mkEvent owner owner` or
+    -- `mkEvent bob bob`, so on the negative cases both boxes failed together;
+    -- dropping the AUTHOR half of the check left the whole suite green. Rule 5
+    -- is a statement about the author, and the author is what nothing asked
+    -- about.
+    it "refuses a delegation the owner blessed and did not author" $ do
+      owner <- kp
+      alice <- kp
+      carol <- kp
+      let repo = fst owner
+          -- The canon box is the owner's, so rule 3 is satisfied and only rule
+          -- 5's reading of the author box refuses this.
+          e = mkEvent alice owner (ADelegate repo (fst carol) 1000) (canonOf repo 1)
+          fr = foldEvents repo [e]
+      fmap drWhy (frDropped fr) `shouldBe` [UnauthorizedDelegate]
+      frMaintainers fr `shouldBe` HS.fromList [repo]
+
+    -- The other half, and the one with an attack behind it: canon is PUBLIC,
+    -- so an owner-authored box is something anybody can lift out of it. If any
+    -- authorized canon key could bless one, a maintainer could re-add a
+    -- delegation the owner had revoked by re-blessing the owner's own old box.
+    it "refuses a delegation the owner authored and a delegate blessed" $ do
+      owner <- kp
+      bob   <- kp
+      carol <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (ADelegate repo (fst bob) 1000) (canonOf repo 1)
+          -- bob is an authorized canon key by now, so the check every other op
+          -- makes would pass here.
+          e2 = mkEvent owner bob (ADelegate repo (fst carol) 2000) (canonOf repo 2)
+          fr = foldEvents repo [e1, e2]
+      fmap drWhy (frDropped fr) `shouldBe` [UnauthorizedDelegate]
+      frMaintainers fr `shouldBe` HS.fromList [repo, fst bob]
+
     it "treats revoking the owner as the no-op it has to be" $ do
       owner <- kp
       let repo = fst owner

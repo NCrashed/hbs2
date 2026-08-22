@@ -16,7 +16,8 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Canon (renderMeta,metaAt,renderEvent)
 import HBS2.Hub.CLI.Argv (argvAtom)
 import HBS2.Hub.Fold ( foldEvents,FoldResult(..),frThreads,frAdmitted,frOrigins
-                     , frMaintainers,frMaxSeq,frMaxNumber,frLastFolded,tsAttrs )
+                     , frMaintainers,frMaxSeq,frMaxNumber,frLastFolded,frLog
+                     , frRedacted,frHonoured,tsAttrs )
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -31,6 +32,7 @@ import Data.Config.Suckless (Syntax,C)
 import Data.List (isInfixOf)
 import Data.Text qualified as Text
 import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 import Data.Text (Text)
 import Data.Word (Word64)
 import Test.Hspec
@@ -556,14 +558,29 @@ spec = do
     -- droppable -- so the field is moved instead. What is under test is the
     -- predicate: a conjunct nothing can reach is one that can be deleted
     -- without a test noticing, which is how the seq conjunct lived untested.
-    it "answers on each counter a publisher mints from" $ do
+    it "answers on every field it compares, one at a time" $ do
       owner <- kp
+      bob <- kp
+      carol <- kp
       let repo = fst owner
-          fr = foldEvents repo [anOpen owner 1 "one"]
+          o = anOpen owner 1 "one"
+          -- A delegation as well, so the log has something for the maintainer
+          -- projection to be about.
+          fr = foldEvents repo [o, ev owner 2 (ADelegate repo (fst bob) 2000)]
+          differs f = equivalentTo fr (f fr) `shouldBe` False
       equivalentTo fr fr `shouldBe` True
-      equivalentTo fr fr { frMaxSeq = frMaxSeq fr + 1 } `shouldBe` False
-      equivalentTo fr fr { frMaxNumber = frMaxNumber fr + 1 } `shouldBe` False
-      equivalentTo fr fr { frLastFolded = frLastFolded fr + 1 } `shouldBe` False
+      differs $ \r -> r { frThreads = mempty }
+      differs $ \r -> r { frMaintainers = HS.insert (fst carol) (frMaintainers r) }
+      differs $ \r -> r { frRedacted = HS.insert (eventId o) (frRedacted r) }
+      differs $ \r -> r { frOrigins = HS.insert (HashRef (hashObject ("a letter" :: LBS.ByteString))) (frOrigins r) }
+      differs $ \r -> r { frHonoured = HS.insert (eventId o) (frHonoured r) }
+      differs $ \r -> r { frMaxSeq = frMaxSeq r + 1 }
+      differs $ \r -> r { frMaxNumber = frMaxNumber r + 1 }
+      differs $ \r -> r { frLastFolded = frLastFolded r + 1 }
+      -- The projection over the log, which is the one conjunct with no field of
+      -- its own: emptying the log takes the delegation out of it and leaves
+      -- everything else where it was.
+      differs $ \r -> r { frLog = [] }
 
   describe "PEP-22 hub compact: arguments" $ do
 

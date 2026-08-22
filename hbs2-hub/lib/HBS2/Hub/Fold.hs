@@ -913,7 +913,7 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
       -- and hide any event in the repo as soon as it got blessed.
       ARedact repo target _
         | repo /= owner              -> dropE r WrongTarget s
-        | not (ownerAuthored r s)    -> dropE r UnauthorizedCanon s
+        | not (bothAuthorized r s)    -> dropE r UnauthorizedCanon s
         -- Moderating a thread changes it, so its clock moves with it:
         -- otherwise a thread whose comment was just withdrawn looks
         -- untouched since before the redaction.
@@ -1001,13 +1001,19 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
     -- rules 3+4: canon-by must be an authorized canon key; for owner-authored
     -- ops the author box signer must be too. For open/comment only canon-by
     -- must be authorized (the author may be anyone).
+    --
+    -- NAMED FOR WHAT IT CHECKS and not for the op class that asks it. It used
+    -- to be `ownerAuthored`, which is the PEP-19 name for the ops -- and reads
+    -- as "the owner authored this", which is not what it says: either box may
+    -- be any authorized key. Rule 5 is the one that means the owner, and it is
+    -- `ownerOnly` above.
     canonOK r s = HS.member (rCanonKey r) (sMaint s)
-    ownerAuthored r s = canonOK r s && HS.member (rAuthorKey r) (sMaint s)
+    bothAuthorized r s = canonOK r s && HS.member (rAuthorKey r) (sMaint s)
 
     onThread r thr s f = withThread canonOK r thr s (Right . f)
-    onOwnerThread r thr s f = withThread ownerAuthored r thr s (Right . f)
+    onOwnerThread r thr s f = withThread bothAuthorized r thr s (Right . f)
     onThreadWith r thr s f = withThread canonOK r thr s f
-    onOwnerThreadWith r thr s f = withThread ownerAuthored r thr s f
+    onOwnerThreadWith r thr s f = withThread bothAuthorized r thr s f
 
     withThread auth r thr s f
       | not (auth r s) = dropE r UnauthorizedCanon s
