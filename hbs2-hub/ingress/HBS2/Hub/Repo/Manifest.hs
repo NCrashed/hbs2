@@ -25,6 +25,7 @@ module HBS2.Hub.Repo.Manifest
   , codeNoManifest
   , mailboxFor
   , sigilFor
+  , byHandOr
   , sigilTrouble
   , mailboxOf
   , sigilOf
@@ -293,9 +294,27 @@ mailboxFor :: forall m . ( MonadUnliftIO m
                          , HasClientAPI LWWRefAPI UNIX m
                          )
            => Maybe HubKey -> RepoRef -> m (Either ManifestGone HubKey)
-mailboxFor (Just k) _ = pure (Right k)
-mailboxFor Nothing repo =
+mailboxFor = byHandOr $ \repo ->
   readManifest repo <&> (>>= maybe (Left (ManifestNoMailbox repo "--mailbox")) Right . mailboxOf)
+
+-- | The rule itself: a value given by hand wins, and costs nothing.
+--
+-- BOTH HALVES ARE THE RULE, and only one of them is about the answer. A caller
+-- who names a mailbox is not asking to be corrected -- that is the half a
+-- reader sees -- and the other half is that naming one makes NO RPC at all,
+-- which is what gets a verb past a peer that will not answer and past a
+-- repository whose manifest is not fetched yet. A resolver called and then
+-- ignored would answer the same and cost the wait.
+--
+-- Its own function so that both are checkable without a peer: the two verbs
+-- that follow this rule need 'HasStorage' and an LWWRef client to be called at
+-- all, so with the rule inlined in them, inverting it -- read the manifest,
+-- prefer what it says -- left the suite green.
+byHandOr :: Applicative m
+         => (RepoRef -> m (Either ManifestGone a))  -- ^ what to do when it was not given
+         -> Maybe a -> RepoRef -> m (Either ManifestGone a)
+byHandOr _ (Just a) _         = pure (Right a)
+byHandOr resolve Nothing repo = resolve repo
 
 -- | The sigil a letter should be sealed to: the one it was given, or the one
 -- the repository publishes for its ingress mailbox.
@@ -333,8 +352,7 @@ sigilFor :: forall m . ( MonadUnliftIO m
                        , HasClientAPI LWWRefAPI UNIX m
                        )
          => Maybe HashRef -> RepoRef -> m (Either ManifestGone HashRef)
-sigilFor (Just h) _ = pure (Right h)
-sigilFor Nothing repo = do
+sigilFor = byHandOr $ \repo -> do
   declared <- readManifest repo <&> \case
     Left e -> Left e
     Right mf -> case mailboxOf mf of

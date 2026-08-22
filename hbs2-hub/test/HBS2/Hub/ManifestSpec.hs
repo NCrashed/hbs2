@@ -2,7 +2,7 @@ module HBS2.Hub.ManifestSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Manifest
-import HBS2.Hub.Repo.Manifest (ManifestGone(..),sigilTrouble)
+import HBS2.Hub.Repo.Manifest (ManifestGone(..),sigilTrouble,byHandOr,mailboxOf,sigilOf)
 import HBS2.Net.Auth.Credentials.Sigil (makeSigilFromCredentials)
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
@@ -17,6 +17,7 @@ import Data.Config.Suckless
 import Data.Either (isLeft)
 import Data.Text qualified as Text
 import Data.List (isInfixOf)
+import Data.IORef
 import Test.Hspec
 
 kp :: IO HubKey
@@ -29,7 +30,7 @@ clauseOf :: HubMailbox -> Syntax C
 clauseOf = either (error . Text.unpack) id . mailboxClause
 
 spec :: Spec
-spec = do
+spec = resolution >> do
 
   describe "PEP-18 manifest clauses" $ do
 
@@ -278,3 +279,52 @@ spec = do
 
 aHash :: String -> HashRef
 aHash = HashRef . hashObject . LBS.pack
+
+-- | HOW A VERB DECIDES WHICH MAILBOX IT IS TALKING ABOUT.
+--
+-- The rule the whole inbox family follows, and the one nothing asked about:
+-- `mailboxFor`, `sigilFor`, `mailboxOf` and `readManifest` were named by no
+-- test at all, and inverting the precedence -- read the manifest and prefer
+-- what it says over what the caller typed -- left the suite green. This is the
+-- code that decides where a contributor's letter is SENT.
+resolution :: Spec
+resolution =
+  describe "PEP-18 manifest: which mailbox a verb is talking about" $ do
+
+    -- BOTH HALVES OF THE RULE, and only one of them is about the answer. A
+    -- caller who names a mailbox is not asking to be corrected; and naming one
+    -- must cost no RPC, which is what gets a verb past a peer that will not
+    -- answer and past a repository whose manifest is not fetched yet. A
+    -- resolver called and then ignored answers the same and costs the wait.
+    it "prefers the value given by hand, and does not resolve at all" $ do
+      k <- kp ; other <- kp ; repo <- kp
+      calls <- newIORef (0 :: Int)
+      let resolve _ = modifyIORef' calls succ >> pure (Right other)
+      byHandOr resolve (Just k) repo `shouldReturn` Right k
+      readIORef calls `shouldReturn` 0
+      -- ...and falls through to it when there was nothing to prefer
+      byHandOr resolve Nothing repo `shouldReturn` Right other
+      readIORef calls `shouldReturn` 1
+
+    it "carries the resolver's refusal rather than inventing one" $ do
+      repo <- kp
+      let resolve r = pure (Left (ManifestNoMailbox r "--mailbox"))
+      byHandOr resolve (Nothing :: Maybe HubKey) repo
+        `shouldReturn` Left (ManifestNoMailbox repo "--mailbox")
+
+    -- What the resolver reads out of the clauses, which is the other end of
+    -- the same wire: the ingress mailbox, and the sigil published FOR it.
+    it "reads the ingress mailbox and its sigil out of a manifest" $ do
+      mbox <- kp ; other <- kp
+      let h = fromMaybe (error "not a hash")
+                (fromStringMay "5Uz3o1LWNo2ejmnFcgw7z3hMJnPHu3mB2FVwjTbEuC5j")
+          mf = [ clauseOf (HubMailbox mbox hubRole Nothing)
+               , mailboxSigilClause (MailboxSigil mbox h) ]
+      mailboxOf mf `shouldBe` Just mbox
+      sigilOf mbox mf `shouldBe` Just h
+      -- A sigil published for another mailbox is not this one's.
+      sigilOf other mf `shouldBe` Nothing
+      -- And a manifest that declares no ingress at all says so, rather than
+      -- picking whatever mailbox clause it can find: a repository that is not
+      -- a forge is an ordinary state.
+      mailboxOf [] `shouldBe` Nothing
