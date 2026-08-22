@@ -34,31 +34,12 @@
 -- the letter, so two folders given the same inputs mint the same events.
 --
 -- The property the module owes its caller is that it never mints an event
--- the fold will drop, and that holds by enumeration over 'DropReason':
---
---   * @BadAuthorSig@, @BadCanonSig@, @UndecodableAuthor@,
---     @UndecodableCanon@, @IdMismatch@: impossible for boxes minted here.
---   * @WrongTarget@, @BadThread@, @UnknownRedact@, @DupId@, @BadRevise@,
---     @UnauthorizedDelegate@, and the four payload refusals
---     (@PROpenWithoutCoords@, @IssueOpenWithCoords@, @CoordsUnreachable@,
---     @PROnlyOnIssue@): refused by the gate, on both the letter path and the
---     owner-native one. Those four are decided by 'openTrouble' and
---     'threadOpTrouble', which the fold uses too, and 'BadContent' carries
---     which of them it was -- so the promise is not only documented here, it
---     is what the refusal says out loud.
---   * @UnauthorizedCanon@: refused by checking this folder's own key against
---     the maintainer set canon reports, which is why 'CanonView' carries it.
---   * The four stamp refusals. @NumberOnNonOpen@ cannot happen because a
---     number is minted only for an open; @SeqAtTopOfRange@ and
---     @NumberAtTopOfRange@ are refused once the cursor reaches the top of its
---     range ('CursorExhausted'); @FoldedTsAboveCeiling@ is refused once the
---     clock about to be stamped passes the ceiling ('StampOutOfRange'). Those
---     are the three stamped fields, and every gate is in 'requireCanon' or
---     'requireStamp', which all four entry points go through.
---
--- The list is checked by hand and nothing checks it for you, so it has to name
--- the constructors as they are: it was left naming two that had been split into
--- eight, which is how an argument stops being an argument.
+-- the fold will drop, and that holds by enumeration over 'DropReason'. The
+-- enumeration is 'keptOut', which is a total function and not this paragraph:
+-- it was this paragraph twice, and both times it went stale -- once naming two
+-- constructors that had been split into eight, and once two short of the list.
+-- A list checked by hand is a list that drifts, and it drifts invisibly exactly
+-- where the argument matters.
 --
 -- Anything that weakens one of those checks weakens the property, so the
 -- view must come from the fold ('viewOf') rather than be reconstructed.
@@ -79,6 +60,8 @@ module HBS2.Hub.Bridge
   , noOwnAttachments
   , ownAttachments
   , outcome
+  , Kept(..)
+  , keptOut
   , EventScope(..)
     -- The constructor is deliberately not exported: a view is a cache of what
     -- the fold would say, and the module's promise (never mint what the fold
@@ -695,6 +678,87 @@ outcome = \case
   OwnerKeyRequired    -> Abort
   CursorExhausted   -> Abort
   StampOutOfRange   -> Abort
+
+-- | How this module is kept from minting an event the fold would drop.
+--
+-- Either the shape cannot come out of what is built here, or a named gate
+-- refuses it first.
+data Kept
+    -- | Nothing this module builds has that shape.
+  = ByConstruction Text
+    -- | A check here refuses it first, and the payload names the 'TriageError'
+    -- raised instead -- which is a constructor of this module and therefore
+    -- greppable, and is also what the operator is shown. "The promise is not
+    -- only documented, it is what the refusal says out loud" was the header's
+    -- claim about four of these; naming the refusal makes it the claim about
+    -- all of them.
+  | ByGate Text
+  deriving stock (Eq,Show)
+
+-- | The module's promise, as a function the compiler checks.
+--
+-- The property is that the bridge never mints an event the fold will drop, and
+-- it holds by enumeration over 'DropReason'. That enumeration was a paragraph
+-- in the header, and nothing checked it: it was found once naming two
+-- constructors that had since been split into eight, fixed by hand, and found
+-- again two short -- 'PartNotProven', which is the gate that stops a stranger's
+-- attachment being published, and 'NumberTooFarAhead'. A list maintained by
+-- hand drifts, and it drifts invisibly exactly where it matters, since a reason
+-- nobody enumerated is a reason nobody looked for a gate for.
+--
+-- So it is a function, total, in a module with @-Werror=incomplete-patterns@:
+-- a constructor added to the fold does not build here until somebody says what
+-- keeps the bridge from minting it. That is the whole purpose. Nothing branches
+-- on the answer -- it is the argument, in the one form a compiler can check --
+-- and 'HBS2.Hub.BridgeSpec' asserts a few of the sentences so that deleting the
+-- function is not free either.
+keptOut :: DropReason -> Kept
+keptOut = \case
+  -- The author box is taken out of the letter verbatim and never re-signed,
+  -- and the canon box is signed here over the id computed here.
+  BadAuthorSig          -> ByConstruction "the author box is carried verbatim"
+  BadCanonSig           -> ByConstruction "the canon box is signed here"
+  UndecodableAuthor _ _ -> ByConstruction "the author box is carried verbatim"
+  UndecodableCanon _ _  -> ByConstruction "the canon box is built here from a value"
+  IdMismatch            -> ByConstruction "the canon box blesses the id computed here"
+
+  -- Refused before minting, on the letter path and the owner-native one alike.
+  WrongTarget           -> ByGate "WrongRepo"
+  BadThread             -> ByGate "UnknownThread"
+  UnknownRedact         -> ByGate "UnknownTarget"
+  DupId                 -> ByGate "AlreadyInCanon"      -- 'seenAlready'
+  BadRevise             -> ByGate "NotAuthorOfRecord"
+  UnauthorizedDelegate  -> ByGate "OwnerKeyRequired"
+
+  -- The four payload refusals, decided by 'openTrouble' and 'threadOpTrouble',
+  -- which the fold uses too -- and 'BadContent' carries the very reason it was,
+  -- so for these four the refusal literally is this line.
+  PROpenWithoutCoords   -> ByGate "BadContent"
+  IssueOpenWithCoords   -> ByGate "BadContent"
+  CoordsUnreachable     -> ByGate "BadContent"
+  PROnlyOnIssue         -> ByGate "BadContent"
+
+  -- This folder's own key against the maintainer set canon reports, which is
+  -- why 'CanonView' carries it. See 'requireCanon'.
+  UnauthorizedCanon     -> ByGate "UnauthorizedForRepo"
+
+  -- The stamped fields. A number is minted only for an open ('mintedNumber'),
+  -- and only as one above the highest canon holds ('cursorFrom'), which is
+  -- well inside 'numberStampWindow'; the two top-of-range refusals and the
+  -- clock ceiling are gates in 'requireCanon' and 'requireStamp', which all
+  -- four entry points go through.
+  NumberOnNonOpen       -> ByConstruction "a number is minted only for an open"
+  NumberTooFarAhead     -> ByConstruction "the next number is one above canon's highest"
+  SeqAtTopOfRange       -> ByGate "CursorExhausted"
+  NumberAtTopOfRange    -> ByGate "CursorExhausted"
+  FoldedTsAboveCeiling  -> ByGate "StampOutOfRange"
+
+  -- The one the paragraph never named. A part-secret is published only after
+  -- 'provesPart' has established that the sender knew it, which is what stops
+  -- this node -- which holds the recipient key and so can open whatever a
+  -- letter names -- from publishing the group secret of a stranger's attachment
+  -- into canon forever. See 'requireParts'.
+  PartNotProven         -> ByGate "PartUnproven"
 
 -- Mark a refusal as being about what the caller composed rather than about the
 -- letter it was answering. Idempotent by construction: nothing wraps twice,

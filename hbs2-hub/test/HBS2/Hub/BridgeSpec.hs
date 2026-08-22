@@ -147,7 +147,7 @@ ctxAs :: KP -> RepoRef -> TriageCtx
 ctxAs kpr repo = TriageCtx kpr (const True) repo
 
 spec :: Spec
-spec = do
+spec = promise >> do
 
   describe "PEP-19 triage bridge" $ do
 
@@ -2304,3 +2304,56 @@ spec = do
       let fr = foldEvents repo (map acEvent [a1,a2,a3,a4])
       frDropped fr `shouldBe` []
       HM.lookup "status" (tsAttrs (threadOf fr (scopeOf a1))) `shouldBe` Just "merged"
+
+-- | THE PROMISE, AS SOMETHING THE COMPILER CHECKS.
+--
+-- The bridge owes its caller that it never mints an event the fold would drop,
+-- and that holds by enumeration over 'DropReason'. The enumeration lived in a
+-- header paragraph and went stale twice: once naming two constructors that had
+-- been split into eight, once two short of the list (@PartNotProven@, which is
+-- the gate a stranger's attachment turns on, and @NumberTooFarAhead@). It is a
+-- total function now, in a module with @-Werror=incomplete-patterns@, so a
+-- reason added to the fold does not build until somebody says what keeps the
+-- bridge from minting it.
+--
+-- What a test can add is that the answers are not vacuous, and that the two
+-- carrying a security argument say what the code does.
+promise :: Spec
+promise =
+  describe "PEP-19 what keeps the bridge from minting a droppable event" $ do
+
+    -- Named as the refusal raised instead, which is a constructor of the
+    -- module and therefore greppable -- and, for the four payload reasons, is
+    -- the refusal that carries the DropReason itself.
+    it "answers with the refusal the gate raises" $ do
+      keptOut PartNotProven `shouldBe` ByGate "PartUnproven"
+      keptOut UnauthorizedCanon `shouldBe` ByGate "UnauthorizedForRepo"
+      keptOut CoordsUnreachable `shouldBe` ByGate "BadContent"
+      keptOut DupId `shouldBe` ByGate "AlreadyInCanon"
+
+    -- And where there is no gate, because no gate is needed: the author box is
+    -- carried out of the letter verbatim, and a number is minted only for an
+    -- open and only one above the highest canon holds.
+    it "answers construction where nothing built here can have the shape" $ do
+      let byConstruction = \case { ByConstruction _ -> True ; ByGate _ -> False }
+      keptOut BadAuthorSig `shouldSatisfy` byConstruction
+      keptOut IdMismatch `shouldSatisfy` byConstruction
+      keptOut NumberOnNonOpen `shouldSatisfy` byConstruction
+      keptOut NumberTooFarAhead `shouldSatisfy` byConstruction
+
+    -- The gate the first assertion names, doing it: the test above pins the
+    -- sentence, this pins that the sentence is about something real. Both, or
+    -- the function is prose with a type.
+    it "raises that refusal when the proof is missing" $ do
+      alice <- kp
+      mallory <- kp
+      owner <- kp
+      origin <- someHash
+      part <- someHash
+      let repo = fst owner
+          stolen = AOpen repo HubIssue "yours now" [] Nothing
+                     (Just (proven (fst alice) part)) Nothing 1
+      expectErr (PartUnproven part)
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst mallory))
+           (emptyView repo) 1 origin (carrying msgSecret [here part])
+           (makeLetter (fst mallory) (snd mallory) stolen noReplyChannel))
