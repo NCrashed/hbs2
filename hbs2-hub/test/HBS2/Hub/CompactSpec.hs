@@ -15,8 +15,8 @@ import HBS2.Hub.CLI.Compact
 import HBS2.Hub.Repo
 import HBS2.Hub.Canon (renderMeta,metaAt,renderEvent)
 import HBS2.Hub.CLI.Argv (argvAtom)
-import HBS2.Hub.Fold ( foldEvents,frThreads,frAdmitted,frOrigins,frMaintainers
-                     , frMaxSeq,tsAttrs )
+import HBS2.Hub.Fold ( foldEvents,FoldResult(..),frThreads,frAdmitted,frOrigins
+                     , frMaintainers,frMaxSeq,frMaxNumber,frLastFolded,tsAttrs )
 
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
@@ -524,6 +524,46 @@ spec = do
       frMaintainers full `shouldBe` frMaintainers short
       frMaxSeq full `shouldSatisfy` (> frMaxSeq short)
       equivalentTo full short `shouldBe` False
+
+    -- THE PAIR THAT CANCELS OUT, which every field above is blind to.
+    -- 'frMaintainers' is the set as of the END of the log, so a delegate and
+    -- the revoke that undid it are a no-op in it; the threads never saw either;
+    -- and a comment above them keeps the counters identical, so this cannot
+    -- pass for the high-water reason. What is erased is the record that the key
+    -- was ever authorized, which is what says whether the events it signed were
+    -- admissible when they were signed.
+    it "says a lineage missing a delegate and the revoke that undid it is not" $ do
+      owner <- kp ; bob <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          d = ev owner 2 (ADelegate repo (fst bob) 2000)
+          r = ev owner 3 (ARevoke repo (fst bob) 3000)
+          cm = ev owner 4 (AComment (eventId o) Nothing (Just "said") Nothing 4000)
+          full  = foldEvents repo [o, d, r, cm]
+          short = foldEvents repo [o, cm]
+      -- Every other conjunct agrees, which is what makes this the case worth
+      -- writing down rather than an obvious one.
+      frThreads full `shouldBe` frThreads short
+      frMaintainers full `shouldBe` frMaintainers short
+      frMaxSeq full `shouldBe` frMaxSeq short
+      frMaxNumber full `shouldBe` frMaxNumber short
+      frLastFolded full `shouldBe` frLastFolded short
+      equivalentTo full short `shouldBe` False
+
+    -- ONE COUNTER AT A TIME, by hand. Two canons that differ in exactly one of
+    -- these do not always exist as a pair of event lists -- a compaction cannot
+    -- lower the number counter without dropping an open, and an open is never
+    -- droppable -- so the field is moved instead. What is under test is the
+    -- predicate: a conjunct nothing can reach is one that can be deleted
+    -- without a test noticing, which is how the seq conjunct lived untested.
+    it "answers on each counter a publisher mints from" $ do
+      owner <- kp
+      let repo = fst owner
+          fr = foldEvents repo [anOpen owner 1 "one"]
+      equivalentTo fr fr `shouldBe` True
+      equivalentTo fr fr { frMaxSeq = frMaxSeq fr + 1 } `shouldBe` False
+      equivalentTo fr fr { frMaxNumber = frMaxNumber fr + 1 } `shouldBe` False
+      equivalentTo fr fr { frLastFolded = frLastFolded fr + 1 } `shouldBe` False
 
   describe "PEP-22 hub compact: arguments" $ do
 

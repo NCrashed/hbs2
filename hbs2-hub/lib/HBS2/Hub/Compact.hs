@@ -66,7 +66,7 @@ module HBS2.Hub.Compact
   ) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Fold (Resolved(..),resolve,FoldResult(..),DropReason)
+import HBS2.Hub.Fold (Resolved(..),resolve,FoldResult(..),DropReason,LogEntry(..))
 
 import Data.Hashable (Hashable(..))
 import Data.HashMap.Strict (HashMap)
@@ -218,11 +218,31 @@ compactionOf fr evs = Compaction { cpKeep = reverse keep, cpDrop = reverse drop'
 --   * the highest seq, which the bridge mints against. A compaction cannot
 --     lower it -- what it drops is superseded, so something higher survives --
 --     and a rewrite that did lower it would hand the bridge a number already
---     spent.
+--     spent;
+--   * the highest number and the last folded-ts, for the same reason and by the
+--     same argument. Both are counters a publisher mints the next value from,
+--     and neither was compared: a number is carried by an @open@ and an @open@
+--     is never droppable, and the largest folded-ts sits on the highest-seq
+--     event, which is never droppable either. So an honest compaction leaves
+--     both alone and a rewrite that lowers one is handing the bridge a value
+--     that has already been spent;
+--   * the @delegate@ and @revoke@ events, by seq and id. See 'maintainerOps'.
 --
 -- WHAT IS NOT: the log. That is the timeline of overwritten values, and losing
 -- it is exactly what a compaction trades for size (PEP-21). Comparing it would
 -- make every compaction look like a fork.
+--
+-- NOR THE ANOMALIES, and one of them is a hole this cannot close. Canon may
+-- hold two admitted events at one @seq@; 'droppable' refuses to drop either
+-- (nothing strictly supersedes a tie), so an honest compaction keeps both and
+-- @hub verify@ keeps reporting it -- but a stranger's rewrite that drops one
+-- leaves every field above identical and the anomaly gone. Comparing anomalies
+-- would catch it and would also fork on an honest pair: when something HIGHER
+-- supersedes both tie members, dropping them is correct and the anomaly goes
+-- with them, so two canons compacted at different moments would disagree about
+-- an anomaly neither of them is wrong about. The state is the same either way;
+-- what is lost is one line of an audit, and the price of catching it is telling
+-- honest compactions apart from forks.
 --
 -- NOR the drops. An event the fold refused is retained by 'droppable', so a
 -- HONEST compaction preserves them; but this predicate is asked about canon a
@@ -237,6 +257,46 @@ equivalentTo a b =
   && frOrigins a == frOrigins b
   && frHonoured a == frHonoured b
   && frMaxSeq a == frMaxSeq b
+  && frMaxNumber a == frMaxNumber b
+  && frLastFolded a == frLastFolded b
+  && maintainerOps a == maintainerOps b
+
+-- | The @delegate@ and @revoke@ events canon holds, by seq and id.
+--
+-- NOT THE LOG, and the difference is what makes comparing this sound. The log
+-- is the timeline of overwritten values and shrinks with every compaction;
+-- these two ops are retained unconditionally -- 'attrOf' answers 'Nothing' for
+-- both, so 'droppable' is False for them whatever else is true (PEP-19) -- so
+-- this projection is a function of the history rather than of when anybody
+-- compacted it. Two honest compactions of one canon, run a year apart, produce
+-- the same list.
+--
+-- WHY 'frMaintainers' DOES NOT COVER IT: that is the set as of the END of the
+-- log, so a @delegate@ and the @revoke@ that undid it cancel out in it. A
+-- rewrite that drops the matched pair leaves every other field identical while
+-- erasing the record that the key was ever authorized -- and that record is
+-- what says whether the events it signed were admissible when they were signed.
+--
+-- The id as well as the seq, because two different delegations at one seq are
+-- the case where the seq alone says nothing.
+maintainerOps :: FoldResult -> [(Word64, EventId)]
+maintainerOps fr =
+  [ (lgSeq e, lgEvent e) | e <- frLog fr, isMaintainerOp (lgContent e) ]
+  where
+    -- Spelled out over every constructor for the reason 'attrOf' is: under a
+    -- wildcard an op added later that changes who may bless canon would join
+    -- this list silently on one side of the question and not the other.
+    isMaintainerOp = \case
+      ADelegate{} -> True
+      ARevoke{}   -> True
+      AOpen{}     -> False
+      AComment{}  -> False
+      ARevise{}   -> False
+      ASet{}      -> False
+      AClose{}    -> False
+      AReopen{}   -> False
+      AMerge{}    -> False
+      ARedact{}   -> False
 
 -- | Whether this one event may go, given what the fold admitted, what
 -- supersedes and what is redacted.

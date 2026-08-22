@@ -958,6 +958,20 @@
 
 ## Fixed
 
+  - **A rewrite could drop a delegation and the revoke that undid it, and still
+    look like the same canon.** The check that decides whether somebody else's
+    rewritten canon is a compaction or a fork compared the maintainer set as of
+    the END of the log, where a `delegate` and its `revoke` cancel out. So a
+    lineage with the pair removed matched on every field, while what was erased
+    is the record that a key was ever authorized -- which is what says whether
+    the events it signed were admissible when they were signed. The two
+    unconditionally-retained ops are compared directly now.
+
+    The two counters the check omitted are compared as well: the highest number
+    and the last folded-ts, on the argument already written for the highest seq.
+    A publisher mints the next value from each, and a rewrite that lowers one
+    hands the next publisher a value that has already been spent.
+
   - **git could answer with as much as it liked.** The runner kept stdout with
     no ceiling at all, under a sentence that is true of exactly one caller:
     stdout of `git bundle create -` IS the bundle, so a bound there truncates an
