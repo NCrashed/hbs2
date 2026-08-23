@@ -24,6 +24,8 @@ module HBS2.Hub.CLI.Own
   , OwnArgs(..)
   , ownArgs
   , ownArgsFor
+  , labelSet
+  , assignSet
 
   , RedactArgs(..)
   , OpenArgs(..)
@@ -300,35 +302,14 @@ ownEntries = do
     labelIt ow = do
       (parent, fr) <- canonOf (owRepo ow)
       thr <- threadOfNumber fr (owNumber ow)
-      -- Through 'encodeLabels', which is what makes the value canonical: the
-      -- bridge refuses an unnormalized one, and two maintainers applying the
-      -- same labels in a different order must produce the same event.
-      let value = encodeLabels (if owClear ow then [] else owLabels ow)
       writeOwn (owRepo ow) (owAs ow) (owDry ow) parent fr
-        (ASet thr attrLabels value) "hub: labels"
+        (uncurry (ASet thr) (labelSet (owClear ow) (owLabels ow))) "hub: labels"
 
     assignIt ow = do
       (parent, fr) <- canonOf (owRepo ow)
       thr <- threadOfNumber fr (owNumber ow)
-      -- PLURAL, and through 'encodeLabels' like every other set-valued
-      -- attribute. PEP-19 states the rule and states why: "an attribute that
-      -- can hold a set is spelled as one everywhere, so nothing has to remember
-      -- which spelling normalizes". This verb wrote the singular, so the name it
-      -- wrote was in no reader's vocabulary but its own: 'multiValued' lists the
-      -- plural, so 'normalizeAttr' left the value alone and `hub verify` raised
-      -- no UnnormalizedAttr; and the PEP-22 render contract reads the plural, so
-      -- every thread this verb ever assigned came out of `--json` with
-      -- "assignees": [] while the terminal showed an assignee. Canon is
-      -- append-only, which is why this had to move before anybody published one.
-      --
-      -- One key still, and the empty set is a clear: last-writer-wins has no way
-      -- to remove an attribute, so the empty value IS the absence a reader shows
-      -- as none. The shape leaves room for --to to become repeatable, which is
-      -- additive; the singular name would not have.
-      let value = encodeLabels
-                    (maybe [] (pure . Text.pack . show . pretty . AsBase58) (owTo ow))
       writeOwn (owRepo ow) (owAs ow) (owDry ow) parent fr
-        (ASet thr attrAssignees value) "hub: assignees"
+        (uncurry (ASet thr) (assignSet (owClear ow) (owTo ow))) "hub: assignees"
 
     redactIt rd = do
       (parent, fr) <- canonOf (rdRepo rd)
@@ -376,6 +357,44 @@ ownEntries = do
           ] )
 
       liftIO (saying (notPublishedYet <> line))
+
+-- | What @hub label@ sets, and to what.
+--
+-- Through 'encodeLabels', which is what makes the value canonical: the bridge
+-- refuses an unnormalized one, and two maintainers applying the same labels in
+-- a different order must produce the same event.
+labelSet :: Bool -> [Text] -> (Text, Text)
+labelSet clear ls = (attrLabels, encodeLabels (if clear then [] else ls))
+
+-- | And what @hub assign@ sets.
+--
+-- PLURAL, and through 'encodeLabels' like every other set-valued attribute.
+-- PEP-19 states the rule and states why: "an attribute that can hold a set is
+-- spelled as one everywhere, so nothing has to remember which spelling
+-- normalizes". This verb wrote the singular, so the name it wrote was in no
+-- reader's vocabulary but its own: 'multiValued' lists the plural, so
+-- 'normalizeAttr' left the value alone and @hub verify@ raised no
+-- @UnnormalizedAttr@; and the PEP-22 render contract reads the plural, so every
+-- thread this verb ever assigned came out of @--json@ with @"assignees": []@
+-- while the terminal showed an assignee. Canon is append-only, which is why
+-- this had to move before anybody published one.
+--
+-- One key still, and the empty set is a clear: last-writer-wins has no way to
+-- remove an attribute, so the empty value IS the absence a reader shows as
+-- none. The shape leaves room for @--to@ to become repeatable, which is
+-- additive; the singular name would not have.
+--
+-- A FUNCTION AND NOT A LINE IN THE VERB, because the bug was an agreement
+-- between three modules -- what this writes, what the fold normalizes, what the
+-- contract reads -- and a verb body is where no test can reach it. See
+-- "HBS2.Hub.OwnSpec": the case that folds what this returns and reads it back
+-- out of the JSON contract is the only one in the suite that crosses those
+-- three in the direction the product runs.
+assignSet :: Bool -> Maybe HubKey -> (Text, Text)
+assignSet clear to =
+  ( attrAssignees
+  , encodeLabels [ Text.pack (show (pretty (AsBase58 k)))
+                 | not clear, Just k <- [to] ] )
 
 -- | @--repo K --number N [--note T] [--label L]... [--clear] [--as K]@.
 --

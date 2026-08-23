@@ -16,9 +16,19 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Hash (hashObject)
 import HBS2.Data.Types.Refs (HashRef(..))
 
+import HBS2.Hub.Fold (foldEvents,frThreads)
+import HBS2.Hub.Render (threadContract)
+
+import Data.Aeson qualified as A
+import Data.Aeson.Key qualified as A
+import Data.Aeson.KeyMap qualified as A
 import Data.Config.Suckless
+import Data.HashMap.Strict qualified as HM
+import Data.Text (Text)
+import Data.Text qualified as Text
+import Data.Word (Word64)
 import Data.ByteString.Lazy.Char8 qualified as LBS
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe,isJust)
 import Prettyprinter (pretty)
 import Test.Hspec
 
@@ -32,7 +42,7 @@ argv :: [String] -> [Syntax C]
 argv = fmap argvAtom
 
 spec :: Spec
-spec = do
+spec = crossing >> do
 
   describe "PEP-22 hub issue close|reopen|label: arguments" $ do
 
@@ -208,3 +218,86 @@ spec = do
                             ,"--label","bug","--clear"])
       fmap owClear got `shouldBe` Just True
       fmap owLabels got `shouldBe` Just ["bug"]
+
+-- | THE ONE TEST THAT CROSSES THREE MODULES IN THE PRODUCT'S DIRECTION.
+--
+-- What `hub assign` writes, what the fold makes of it, and what a renderer
+-- reads back out of the PEP-22 contract. Every one of those was tested on its
+-- own and the AGREEMENT between them was tested by nothing -- which is exactly
+-- how the singular `assignee` shipped: the verb wrote a name in no reader's
+-- vocabulary but its own, `hub verify` raised nothing (the normalizer lists the
+-- plural), and every thread ever assigned came out of `--json` as unassigned
+-- while the terminal showed an assignee.
+crossing :: Spec
+crossing =
+  describe "PEP-19/22 what an owner writes is what a renderer reads" $ do
+
+    it "carries an assignee from the verb through the fold into the contract" $ do
+      owner <- kp
+      alice <- aKey
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          -- The value the verb writes, taken from the verb rather than spelled
+          -- again here: a fixture that spells it is a test of this test's
+          -- opinion, and the opinion is what was wrong.
+          set = uncurry (ASet thr) (assignSet False (Just alice)) 2000
+          fr = foldEvents repo [o, ev owner 2 set]
+          [t] = HM.elems (frThreads fr)
+      case field (threadContract t Nothing) "assignees" of
+        A.Array vs -> foldr (:) [] vs `shouldBe` [A.String (Text.pack (b58 alice))]
+        other      -> expectationFailure ("not an array: " <> show other)
+
+    -- And the clear, which is the same wire: last-writer-wins cannot remove an
+    -- attribute, so the empty value IS the absence a reader shows as none.
+    it "carries a clear through as the empty set" $ do
+      owner <- kp
+      alice <- aKey
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          fr = foldEvents repo
+                 [ o
+                 , ev owner 2 (uncurry (ASet thr) (assignSet False (Just alice)) 2000)
+                 , ev owner 3 (uncurry (ASet thr) (assignSet True Nothing) 3000) ]
+          [t] = HM.elems (frThreads fr)
+      field (threadContract t Nothing) "assignees" `shouldBe` A.Array mempty
+
+    -- The same for labels, which is the attribute the assignee one was supposed
+    -- to be spelled like.
+    it "carries labels through, canonically ordered" $ do
+      owner <- kp
+      let repo = fst owner
+          o = anOpen owner 1 "one"
+          thr = eventId o
+          set = uncurry (ASet thr) (labelSet False ["ui","bug"]) 2000
+          fr = foldEvents repo [o, ev owner 2 set]
+          [t] = HM.elems (frThreads fr)
+      case field (threadContract t Nothing) "labels" of
+        A.Array vs -> foldr (:) [] vs `shouldBe` [A.String "bug", A.String "ui"]
+        other      -> expectationFailure ("not an array: " <> show other)
+
+-- The pieces the crossing needs, and they are the product's own: an event
+-- signed for real, and a fold over it.
+type KP = (HubKey, PrivKey 'Sign HubScheme)
+
+kp :: IO KP
+kp = do
+  c <- newCredentials @'HBS2Basic
+  pure (_peerSignPk c, _peerSignSk c)
+
+canonOf :: RepoRef -> Word64 -> Maybe Word64 -> EventId -> CanonContent
+canonOf repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothing
+
+ev :: KP -> Word64 -> AuthorContent -> Event
+ev owner sq c = mkEvent owner owner c (canonOf (fst owner) sq Nothing)
+
+anOpen :: KP -> Word64 -> Text -> Event
+anOpen owner sq t =
+  mkEvent owner owner (AOpen (fst owner) HubIssue t [] (Just "body") Nothing Nothing 1000)
+          (canonOf (fst owner) sq (Just sq))
+
+field :: A.Value -> Text -> A.Value
+field v k = case v of
+  A.Object o -> fromMaybe A.Null (A.lookup (A.fromText k) o)
+  _          -> A.Null
