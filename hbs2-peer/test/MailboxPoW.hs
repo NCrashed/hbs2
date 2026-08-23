@@ -143,6 +143,47 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         assertBool "a stranger's does not"
           (not (stampNames content (solveStamp 0 stranger msg)))
 
+  -- WHETHER THIS PEER CARRIES IT ON, which the protocol handler decided in
+  -- three branches with three spellings of one rule and no test could reach:
+  -- they live inside `mailboxProto`, which has no harness at all. The rule is a
+  -- function now, so the three answer alike and the answer is checkable.
+  --
+  -- It gates CARRYING and not TAKING: a weak stamp means this peer will not
+  -- amplify, the letter still reaches its queue, and what happens to it there
+  -- is the mailbox policy's business.
+  , testCase "what a peer will carry on" $
+      withStore $ \sto -> do
+        alice <- aPeer
+        (bobC, bobS)   <- aPeer
+        (strangerC, _) <- aPeer
+        let bob      = view peerSignPk bobC
+            stranger = view peerSignPk strangerC
+
+        msg <- aMessage sto alice [bobS] (B8.pack "a letter")
+        content <- contentOf msg
+
+        let carries d st = forwardable d (stampNames content st) (stampBits msg st)
+            solved = solveStamp 4 bob msg
+
+        -- A real stamp, over a real message, at and under the floor.
+        assertBool "the work it paid is carried where that much is asked"
+          (carries 4 solved)
+        assertBool "and where less is asked" (carries 0 solved)
+        assertBool "and not where more is" (not (carries 20 solved))
+
+        -- AN UNSTAMPED PACKET PAYS ZERO, which is what the two branches that
+        -- have no stamp field on the wire -- an unstamped message and a delete
+        -- -- rely on: at the default floor of zero they are carried exactly as
+        -- they always were, and any floor an operator set means what they said.
+        assertBool "an unstamped packet goes at floor zero" (forwardable 0 True 0)
+        assertBool "and stops at any floor above it" (not (forwardable 1 True 0))
+
+        -- Work for somebody else's delivery buys nothing here, however much of
+        -- it there is: a stamp naming a mailbox this letter is not addressed to
+        -- is not this letter's work.
+        assertBool "a stamp for a mailbox nobody addressed is not carried"
+          (not (carries 0 (solveStamp 4 stranger msg)))
+
   , testCase "a restamp is the same message to gossip" $
       withStore $ \sto -> do
         alice <- aPeer

@@ -25,6 +25,7 @@ module HBS2.Peer.Proto.Mailbox.PoW
   , stampBits
   , stampNames
   , stampOk
+  , forwardable
   , stampMarker
   , solveStamp
   , leadingZeroBits
@@ -84,6 +85,30 @@ stampNames content MessageStamp1{..} = Set.member msMailbox (messageRecipients c
 -- one.
 stampOk :: forall s . ForMailbox s => PoWDifficulty -> MailboxKey s -> Message s -> MessageStamp s -> Bool
 stampOk d mbox msg st = msMailbox st == mbox && stampBits msg st >= fromIntegral d
+
+-- | Will this peer carry the packet on?
+--
+-- THE RELAY'S COUNTERPART TO 'stampOk', and one rule where there were three
+-- spellings. 'mailboxProto' decides this in three branches -- an unstamped
+-- message, a stamped one, and a delete -- and wrote it out inline each time:
+-- @floorD == 0@, @named && bits >= floorD@, @floorD == 0@. The first and third
+-- are the second with the zero an unstamped packet pays, which the comments at
+-- both sites say in words. Three spellings are three chances to raise a floor
+-- in two places, and none of the three was reachable by a test: they live
+-- inside the protocol handler, which has no harness.
+--
+-- NAMED, because a stamp solved for a mailbox this message is not addressed to
+-- is work for somebody else's delivery. It buys the sender nothing here, and
+-- this peer has no policy for any of these mailboxes and no business picking
+-- one -- which is 'stampNames', asked here.
+--
+-- IT GATES CARRYING AND NOT TAKING, which is the distinction the whole design
+-- rests on: a weak stamp means "I will not carry this further", the message
+-- still reaches this peer's queue, and what happens to it there is the MAILBOX
+-- policy's decision, which knows a real difficulty. A relay that refused to
+-- take would be a relay that decides delivery for a mailbox it does not hold.
+forwardable :: PoWDifficulty -> Bool -> Int -> Bool
+forwardable d named bits = named && bits >= fromIntegral d
 
 -- | The gossip dedup identity of a stamped message.
 --

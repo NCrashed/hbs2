@@ -377,12 +377,16 @@ mailboxProto inner adapter mess = deferred @p do
         -- policy ящика, у которой есть настоящее D.
         floorD <- lift $ mailboxPoWFloor @s adapter
 
-        unless (floorD == 0) do
+        -- Through 'forwardable' like the two branches below it: an unstamped
+        -- message pays zero bits, which is what "floor 0 lets it through" says.
+        let carry = forwardable floorD True 0
+
+        unless carry do
           lift $ mailboxNotForwarded @s adapter
           debug $ red "mailbox: unstamped message carries no work to forward"
                     <+> parens ("floor is" <+> pretty floorD <+> "bits")
 
-        takeMessageWith (floorD == 0) (Submitted Nothing) msg content
+        takeMessageWith carry (Submitted Nothing) msg content
           (hashObject @HbSync (serialise mess) & HashRef)
 
       -- То же сообщение, но с доказательством работы (PEP-21).
@@ -416,7 +420,7 @@ mailboxProto inner adapter mess = deferred @p do
           debug $ red "mailbox: stamp too weak to forward"
                     <+> pretty bits <> ", wanted" <+> pretty floorD
 
-        takeMessageWith (named && bits >= fromIntegral floorD)
+        takeMessageWith (forwardable floorD named bits)
                         (Submitted (Just stamp)) msg content (stampMarker stamp msg)
 
       -- NOTE: CheckMailbox-auth
@@ -676,7 +680,11 @@ mailboxProto inner adapter mess = deferred @p do
 
         floorD <- lift $ mailboxPoWFloor @s adapter
 
-        unless (floorD == 0) do
+        -- Through 'forwardable', like both message branches: a delete carries no
+        -- stamp -- there is no field for one on the wire -- so it pays zero bits.
+        let carry = forwardable floorD True 0
+
+        unless carry do
           debug $ red "mailbox: a delete carries no work to forward"
                     <+> parens ("floor is" <+> pretty floorD <+> "bits")
 
@@ -684,7 +692,7 @@ mailboxProto inner adapter mess = deferred @p do
         -- спрашивается ТОЛЬКО когда пересылать собираемся -- иначе ветка,
         -- которая не пересылает, съела бы первое появление и погасила
         -- следующую копию везде, куда та ещё не дошла.
-        when (floorD == 0) do
+        when carry do
           let h = hashObject @HbSync (serialise mess) & HashRef
 
           fresh <- lift $ mailboxRelayOnce @s adapter h
