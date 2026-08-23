@@ -133,6 +133,7 @@ library hub-ingress
       HBS2.Hub.CLI.Common
       HBS2.Hub.CLI.Compact
       HBS2.Hub.CLI.Compose
+      HBS2.Hub.CLI.Dict
       HBS2.Hub.CLI.Drop
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
@@ -210,6 +211,7 @@ test-suite spec
                  , aeson
                  , unliftio
                  , containers
+                 , hbs2-cli
                  -- For planting a loose object git would not write: one whose
                  -- header announces a size its body does not have. See
                  -- 'lyingObject' in HBS2.Hub.GitRepoSpec.
@@ -222,6 +224,7 @@ test-suite spec
       HBS2.Hub.CommentSpec
       HBS2.Hub.CommonSpec
       HBS2.Hub.CompactSpec
+      HBS2.Hub.DictSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
       HBS2.Hub.StatusSpec
