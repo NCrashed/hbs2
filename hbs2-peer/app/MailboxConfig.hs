@@ -39,16 +39,26 @@ import Safe (lastMay)
 -- sets it is the only one who can weigh it. A sender solves for what the
 -- MAILBOX charges, which is in the mailbox's signed policy; this is a peer's
 -- own number and is in nobody's policy. So a peer with a floor of 16 does not
--- forward a message that honestly paid the 12 its destination asked for, and
--- neither end learns why: there is no reply on this path, and the sender cannot
--- observe a floor they never knew about.
+-- forward a message that honestly paid the 12 its destination asked for.
 --
 -- On a peer that HOSTS the mailbox the letter still arrives -- the floor gates
 -- forwarding only, and the mailbox's own policy decides acceptance. The case
 -- that bites is a pure relay: if it is on the only path, the letter is gone.
 -- What makes it visible from this side is 'mpwPoWNotForwarded' in the worker,
--- which counts it into the periodic report; there is nothing to make it visible
--- from the sender's, short of a wire format that carries a refusal.
+-- which counts it into the periodic report.
+--
+-- FROM THE OTHER SIDE it is published (PEP-23 step C): this number goes into
+-- the peer's meta as @mailbox-pow-min@, so a neighbour can read what this peer
+-- wants and pay it rather than discovering the refusal as silence. That reaches
+-- ONE HOP. A relay four hops away with a higher floor still drops the packet
+-- with nothing said, and in a flood network with no end-to-end feedback there
+-- is nothing to do about that but count it, above.
+--
+-- The floor is also a switch and not yet a dial, and that is the standing
+-- reason to leave it at zero. An unstamped message and a delete carry no work
+-- field, so they pay a literal zero: any non-zero value here stops this peer
+-- relaying all plain mail and all deletes rather than pricing them. PEP-23
+-- step A is what would change that.
 hbs2MailboxPoWMinOpt :: String
 hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
 

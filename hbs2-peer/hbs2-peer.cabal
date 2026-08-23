@@ -211,6 +211,7 @@ test-suite test
         MailboxPolicy
         MailboxEntry
         MailboxPoW
+        PeerMetaSpec
         MailboxConfig
         MailboxMerged
         MailboxMergedSpec
@@ -223,6 +224,7 @@ test-suite test
         -- from app/: HttpListen exercises the config resolution the peer
         -- itself uses, so it reads the real module rather than a copy.
         PeerConfig
+        PeerMetaAnnounce
         PeerLogger
 
     -- other-extensions:
@@ -284,6 +286,7 @@ executable hbs2-peer
                     , Bootstrap
                     , PeerInfo
                     , PeerMeta
+                    , PeerMetaAnnounce
                     , SendBlockAnnounce
                     , CheckBlockAnnounce
                     , CheckPeer

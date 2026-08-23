@@ -21,14 +21,11 @@ import Control.Concurrent.STM
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.State.Strict qualified as State
-import Data.ByteString (ByteString)
 import Data.Foldable hiding (find)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Set qualified as Set
-import Data.Text qualified as Text
-import Data.Text.Encoding qualified as TE
 import Data.Time
 import Data.Word
 import Lens.Micro.Platform
@@ -115,7 +112,7 @@ fillPeerMeta mtcp probePeriod = do
                       debug $ "*** GOT VERY GOOD META *** " <+> pretty p <+> viaShow peerMeta
 
                       -- 3) пробить, что есть tcp
-                      forM_ (lookupDecode "listen-tcp" (unPeerMeta peerMeta)) \listenTCPPort -> lift do
+                      forM_ (peerMetaValue "listen-tcp" peerMeta) \listenTCPPort -> lift do
                        mTcpAddr <- replacePort p listenTCPPort
                        -- skipped for name-carrying (e.g. .onion) peers
                        forM_ mTcpAddr \peerTCPAddrPort -> do
@@ -143,7 +140,7 @@ fillPeerMeta mtcp probePeriod = do
                       -- onion peer becomes known by its real address instead of
                       -- the Tor exit (127.0.0.1) the connection appears to come
                       -- from. Only handed to us if we are reachable on its class.
-                      forM_ (lookupDecode "public-address" (unPeerMeta peerMeta)) \pubAddrStr -> lift do
+                      forM_ (peerMetaValue "public-address" peerMeta) \pubAddrStr -> lift do
                         forM_ (fromStringMay @(PeerAddr L4Proto) pubAddrStr) \pa -> do
                           candidate <- fromPeerAddr pa
                           debug $ "** PUBLIC ADDRESS FROM META ** " <+> pretty candidate
@@ -163,7 +160,7 @@ fillPeerMeta mtcp probePeriod = do
                       -- bound to its own loopback, and a name-carrying address
                       -- (.onion) has no port to swap in.
                       mipp <- lift $ runMaybeT do
-                          port <- (MaybeT . pure) (lookupDecode "http-port" (unPeerMeta peerMeta))
+                          port <- (MaybeT . pure) (peerMetaValue "http-port" peerMeta)
                           MaybeT (replacePort p port)
 
                       lift do
@@ -216,6 +213,8 @@ fillPeerMeta mtcp probePeriod = do
                  Just (IPAddrPort (ip,_)) -> Just (IPAddrPort (ip, port))
                  Nothing                  -> Nothing
 
-    lookupDecode :: (Eq k, Read v) => k -> [(k, ByteString)] -> Maybe v
-    lookupDecode k d =
-        readMay . Text.unpack . TE.decodeUtf8 =<< lookup k d
+-- 'lookupDecode' was here and is now 'peerMetaValue', beside 'PeerMeta' itself.
+-- Values are written with 'show' and read with 'readMay', which is a pair of
+-- decisions that has to be made in one place: this module read three keys and
+-- 'PeerMetaAnnounce' writes four, and a reader in one package guessing at an
+-- encoding chosen in another is how a key silently stops parsing.

@@ -1,7 +1,7 @@
 PEP-23: a work field on every floodable mailbox packet
 
-Status: draft, started 2026-08-23. Step B implemented 2026-08-23; A, C and D
-        are still proposals.
+Status: draft, started 2026-08-23. Steps B and C implemented 2026-08-23;
+        A and D are still proposals.
 Author: NCrashed (Anton Gushcha)
 Extends: PEP-21 (triage, moderation, retention: the stamp and the peer floor).
 Related: PEP-17 (hbs2-hub umbrella), PEP-18 (letter), PEP-22 (`hub drop`).
@@ -344,16 +344,50 @@ The floor becomes a `PeerMeta` key:
 mailbox-pow-min   the value of (hbs2:mailbox:pow-min D), decimal, omitted at 0
 ```
 
-written in `mkPeerMeta` beside `http-port` and read back out of `_peerMeta`.
-This is not a wire change at all: `PeerMeta` is an association list, unknown
-keys are already ignored, the protocol is already rate limited
-(`ReqLimPerMessage 0.25`) and already answers only authenticated peers.
+written in `mkPeerMeta` beside `http-port` and read back with `peerMetaValue`
+out of `_peerMeta`. This is not a wire change at all: `PeerMeta` is an
+association list, unknown keys are already ignored, the protocol is already
+rate limited (`ReqLimPerMessage 0.25`) and already answers only authenticated
+peers.
 
-One local fix is needed with it. `fillPeerMeta` stops sending `GetPeerMeta` to
-a peer once `_peerHttpApiAddress` resolves to a `Right`, so meta is fetched at
-most three times per peer and then never refreshed. It should re-request on
-the probe period regardless of the HTTP address state, or a floor an operator
-changes today is invisible to neighbours until they reconnect.
+Nothing is a floor of zero, and the two must not be collapsed. Zero is a peer
+saying it carries anything; `Nothing` is a peer this one has not heard from --
+an older build with no such key, or a neighbour whose meta has not arrived yet.
+Reporting the second as the first would name a floor of zero for a peer that
+may charge sixteen bits.
+
+`mkPeerMeta` moves out of `PeerTypes` into its own module on the way, and loses
+a `PeerEnv` argument it never used. That is what makes the publishing side
+testable at all: it is a function of a config and a recipient, with no peer, no
+socket and no clock in it, and two of its four keys gate on the recipient.
+
+How stale a floor can be, which the first draft of this section got wrong
+-----------------------------------------------------------------------
+
+It said `fillPeerMeta` fetches meta at most three times per peer and then never
+refreshes, and that it should re-request every probe period instead. Half right
+and the remedy is wrong.
+
+It is true that `fillPeerMeta` stops asking once `_peerHttpApiAddress` resolves
+to a `Right`. But `PeerInfo` is a session with `defCookieTimeoutSec` (7200s) on
+it, and NOTHING renews that session: `fetch` inserts only when the key is
+absent, `Cache.lookup` does not extend an expiry, and no call site calls
+`update` on a `PeerInfoKey`. So the session is dropped and rebuilt about every
+two hours, `_peerMeta` and `_peerHttpApiAddress` with it, and the prober asks
+again. Two hours is a bound, not "until they reconnect".
+
+The proposed remedy would have been a leak. `subscribe` appends a handler to a
+list under the event key and pushes the sweeper's expiry out by another 600s on
+every call, which the FIXME beside it says in as many words. Asking every probe
+period means subscribing every probe period, so the handler list for a
+long-lived neighbour would grow without bound and never be swept.
+
+So step C leaves `fillPeerMeta` alone. Two hours of staleness on a number an
+operator changes by hand is acceptable, and the failure it produces is the one
+that already exists: a letter not carried. If that ever needs to be tighter,
+the shape is to have the `ThePeerMeta` handler itself store what arrived --
+then a bare periodic `request` needs no subscription at all -- and not to
+subscribe in a loop.
 
 Why not a refusal message
 -------------------------
@@ -458,7 +492,10 @@ Steps B, C and D break nothing and are useful on their own, so they go first:
      builder (`deleteNaming`, `dropMessages`). DONE 2026-08-23, with the
      decision testable entirely in `hbs2-peer/test/MailboxMerge.hs`, which
      already had the fixtures.
-  2. C, the published floor, plus the `fillPeerMeta` refresh fix.
+  2. C, the published floor: `mailbox-pow-min` in `mkPeerMeta`, `peerMetaValue`
+     and `peerMetaPoWFloor` to read it, and the neighbour maximum on the
+     mailbox worker's probe beside `powNotForwarded`. DONE 2026-08-23. No
+     `fillPeerMeta` change, for the reason recorded under step C.
   3. D, the client difficulty, in `stampsFor`, plus the RPC that carries the
      neighbour maximum.
   4. A, the wire change: the constructor, the preimage split, the marker, and

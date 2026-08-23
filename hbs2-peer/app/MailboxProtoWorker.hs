@@ -1136,6 +1136,23 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
         pro <- readTVarIO probe
 
+        -- WHAT THE NEIGHBOURS CHARGE (PEP-23 step C), which is the other half of
+        -- 'powNotForwarded'. That counter says what THIS peer's floor cost
+        -- somebody else; this says what somebody else's floor costs this peer,
+        -- and until the number was published there was nothing to read it from.
+        --
+        -- A maximum and not a list: a gossiped letter goes to every neighbour,
+        -- so the number that decides whether it travels at all is the largest
+        -- one any of them wants. A peer that has not answered its meta yet
+        -- contributes nothing rather than a zero -- see 'peerMetaPoWFloor'.
+        theirFloor <- liftIO $ withPeerM mpwPeerEnv do
+          pl <- getPeerLocator @e
+          ps <- knownPeers @e pl
+          floors <- for ps $ \p -> runMaybeT do
+                      pinfo <- MaybeT $ find (PeerInfoKey p) id
+                      MaybeT $ peerMetaPoWFloor pinfo
+          pure $ maximum (0 : catMaybes floors)
+
         values <- atomically do
           mpwFetchQSize <- readTVar mpwFetchQ <&> HS.size
           inMessageMergeQueueSize <- readTVar inMessageMergeQueue <&> HM.size
@@ -1155,6 +1172,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                  , ("inMailboxDownloadQ", fromIntegral inMailboxDownloadQSize)
                  , ("inMessageQueueDropped", fromIntegral dropped)
                  , ("powNotForwarded", fromIntegral notFwd)
+                 , ("powFloorNeighbours", fromIntegral theirFloor)
                  ]
         acceptReport pro values
         debug $ "I'm" <+> yellow "mailboxProtoWorker"

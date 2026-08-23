@@ -20,6 +20,7 @@ import MailboxRelayedSpec qualified
 import MailboxPolicyCacheSpec qualified
 import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
+import PeerMetaSpec (peerMetaTests)
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -156,6 +157,7 @@ main = do
       , mailboxPolicyTests
       , mailboxEntryTests
       , httpListenTests
+      , peerMetaTests
       , messagePartsTests
       , mailboxPoWTests
       , mailboxConfigTests

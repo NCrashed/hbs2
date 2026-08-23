@@ -22,11 +22,11 @@ import HBS2.Data.Types.Refs
 import HBS2.Defaults
 import HBS2.Events
 import HBS2.Hash
-import HBS2.Merkle (AnnMetaData)
 import HBS2.Net.IP.Addr
 import HBS2.Peer.Proto.Peer
 import HBS2.Peer.Proto.BlockInfo
 import HBS2.Peer.Proto.LWWRef
+import HBS2.Peer.Proto.Mailbox.Types (PoWDifficulty)
 import HBS2.Net.Proto.Sessions
 import HBS2.Prelude.Plated
 import HBS2.Storage
@@ -35,18 +35,14 @@ import HBS2.Net.PeerLocator
 import HBS2.Peer.Proto
 
 import Brains
-import PeerConfig
 import PeerLogger
 
 import Prelude hiding (log)
 import Control.Monad.Trans.Maybe
 import Control.Monad.Reader
-import Control.Monad.Writer qualified as W
 import Data.ByteString.Lazy (ByteString)
-import Data.Coerce
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
-import Data.List qualified as L
 import Data.Maybe
 import Lens.Micro.Platform
 import Data.Hashable
@@ -54,9 +50,6 @@ import Type.Reflection
 import Data.IntMap qualified as IntMap
 import Data.IntMap (IntMap)
 import Data.IntSet (IntSet)
-import Data.Text qualified as Text
-import Data.Text.Encoding qualified as TE
-import Data.Word
 import Data.Set qualified as Set
 import Data.Set (Set)
 
@@ -295,47 +288,21 @@ getKnownPeers  = do
     maybe1 pd' (pure mempty) (const $ pure [p])
   pure $ mconcat r
 
--- | Build the peer-meta announced to a neighbour. The neighbour's reachable
---   network classes gate which of our own public addresses we disclose: an
---   onion address is handed only to onion-capable peers, so a clearnet peer
---   never learns it (PEP-05 G + the network-class policy).
-mkPeerMeta :: PeerConfig -> PeerEnv e -> Set NetworkClass -> AnnMetaData
-mkPeerMeta (PeerConfig syn) penv recipientClasses = do
-
-    -- Only a port a neighbour can actually open. The API binds loopback
-    -- unless `http-listen` says otherwise, and announcing a loopback port
-    -- just sends everyone probing an address that will never answer them.
-    let mHttpPort :: Maybe Integer
-        mHttpPort = do
-          (host, port) <- runReader peerHttpListen syn
-          guard (not (isLoopbackHost host))
-          pure port
-
-    let mTcpPort :: Maybe Word16
-        mTcpPort =
-          (
-          fmap (\case L4Address _ (IPAddrPort (_, p)) -> p
-                      L4AddressName _ _ p             -> p)
-            . fromStringMay @(PeerAddr L4Proto)
-          )
-          =<< runReader (cfgValue @PeerListenTCPKey) syn
-
-    -- our own public address(es); disclose the first one whose class the
-    -- recipient can actually reach
-    let mPubAddr :: Maybe String
-        mPubAddr = listToMaybe
-          [ a | a <- Set.toList (runReader (cfgValue @PeerPublicAddressKey) syn)
-              , Just pa <- [fromStringMay @(PeerAddr L4Proto) a]
-              , classOf pa `Set.member` recipientClasses
-          ]
-
-    annMetaFromPeerMeta . PeerMeta $ W.execWriter do
-      mHttpPort `forM` \p -> elem "http-port" (TE.encodeUtf8 . Text.pack . show $ p)
-      mTcpPort `forM` \p -> elem "listen-tcp" (TE.encodeUtf8 . Text.pack . show $ p)
-      mPubAddr `forM` \a -> elem "public-address" (TE.encodeUtf8 . Text.pack . show $ a)
-
-  where
-    elem k = W.tell . L.singleton . (k ,)
+-- | The mailbox relay floor a neighbour published, if it published one.
+--
+-- Nothing is NOT zero, and the difference is worth keeping: zero is a peer that
+-- says it carries anything, and Nothing is a peer this one has not heard the
+-- answer from -- an older build with no such key, or a neighbour whose meta has
+-- not been fetched yet. Collapsing them would report a floor of zero for a peer
+-- that may charge sixteen bits.
+--
+-- See 'PeerMetaAnnounce.mkPeerMeta' for the writing half. The value goes stale
+-- for as long as a 'PeerInfo' session lives, which is 'defCookieTimeoutSec'
+-- (7200s): nothing renews that session, so it is dropped and rebuilt on that
+-- period and @fillPeerMeta@ asks again for the peer it does not know.
+peerMetaPoWFloor :: MonadIO m => PeerInfo e -> m (Maybe PoWDifficulty)
+peerMetaPoWFloor pinfo =
+  liftIO $ readTVarIO (_peerMeta pinfo) <&> (>>= peerMetaValue "mailbox-pow-min")
 
 pingPeerWait :: forall e m . ( MonadIO m
                              , Request e (PeerHandshake e) m

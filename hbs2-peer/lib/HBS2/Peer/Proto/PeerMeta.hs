@@ -22,7 +22,9 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Functor
 import Data.Maybe
 import Data.Set (Set)
+import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TE
+import Safe (readMay)
 
 instance HasProtocol L4Proto (PeerMetaProto L4Proto) where
   type instance ProtocolId (PeerMetaProto L4Proto) = 9
@@ -98,3 +100,18 @@ annMetaFromPeerMeta =
 
 parsePeerMeta :: Text -> Maybe PeerMeta
 parsePeerMeta = either (const Nothing) Just . deserialiseOrFail . LBS.fromStrict <=< fromBase58 . TE.encodeUtf8
+
+-- | One value out of a peer's meta, decoded.
+--
+-- 'PeerMeta' is an association list of text keys to bytes, so a reader that does
+-- not know a key ignores it and a writer may add one without changing any
+-- format. That is what makes it the cheap place to publish a number, and it is
+-- why this accessor is here rather than repeated at each call site: the values
+-- are written with 'show' and read with 'readMay', and those two have to be
+-- decided together. A key that is absent, or whose value will not parse as @v@,
+-- is 'Nothing' -- there is no third answer, because a peer that did not say a
+-- thing and a peer that said it in a way this build cannot read are the same
+-- amount of knowledge.
+peerMetaValue :: Read v => Text -> PeerMeta -> Maybe v
+peerMetaValue k =
+  (readMay . Text.unpack . TE.decodeUtf8 =<<) . lookup k . unPeerMeta

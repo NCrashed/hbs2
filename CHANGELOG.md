@@ -170,6 +170,37 @@
 
 ## Changed
 
+  - **A peer publishes the mailbox relay floor it enforces (PEP-23 step C).**
+    `hbs2:mailbox:pow-min` decides whether this peer carries a mailbox packet
+    onward, and it was in nobody's policy and readable by nobody: a sender
+    solves what the destination MAILBOX charges, so a relay refusing a letter
+    that honestly paid that price was silence at both ends.
+
+    It goes into the peer's meta as `mailbox-pow-min`, which costs no wire
+    change at all -- `PeerMeta` is an association list, an unknown key is
+    ignored, and the protocol is already rate limited and already answers only
+    authenticated peers. Omitted at zero, since absent is what a reader already
+    takes for zero. Unlike the public address beside it, it is told to every
+    neighbour: a floor is a price, not a location.
+
+    The mailbox worker's periodic report gains `powFloorNeighbours`, the
+    largest floor any neighbour published, which is the counterpart to
+    `powNotForwarded`: one says what this peer's floor cost somebody else, the
+    other what somebody else's costs this peer. A neighbour that has not
+    answered contributes nothing rather than a zero, because "said nothing" and
+    "carries anything" are different claims.
+
+    It reaches one hop. A relay further away with a higher floor still drops a
+    packet in silence, and in a flood network with no end-to-end feedback there
+    is nothing to do about that but count it. A not-forwarded reply message was
+    considered and rejected: it travels one hop back too, since gossip keeps no
+    reverse path, so it buys nothing a published number does not and costs a
+    reply primitive that would need bounding.
+
+    `mkPeerMeta` moves to its own module and loses a `PeerEnv` argument it never
+    used, which is what makes any of this testable: what a config announces
+    could previously only be seen by running a peer and capturing a packet.
+
   - **A mailbox delete names a set of messages, not one (PEP-23 step B).** The
     predicate language has had `Or` on the wire since the mailbox protocol was
     written and no reader honoured it, so every tombstone cost its own signed

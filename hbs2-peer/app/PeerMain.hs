@@ -60,6 +60,7 @@ import MailboxProtoWorker
 import HttpWorker
 import DispatchProxy
 import PeerMeta
+import PeerMetaAnnounce
 import Watchdogs
 import Monkeys
 import CLI.Common
@@ -973,7 +974,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   -- meta served over the local HTTP API: clearnet recipient, so no onion
   -- public-address is disclosed
-  let peerMetaHttp = mkPeerMeta conf penv (Set.fromList [Clearnet])
+  let peerMetaHttp = mkPeerMeta conf (Set.fromList [Clearnet])
 
   nbcache <- liftIO $ Cache.newCache (Just $ toTimeSpec ( 600 :: Timeout 'Seconds))
 
@@ -1289,7 +1290,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     , makeResponse peerExchangeProto
                     , makeResponse refLogUpdateProto
                     , makeResponse (refLogRequestProto reflogReqAdapter)
-                    , makeResponse (peerMetaProto (mkPeerMeta conf penv))
+                    , makeResponse (peerMetaProto (mkPeerMeta conf))
                     , makeResponse (refChanHeadProto False refChanAdapter)
                     , makeResponse (refChanUpdateProto False pc refChanAdapter)
                     , makeResponse (refChanRequestProto False refChanAdapter)
