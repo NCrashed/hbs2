@@ -227,6 +227,7 @@ data Tag =
   | TCorruptRefused  -- ^ ...and so was a letter whose signature does not hold
   | TIntruder        -- ^ a stranger's event was put in the tree by hand
   | TRestart         -- ^ the view was rebuilt from canon mid-run
+  | TUnnormalRefused -- ^ ...and an attribute value that is not in canonical form
   | TBigRefused      -- ^ an oversized body was refused rather than minted
   | TGhost           -- ^ an event from a newer schema spent a seq
   | TCompact         -- ^ canon was compacted mid-run
@@ -408,6 +409,7 @@ spec =
         monitor (cover 5 (TCompact `elem` rTags r) "compacted canon mid-run")
         monitor (cover 1 (TCompactDropped `elem` rTags r) "compacted canon and dropped something")
         monitor (cover 5 (TBigRefused `elem` rTags r) "refused an oversized body")
+        monitor (cover 2 (TUnnormalRefused `elem` rTags r) "refused an unnormalized attribute")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
@@ -650,8 +652,21 @@ step cast st = \case
   -- never reaches canon and the view is not advanced. What makes discarding
   -- mandatory is that the stale cursor hands out a seq canon has already
   -- issued, so the run records it and checks exactly that.
+  -- AND THE UNNORMALIZED HALF IS AN ASSERTION. @ok=False@ writes the same two
+  -- labels in the wrong order, which PEP-19 refuses ('UnnormalizedValue'), and
+  -- the step said nothing about it: the refusal went into 'stRefused', which
+  -- only the double-honour monitor reads, so the case was carried by 'rAnoms'
+  -- catching 'UnnormalizedAttr' one floor down. That is a different rule
+  -- holding by luck -- a bridge that stopped refusing would be caught by the
+  -- FOLD's opinion of what the bridge minted, and only for as long as the fold
+  -- keeps that opinion.
   StepSetLabels i ts ok -> withThread i $ \thr ->
-    mint TSetLabels (ASet thr "labels" (if ok then "bug,ui" else "ui,bug") ts) ts
+    let content = ASet thr "labels" (if ok then "bug,ui" else "ui,bug") ts
+    in if ok then mint TSetLabels content ts
+       else case ownerEvent (castOwner cast) (stView st) (clockOf st)
+                            noOwnAttachments content of
+              Right _ -> error "an unnormalized attribute was minted"
+              Left e  -> (refuse e) { stTags = TUnnormalRefused : stTags st }
 
   -- The reviewed half of the honour path. It shares an origin with StepHonour
   -- for the same thread AND the same clock, because it builds the same request,

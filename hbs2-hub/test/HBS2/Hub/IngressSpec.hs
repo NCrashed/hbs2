@@ -574,15 +574,18 @@ spec3 =
     -- that a banned author's letter is not in front of a human at all. Nothing
     -- reached it: igAllowed is a field of the record and every fixture left it
     -- const True while every letter failed earlier.
-    it "drops a letter from a denied author, however the envelope was signed" $ do
+    it "reports a letter from a denied author as denied, however the envelope was signed" $ do
       alice <- newCredentials @'HBS2Basic
       owner <- aKey
       let ac = AOpen owner HubIssue "t" [] Nothing Nothing Nothing 1
       (msg, gks) <- opened alice (letterPayload (makeLetter (_peerSignPk alice) (_peerSignSk alice) ac noReplyChannel))
       let denied = (holding msg gks stub) { igAllowed = const False }
       lv <- openMessage denied (mh "m")
+      -- The reason, and not just A refusal: every other Left here is a letter
+      -- this node could not read, and the whole point of the deny-list is that
+      -- it turns away one it can.
       case lvLetter lv of
-        Left (BadLetterHere _) -> pure ()
+        Left (BadLetterHere AuthorDenied) -> pure ()
         other -> expectationFailure ("expected a refusal by the deny-list, got " <> show other)
       -- and with the same bytes and the list empty it opens, so the refusal
       -- above is the LIST and not the letter

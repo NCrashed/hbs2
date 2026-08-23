@@ -57,7 +57,14 @@ expectRequested = \case
 expectOwn :: TriageError -> Either TriageError a -> Expectation
 expectOwn want = expectErr (Composed want)
 
--- Event has no Eq, so assert on the error side by hand.
+-- ON THE LEFT ALONE, so that nothing is asked of the Right. 'shouldBe' over
+-- the whole Either would want Eq and Show on it, and 'Accepted' has a
+-- deliberately partial Show and no Eq at all -- so this works for every result
+-- type in the file and demands nothing of any of them.
+--
+-- The comment here used to say "Event has no Eq", which was never true: Event
+-- derives Eq and hand-writes Show. A reason that names the wrong type is worse
+-- than none, because it is the one a reader believes.
 expectErr :: TriageError -> Either TriageError a -> Expectation
 expectErr want = \case
   Left got -> got `shouldBe` want
