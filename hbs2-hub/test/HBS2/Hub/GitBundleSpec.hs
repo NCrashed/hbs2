@@ -18,12 +18,12 @@ import Control.Monad (void)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Either (isLeft)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import System.Environment qualified as Env
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing,doesFileExist,findExecutable)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
 import Test.Hspec
@@ -31,6 +31,11 @@ import Test.Hspec
 -- Git for the FIXTURE, sealed from the developer's configuration. What is
 -- under test runs with the ambient environment, which is what an operator's
 -- shell has.
+--
+-- So a global `core.hooksPath`, or anything else in a developer's ~/.gitconfig
+-- that runs on fetch or commit, breaks these cases -- and that is the condition
+-- rather than a fault in them. Sealing the code under test would be testing a
+-- git no operator has.
 git :: FilePath -> [String] -> IO String
 git cwd args = do
   path <- fromMaybe "/usr/bin:/bin" <$> Env.lookupEnv "PATH"
@@ -69,7 +74,15 @@ ok :: Show e => Either e a -> IO a
 ok = either (fail . show) pure
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> spec4 >> spec5 >> spec6
+spec = do
+  -- Skipped rather than failed where git is not installed, the same way
+  -- "HBS2.Hub.GitRepoSpec" does it. Three specs in this suite shell out to git
+  -- and only one of them said so, so a machine without it got a red suite from
+  -- the other two while that one politely skipped -- and its comment claimed to
+  -- be the only spec that needs git, which was never true.
+  hasGit <- runIO (isJust <$> findExecutable "git")
+  around_ (\act -> if hasGit then act else pendingWith "git is not on PATH") $
+    spec1 >> spec2 >> spec3 >> spec4 >> spec5 >> spec6
 
 spec1 :: Spec
 spec1 = do
@@ -93,14 +106,22 @@ spec1 = do
 
     -- A ref name comes out of a stranger's signed box, and git reads a leading
     -- dash as an option. This is the letter that would run a program.
+    --
+    -- BOTH HALVES: that it was refused, and that the program did not run. The
+    -- second is the one the case is named for and the one that was missing --
+    -- a refusal reported after the fact is not a refusal. The target is inside
+    -- this case's own directory, so what proves it is a file that is not there
+    -- rather than a name in /tmp two concurrent runs would share.
     it "will not pass a ref name shaped like an option to git" $
       withWork $ \dir base _ -> do
-        r <- bundleRange (Just dir) base "--upload-pack=touch /tmp/pwned"
+        let mark = dir <> "/pwned"
+        r <- bundleRange (Just dir) base ("--upload-pack=touch " <> Text.pack mark)
         case r of
           Left (BundleBadName what v) -> do
             what `shouldBe` "ref name"
             v `shouldSatisfy` ("--upload-pack" `Text.isPrefixOf`)
           other -> expectationFailure ("expected a refusal, got " <> show other)
+        doesFileExist mark >>= (`shouldBe` False)
 
     it "will not pass a base that is not an object name" $
       withWork $ \dir _ _ -> do
@@ -558,11 +579,14 @@ spec3 =
       got <- ok =<< mergeBase (Just dir) "master" "feature"
       got `shouldBe` base
 
+    -- The refusal AND the file that is not there: see the bundle case above.
     it "refuses a ref name it would not pass to git" $ withWork $ \dir _ _ -> do
-      r <- mergeBase (Just dir) "master" "--output=/tmp/pwned"
+      let mark = dir <> "/pwned"
+      r <- mergeBase (Just dir) "master" ("--output=" <> Text.pack mark)
       case r of
         Left (BundleBadName what _) -> what `shouldBe` "ref name"
         other -> expectationFailure ("expected a refusal, got " <> show other)
+      doesFileExist mark >>= (`shouldBe` False)
 
 spec4 :: Spec
 spec4 =
@@ -750,12 +774,15 @@ spec5 =
         void (ok =<< syncFrom (Just here) "origin")
         (ok =<< pullTip (Just here) 7) >>= (`shouldBe` Just (Text.pack tip))
 
+    -- The refusal AND the file that is not there: see the bundle case above.
     it "refuses a remote name it would not pass to git" $
       withClone $ \_ here -> do
-        r <- syncFrom (Just here) "--upload-pack=touch /tmp/pwned"
+        let mark = here <> "/pwned"
+        r <- syncFrom (Just here) ("--upload-pack=touch " <> Text.pack mark)
         case r of
           Left (BundleBadName what _) -> what `shouldBe` "remote name"
           other -> expectationFailure ("expected a refusal, got " <> show other)
+        doesFileExist mark >>= (`shouldBe` False)
 
 -- | What a proposal weighs once git is not compressing it.
 --

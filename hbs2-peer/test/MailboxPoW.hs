@@ -158,12 +158,19 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- price. Two nonces OF THE SAME STRENGTH, because the marker carries
         -- the work: a restamp is one message to gossip, and buying a second
         -- flood means buying a bit, which doubles the price.
+        --
+        -- TWO ZERO-BIT NONCES, and the strength is chosen rather than
+        -- discovered. This searched for a second nonce as strong as nonce 1,
+        -- and 'stampBits' is a hash: nonce 1 scores twelve bits about once in
+        -- four thousand messages, and there is no second twelve-bit nonce in a
+        -- window of four thousand -- so the case failed on correct code, at
+        -- about that rate, with a message blaming the search. Half of any
+        -- window is zero-bit, so this one cannot come up empty.
         let bitsOf n = stampBits msg (MessageStamp1 bob n)
-            sameAs b = [ n | n <- [1 .. 4096 :: Word64], bitsOf n == b ]
-        case take 2 (sameAs (bitsOf 1)) of
+        case take 2 [ n | n <- [1 .. 4096 :: Word64], bitsOf n == 0 ] of
           [n1, n2] -> stampMarker (MessageStamp1 bob n1) msg
                         @?= stampMarker (MessageStamp1 bob n2) msg
-          _ -> assertFailure "no two nonces of equal strength in four thousand"
+          _ -> assertFailure "no two zero-bit nonces in four thousand"
 
         -- AND A CHEAP STAMP DOES NOT SPEAK FOR AN EXPENSIVE ONE, which is what
         -- leaving the work out of the marker allowed. Anybody who saw a message

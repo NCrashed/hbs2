@@ -620,9 +620,11 @@ isolated act = do
 spec :: Spec
 spec = do
 
-  -- Skipped rather than failed where git is not installed: this is the one spec
-  -- in the suite that needs it, and a red suite on a machine without git says
-  -- something false about the code.
+  -- Skipped rather than failed where git is not installed: a red suite on a
+  -- machine without git says something false about the code. Three specs in
+  -- this suite need it -- this one, "HBS2.Hub.GitWriteSpec" and
+  -- "HBS2.Hub.GitBundleSpec" -- and all three answer the same way. This comment
+  -- used to claim it was the only one, while the other two failed.
   hasGit <- runIO (isJust <$> findExecutable "git")
 
   around_ (\act -> if hasGit then isolated act

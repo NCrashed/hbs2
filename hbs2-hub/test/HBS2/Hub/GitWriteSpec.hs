@@ -32,12 +32,12 @@ import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.HashMap.Strict qualified as HM
 import Data.List (sort,isInfixOf)
 import Data.List qualified as List
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import System.Environment qualified as Env
-import System.Directory (createDirectoryIfMissing,getPermissions,setPermissions,setOwnerExecutable,removeFile)
+import System.Directory (createDirectoryIfMissing,findExecutable,getPermissions,setPermissions,setOwnerExecutable,removeFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process.Typed
 import Data.Time.Clock (getCurrentTime,diffUTCTime)
@@ -56,6 +56,11 @@ canonOf repo sq num eid = CanonContent repo eid sq num Nothing Nothing sq Nothin
 -- Git, sealed from the developer's configuration, for building the FIXTURE
 -- only. What is under test runs with the ambient environment, because that is
 -- what an operator's accept runs with.
+--
+-- So a global `core.hooksPath`, or anything else in a developer's ~/.gitconfig
+-- that runs on commit, breaks these cases -- and that is the condition rather
+-- than a fault in them. Sealing the code under test would be testing a git no
+-- operator has.
 git :: FilePath -> [String] -> IO String
 git cwd args = do
   path <- fromMaybe "/usr/bin:/bin" <$> Env.lookupEnv "PATH"
@@ -121,7 +126,13 @@ anOpen alice owner sq title = do
   pure (ev, cw)
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3
+spec = do
+  -- Skipped rather than failed where git is not installed: see the same guard
+  -- in "HBS2.Hub.GitRepoSpec" and "HBS2.Hub.GitBundleSpec". Three specs need
+  -- git and all three answer the same way now.
+  hasGit <- runIO (isJust <$> findExecutable "git")
+  around_ (\act -> if hasGit then act else pendingWith "git is not on PATH") $
+    spec1 >> spec2 >> spec3
 
 spec1 :: Spec
 spec1 = do
