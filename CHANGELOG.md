@@ -170,6 +170,31 @@
 
 ## Changed
 
+  - **`hbs2-hub` pays for the road out, not only for storage (PEP-23 step D).**
+    A sender solved exactly what the destination mailbox charges, which answers
+    the wrong half of the question: what a mailbox charges decides whether the
+    letter is stored, and what a peer charges decides whether it is carried at
+    all. A letter to a mailbox that charges nothing therefore carried nothing,
+    and any peer with a floor dropped it -- including the sender's own, since a
+    submission over the RPC runs the same forwarding rule as a packet off the
+    wire, so a letter could fail to leave the machine it was composed on.
+
+    Each charging recipient is now solved at `max (policy D) floor`, and a
+    letter whose recipients all charge nothing gets one stamp at the floor
+    instead of none. One stamp for the road and not one per recipient: a
+    mailbox's policy is satisfied only by a stamp naming that mailbox, but a
+    relay asks only that the packet carry work for some recipient of it, so one
+    copy reaches every host that charges nothing.
+
+    The number comes from the new `RpcMailboxPoWFloor`, which answers the
+    maximum of the peer's own floor and the largest its neighbours published.
+    `MailboxAPIProto` is NOT bumped, unlike the two bumps recorded beside it:
+    those changed the meaning of bytes an existing method already exchanged,
+    where silence is the only safe outcome, while an absent method answers
+    `ErrorMethodNotFound` and the client reads no floor and sends what it sent
+    before. At the default floor of zero nothing is stamped that would not have
+    been and nothing is stamped harder.
+
   - **A peer publishes the mailbox relay floor it enforces (PEP-23 step C).**
     `hbs2:mailbox:pow-min` decides whether this peer carries a mailbox packet
     onward, and it was in nobody's policy and readable by nobody: a sender

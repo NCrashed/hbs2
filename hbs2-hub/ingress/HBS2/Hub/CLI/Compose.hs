@@ -66,7 +66,7 @@ import Crypto.Saltine.Class qualified as Saltine
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isSpace)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes,fromMaybe)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import System.Exit (die)
@@ -250,7 +250,8 @@ sendPayload ob sender rcpts parts payload = do
   -- already in flight, and it pays" kept whichever stamp arrived first and
   -- dropped the rest -- and a letter to two charging mailboxes reached one of
   -- them. Nothing hostile was involved: it is what this loop sends.
-  stamps <- stampsFor (readPolicyWith (obStorage ob) (obMailbox ob)) msg
+  floorD <- relayFloor ob
+  stamps <- stampsFor floorD (readPolicyWith (obStorage ob) (obMailbox ob)) msg
 
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
   -- discarding that printed a message hash and left with a zero exit having sent
@@ -283,7 +284,23 @@ sendPayload ob sender rcpts parts payload = do
 
   pure (HashRef h)
 
--- | Solve what the recipients charge, for the recipients that charge.
+-- | What the sender's own peer says a letter must pay to leave (PEP-23 step D).
+--
+-- SILENCE IS ZERO, deliberately. A peer older than this method answers
+-- 'ErrorMethodNotFound', which arrives here as 'Nothing', and so does a peer
+-- that is not answering at all. Both mean "no evidence of a price", and reading
+-- them as a price would either refuse to send or grind work nobody asked for.
+-- The send that follows is then exactly the send this tool made before the
+-- method existed, which is the behaviour to fall back to.
+--
+-- Asked once per letter and not once per recipient: the number is a property of
+-- the road out of this machine, not of who the letter is addressed to.
+relayFloor :: MonadUnliftIO m => Outbound -> m PoWDifficulty
+relayFloor ob =
+  callRpcWaitMay @RpcMailboxPoWFloor (obTimeout ob) (obMailbox ob) ()
+    <&> fromMaybe 0
+
+-- | Solve what the recipients charge, and what the road out charges.
 --
 -- WHAT IT CAN AND CANNOT SEE. The difficulty lives in the mailbox's own signed
 -- policy, and this peer has that policy only for mailboxes it holds. Writing to
@@ -298,23 +315,43 @@ sendPayload ob sender rcpts parts payload = do
 -- it says so on stderr: the letter still goes, because refusing to send over a
 -- broken policy file on somebody else's peer would be a worse failure than
 -- sending work-free into a mailbox that may want work.
--- TAKES THE POLICY READER, and does not take an 'Outbound'. Everything else
--- here needs 'createMessage', which needs a storage and a keyman, so no test
--- can reach it; this one needs the ANSWER, and with the two handles inlined the
--- whole proof-of-work path could only be run against a peer. Skipping every
--- grind left the suite green, and what that costs is letters dropped by a hub
--- for want of work with no signal to the sender.
+--
+-- THE RELAY FLOOR IS THE SECOND PRICE (PEP-23 step D), and it answers a
+-- different question from the first: what a mailbox charges decides whether the
+-- letter is STORED, what a peer charges decides whether it is CARRIED. The
+-- floor comes from 'RpcMailboxPoWFloor' and is the sender's own peer plus the
+-- neighbours it can see; nothing further out is knowable. Two consequences,
+-- both of them the point:
+--
+--   * a mailbox that charges nothing can still need a stamp, because somebody
+--     on the way will not carry a letter that pays nothing. That is the case
+--     this function used to answer with no stamp at all;
+--   * a mailbox that charges less than the floor gets the floor, since a letter
+--     that satisfies its destination and never arrives is not delivered.
+--
+-- At the default floor of zero this is exactly what it was: no letter is
+-- stamped that would not have been, and none is stamped harder.
+--
+-- TAKES THE POLICY READER AND THE FLOOR, and does not take an 'Outbound'.
+-- Everything else here needs 'createMessage', which needs a storage and a
+-- keyman, so no test can reach it; this one needs the ANSWERS, and with the
+-- handles inlined the whole proof-of-work path could only be run against a
+-- peer. Skipping every grind left the suite green, and what that costs is
+-- letters dropped for want of work with no signal to the sender.
 stampsFor :: MonadUnliftIO m
-          => PolicyReader m -> Message HubScheme -> m [MessageStamp HubScheme]
-stampsFor policyFor msg = do
+          => PoWDifficulty       -- ^ what the road out of this machine charges
+          -> PolicyReader m
+          -> Message HubScheme
+          -> m [MessageStamp HubScheme]
+stampsFor floorD policyFor msg = do
 
   -- From the message rather than from the sigils it was built out of: a stamp
   -- is checked against `messageRecipients`, so what it must name is what ended
   -- up in there.
-  let rcpts = maybe mempty (messageRecipients . snd)
-                (unboxSignedBox0 (messageContent msg))
+  let rcpts = Set.toList $ maybe mempty (messageRecipients . snd)
+                             (unboxSignedBox0 (messageContent msg))
 
-  fmap catMaybes $ for (Set.toList rcpts) $ \mbox ->
+  charging <- fmap catMaybes $ for rcpts $ \mbox ->
     policyFor mbox >>= \case
       Left (PolicyNotHere _) -> pure Nothing
       Left e -> do
@@ -330,10 +367,26 @@ stampsFor policyFor msg = do
       Right Nothing -> pure Nothing
       Right (Just (_, p)) -> do
         d <- policyPoW @HBS2Basic p
-        if d == 0 then pure Nothing else do
-          liftIO $ saying ( "hbs2-hub: solving" <+> pretty d <+> "bits of work for"
-                              <+> pretty (AsBase58 mbox) <> line )
-          Just <$> solveWithin powBudget d mbox msg
+        pure $ if d == 0 then Nothing else Just (mbox, max d floorD)
+
+  case charging of
+    -- ONE STAMP FOR THE ROAD, not one per recipient, and this is why the two
+    -- cases are not written as one. A stamp buys two different things: a
+    -- mailbox's policy is satisfied only by a stamp NAMING that mailbox, so a
+    -- charging mailbox needs its own copy; but a relay only asks that the
+    -- packet carry enough work for SOME recipient of it, so one copy carries
+    -- the letter to every host that charges nothing. Solving per recipient
+    -- there would multiply the gossip by the recipient count and buy nothing.
+    [] | floorD > 0, (mbox:_) <- rcpts -> do
+           liftIO $ saying ( "hbs2-hub: solving" <+> pretty floorD
+                               <+> "bits of work to leave this peer" <> line )
+           pure <$> solveWithin powBudget floorD mbox msg
+       | otherwise -> pure []
+
+    _ -> for charging $ \(mbox, d) -> do
+           liftIO $ saying ( "hbs2-hub: solving" <+> pretty d <+> "bits of work for"
+                               <+> pretty (AsBase58 mbox) <> line )
+           solveWithin powBudget d mbox msg
 
 -- | How long a grind is allowed to take before it is called impossible.
 --

@@ -701,6 +701,18 @@ instance ( s ~ Encryption e, e ~ L4Proto
 
       pure $ Right ()
 
+  -- What a client must pay for a letter to leave this machine.
+  --
+  -- BOTH HALVES, and the local one is the half that surprises: a submission
+  -- over the RPC runs the same `forwardable` rule as a packet off the wire, so
+  -- a peer with a floor of its own will not gossip a letter composed on it.
+  -- Answering only the neighbours' number would send a client away to grind
+  -- work that still does not leave the building.
+  mailboxRelayFloor MailboxProtoWorker{..} = do
+    mine <- readTVarIO mpwPoWFloor
+    theirs <- liftIO $ withPeerM mpwPeerEnv (knownPeersPoWFloor @e)
+    pure (max mine theirs)
+
   mailboxSendDelete w@MailboxProtoWorker{..} box = do
     debug $ red "mailboxSendDelete"
 
@@ -1141,17 +1153,10 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
         -- somebody else; this says what somebody else's floor costs this peer,
         -- and until the number was published there was nothing to read it from.
         --
-        -- A maximum and not a list: a gossiped letter goes to every neighbour,
-        -- so the number that decides whether it travels at all is the largest
-        -- one any of them wants. A peer that has not answered its meta yet
-        -- contributes nothing rather than a zero -- see 'peerMetaPoWFloor'.
-        theirFloor <- liftIO $ withPeerM mpwPeerEnv do
-          pl <- getPeerLocator @e
-          ps <- knownPeers @e pl
-          floors <- for ps $ \p -> runMaybeT do
-                      pinfo <- MaybeT $ find (PeerInfoKey p) id
-                      MaybeT $ peerMetaPoWFloor pinfo
-          pure $ maximum (0 : catMaybes floors)
+        -- Through 'knownPeersPoWFloor', which is also what 'mailboxRelayFloor'
+        -- answers a client with: what an operator is shown and what a sender is
+        -- asked to pay have to be the same number.
+        theirFloor <- liftIO $ withPeerM mpwPeerEnv (knownPeersPoWFloor @e)
 
         values <- atomically do
           mpwFetchQSize <- readTVar mpwFetchQ <&> HS.size

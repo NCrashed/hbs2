@@ -206,6 +206,23 @@ class ForMailbox s => IsMailboxService s a where
                -> MailboxRefKey s
                -> m (Either MailboxServiceError ())
 
+  -- | The least work a message must carry to leave this machine (PEP-23 step D).
+  --
+  -- The maximum of this peer's own 'mailboxPoWFloor' and the largest floor its
+  -- neighbours have published. BOTH HALVES ARE NEEDED and the first is the one
+  -- that surprises: a message submitted over the RPC goes through the same
+  -- forwarding rule as one arriving from the network, so a peer with a floor of
+  -- its own will not gossip a letter composed on the very machine it runs on.
+  --
+  -- It exists on the SERVICE and not on the adapter because it is the answer a
+  -- client asks for before it grinds, and a client talks to the service. The
+  -- adapter's 'mailboxPoWFloor' is the one half of it that gates a packet.
+  --
+  -- Zero by default, which is a peer that answers "nothing is required" and is
+  -- what every peer said before this existed.
+  mailboxRelayFloor :: forall m . MonadIO m => a -> m PoWDifficulty
+  mailboxRelayFloor _ = pure 0
+
 data AnyMailboxService s =
   forall a  . (IsMailboxService s a) => AnyMailboxService { mailboxService :: a }
 
@@ -222,6 +239,7 @@ instance ForMailbox s => IsMailboxService s (AnyMailboxService s) where
   mailboxGetStatus (AnyMailboxService a) = mailboxGetStatus @s a
   mailboxAcceptStatus (AnyMailboxService a) = mailboxAcceptStatus @s a
   mailboxFetch (AnyMailboxService a) = mailboxFetch @s a
+  mailboxRelayFloor (AnyMailboxService a) = mailboxRelayFloor @s a
 
 instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxGetCredentials (AnyMailboxAdapter a) = mailboxGetCredentials @s a

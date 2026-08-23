@@ -24,7 +24,12 @@ data RpcMailboxList
 data RpcMailboxSend
 data RpcMailboxDeleteMessages
 data RpcMailboxGet
+data RpcMailboxPoWFloor
 
+-- APPENDED, AND NEW ENTRIES GO AT THE END. A call is addressed by the method's
+-- INDEX in this list ('findMethodIndex'), so inserting one above renumbers
+-- everything below it and a client would call the wrong handler with the right
+-- bytes.
 type MailboxAPI = '[ RpcMailboxPoke
                    , RpcMailboxCreate
                    , RpcMailboxSetPolicy
@@ -35,6 +40,7 @@ type MailboxAPI = '[ RpcMailboxPoke
                    , RpcMailboxSend
                    , RpcMailboxDeleteMessages
                    , RpcMailboxGet
+                   , RpcMailboxPoWFloor
                    ]
 
 -- Bumped when four methods stopped answering () for everything (see below). The
@@ -48,6 +54,14 @@ type MailboxAPI = '[ RpcMailboxPoke
 -- REQUEST changed: an old client's message would arrive as an undecodable
 -- input, and a new client's call would reach an old peer that has no idea a
 -- stamp exists and would send the letter without one.
+--
+-- NOT bumped for 'RpcMailboxPoWFloor' (PEP-23 step D), and the difference is
+-- what a bump is for. Both bumps above changed the meaning of bytes an existing
+-- method already exchanged, so silence was the only safe outcome. Appending a
+-- method changes nothing that exists: an old peer answers a new client's call
+-- with 'ErrorMethodNotFound', which 'callRpcWaitMay' reports as 'Nothing', and
+-- the caller reads no floor and sends exactly what it sends today. Refusing to
+-- connect over that would trade a benign degradation for an outage.
 type MailboxAPIProto =  0x056091510d3b2ecb
 
 
@@ -97,4 +111,25 @@ type instance Output RpcMailboxDeleteMessages = (Either MailboxServiceError ())
 
 type instance Input RpcMailboxGet = (PubKey 'Sign HBS2Basic)
 type instance Output RpcMailboxGet = (Maybe HashRef)
+
+-- | The least work a message must carry to leave this machine (PEP-23 step D).
+--
+-- WHY A CLIENT NEEDS TO ASK. A sender solves what the destination MAILBOX
+-- charges, which is in that mailbox's signed policy. Whether a peer CARRIES the
+-- packet is a different number -- that peer's own @hbs2:mailbox:pow-min@ -- and
+-- it is in nobody's policy. The first peer to apply it is the sender's own,
+-- since a submission over this RPC runs the same forwarding rule, so a letter
+-- can fail to leave the machine it was composed on.
+--
+-- The answer is the maximum of this peer's floor and the largest one its
+-- neighbours have published in their meta (PEP-23 step C). It reaches one hop:
+-- a relay further out with a higher floor is still invisible, and nothing short
+-- of end-to-end feedback would change that.
+--
+-- Not an @Either MailboxServiceError@: there is no question to refuse. A peer
+-- that cannot answer at all -- an older build without this method -- is
+-- 'Nothing' at the call site, which a caller reads as no floor and sends what
+-- it would have sent anyway.
+type instance Input RpcMailboxPoWFloor = ()
+type instance Output RpcMailboxPoWFloor = PoWDifficulty
 

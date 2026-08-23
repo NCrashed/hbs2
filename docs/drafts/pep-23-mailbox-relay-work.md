@@ -1,7 +1,7 @@
 PEP-23: a work field on every floodable mailbox packet
 
-Status: draft, started 2026-08-23. Steps B and C implemented 2026-08-23;
-        A and D are still proposals.
+Status: draft, started 2026-08-23. Steps B, C and D implemented 2026-08-23;
+        step A, the one wire change, is still a proposal.
 Author: NCrashed (Anton Gushcha)
 Extends: PEP-21 (triage, moderation, retention: the stamp and the peer floor).
 Related: PEP-17 (hbs2-hub umbrella), PEP-18 (letter), PEP-22 (`hub drop`).
@@ -418,21 +418,43 @@ flood arrives.
 Step D. The client solves for what it can see
 ===========================================
 
-`stampsFor` (`hbs2-hub/ingress/HBS2/Hub/CLI/Compose.hs`) solves exactly
-`policyPoW` today, so a letter to a mailbox that charges nothing is sent
-unstamped and carries zero bits past every relay. With step C the sending
-peer knows its neighbours' floors, so the difficulty to solve becomes:
+`stampsFor` (`hbs2-hub/ingress/HBS2/Hub/CLI/Compose.hs`) solved exactly
+`policyPoW`, so a letter to a mailbox that charges nothing was sent unstamped
+and carried zero bits past every relay. The two numbers answer different
+questions and both have to be paid:
 
-```
-max (policy D of the target mailbox) (max floor over this peer's neighbours)
-```
+  - what the MAILBOX charges decides whether the letter is STORED;
+  - what a PEER charges decides whether it is CARRIED.
 
-At the default this is `max 0 0`, a zero-bit stamp, which `solveStamp` returns
-at nonce 0. It costs nothing and changes nothing until somebody sets a floor.
+So the difficulty per charging recipient becomes `max (policy D) floor`, and a
+letter whose recipients all charge nothing gets ONE stamp at the floor rather
+than none. At the default floor of zero nothing is stamped that would not have
+been and nothing is stamped harder, which is what makes the step invisible
+until an operator sets a number.
 
-The peer exposes the neighbour maximum over the mailbox RPC so the client does
-not have to learn about peer meta. `powBudget` and `solveWithin` already bound
-what a grind is allowed to cost, and `PoWTooHard` already says so.
+One stamp for the road, not one per recipient. A stamp buys two different
+things: a mailbox's policy is satisfied only by a stamp NAMING that mailbox, so
+a charging mailbox needs its own copy; but a relay asks only that the packet
+carry enough work for SOME recipient of it, so one copy reaches every host that
+charges nothing. Solving per recipient there would multiply the gossip by the
+recipient count and buy nothing.
+
+The floor comes over the mailbox RPC (`RpcMailboxPoWFloor`), so the client does
+not have to learn about peer meta, and the peer answers `max` of ITS OWN floor
+and its neighbours'. The own half is the one that surprises, and it is the
+reason this method exists rather than a read of step C's number: a submission
+over the RPC runs the same `forwardable` rule as a packet off the wire, so a
+peer with a floor of its own will not gossip a letter composed on the machine
+it runs on.
+
+Appending a method does not bump `MailboxAPIProto`, and the two bumps already
+recorded there say why: both changed the meaning of bytes an existing method
+already exchanged, where silence is the only safe outcome. A method that is
+merely absent answers `ErrorMethodNotFound`, which `callRpcWaitMay` reports as
+`Nothing`, which this client reads as no floor and sends what it sends today.
+
+`powBudget` and `solveWithin` already bound what a grind is allowed to cost,
+and `PoWTooHard` already says so.
 
 
 Not in this proposal
@@ -496,8 +518,8 @@ Steps B, C and D break nothing and are useful on their own, so they go first:
      and `peerMetaPoWFloor` to read it, and the neighbour maximum on the
      mailbox worker's probe beside `powNotForwarded`. DONE 2026-08-23. No
      `fillPeerMeta` change, for the reason recorded under step C.
-  3. D, the client difficulty, in `stampsFor`, plus the RPC that carries the
-     neighbour maximum.
+  3. D, the client difficulty in `stampsFor`, plus `RpcMailboxPoWFloor` and
+     `mailboxRelayFloor` behind it. DONE 2026-08-23.
   4. A, the wire change: the constructor, the preimage split, the marker, and
      the `forwardable` call on the new branch.
 

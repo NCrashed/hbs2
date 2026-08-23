@@ -304,6 +304,32 @@ peerMetaPoWFloor :: MonadIO m => PeerInfo e -> m (Maybe PoWDifficulty)
 peerMetaPoWFloor pinfo =
   liftIO $ readTVarIO (_peerMeta pinfo) <&> (>>= peerMetaValue "mailbox-pow-min")
 
+-- | The largest mailbox relay floor any neighbour has published.
+--
+-- A MAXIMUM and not a list, because a mailbox packet is gossiped to every
+-- neighbour at once: the number that decides whether it travels at all is the
+-- largest one any of them wants. A neighbour that has published nothing
+-- contributes nothing rather than a zero -- see 'peerMetaPoWFloor' -- so this
+-- under-reports while meta is still arriving, which is the safe direction: it
+-- asks a sender for no more work than this peer can show a reason for.
+--
+-- One spelling for two readers: the mailbox worker's periodic report, which
+-- publishes it beside what this peer's own floor cost somebody else, and
+-- 'mailboxRelayFloor', which answers a client that is about to grind.
+knownPeersPoWFloor :: forall e m . ( MonadIO m
+                                   , HasPeer e
+                                   , HasPeerLocator e m
+                                   , Sessions e (PeerInfo e) m
+                                   )
+                   => m PoWDifficulty
+knownPeersPoWFloor = do
+  pl <- getPeerLocator @e
+  ps <- knownPeers @e pl
+  floors <- forM ps $ \p -> runMaybeT do
+              pinfo <- MaybeT $ find (PeerInfoKey p) id
+              MaybeT $ peerMetaPoWFloor pinfo
+  pure $ maximum (0 : catMaybes floors)
+
 pingPeerWait :: forall e m . ( MonadIO m
                              , Request e (PeerHandshake e) m
                              , Sessions e (PeerHandshake e) m

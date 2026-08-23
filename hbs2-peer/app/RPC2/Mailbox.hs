@@ -106,6 +106,13 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxDeleteMessages where
     debug $ "rpc.RpcMailboxDeleteMessages"
     mailboxSendDelete w sbox
 
+instance (ForMailboxRPC m) => HandleMethod m RpcMailboxPoWFloor where
+
+  handleMethod _ = do
+    AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
+    debug $ "rpc.RpcMailboxPoWFloor"
+    mailboxRelayFloor @HBS2Basic mbs
+
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxGet where
 
   handleMethod mbox = do

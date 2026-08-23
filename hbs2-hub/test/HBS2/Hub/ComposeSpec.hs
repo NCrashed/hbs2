@@ -271,7 +271,7 @@ work =
       creds <- newCredentials @'HBS2Basic
       mbox  <- aKey
       let msg = messageTo creds [mbox]
-      stampsFor (charging 3) msg >>= \case
+      stampsFor 0 (charging 3) msg >>= \case
         [s]   -> stampOk 3 mbox msg s `shouldBe` True
         other -> expectationFailure ("expected one stamp, got " <> show (length other))
 
@@ -281,7 +281,7 @@ work =
       creds <- newCredentials @'HBS2Basic
       one <- aKey ; two <- aKey
       let msg = messageTo creds [one, two]
-      stamps <- stampsFor (charging 2) msg
+      stamps <- stampsFor 0 (charging 2) msg
       length stamps `shouldBe` 2
       [ () | s <- stamps, m <- [one, two], stampOk 2 m msg s ] `shouldSatisfy` ((>= 2) . length)
 
@@ -289,10 +289,10 @@ work =
       creds <- newCredentials @'HBS2Basic
       mbox <- aKey
       let msg = messageTo creds [mbox]
-      fmap length (stampsFor (charging 0) msg) >>= (`shouldBe` 0)
+      fmap length (stampsFor 0 (charging 0) msg) >>= (`shouldBe` 0)
       -- ...nor for one with no policy at all, which is not the deny/deny
       -- fallback and charges nothing either way.
-      fmap length (stampsFor (const (pure (Right Nothing))) msg) >>= (`shouldBe` 0)
+      fmap length (stampsFor 0 (const (pure (Right Nothing))) msg) >>= (`shouldBe` 0)
 
     -- The ordinary case for a letter addressed to somebody else's hub: this
     -- peer holds no policy for it, which is no evidence of a charge and not a
@@ -301,7 +301,7 @@ work =
       creds <- newCredentials @'HBS2Basic
       mbox <- aKey
       let msg = messageTo creds [mbox]
-      fmap length (stampsFor (const (pure (Left (PolicyNotHere mbox)))) msg) >>= (`shouldBe` 0)
+      fmap length (stampsFor 0 (const (pure (Left (PolicyNotHere mbox)))) msg) >>= (`shouldBe` 0)
 
     -- And a policy that will NOT read is not a policy that charges nothing:
     -- the letter still goes -- refusing over a broken file on somebody else's
@@ -310,7 +310,76 @@ work =
       creds <- newCredentials @'HBS2Basic
       mbox <- aKey
       let msg = messageTo creds [mbox]
-      fmap length (stampsFor (const (pure (Left PolicyUnparsed))) msg) >>= (`shouldBe` 0)
+      fmap length (stampsFor 0 (const (pure (Left PolicyUnparsed))) msg) >>= (`shouldBe` 0)
+
+    -- PEP-23 step D: the relay floor is a SECOND price, and it answers a
+    -- different question. What a mailbox charges decides whether the letter is
+    -- stored; what a peer charges decides whether it is carried at all. Before
+    -- this, a sender solved only the first, so a letter to a mailbox that
+    -- charges nothing carried nothing and any peer with a floor dropped it --
+    -- including the sender's own, which applies the same rule to a submission.
+    it "pays the road out even when nothing is charged for storage" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox  <- aKey
+      let msg = messageTo creds [mbox]
+      stampsFor 3 (charging 0) msg >>= \case
+        [s]   -> stampOk 3 mbox msg s `shouldBe` True
+        other -> expectationFailure ("expected one stamp, got " <> show (length other))
+
+    -- ONE stamp and not one per recipient. A relay asks only that the packet
+    -- carry work for SOME recipient of it, so one copy travels and every host
+    -- that charges nothing takes it; a stamp each would multiply the gossip by
+    -- the recipient count and buy nothing.
+    it "buys the road out once, however many recipients there are" $ do
+      creds <- newCredentials @'HBS2Basic
+      one <- aKey ; two <- aKey ; three <- aKey
+      let msg = messageTo creds [one, two, three]
+      stamps <- stampsFor 3 (charging 0) msg
+      length stamps `shouldBe` 1
+      [ () | s <- stamps, m <- [one, two, three], stampOk 3 m msg s ]
+        `shouldSatisfy` ((== 1) . length)
+
+    -- A mailbox that charges LESS than the floor gets the floor: a letter that
+    -- satisfies its destination and never reaches it is not delivered.
+    it "raises a charge that is below the floor" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox  <- aKey
+      let msg = messageTo creds [mbox]
+      stampsFor 5 (charging 2) msg >>= \case
+        [s]   -> stampOk 5 mbox msg s `shouldBe` True
+        other -> expectationFailure ("expected one stamp, got " <> show (length other))
+
+    -- And does not lower one that is above it. The floor is what the road
+    -- charges, not a cap on what a mailbox may ask for.
+    it "leaves a charge that is above the floor alone" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox  <- aKey
+      let msg = messageTo creds [mbox]
+      stampsFor 1 (charging 4) msg >>= \case
+        [s]   -> stampOk 4 mbox msg s `shouldBe` True
+        other -> expectationFailure ("expected one stamp, got " <> show (length other))
+
+    -- Each charging mailbox still gets its own stamp, because a policy is
+    -- satisfied only by a stamp NAMING that mailbox, and each is raised to the
+    -- floor separately.
+    it "pays every charging recipient at no less than the floor" $ do
+      creds <- newCredentials @'HBS2Basic
+      one <- aKey ; two <- aKey
+      let msg = messageTo creds [one, two]
+      stamps <- stampsFor 4 (charging 2) msg
+      length stamps `shouldBe` 2
+      [ () | s <- stamps, m <- [one, two], stampOk 4 m msg s ]
+        `shouldSatisfy` ((>= 2) . length)
+
+    -- A peer with no floor is the default and must change nothing: this is the
+    -- claim that the whole step is invisible until an operator sets a number.
+    it "does no work for the road when the road is free" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox <- aKey
+      let msg = messageTo creds [mbox]
+      fmap length (stampsFor 0 (charging 0) msg) >>= (`shouldBe` 0)
+      fmap length (stampsFor 0 (const (pure (Left (PolicyNotHere mbox)))) msg)
+        >>= (`shouldBe` 0)
 
 -- A policy that charges this many bits and says nothing else.
 charging :: Applicative m => PoWDifficulty -> PolicyReader m
