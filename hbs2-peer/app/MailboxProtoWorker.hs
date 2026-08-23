@@ -263,10 +263,10 @@ mailboxDownTTL, policyDownTTL :: Word64
 mailboxDownTTL = 3600
 policyDownTTL  = 3600
 
--- 'PlainMessageDelete' moved to HBS2.Peer.Proto.Mailbox.Merge, beside the
--- decision that has to read the same predicate. It lived here, in an executable
--- module, which is part of why the merge path never consulted it: nothing that
--- could be tested could see it either.
+-- Reading a delete's predicate moved to HBS2.Peer.Proto.Mailbox.Merge
+-- ('deleteTargets'), beside the decision that has to read the same thing. It
+-- lived here, in an executable module, which is part of why the merge path
+-- never consulted it: nothing that could be tested could see it either.
 
 instance IsAcceptPolicy HBS2Basic () where
   policyAcceptPeer _ _ = pure True
@@ -466,11 +466,14 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
 
       -- Предикат разбирается до всякой записи, потому что из него и из бокса
       -- выводится хеш записи, а из него -- маркер «уже влито».
-      let what' = case dmp of
-                   PlainMessageDelete x -> Just x
-                   _ -> Nothing
-
-      what <- ContT $ maybe1 what' unsupportedPredicate
+      --
+      -- МНОЖЕСТВО, а не одно сообщение (PEP-23, шаг B). Разбор один и тот же,
+      -- что и на пути слияния, и живёт он там же: 'deleteTargets'. Отказ он уже
+      -- назвал -- сколько именно целей допустимо, решает maxDeleteTargets, --
+      -- поэтому здесь его передают как есть, а не сводят к одному слову.
+      targets <- ContT $ \k -> case deleteTargets dmp of
+                   Left verdict -> refusedPredicate verdict
+                   Right ts     -> k (HS.toList ts)
 
       -- Повторно пришедший delete теперь стоит один поиск.
       --
@@ -486,36 +489,59 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
       -- единственный путь, по которому доезжает незавершённый мерж. Поэтому
       -- дешёвый выход нужен здесь. Оба хеша считаются без хранилища; putBlock
       -- ниже вернёт ровно boxH, содержимое адресуется своим хешем.
-      let boxH   = HashRef (hashObject (serialise box))
-          entry  = deletedEntry boxH what
-          entryH = deletedEntryHash boxH what
+      --
+      -- ФИЛЬТР ПОШТУЧНЫЙ, а выход -- по всему набору. Один бокс на N целей
+      -- значит, что часть записей могла быть влита прошлым разом, а часть нет,
+      -- и «уже влито» -- это свойство записи, а не бокса. Пропускаем только те,
+      -- которых ещё нет; если не осталось ни одной, выходим тем же дешёвым
+      -- путём, что и раньше.
+      let boxH = HashRef (hashObject (serialise box))
 
-      merged <- isMerged dbe mbox entryH
+      fresh <- flip filterM targets $ \what ->
+                 not <$> isMerged dbe mbox (deletedEntryHash boxH what)
 
-      void $ ContT $ maybe1 (guard (not merged) :: Maybe ()) (alreadyMerged entryH)
+      void $ ContT $ maybe1 (guard (not (null fresh)) :: Maybe ())
+                            (alreadyMerged (length targets))
 
       h' <- putBlock sto (serialise box)
 
       void $ ContT $ maybe1 h' storageFail
 
-      deh' <- enqueueBlock sto (serialise entry)
-               <&> fmap HashRef
+      -- Блок бокса один на весь набор, а записей столько, сколько целей: каждая
+      -- ссылается на одно и то же доказательство, и admitDeleted принимает её
+      -- потому, что цель записи есть в множестве, которое подписал владелец.
+      --
+      -- Отказ хранилища на одной записи не обрывает остальные: это не ContT, и
+      -- это намеренно. Запись, которую не удалось положить, вернётся со
+      -- следующим приходом того же бокса -- фильтр выше её не отсеет, раз
+      -- влитой она не стала.
+      for_ fresh $ \what -> do
+        deh' <- enqueueBlock sto (serialise (deletedEntry boxH what))
+                 <&> fmap HashRef
 
-      deh <- ContT $ maybe1 deh' storageFail
+        case deh' of
+          Nothing ->
+            err $ red "mailbox (storage:critical)"
+                    <+> "delete entry writing failure" <+> pretty what
 
-      -- insertWith for the reason the download path needs it: two deletes issued
-      -- for one mailbox between two merge polls collided here and the first was
-      -- dropped.
-      atomically $ modifyTVar inMessageMergeQueue (enqueueMerge mbox deh)
+          -- insertWith for the reason the download path needs it: two deletes
+          -- issued for one mailbox between two merge polls collided here and the
+          -- first was dropped.
+          Just deh ->
+            atomically $ modifyTVar inMessageMergeQueue (enqueueMerge mbox deh)
 
     where
       storageFail = err $ red "mailbox (storage:critical)" <+> "block writing failure"
-      unsupportedPredicate = err $ red "mailbox (unsuported-predicate)"
+      -- warn and not debug: reaching this line takes a signature by the mailbox
+      -- key, so the volume is the owner's and not a stranger's, and a delete
+      -- this build cannot read is something its owner wants to know about.
+      refusedPredicate v = warn $ red "mailbox (delete): refused for" <+> pretty mbox
+                             <> ":" <+> pretty v
       dbNotReady = err $ red "mailbox (delete)" <+> "database not ready"
       notOurs = debug $ red "mailbox (delete)"
                   <+> "not ours, ignored:" <+> pretty mbox
-      alreadyMerged e = debug $ "mailbox (delete): already merged, skip"
-                          <+> pretty mbox <+> pretty e
+      alreadyMerged n = debug $ "mailbox (delete): already merged, skip"
+                          <+> pretty mbox <+> parens (pretty n <+> "targets")
 
 instance ( s ~ Encryption e, e ~ L4Proto
          ) => IsMailboxService s (MailboxProtoWorker s e) where

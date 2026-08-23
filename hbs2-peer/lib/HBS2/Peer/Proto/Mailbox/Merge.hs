@@ -1,4 +1,4 @@
-{-# Language PatternSynonyms #-}
+{-# Language BangPatterns #-}
 -- | Whether an entry somebody else's tree carries may be merged into ours.
 --
 -- Split out of @mailboxMergeQ@ because the decision was buried inside a
@@ -16,9 +16,11 @@
 module HBS2.Peer.Proto.Mailbox.Merge
   ( MergeVerdict(..)
   , admitDeleted
+  , deleteTargets
+  , deleteNaming
+  , maxDeleteTargets
   , enqueueMerge
   , maxMergeQueue
-  , pattern PlainMessageDelete
   ) where
 
 import HBS2.Prelude
@@ -92,20 +94,101 @@ enqueueMerge k h m
 maxMergeQueue :: Int
 maxMergeQueue = 4096
 
--- | A delete payload that names exactly one message.
+-- | The most messages one delete payload may name (PEP-23 step B).
 --
--- The only predicate this build honours, on either path: 'mailboxAcceptDelete'
--- refuses anything else outright, so no entry a peer wrote itself can carry one.
--- Here rather than in the worker, which is where it used to be, so that the
--- decision below and the code that builds an entry can be read together.
-pattern PlainMessageDelete :: forall {s :: CryptoScheme} . HashRef -> DeleteMessagesPayload s
-pattern PlainMessageDelete x <- DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq x)))
+-- A gossiped packet has to fit 'defMaxDatagram', which is 4096 bytes, and a
+-- datagram over that is one nobody receives -- silently, since nothing here
+-- reports an oversized send. A full batch measures 2931 bytes, which a test in
+-- @MailboxMerge@ asserts rather than leaving in this sentence, so the number
+-- below cannot drift away from the thing that justifies it.
+--
+-- IT IS ALSO A BOUND ON WORK, and that is the half a datagram does not cover.
+-- The merge path reads a proof out of the block store rather than off the wire,
+-- and a block is up to 256 KiB, so a hostile payload could name thousands of
+-- messages and buy that many entries and merge-queue slots for one signature.
+-- 'deleteTargets' stops counting here, whichever path the payload arrived on.
+maxDeleteTargets :: Int
+maxDeleteTargets = 64
+
+-- | The messages a delete payload authorises removing.
+--
+-- ONE READING OF A PREDICATE, and there used to be two: this module carried a
+-- @PlainMessageDelete@ pattern for the single-hash shape and the worker matched
+-- on it separately. Two spellings of "what does this delete say" are two places
+-- to teach about a new shape, and the shape below is new.
+--
+-- WHAT IS HONOURED: 'Or' spines and 'End', so a payload denotes the set of
+-- hashes its @Op (MessageHashEq h)@ leaves name. 'Or' was already in the wire
+-- format and decodes on every deployed peer, which is why a set is spelled with
+-- it rather than with a new 'SimplePredicate' constructor: this type lives
+-- INSIDE the signed box, so a new constructor would make an older peer fail in
+-- 'unboxSignedBox0' and drop the delete whole, with no verdict and no
+-- diagnostic, instead of answering 'MergeUnsupportedPred' and relaying it on.
+--
+-- WHAT IS NOT: 'And', which has no meaning over a set of hashes and must not be
+-- given one by guesswork; 'Nop', whose meaning is unspecified, so a newer build
+-- may mean something by it that an older one must not act on; and a predicate
+-- that names no message at all, which authorises nothing. All three are the
+-- same answer to a reader: this build cannot tell what you meant.
+deleteTargets :: forall s . DeleteMessagesPayload s
+              -> Either MergeVerdict (HashSet HashRef)
+deleteTargets (DeleteMessagesPayload (MailboxMessagePredicate1 e0)) = go 0 mempty [e0]
+  where
+    -- Counting LEAVES VISITED and not the size of the set, for two reasons.
+    -- 'HS.size' is a walk, so asking it per node would make this quadratic in a
+    -- value a stranger chooses the size of. And a payload that names one hash a
+    -- thousand times has still named a thousand targets: deduplication is a
+    -- courtesy to the honest caller, not a discount on the bound.
+    go :: Int -> HashSet HashRef -> [SimplePredicateExpr]
+       -> Either MergeVerdict (HashSet HashRef)
+    go !n _ _ | n > maxDeleteTargets = Left MergeTooManyTargets
+    go _ acc [] | HS.null acc = Left MergeUnsupportedPred
+                | otherwise   = Right acc
+    go !n acc (x:xs) = case x of
+      End                  -> go n acc xs
+      Or a b               -> go n acc (a:b:xs)
+      Op (MessageHashEq h) -> go (n+1) (HS.insert h acc) xs
+      Op Nop               -> Left MergeUnsupportedPred
+      And{}                -> Left MergeUnsupportedPred
+
+-- | The delete payloads that authorise removing these messages.
+--
+-- THE WRITER'S HALF OF 'deleteTargets', and here so that it cannot drift from
+-- it. A builder living in the hub would be a second opinion about what a delete
+-- says, in a package the reader does not depend on, and the two would be free to
+-- disagree about the spine shape, the terminator or the batch size.
+--
+-- Answers a LIST because the batch size is not the caller's to choose:
+-- 'maxDeleteTargets' is what a reader will accept, so a caller with more
+-- messages than that gets more payloads, each of which it signs and sends
+-- separately. An empty input is no payloads at all, not one authorising nothing.
+--
+-- The spine is right-leaning and terminated by 'End'. Nothing requires that of a
+-- writer -- 'deleteTargets' reads any shape -- so it is a choice about being
+-- boring rather than a promise anybody may rely on.
+deleteNaming :: forall s . [HashRef] -> [DeleteMessagesPayload s]
+deleteNaming =
+  fmap (DeleteMessagesPayload . MailboxMessagePredicate1 . spine) . chunk . dedup
+  where
+    spine = foldr (Or . Op . MessageHashEq) End
+
+    chunk [] = []
+    chunk xs = let (a,b) = splitAt maxDeleteTargets xs in a : chunk b
+
+    -- Order-preserving, so the same input builds the same payloads twice. The
+    -- set 'deleteTargets' reads back does not care, but a caller comparing two
+    -- runs, or an operator reading a log, does.
+    dedup = go mempty
+      where
+        go _ [] = []
+        go seen (x:xs) | HS.member x seen = go seen xs
+                       | otherwise        = x : go (HS.insert x seen) xs
 
 -- | Why a @Deleted@ entry was or was not merged.
 --
--- Six answers and not a Bool, because a refusal goes in the log and the reasons
--- call for different things: three of them are somebody's bug, one is a build
--- that is too old, and one is an attack.
+-- Seven answers and not a Bool, because a refusal goes in the log and the
+-- reasons call for different things: three of them are somebody's bug, one is a
+-- build that is too old, and two are an attack.
 data MergeVerdict =
     -- | The proof is signed by this mailbox's key and names this entry's target.
     MergeAccept
@@ -130,10 +213,21 @@ data MergeVerdict =
   | MergeWrongTarget
     -- | A predicate this build does not implement.
     --
-    -- Compound And/Or predicates are defined in the wire format and honoured
-    -- nowhere, so this is a refusal and not a failure: an older reader must not
-    -- guess what a newer one meant by a delete.
+    -- The predicate language is wider than any reader implements, so this is a
+    -- refusal and not a failure: an older reader must not guess what a newer one
+    -- meant by a delete. Since PEP-23 step B, @Or@ IS honoured, and what is left
+    -- here is @And@, @Nop@, and a predicate naming no message at all. See
+    -- 'deleteTargets'.
   | MergeUnsupportedPred
+    -- | It names more messages than 'maxDeleteTargets'.
+    --
+    -- Its own answer and not folded into the one above, because they call for
+    -- different things: that one is a build too old to understand a delete,
+    -- this one is a payload no honest builder produces. The merge path reads
+    -- proofs out of the block store, where a value is up to 256 KiB rather than
+    -- one datagram, so this is the ceiling on how many entries and merge-queue
+    -- slots one signature can buy.
+  | MergeTooManyTargets
   deriving stock (Eq,Show,Generic)
 
 instance Pretty MergeVerdict where
@@ -144,6 +238,8 @@ instance Pretty MergeVerdict where
     MergeWrongMailbox    -> "the delete payload is signed for another mailbox"
     MergeWrongTarget     -> "the delete payload is for this mailbox and authorises another message"
     MergeUnsupportedPred -> "the delete payload carries a predicate this build does not implement"
+    MergeTooManyTargets  -> "the delete payload names more messages than"
+                              <+> pretty maxDeleteTargets
 
 -- | May this @Deleted@ entry be merged into this mailbox?
 --
@@ -155,6 +251,12 @@ instance Pretty MergeVerdict where
 -- The two hashes that must agree are the entry's target and the predicate's
 -- argument. Both used to be discarded at the match site: the entry's in a @_@
 -- pattern, the payload's by never reading @dmpPredicate@ on this path at all.
+--
+-- SINCE PEP-23 STEP B a payload names a SET (see 'deleteTargets'), and the
+-- property this function exists to protect is unchanged by that: the proof must
+-- still name the message the entry deletes, so a public delete box stapled to
+-- somebody else's letter is still 'MergeWrongTarget'. A set widens what one box
+-- authorises to what its signer actually wrote down, and not by one message.
 admitDeleted
   :: forall s . ForMailbox s
   => MailboxRefKey s      -- ^ the mailbox being merged into
@@ -169,10 +271,13 @@ admitDeleted (MailboxRefKey want) what bs =
       Nothing -> MergeUnsigned
       Just (pk, payload)
         | pk /= want -> MergeWrongMailbox
-        -- An `if` and not a guard, because a guard that fails here falls through
-        -- to the wildcard below and would report a target mismatch as an
-        -- unsupported predicate: the same answer for an attack and for an old
-        -- build.
-        | otherwise -> case payload of
-            PlainMessageDelete x -> if x == what then MergeAccept else MergeWrongTarget
-            _                    -> MergeUnsupportedPred
+        -- The refusal 'deleteTargets' returns is passed through as it stands,
+        -- because it has already picked which of the reasons this is. Collapsing
+        -- it into one answer here would put an old build and a hostile payload
+        -- back under the same word, which is the mistake the verdict type exists
+        -- to prevent.
+        | otherwise -> case deleteTargets payload of
+            Left verdict -> verdict
+            Right targets
+              | HS.member what targets -> MergeAccept
+              | otherwise              -> MergeWrongTarget

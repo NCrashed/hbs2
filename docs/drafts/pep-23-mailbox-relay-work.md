@@ -1,6 +1,7 @@
 PEP-23: a work field on every floodable mailbox packet
 
-Status: draft, started 2026-08-23.
+Status: draft, started 2026-08-23. Step B implemented 2026-08-23; A, C and D
+        are still proposals.
 Author: NCrashed (Anton Gushcha)
 Extends: PEP-21 (triage, moderation, retention: the stamp and the peer floor).
 Related: PEP-17 (hbs2-hub umbrella), PEP-18 (letter), PEP-22 (`hub drop`).
@@ -267,7 +268,7 @@ lives INSIDE the signed box, so an old peer fails in `unboxSignedBox0` and
 drops the delete entirely, with no verdict and no diagnostic.
 
 `Or` is already on the wire and already decodes on every deployed peer. An
-old reader walks it, does not match `PlainMessageDelete`, and answers
+old reader walks it, does not recognise the shape, and answers
 `MergeUnsupportedPred` -- the exact case that verdict was written for -- while
 still relaying the packet onward. So `Or` degrades the way the design intended
 and a new constructor does not. Use `Or`.
@@ -276,31 +277,54 @@ The rules
 ---------
 
   - A delete payload denotes the SET of hashes named by `Op (MessageHashEq h)`
-    anywhere in its expression tree.
-  - `End` terminates a spine and contributes no hash. `Op Nop` contributes
-    none either and stays refused as before.
-  - `And` remains unimplemented. It has no meaning over a set of hashes, and
-    a reader must not invent one.
+    anywhere in its expression tree. `End` contributes no hash, so it works as
+    a spine terminator.
+  - `And`, `Nop`, and a predicate naming no message at all are all
+    `MergeUnsupportedPred`. `And` has no meaning over a set of hashes and a
+    reader must not invent one; `Nop`'s meaning is unspecified, so a newer
+    build may mean something by it that an older one must not act on; and a
+    predicate naming nothing authorises nothing. Refusing `Nop` ANYWHERE
+    matters more than it looks: a reader that collected the leaves it
+    recognised and ignored the rest would act on part of a sentence it only
+    partly understood.
   - `admitDeleted` accepts when the entry's target is a MEMBER of that set.
     The property it exists to protect is unchanged: a proof still has to name
     the message the entry deletes, so `MergeWrongTarget` still fires for a
     public delete box stapled to somebody else's letter.
   - `mailboxAcceptDelete` writes one `Deleted` entry per named hash, all
     pointing at the same proof block, and enqueues one merge per entry.
-    `maxMergeQueue` is 4096, so a full batch is comfortably inside it.
+    `maxMergeQueue` is 4096, so a full batch is comfortably inside it. Whether
+    an entry is already merged is a property of the ENTRY, so a box naming 64
+    messages of which 60 are already tombstoned writes the remaining four.
+
+One reading and one writing, in one module. `deleteTargets` is the reader and
+`deleteNaming` is the writer, both in `Proto/Mailbox/Merge.hs`, because a
+builder living in the hub package -- which the reader does not depend on --
+could disagree about the spine, the terminator or the batch size, and nothing
+would notice until a delete stopped working. The single-hash pattern this
+module used to export is gone: two spellings of "what does this delete say"
+are two places to teach about a new shape.
 
 The bound
 ---------
 
-A gossiped packet must fit `defMaxDatagram`, 4096 bytes. Each target costs
-about 40 bytes in the tree, and the signed box costs about 110, so:
-
-  - the reader refuses a payload naming more than `maxDeleteTargets = 64`,
+  - The reader refuses a payload naming more than `maxDeleteTargets = 64`,
     with its own verdict (`MergeTooManyTargets`) rather than folding into
     `MergeUnsupportedPred`, because this module's rule is that a refusal names
-    which of the reasons it is;
-  - the builder in `hub drop` batches targets until either 64 targets or an
-    encoded box over 3072 bytes, then signs, grinds and sends that batch.
+    which of the reasons it is. It counts LEAVES VISITED and not distinct
+    hashes: deduplication is a courtesy to an honest builder, not a discount
+    on the bound, and asking a set for its size per node would be quadratic in
+    a value a stranger chooses the length of.
+  - `deleteNaming` chunks by the same constant, so `hub drop` cannot get the
+    batch size wrong by being in a different package.
+
+What pins 64 is the datagram. A delete is gossiped, gossip goes over UDP, and
+a packet over `defMaxDatagram` (4096 bytes) is one nobody receives, silently.
+A full batch measures 2931 bytes, which is asserted by a test rather than left
+as a comment, so the constant cannot drift away from the thing that justifies
+it. A separate byte budget in the builder was considered and dropped: with a
+fixed-size hash the count already decides the size, and two numbers that must
+agree are worse than one that is checked.
 
 64 targets is one signature and one grind per 64 letters, which is the whole
 point of this step.
@@ -429,10 +453,11 @@ Order of work, and the one flag day
 
 Steps B, C and D break nothing and are useful on their own, so they go first:
 
-  1. B, the set-valued delete: reader (`admitDeleted`, `mailboxAcceptDelete`,
-     `maxDeleteTargets`, `MergeTooManyTargets`) and builder (`hub drop`
-     batching). Testable entirely in `hbs2-peer/test/MailboxMerge.hs`, which
-     already has the fixtures.
+  1. B, the set-valued delete: reader (`deleteTargets`, `admitDeleted`,
+     `mailboxAcceptDelete`, `maxDeleteTargets`, `MergeTooManyTargets`) and
+     builder (`deleteNaming`, `dropMessages`). DONE 2026-08-23, with the
+     decision testable entirely in `hbs2-peer/test/MailboxMerge.hs`, which
+     already had the fixtures.
   2. C, the published floor, plus the `fillPeerMeta` refresh fix.
   3. D, the client difficulty, in `stampsFor`, plus the RPC that carries the
      neighbour maximum.

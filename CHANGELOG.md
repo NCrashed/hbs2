@@ -170,6 +170,37 @@
 
 ## Changed
 
+  - **A mailbox delete names a set of messages, not one (PEP-23 step B).** The
+    predicate language has had `Or` on the wire since the mailbox protocol was
+    written and no reader honoured it, so every tombstone cost its own signed
+    payload and its own gossiped packet. `hub inbox reject` drops a letter and
+    every rewrapped copy of it, and `hub inbox accept` drops what it folded, so
+    a triage session was one flood per letter.
+
+    A payload now denotes the set of hashes its `MessageHashEq` leaves name, up
+    to `maxDeleteTargets` (64) of them, which is one signature and one packet
+    per 64 letters. The bound is what fits a datagram -- gossip goes over UDP,
+    and a packet over 4096 bytes is one nobody receives, silently -- and a full
+    batch measures 2931 bytes, asserted by a test so the constant cannot drift
+    from what justifies it.
+
+    What is NOT honoured stays refused, and the distinction is the point:
+    `And`, `Nop`, and a predicate naming no message at all are all
+    `MergeUnsupportedPred`, because a reader that collected the leaves it
+    recognised and ignored the rest would act on part of a sentence it only
+    partly understood. Naming more than the cap is its own verdict
+    (`MergeTooManyTargets`): the merge path reads proofs out of the block
+    store, where a value is up to 256 KiB rather than one datagram, so without
+    a ceiling one signature buys thousands of entries and merge-queue slots.
+
+    The property issue #15 is about is unchanged. A proof still has to name the
+    message the entry deletes, so a public delete box stapled to somebody
+    else's letter is still `MergeWrongTarget`; a set widens what one box
+    authorises to what its signer actually wrote down and by nothing else.
+
+    Older peers relay such a delete and refuse to merge it, which is the
+    degradation the verdict was written for -- no wire format changed.
+
   - **`hbs2-hub --help`: the list says what each verb is for, and `hub issue`
     answers.** Forty-one names in one alphabetical column said which words exist
     and not which of them a contributor wants -- `issue new` and `pr new` are

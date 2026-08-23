@@ -30,7 +30,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.CLI.Drop (dropMessage,DropTrouble(..))
+import HBS2.Hub.CLI.Drop (dropMessages,DropTrouble(..))
 import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..)
                         ,rawMessage,LetterRaw(..),rpcTimeout)
 import HBS2.Hub.Letter (AckRecord(..),openLetterAs,EnvelopeSigner(..))
@@ -207,14 +207,18 @@ rejectEntries = do
       -- was looking at when they typed this.
       copies <- copiesOf ig (rjMailbox rj) (rjMessage rj)
 
-      for_ (rjMessage rj : copies) $ \h ->
-        -- The peer is silent for the reason 'PeerSilent' says and NOT for the
-        -- reason a missing key is, so the three answers keep their own codes.
-        dropMessage (rjMailbox rj) h >>= \case
-          Right () -> pure ()
-          Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
-                                                codePeerSilent)
-          Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
+      -- ONE DELETE FOR THE WHOLE SET, and it used to be one per copy. A delete
+      -- names a set since PEP-23 step B, so a letter arriving under a dozen
+      -- envelopes is a dozen tombstones bought with one signature and one packet
+      -- rather than a dozen of each.
+      --
+      -- The peer is silent for the reason 'PeerSilent' says and NOT for the
+      -- reason a missing key is, so the three answers keep their own codes.
+      dropMessages (rjMailbox rj) (rjMessage rj : copies) >>= \case
+        Right () -> pure ()
+        Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
+                                              codePeerSilent)
+        Left e -> liftIO (refuse (show (pretty e)) codeNotRejected)
 
       -- AND THE CONTRIBUTOR IS TOLD, which is the half of a decision this tool
       -- did not have. `sendAck` had one caller -- the accept -- so a letter that

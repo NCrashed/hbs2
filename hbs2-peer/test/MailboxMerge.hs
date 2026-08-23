@@ -8,6 +8,7 @@
 module MailboxMerge (mailboxMergeTests) where
 
 import HBS2.Prelude.Plated
+import HBS2.Defaults (defMaxDatagram)
 import HBS2.Hash
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Data.Types.SignedBox
@@ -32,10 +33,28 @@ type S = 'HBS2Basic
 mh :: ByteString -> HashRef
 mh = HashRef . hashObject
 
--- A delete payload that authorises removing exactly one message. The only shape
--- either path honours.
+-- A delete payload that authorises removing exactly one message. A bare leaf,
+-- with no spine around it, which is what every delete looked like before PEP-23.
 deleteOf :: HashRef -> DeleteMessagesPayload S
 deleteOf h = DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq h)))
+
+-- A delete payload naming a set, built here rather than by 'deleteNaming' so
+-- that a test can write a shape the builder would never emit: over the cap, with
+-- a node the reader refuses, or leaning the other way.
+deleteOfMany :: [HashRef] -> DeleteMessagesPayload S
+deleteOfMany hs =
+  DeleteMessagesPayload (MailboxMessagePredicate1 (foldr (Or . Op . MessageHashEq) End hs))
+
+-- The same set the other way round. A reader must not care: the shape a payload
+-- happens to have is not something its signer promised anybody.
+deleteOfManyLeft :: [HashRef] -> DeleteMessagesPayload S
+deleteOfManyLeft hs =
+  DeleteMessagesPayload
+    (MailboxMessagePredicate1 (foldl (\acc h -> Or acc (Op (MessageHashEq h))) End hs))
+
+-- Distinct message hashes, n of them.
+mhs :: Int -> [HashRef]
+mhs n = [ mh (fromString (show i)) | i <- [1 .. n] ]
 
 -- The bytes of a proof block: a delete payload signed by some key.
 proofBytes :: PeerCredentials S -> DeleteMessagesPayload S -> LBS.ByteString
@@ -112,6 +131,135 @@ mailboxMergeTests = testGroup "mailbox merge (issue #15)"
         @?= MergeUnsupportedPred
       admitDeleted (mailboxOf owner) victim (proofBytes owner bothOf)
         @?= MergeUnsupportedPred
+
+  -- PEP-23 step B: a delete names a SET, spelled with the Or the wire format
+  -- already had. `hub drop` on a triage queue was one packet, one signature and
+  -- (after the stamp) one grind per letter; a set makes it one per batch.
+  , testCase "accepts a proof whose set contains the message the entry removes" do
+      owner <- newCredentials @S
+      let batch  = mhs 5
+          victim = batch !! 2
+      admitDeleted (mailboxOf owner) victim (proofBytes owner (deleteOfMany batch))
+        @?= MergeAccept
+
+  , testCase "refuses a proof whose set does not contain it" do
+      -- The property #15 is about, restated for a set: what a box authorises is
+      -- what its signer wrote down, and a set widens that by the messages named
+      -- in it and by nothing else.
+      owner <- newCredentials @S
+      let victim = mh "a letter the stranger wants gone"
+      admitDeleted (mailboxOf owner) victim (proofBytes owner (deleteOfMany (mhs 5)))
+        @?= MergeWrongTarget
+
+  , testCase "reads the same set out of either spine" do
+      -- The tree shape is the builder's business. A reader that accepted only a
+      -- right-leaning spine would refuse a legitimate delete from any other
+      -- implementation for a reason nothing on the wire states.
+      owner <- newCredentials @S
+      let batch  = mhs 4
+          victim = head batch
+      admitDeleted (mailboxOf owner) victim (proofBytes owner (deleteOfManyLeft batch))
+        @?= MergeAccept
+      deleteTargets (deleteOfManyLeft batch) @?= deleteTargets (deleteOfMany batch)
+
+  , testCase "accepts a set at exactly the cap" do
+      -- The boundary, from below: the cap is what the builder is allowed to
+      -- emit, so a full batch has to survive the reader that receives it.
+      owner <- newCredentials @S
+      let batch = mhs maxDeleteTargets
+      admitDeleted (mailboxOf owner) (last batch) (proofBytes owner (deleteOfMany batch))
+        @?= MergeAccept
+
+  , testCase "refuses a set over the cap" do
+      -- The merge path reads proofs out of the block store, not off the wire, so
+      -- a payload is bounded by the block size and not by a datagram. Without
+      -- this, one signature buys thousands of entries and merge-queue slots.
+      owner <- newCredentials @S
+      let batch = mhs (maxDeleteTargets + 1)
+      admitDeleted (mailboxOf owner) (head batch) (proofBytes owner (deleteOfMany batch))
+        @?= MergeTooManyTargets
+
+  , testCase "counts leaves and not distinct hashes" do
+      -- Deduplication is a courtesy to an honest builder, not a discount on the
+      -- bound: the walk is what costs, and a payload naming one hash a thousand
+      -- times has still made a reader visit a thousand leaves.
+      owner <- newCredentials @S
+      let victim = mh "m1"
+          batch  = replicate (maxDeleteTargets + 1) victim
+      admitDeleted (mailboxOf owner) victim (proofBytes owner (deleteOfMany batch))
+        @?= MergeTooManyTargets
+
+  , testCase "refuses a set with an unsupported node anywhere in it" do
+      -- An old build must not act on part of a predicate it only partly
+      -- understands. Both of these would be ACCEPTED by a reader that simply
+      -- collected the MessageHashEq leaves it recognised and ignored the rest.
+      owner <- newCredentials @S
+      let victim  = mh "m1"
+          leaf    = Op (MessageHashEq victim)
+          withNop = DeleteMessagesPayload
+                      (MailboxMessagePredicate1 (Or leaf (Op Nop)))
+          withAnd = DeleteMessagesPayload
+                      (MailboxMessagePredicate1
+                        (Or leaf (And leaf (Op (MessageHashEq (mh "m2"))))))
+      admitDeleted (mailboxOf owner) victim (proofBytes owner withNop)
+        @?= MergeUnsupportedPred
+      admitDeleted (mailboxOf owner) victim (proofBytes owner withAnd)
+        @?= MergeUnsupportedPred
+
+  , testCase "what the builder writes is what the reader reads" do
+      -- The two halves are in one module so they cannot drift, and this is the
+      -- assertion that says so. A builder in the hub package, which the reader
+      -- does not depend on, could disagree about the spine, the terminator or
+      -- the batch size and nothing would notice until a delete stopped working.
+      let batch    = mhs (maxDeleteTargets * 2 + 7)
+          payloads = deleteNaming @S batch
+
+      length payloads @?= 3
+
+      mapM_ (\p -> case deleteTargets p of
+                Left v   -> assertFailure ("the reader refuses a payload the builder"
+                                             <> " wrote: " <> show v)
+                Right ts -> assertBool "a batch over the cap"
+                                       (HS.size ts <= maxDeleteTargets))
+            payloads
+
+      -- and nothing is lost or invented between the batches
+      mconcat [ ts | Right ts <- fmap deleteTargets payloads ] @?= HS.fromList batch
+
+  , testCase "the builder names a message once however often it is asked" do
+      -- The reject path drops a letter and every rewrapped copy of it, and the
+      -- copies are found by a walk that can offer the same hash twice.
+      let victim = mh "m1"
+      case deleteNaming @S [victim, victim, victim] of
+        [p] -> deleteTargets p @?= Right (HS.singleton victim)
+        ps  -> assertFailure ("expected one payload, got " <> show (length ps))
+
+  , testCase "nothing to drop is nothing to sign" do
+      -- Not one payload authorising nothing, which the reader would refuse and
+      -- which would cost a signature and a packet to be refused.
+      assertBool "an empty drop built a payload" (null (deleteNaming @S []))
+
+  , testCase "a full batch still fits a datagram" do
+      -- WHAT PINS 'maxDeleteTargets', so the number is not a guess anybody has
+      -- to re-derive. A delete is gossiped, gossip goes over UDP, and a packet
+      -- larger than 'defMaxDatagram' is one nobody receives -- silently, since
+      -- an oversized datagram is not an error anything here reports.
+      --
+      -- The margin covers what this test cannot see: the protocol framing around
+      -- the payload, which is the (id, bytes) tuple plus a constructor tag.
+      owner <- newCredentials @S
+      let full = LBS.length (proofBytes owner (deleteOfMany (mhs maxDeleteTargets)))
+      assertBool ("a full batch encodes to " <> show full <> " bytes")
+                 (full < fromIntegral defMaxDatagram - 256)
+
+  , testCase "refuses a predicate that names no message at all" do
+      -- Well formed and authorising nothing. It is not an attack and not a
+      -- target mismatch, so it must not be reported as one.
+      owner <- newCredentials @S
+      let empty = DeleteMessagesPayload (MailboxMessagePredicate1 End)
+      admitDeleted (mailboxOf owner) (mh "m1") (proofBytes owner empty)
+        @?= MergeUnsupportedPred
+      deleteTargets (deleteOfMany []) @?= Left MergeUnsupportedPred
 
   , testCase "keeps every entry of a tree in the merge queue" do
       -- The second defect in the same twenty lines. This runs inside the loop
