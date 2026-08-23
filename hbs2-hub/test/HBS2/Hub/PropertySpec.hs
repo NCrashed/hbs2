@@ -66,6 +66,11 @@ data Step =
     -- must be refused is the same one twice, and this is the only shape that
     -- produces it reliably.
   | StepHonourTwice Int Word64
+    -- | The same letter presented twice under two different messages, which is
+    -- the replay canon's own publicity makes free.
+  | StepReplay Int Word64
+    -- | A letter carrying an op only the owner may author.
+  | StepOwnerOp Word64
   | StepAttach Int Word64 Attach
   | StepBigBody Word64          -- ^ an inline body over what triage carries
     -- | A letter from the second contributor, rewrapped by someone else. The
@@ -129,6 +134,8 @@ instance Arbitrary Step where
     , (2, StepSetLabels <$> genIx <*> genTs <*> arbitrary)
     , (2, StepHonourWith <$> genIx <*> genTs)
     , (2, StepHonourTwice <$> genIx <*> genTs)
+    , (2, StepReplay <$> genIx <*> genTs)
+    , (1, StepOwnerOp <$> genTs)
     , (2, StepAttach <$> genIx <*> genTs
             <*> elements [Ready,NotFetched,NotCarried,NoKey,TooBig,Unproven])
     , (1, StepBigBody <$> genTs)
@@ -160,6 +167,8 @@ instance Arbitrary Step where
     StepStaleView i ts  -> both StepStaleView i ts
     StepHonourWith i ts -> both StepHonourWith i ts
     StepHonourTwice i ts -> both StepHonourTwice i ts
+    StepReplay i ts     -> both StepReplay i ts
+    StepOwnerOp ts      -> [StepOwnerOp ts' | ts' <- shrinkTs ts]
     StepBigBody ts      -> [StepBigBody ts' | ts' <- shrinkTs ts]
     StepFromDenied ts   -> [StepFromDenied ts' | ts' <- shrinkTs ts]
     StepCorrupt ts      -> [StepCorrupt ts' | ts' <- shrinkTs ts]
@@ -227,6 +236,8 @@ data Tag =
   | TCorruptRefused  -- ^ ...and so was a letter whose signature does not hold
   | TIntruder        -- ^ a stranger's event was put in the tree by hand
   | TRestart         -- ^ the view was rebuilt from canon mid-run
+  | TReplayRefused   -- ^ the same letter, sent a second time
+  | TOwnerOpRefused  -- ^ a letter carrying an op only the owner may author
   | TUnnormalRefused -- ^ ...and an attribute value that is not in canonical form
   | TBigRefused      -- ^ an oversized body was refused rather than minted
   | TGhost           -- ^ an event from a newer schema spent a seq
@@ -410,6 +421,8 @@ spec =
         monitor (cover 1 (TCompactDropped `elem` rTags r) "compacted canon and dropped something")
         monitor (cover 5 (TBigRefused `elem` rTags r) "refused an oversized body")
         monitor (cover 2 (TUnnormalRefused `elem` rTags r) "refused an unnormalized attribute")
+        monitor (cover 2 (TReplayRefused `elem` rTags r) "refused a replayed letter")
+        monitor (cover 2 (TOwnerOpRefused `elem` rTags r) "refused an owner-native op in a letter")
         monitor (cover 2 (TRedact `elem` rTags r) "redacted an event")
         monitor (cover 2 (TByDelegate `elem` rTags r) "folded under a delegation")
         monitor (cover 1 (TRevokedRefused `elem` rTags r) "refused a revoked delegate")
@@ -622,13 +635,58 @@ step cast st = \case
   -- be refused, and what refuses it is the requester's own box: the message
   -- hash agrees too (it follows the letter), but the box is the identity that
   -- survives a rewrap, which is the case the gate is for.
+  -- THREADED BY HAND, because 'keep' and 'refuse' both build from the state
+  -- this function was given: composing them twice built the second answer on
+  -- top of the ORIGINAL state, so the first honour's event never reached the
+  -- model's canon and nothing downstream could see it. What the case is about
+  -- survived that; what it lost is every other invariant's chance to look at
+  -- the event it folded.
+  --
+  -- And the second attempt is an assertion now: it used to record whatever
+  -- happened, so a gate that stopped refusing would have left the run looking
+  -- ordinary.
   StepHonourTwice i ts -> withThread i $ \thr ->
     let req = letterOf (AClose thr Nothing ts)
-        once s = case honourRequest (castOwner cast) (EnvelopeSigner alicePk)
-                        (stView s) (clockOf s) (reqOriginFor req) req of
-                   Right acc -> keep THonour acc
-                   Left e    -> refuse e
-    in once (once st)
+        once s = honourRequest (castOwner cast) (EnvelopeSigner alicePk)
+                   (stView s) (clockOf s) (reqOriginFor req) req
+    in case once st of
+         Left e -> refuse e
+         Right acc ->
+           let s' = keep THonour acc
+           in case once s' of
+                Right _ -> error "one request was honoured twice"
+                Left e  -> s' { stRefused = e : stRefused s' }
+
+  -- THE SAME LETTER TWICE, under two different messages. Canon is public, so
+  -- anybody can lift a signed box out of an event file, wrap it under their own
+  -- envelope key and send it again; 'seenAlready' is what stops that, and it is
+  -- the author box that refuses -- which is why the second send here carries a
+  -- FRESH origin. With the same origin the letter would be caught one gate
+  -- earlier and the case would be about a different rule.
+  StepReplay i ts -> withThread i $ \thr ->
+    let letter = letterOf (AComment thr Nothing (Just "again") Nothing ts)
+        send s o = acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView s)
+                     (clockOf s) o noParts letter
+    in case send st (originOf (stStep st)) of
+         Left e -> refuse e
+         Right acc ->
+           let s' = keep TComment acc
+           in case send s' (originOf (stStep st + 1)) of
+                Right _ -> error "the same letter folded twice"
+                Left e  -> s' { stRefused = e : stRefused s'
+                              , stTags = TReplayRefused : stTags s' }
+
+  -- A LETTER CARRYING AN OP ONLY THE OWNER MAY AUTHOR, which is the shape that
+  -- hands a maintainer a delegation to sign. 'classify' answers OwnerNative and
+  -- the bridge refuses before anything is minted; the script generated no such
+  -- letter at all, so the whole authority half of the gate was reached only by
+  -- the hand-written cases.
+  StepOwnerOp ts ->
+    case acceptLetter (castOwner cast) (EnvelopeSigner alicePk) (stView st)
+           (clockOf st) (originOf (stStep st)) noParts
+           (letterOf (ADelegate repo alicePk ts)) of
+      Right _ -> error "a letter carrying an owner-native op was folded"
+      Left e  -> (refuse e) { stTags = TOwnerOpRefused : stTags st }
 
   StepOwnerSet i ts -> withThread i $ \thr ->
     mint TSet (ASet thr "status" "closed" ts) ts
