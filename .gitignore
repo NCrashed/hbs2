@@ -29,3 +29,4 @@ docs/drafts/*
 !docs/drafts/pep-20-pull-request-model.md
 !docs/drafts/pep-21-triage-moderation.md
 !docs/drafts/pep-22-hub-cli-and-render-contract.md
+!docs/drafts/pep-23-mailbox-relay-work.md
