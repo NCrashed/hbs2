@@ -16,6 +16,8 @@ module HBS2.Hub.CLI.Compose
   , sendLetter
   , sendLetterWith
   , sendPayload
+  , stampsFor
+  , checkReplyChannel
   , attachToLetter
   , issueUsage
   , issueArgs
@@ -40,7 +42,7 @@ import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair
                            ,askingKeyman)
 import HBS2.Hub.Repo.Manifest (sigilFor)
-import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyGone(..))
+import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyReader,PolicyGone(..))
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -142,7 +144,7 @@ sendLetterWith
   -> ReplyChannel
   -> m HashRef
 sendLetterWith ob sender rcpts parts box reply = do
-  checkReplyChannel ob reply
+  checkReplyChannel (loadSigil @HubScheme (obStorage ob)) reply
   sendPayload ob (Left sender) rcpts parts
     (MessageData hubMsgWrite (Letter box reply))
 
@@ -166,10 +168,15 @@ sendLetterWith ob sender rcpts parts box reply = do
 -- 'Nothing' PROCEEDS, matching 'ackTarget' on the other side: a sigil this node
 -- cannot read is not evidence of anything, and the send fails on its own if the
 -- bytes are really missing, which is a better answer than an accusation.
-checkReplyChannel :: MonadUnliftIO m => Outbound -> ReplyChannel -> m ()
+--
+-- TAKES THE SIGIL READER for the reason 'stampsFor' takes the policy one: what
+-- this decides is a refusal a contributor meets, and with the storage inlined
+-- it could only be reached with a peer.
+checkReplyChannel :: MonadUnliftIO m
+                  => (HashRef -> m (Maybe (Sigil HubScheme))) -> ReplyChannel -> m ()
 checkReplyChannel _ NoReply = pure ()
-checkReplyChannel ob (ReplyTo k href) = do
-  named <- sigilNames k <$> loadSigil @HubScheme (obStorage ob) href
+checkReplyChannel sigilAt (ReplyTo k href) = do
+  named <- sigilNames k <$> sigilAt href
   when (named == Just False) $ liftIO $ refuse
     ( show ( "the sender sigil does not name the author key" <> line
                <> "  --author" <+> pretty (AsBase58 k) <> line
@@ -243,7 +250,7 @@ sendPayload ob sender rcpts parts payload = do
   -- already in flight, and it pays" kept whichever stamp arrived first and
   -- dropped the rest -- and a letter to two charging mailboxes reached one of
   -- them. Nothing hostile was involved: it is what this loop sends.
-  stamps <- stampsFor ob msg
+  stamps <- stampsFor (readPolicyWith (obStorage ob) (obMailbox ob)) msg
 
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
   -- discarding that printed a message hash and left with a zero exit having sent
@@ -291,8 +298,15 @@ sendPayload ob sender rcpts parts payload = do
 -- it says so on stderr: the letter still goes, because refusing to send over a
 -- broken policy file on somebody else's peer would be a worse failure than
 -- sending work-free into a mailbox that may want work.
-stampsFor :: MonadUnliftIO m => Outbound -> Message HubScheme -> m [MessageStamp HubScheme]
-stampsFor ob msg = do
+-- TAKES THE POLICY READER, and does not take an 'Outbound'. Everything else
+-- here needs 'createMessage', which needs a storage and a keyman, so no test
+-- can reach it; this one needs the ANSWER, and with the two handles inlined the
+-- whole proof-of-work path could only be run against a peer. Skipping every
+-- grind left the suite green, and what that costs is letters dropped by a hub
+-- for want of work with no signal to the sender.
+stampsFor :: MonadUnliftIO m
+          => PolicyReader m -> Message HubScheme -> m [MessageStamp HubScheme]
+stampsFor policyFor msg = do
 
   -- From the message rather than from the sigils it was built out of: a stamp
   -- is checked against `messageRecipients`, so what it must name is what ended
@@ -301,7 +315,7 @@ stampsFor ob msg = do
                 (unboxSignedBox0 (messageContent msg))
 
   fmap catMaybes $ for (Set.toList rcpts) $ \mbox ->
-    readPolicyWith (obStorage ob) (obMailbox ob) mbox >>= \case
+    policyFor mbox >>= \case
       Left (PolicyNotHere _) -> pure Nothing
       Left e -> do
         liftIO $ saying ( "hbs2-hub: cannot tell what"

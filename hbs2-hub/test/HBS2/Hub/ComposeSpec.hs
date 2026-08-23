@@ -1,7 +1,8 @@
 module HBS2.Hub.ComposeSpec (spec) where
 
-import HBS2.Hub.Types ()
-import HBS2.Hub.CLI.Compose (issueArgs,issueUsage)
+import HBS2.Hub.Types
+import HBS2.Hub.CLI.Compose (issueArgs,issueUsage,stampsFor)
+import HBS2.Hub.CLI.Policy (PolicyReader,PolicyGone(..),withPoW)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
@@ -9,9 +10,18 @@ import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
 import HBS2.Prelude.Plated (Doc,pretty)
 
+import HBS2.Data.Types.SignedBox (makeSignedBox)
+import HBS2.Data.Types.EncryptedBox
+import HBS2.Data.Types.SmallEncryptedBlock
+import HBS2.Peer.Proto.Mailbox
+import HBS2.Peer.Proto.Mailbox.PoW (stampOk)
+import HBS2.Peer.Proto.Mailbox.Policy.Basic (defaultBasicPolicy)
+
 import Data.Config.Suckless
 
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Set qualified as Set
 import Data.List (isInfixOf)
 import Test.Hspec
 
@@ -34,7 +44,7 @@ aKey :: IO HubKeyOf
 aKey = _peerSignPk <$> newCredentials @'HBS2Basic
 
 spec :: Spec
-spec = do
+spec = work >> do
 
   describe "PEP-22 hub issue new: which value is which" $ do
 
@@ -242,3 +252,81 @@ spec = do
       bodyOf' (with [mkStr @C "--body", mkStr @C "-"]) `shouldBe` Just (Just "-")
       -- And it is a value like any other: a flag where it belongs is missing.
       issueArgs (with [mkStr @C "--body", mkStr @C "--label"]) `shouldBe` Nothing
+
+-- | THE WORK A SENDER PAYS, AND WHEN IT PAYS NONE.
+--
+-- `stampsFor` could be made to skip every grind with the suite green, and what
+-- that costs is letters dropped by a hub for want of work with no signal to the
+-- sender (PEP-21 says plainly that the sender gets none). It was unreachable
+-- because it took the storage and the service caller that read the policy; it
+-- takes the READER now, so the whole path runs here with no peer.
+work :: Spec
+work =
+  describe "PEP-21 the work a sender pays before sending" $ do
+
+    -- Three bits, because the test grinds for real: what is asserted is not
+    -- that a stamp object came back but that it satisfies the peer's own
+    -- checker, for THAT mailbox and THAT message.
+    it "solves what a charging mailbox asks, for that mailbox and that message" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox  <- aKey
+      let msg = messageTo creds [mbox]
+      stampsFor (charging 3) msg >>= \case
+        [s]   -> stampOk 3 mbox msg s `shouldBe` True
+        other -> expectationFailure ("expected one stamp, got " <> show (length other))
+
+    -- A stamp is work for ONE mailbox (PEP-21), so a letter to two that charge
+    -- is paid twice, and each stamp names its own.
+    it "pays each charging recipient separately" $ do
+      creds <- newCredentials @'HBS2Basic
+      one <- aKey ; two <- aKey
+      let msg = messageTo creds [one, two]
+      stamps <- stampsFor (charging 2) msg
+      length stamps `shouldBe` 2
+      [ () | s <- stamps, m <- [one, two], stampOk 2 m msg s ] `shouldSatisfy` ((>= 2) . length)
+
+    it "does no work for a mailbox that charges nothing" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox <- aKey
+      let msg = messageTo creds [mbox]
+      fmap length (stampsFor (charging 0) msg) >>= (`shouldBe` 0)
+      -- ...nor for one with no policy at all, which is not the deny/deny
+      -- fallback and charges nothing either way.
+      fmap length (stampsFor (const (pure (Right Nothing))) msg) >>= (`shouldBe` 0)
+
+    -- The ordinary case for a letter addressed to somebody else's hub: this
+    -- peer holds no policy for it, which is no evidence of a charge and not a
+    -- complaint either.
+    it "says nothing about a mailbox this peer does not hold" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox <- aKey
+      let msg = messageTo creds [mbox]
+      fmap length (stampsFor (const (pure (Left (PolicyNotHere mbox)))) msg) >>= (`shouldBe` 0)
+
+    -- And a policy that will NOT read is not a policy that charges nothing:
+    -- the letter still goes -- refusing over a broken file on somebody else's
+    -- peer would be the worse failure -- and the sender is told.
+    it "sends without work over a policy it cannot read" $ do
+      creds <- newCredentials @'HBS2Basic
+      mbox <- aKey
+      let msg = messageTo creds [mbox]
+      fmap length (stampsFor (const (pure (Left PolicyUnparsed))) msg) >>= (`shouldBe` 0)
+
+-- A policy that charges this many bits and says nothing else.
+charging :: Applicative m => PoWDifficulty -> PolicyReader m
+charging d _ = pure (Right (Just (0, withPoW d (defaultBasicPolicy @'HBS2Basic))))
+
+-- A message addressed to these mailboxes. Built by hand rather than through
+-- 'createMessage', which needs a storage and a keyman: what the work is over is
+-- the message's own bytes and the recipient set inside its signed content.
+messageTo :: PeerCredentials 'HBS2Basic -> [HubKey] -> Message 'HBS2Basic
+messageTo creds rcpts =
+  MessageBasic (makeSignedBox @'HBS2Basic (_peerSignPk creds) (_peerSignSk creds) content)
+  where
+    content = MessageContent (MessageFlags1 (MessageTimestamp 0) Nothing Nothing Nothing)
+                (Set.fromList rcpts)
+                (Left (HashRef (hashObject ("a group key" :: ByteString))))
+                mempty
+                (SmallEncryptedBlock (HashRef (hashObject ("gk" :: ByteString)))
+                                     (BS.replicate 24 0x6e)
+                                     (EncryptedBox "not a secretbox"))

@@ -36,6 +36,9 @@ module HBS2.Hub.CLI.Policy
   , policyText
   , readPolicy
   , readPolicyWith
+  , PolicyReader
+  , policyOf
+  , maxPolicyClauses
   , PolicyGone(..)
   , policyGoneCode
   , codeNoPolicy
@@ -228,11 +231,19 @@ readPolicy mbox = do
 -- | The same, for a caller that carries its peer around rather than reaching
 -- for it: 'HBS2.Hub.CLI.Compose.Outbound' holds both of these already, and its
 -- send path has no @HasStorage@ to reach through.
+-- | What a mailbox's policy costs to ask about, as a function.
+--
+-- Named so that the send path can TAKE it rather than take a storage and a
+-- service caller: what 'HBS2.Hub.CLI.Compose.stampsFor' needs is the answer,
+-- and with the two handles inlined into it the whole proof-of-work path could
+-- only be run with a peer. See 'HBS2.Hub.ComposeSpec'.
+type PolicyReader m =
+  HubKey -> m (Either PolicyGone (Maybe (PolicyVersion, BasicPolicy HBS2Basic)))
+
 readPolicyWith :: forall m . MonadUnliftIO m
                => AnyStorage
                -> ServiceCaller MailboxAPI UNIX
-               -> HubKey
-               -> m (Either PolicyGone (Maybe (PolicyVersion, BasicPolicy HBS2Basic)))
+               -> PolicyReader m
 readPolicyWith sto api mbox = runExceptT do
 
   st <- lift (callRpcWaitMay @RpcMailboxGetStatus rpcTimeout api mbox)
@@ -278,16 +289,27 @@ readPolicyWith sto api mbox = runExceptT do
       -- straight into 'parseTop' with no bound of any kind, on a path that runs
       -- per recipient on every send. 'parseTop' is superlinear in the number of
       -- top-level items (see 'scanText' in "HBS2.Hub.Canon"), so the file that
-      -- costs the most is not the biggest one.
-      --
-      -- Unreadable and unparseable stay one answer, deliberately: both mean
-      -- nothing usable was read, and the caller's decision is the same.
-      cs <- either (const (throwError PolicyUnparsed)) pure
-              (clausesWith maxPolicyBytes maxPolicyClauses
-                 (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
-      p <- lift (parseBasicPolicy @HBS2Basic cs)
-             >>= maybe (throwError PolicyUnparsed) pure
+      -- costs the most is not the biggest one. See 'policyOf'.
+      p <- lift (policyOf (Text.decodeUtf8Lenient (LBS.toStrict lbs)))
+             >>= either throwError pure
       pure (Just (sppPolicyVersion spp, p))
+
+-- | A policy file's bytes, as a policy.
+--
+-- SPLIT OUT SO THE BOUNDS ARE REACHABLE. Everything above this needs a storage
+-- and a mailbox service to be called at all, so replacing the two numbers below
+-- with @maxBound@ left the suite green -- and what they bound is 'parseTop',
+-- which is superlinear in the number of top-level forms, on a path that runs
+-- once per recipient on every send.
+--
+-- Unreadable and unparseable stay one answer, deliberately: both mean nothing
+-- usable was read, and the caller's decision is the same. A policy this node
+-- cannot read is one the owner wrote and this node must not guess at.
+policyOf :: MonadUnliftIO m => Text -> m (Either PolicyGone (BasicPolicy HBS2Basic))
+policyOf txt = case clausesWith maxPolicyBytes maxPolicyClauses txt of
+  Left _   -> pure (Left PolicyUnparsed)
+  Right cs -> parseBasicPolicy @HBS2Basic cs
+                <&> maybe (Left PolicyUnparsed) Right
 
 policyEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m

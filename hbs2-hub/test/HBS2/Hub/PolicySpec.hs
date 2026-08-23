@@ -31,7 +31,7 @@ b58 :: HubKey -> String
 b58 = show . pretty . AsBase58
 
 spec :: Spec
-spec = do
+spec = theBound >> do
 
   describe "PEP-21 peer layer: one clause at a time" $ do
 
@@ -200,3 +200,42 @@ spec = do
       with "yes" `shouldBe` Nothing
       with "open" `shouldBe` Nothing
       with "Allow" `shouldBe` Nothing
+
+-- | THE BOUND ON READING A POLICY, which nothing could reach.
+--
+-- `readPolicyWith` needs a storage and a mailbox service to be CALLED, so the
+-- two numbers behind its parser could be replaced with maxBound and the suite
+-- stayed green -- on a path that runs once per recipient on every send, over a
+-- file somebody else published. `policyOf` is the half that decides, split out
+-- so the bound is answerable here.
+theBound :: Spec
+theBound =
+  describe "PEP-21 policy: what a reader will take" $ do
+
+    it "reads a policy a hub would write" $ do
+      k <- aKey
+      let p = withPoW 12 (denying True k (defaultBasicPolicy @'HBS2Basic))
+      policyOf (policyText p) >>= \case
+        Right p' -> policyText p' `shouldBe` policyText p
+        Left e   -> expectationFailure ("would not read: " <> show (pretty e))
+
+    -- Over the clause bound. Refused as unparsed, which is deny/deny: a policy
+    -- this node cannot read is one the owner wrote and this node must not guess
+    -- at. The bound is on the FORMS because parseTop is superlinear in them.
+    it "refuses a policy with more clauses than it will parse" $ do
+      k <- aKey
+      -- Out of a policy this build WRITES, repeated, so that what is refused is
+      -- the count and not the syntax: a fixture of clauses the parser rejects
+      -- anyway would answer PolicyUnparsed with the bound removed and pass for
+      -- the wrong reason.
+      let one = policyText (denying True k (defaultBasicPolicy @'HBS2Basic))
+          copies = maxPolicyClauses `div` Prelude.length (Text.lines one) + 1
+          many' = Text.concat (replicate copies one)
+      -- The fixture really is over the bound and really is well formed.
+      policyOf one >>= \case
+        Right _ -> pure ()
+        Left e  -> expectationFailure ("the fixture itself will not read: " <> show (pretty e))
+      policyOf many' >>= \case
+        Left PolicyUnparsed -> pure ()
+        Left e  -> expectationFailure ("refused for the wrong reason: " <> show (pretty e))
+        Right _ -> expectationFailure "a policy past the clause bound was read"
