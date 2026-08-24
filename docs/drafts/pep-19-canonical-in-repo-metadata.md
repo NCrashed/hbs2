@@ -767,23 +767,35 @@ anywhere declares the version that selects it, and canon is append-only, so
 that is never. The fold is also the one function in this system that two nodes
 may never disagree about, and a selector doubles the surface on which they can.
 
-THE OTHER DIRECTION IS STILL NOT ANSWERED, and this is the honest part. A
-NEWER build folding OLDER canon applies its own rules to it, because that is
-what one rule set means. That is sound only if a bump is designed so that
-applying the new rules to canon written before it changes no outcome, and
-nothing checks that today.
+THE OTHER DIRECTION NOW HAS A RULE RATHER THAN AN ANSWER. A NEWER build
+folding OLDER canon applies its own rules to it, because that is what one rule
+set means. So: **every bump must either leave older canon's outcomes
+unchanged, or raise `hub-min` to itself.** A bump that does neither is the one
+shape this scheme cannot express.
 
-The 1-to-2 step satisfies it by construction: `PartNotProven` can only reach an
-event that names a part, and no v1 event could. The 2-to-3 step is the one to
-look at -- the stamp window is applied unconditionally in `spendable`, so a
-v3 build meeting a v2 tree that holds a box stamped outside the window would
-drop an event the v2 publisher admitted.
+Checked against the two bumps that exist:
 
-Whether any such tree exists is a question about deployment and not about the
-design. What the design owes is the rule, which is now stated: **every bump
-must either leave older canon's outcomes unchanged, or raise `hub-min` to
-itself.** A bump that does neither is the one shape this scheme cannot
-express, and the answer to it is to make it one of the two.
+  - 1 to 2 satisfies it by construction. `PartNotProven` can only reach an
+    event that names a part, and no v1 event could name one.
+
+  - 2 to 3 does not, and it is worth being exact about which half. The SEQ
+    window (`spendable`) admits an out-of-window event and merely declines to
+    move the cursor, reporting `SeqTooFarAhead`; the divergence there is
+    `frMaxSeq` and a line in `hub verify`, not the tracker. The NUMBER window
+    is the one that refuses: an `open` whose number leapt more than
+    `numberStampWindow` above the log is `NumberTooFarAhead`, a drop, and a v2
+    publisher had no such rule.
+
+That second one is unreachable in fact, and the reason is worth recording
+because it expires. No build that writes canon has ever been released --
+`hbs2-hub` is in no tag and in no release's `cabal.project` -- so no tree at
+`hub-meta` 1 or 2 exists outside a working copy. The three versions so far are
+development steps nobody can observe, which is the same thing this document
+says two paragraphs down about the number being free until a writer ships.
+
+So the rule above has not yet been tested by anything. Its first real test is
+the first bump AFTER the first release, and that is the point at which "check
+it against older canon" stops being a formality.
 
 The second is that `hub-meta` moves while the rules do. Changes that would
 normally require a bump (a new drop reason, a change to the signed encoding, a

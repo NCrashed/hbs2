@@ -197,8 +197,15 @@
     an older reader's answer refuses that reader instead of misleading it. The
     price is a flag day per bump of that kind; the price of the alternative is
     two of everything the fold decides, deletable only when no tree anywhere
-    declares the old version, which for append-only canon is never. PEP-19
-    carries the decision and the rule it puts on future bumps.
+    declares the old version, which for append-only canon is never.
+
+    PEP-19 carries the decision and the rule it puts on every future bump:
+    leave older canon's outcomes unchanged, or raise `hub-min` to itself. The
+    1-to-2 step satisfies it by construction; 2-to-3 does not, since an `open`
+    whose number leapt is a drop under the newer rules and was admitted under
+    the older. That is unreachable in fact and the reason expires: no build
+    that writes canon has shipped yet, so no tree at `hub-meta` 1 or 2 exists.
+    The rule's first real test is the first bump after the first release.
 
   - **`hbs2:mailbox:pow-min` becomes a price instead of a switch.** The
     floor decides whether a peer carries a mailbox packet onward. A plain
