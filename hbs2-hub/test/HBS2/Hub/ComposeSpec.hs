@@ -312,7 +312,7 @@ work =
       let msg = messageTo creds [mbox]
       fmap length (stampsFor 0 (const (pure (Left PolicyUnparsed))) msg) >>= (`shouldBe` 0)
 
-    -- PEP-23: the relay floor is a SECOND price, and it answers a
+    -- THE RELAY FLOOR IS A SECOND PRICE, and it answers a
     -- different question. What a mailbox charges decides whether the letter is
     -- stored; what a peer charges decides whether it is carried at all. Before
     -- this, a sender solved only the first, so a letter to a mailbox that

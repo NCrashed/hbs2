@@ -26,8 +26,8 @@
 -- and the predicate language has the Or to express one, but a function that took
 -- a PREDICATE would take one matching more than the caller read. So the caller
 -- names the letters it decided about, and 'deleteNaming' turns that list into as
--- many payloads as a reader will accept -- which since PEP-23 is up to
--- 'maxDeleteTargets' letters per signature instead of one.
+-- many payloads as a reader will accept, which is up to 'maxDeleteTargets'
+-- letters per signature.
 module HBS2.Hub.CLI.Drop
   ( dropMessage
   , dropMessages
@@ -87,11 +87,11 @@ dropMessage mbox msg = dropMessages mbox [msg]
 
 -- | Write the tombstones for a set of letters, or say why there are none.
 --
--- ONE SIGNATURE PER BATCH, not per letter, which is the whole of PEP-23
--- at this end. A reject drops the letter and every rewrapped copy of it, and an
--- inbox sweep drops a page at a time, so the one-per-letter shape this replaced
--- meant one packet flooded to every neighbour per letter, and after step A it
--- would have meant one proof-of-work grind per letter too.
+-- ONE SIGNATURE PER BATCH, not per letter. A reject drops the letter and every
+-- rewrapped copy of it, and an inbox sweep drops a page at a time, so the
+-- one-per-letter shape this replaced meant one packet flooded to every
+-- neighbour per letter -- and, once a delete could carry a stamp, one
+-- proof-of-work grind per letter too.
 --
 -- STOPS AT THE FIRST BATCH THAT FAILS, and reports that batch's answer. The
 -- alternative is to carry on and report the last failure, which would leave the
@@ -121,7 +121,7 @@ dropMessages mbox msgs =
 
       -- What the road out charges, asked once for the whole set rather than per
       -- batch: it is a property of this machine's neighbourhood and does not
-      -- change between two signatures (PEP-23).
+      -- change between two signatures.
       floorD <- relayFloor rpcTimeout api
 
       let send payload = do

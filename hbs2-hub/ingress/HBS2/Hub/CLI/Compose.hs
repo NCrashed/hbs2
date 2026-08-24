@@ -286,7 +286,7 @@ sendPayload ob sender rcpts parts payload = do
 
   pure (HashRef h)
 
--- | What the sender's own peer says a letter must pay to leave (PEP-23).
+-- | What the sender's own peer says a letter must pay to leave.
 --
 -- SILENCE IS ZERO, deliberately. A peer older than this method answers
 -- 'ErrorMethodNotFound', which arrives here as 'Nothing', and so does a peer
@@ -335,7 +335,7 @@ relayFloor t api = do
 -- broken policy file on somebody else's peer would be a worse failure than
 -- sending work-free into a mailbox that may want work.
 --
--- THE RELAY FLOOR IS THE SECOND PRICE (PEP-23), and it answers a
+-- THE RELAY FLOOR IS THE SECOND PRICE, and it answers a
 -- different question from the first: what a mailbox charges decides whether the
 -- letter is STORED, what a peer charges decides whether it is CARRIED. The
 -- floor comes from 'RpcMailboxPoWFloor' and is the sender's own peer plus the
@@ -415,7 +415,7 @@ stampsFor floorD policyFor msg = do
 -- nonce has been found.
 --
 -- TAKES THE UNFORCED SEARCH rather than the thing being paid for, because there
--- are two of those now: a letter and a delete (PEP-23). What the bound
+-- are two of those now: a letter and a delete. What the bound
 -- is about is time, and time does not care which. The difficulty and the
 -- mailbox are still arguments because they are what 'PoWTooHard' has to say.
 solveWithin :: MonadUnliftIO m

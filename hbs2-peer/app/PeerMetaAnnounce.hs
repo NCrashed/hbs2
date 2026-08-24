@@ -68,7 +68,7 @@ mkPeerMeta (PeerConfig syn) recipientClasses = do
               , classOf pa `Set.member` recipientClasses
           ]
 
-    -- THE MAILBOX RELAY FLOOR (PEP-23), and it is here rather than in a
+    -- THE MAILBOX RELAY FLOOR, and it is here rather than in a
     -- new message because a peer's floor is a small number every neighbour
     -- benefits from knowing and nobody needs to ask for twice.
     --

@@ -204,7 +204,7 @@ data MailBoxProtoMessage s e =
   -- stamped message travels only over a path of upgraded peers, and an old one
   -- in the path drops it in silence.
   | SendMessageStamped (Message s) (MessageStamp s)
-  -- | The same delete, carrying a proof of work (PEP-23).
+  -- | The same delete, carrying a proof of work.
   --
   -- APPENDED LAST, and the rule above applies to it in turn: the next
   -- constructor goes below this one, not above it.

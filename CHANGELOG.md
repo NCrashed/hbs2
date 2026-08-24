@@ -170,7 +170,7 @@
 
 ## Changed
 
-  - **PEP-23: `hbs2:mailbox:pow-min` becomes a price instead of a switch.** The
+  - **`hbs2:mailbox:pow-min` becomes a price instead of a switch.** The
     floor decides whether a peer carries a mailbox packet onward. A plain
     message and a delete had no field to carry work in, so they paid a literal
     zero, and any non-zero floor stopped that peer relaying all plain mail and

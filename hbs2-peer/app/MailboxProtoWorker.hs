@@ -467,7 +467,7 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
       -- Предикат разбирается до всякой записи, потому что из него и из бокса
       -- выводится хеш записи, а из него -- маркер «уже влито».
       --
-      -- МНОЖЕСТВО, а не одно сообщение (PEP-23). Разбор один и тот же,
+      -- МНОЖЕСТВО, а не одно сообщение. Разбор один и тот же,
       -- что и на пути слияния, и живёт он там же: 'deleteTargets'. Отказ он уже
       -- назвал -- сколько именно целей допустимо, решает maxDeleteTargets, --
       -- поэтому здесь его передают как есть, а не сводят к одному слову.
@@ -1150,7 +1150,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
         pro <- readTVarIO probe
 
-        -- WHAT THE NEIGHBOURS CHARGE (PEP-23), which is the other half of
+        -- WHAT THE NEIGHBOURS CHARGE, which is the other half of
         -- 'powNotForwarded'. That counter says what THIS peer's floor cost
         -- somebody else; this says what somebody else's floor costs this peer,
         -- and until the number was published there was nothing to read it from.

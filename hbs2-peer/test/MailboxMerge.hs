@@ -34,7 +34,8 @@ mh :: ByteString -> HashRef
 mh = HashRef . hashObject
 
 -- A delete payload that authorises removing exactly one message. A bare leaf,
--- with no spine around it, which is what every delete looked like before PEP-23.
+-- with no spine around it, which is what every delete looked like before a
+-- payload could name a set.
 deleteOf :: HashRef -> DeleteMessagesPayload S
 deleteOf h = DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq h)))
 
@@ -132,7 +133,7 @@ mailboxMergeTests = testGroup "mailbox merge (issue #15)"
       admitDeleted (mailboxOf owner) victim (proofBytes owner bothOf)
         @?= MergeUnsupportedPred
 
-  -- PEP-23: a delete names a SET, spelled with the Or the wire format
+  -- A DELETE NAMES A SET, spelled with the Or the wire format
   -- already had. `hub drop` on a triage queue was one packet, one signature and
   -- (after the stamp) one grind per letter; a set makes it one per batch.
   , testCase "accepts a proof whose set contains the message the entry removes" do

@@ -3,7 +3,7 @@
 -- The two halves are in different packages -- 'PeerMetaAnnounce' writes and
 -- "HBS2.Peer.Proto.PeerMeta" reads -- and the values go through @show@ on one
 -- side and @readMay@ on the other, so nothing but a round trip establishes that
--- a key survives the journey. Until PEP-23 nothing could ask: 'mkPeerMeta'
+-- a key survives the journey. Nothing could ask until recently: 'mkPeerMeta'
 -- lived in @PeerTypes@ and took a 'PeerEnv' it never used, so the only way to
 -- see what a config announces was to run a peer and capture a packet.
 module PeerMetaSpec (peerMetaTests) where
@@ -38,7 +38,7 @@ floorSaid :: String -> Maybe Word8
 floorSaid src = peerMetaNat "mailbox-pow-min" =<< said src
 
 peerMetaTests :: TestTree
-peerMetaTests = testGroup "PEP-23: the relay floor a peer publishes"
+peerMetaTests = testGroup "the relay floor a peer publishes"
 
   [ testCase "a peer that charges nothing says nothing about a floor" do
       -- Absent already means zero to a reader, so publishing "0" would put a

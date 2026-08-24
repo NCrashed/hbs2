@@ -105,10 +105,10 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- on this path. The only trace was a 'debug' line, which an operator running
   -- at the ordinary level never sees.
   --
-  -- SINCE PEP-23 the floor is at least KNOWABLE one hop out: a peer
-  -- publishes it in its meta and 'mailboxRelayFloor' answers what a client must
-  -- pay to leave this machine. A relay further away is still invisible, and
-  -- this counter is still the only thing that says the refusal happened.
+  -- The floor is at least KNOWABLE one hop out: a peer publishes it in its meta
+  -- and 'mailboxRelayFloor' answers what a client must pay to leave this
+  -- machine. A relay further away is still invisible, and this counter is still
+  -- the only thing that says the refusal happened.
   --
   -- A warning per message would be worse than nothing: the floor earns its keep
   -- exactly when a flood is arriving, which is when a line per message is its
@@ -211,7 +211,7 @@ class ForMailbox s => IsMailboxService s a where
                -> MailboxRefKey s
                -> m (Either MailboxServiceError ())
 
-  -- | The least work a message must carry to leave this machine (PEP-23).
+  -- | The least work a message must carry to leave this machine.
   --
   -- The maximum of this peer's own 'mailboxPoWFloor' and the largest floor its
   -- neighbours have published. BOTH HALVES ARE NEEDED and the first is the one
@@ -772,11 +772,10 @@ mailboxProto inner adapter mess = deferred @p do
         -- штамп значит «дальше не понесу».
         --
         -- Что этим НЕ закрыто, честно: при пороге 0 усиление остаётся. Поле под
-        -- штамп теперь есть (PEP-23, ветка ниже), но ограничивает оно
-        -- только тогда, когда порог кто-то поставил; сам дефолт этот шаг не
-        -- трогает и не должен.
+        -- штамп есть (ветка ниже), но ограничивает оно только тогда, когда порог
+        -- кто-то поставил, а дефолт -- ноль.
         takeDeleteWith Nothing box
 
-      -- Тот же delete, но с доказательством работы (PEP-23).
+      -- Тот же delete, но с доказательством работы.
       DeleteMessagesStamped box stamp -> takeDeleteWith (Just stamp) box
 

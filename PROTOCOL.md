@@ -55,8 +55,8 @@ change an existing constructor, and it may not change the shape of any
 payload an existing constructor carries.
 
 This is a real exception to the paragraph above and is written down
-rather than taken quietly: `SendMessageStamped` (PEP-21) and
-`DeleteMessagesStamped` (PEP-23) were both added this way, and pretending
+rather than taken quietly: `SendMessageStamped` and
+`DeleteMessagesStamped` were both added this way, and pretending
 otherwise would leave a re-implementer with a spec the source contradicts.
 
 What makes it safe to allow here and nowhere else:
@@ -277,8 +277,8 @@ is `MailBoxProtoV1` wrapping one of:
 | 1 | `CheckMailbox` | an optional nonce and a mailbox key |
 | 2 | `MailboxStatus` | a peer-signed `MailBoxStatusPayload` |
 | 3 | `DeleteMessages` | an owner-signed `DeleteMessagesPayload` |
-| 4 | `SendMessageStamped` | a `Message` and a `MessageStamp` (PEP-21) |
-| 5 | `DeleteMessagesStamped` | a delete box and a `MessageStamp` (PEP-23) |
+| 4 | `SendMessageStamped` | a `Message` and a `MessageStamp` |
+| 5 | `DeleteMessagesStamped` | a delete box and a `MessageStamp` |
 
 Tags 4 and 5 are the append-only extension described under Stability. A
 `MessageStamp` is `(mailbox key, nonce :: Word64)`, unsigned and

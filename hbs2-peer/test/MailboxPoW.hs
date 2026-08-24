@@ -175,8 +175,8 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- AN UNSTAMPED PACKET PAYS ZERO, which is what the two branches that
         -- carry no stamp -- a plain message and a plain delete -- rely on: at
         -- the default floor of zero they are carried exactly as they always
-        -- were, and any floor an operator set means what they said. Since
-        -- PEP-23 both have a stamped sibling, so a floor prices them
+        -- were, and any floor an operator set means what they said. Both now
+        -- have a stamped sibling, so a floor prices them
         -- rather than stopping them.
         assertBool "an unstamped packet goes at floor zero" (forwardable 0 True 0)
         assertBool "and stops at any floor above it" (not (forwardable 1 True 0))
@@ -251,7 +251,7 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- bytes that will occupy disk.
         messageKey msg @?= HashRef (hashObject @HbSync (serialise msg))
 
-  -- PEP-23: a delete pays too, and everything the message stamp had to
+  -- A DELETE PAYS TOO, and everything the message stamp had to
   -- get right has to be got right again for a different hash.
   , testCase "a delete's work is solved and verified over the same preimage" $ do
       owner <- fst <$> aPeer

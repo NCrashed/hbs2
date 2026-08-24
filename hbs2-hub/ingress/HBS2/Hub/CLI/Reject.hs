@@ -208,9 +208,9 @@ rejectEntries = do
       copies <- copiesOf ig (rjMailbox rj) (rjMessage rj)
 
       -- ONE DELETE FOR THE WHOLE SET, and it used to be one per copy. A delete
-      -- names a set since PEP-23, so a letter arriving under a dozen
-      -- envelopes is a dozen tombstones bought with one signature and one packet
-      -- rather than a dozen of each.
+      -- names a set, so a letter arriving under a dozen envelopes is a dozen
+      -- tombstones bought with one signature and one packet rather than a dozen
+      -- of each.
       --
       -- The peer is silent for the reason 'PeerSilent' says and NOT for the
       -- reason a missing key is, so the three answers keep their own codes.

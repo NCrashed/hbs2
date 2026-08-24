@@ -1,6 +1,6 @@
 {-# Language AllowAmbiguousTypes #-}
 {-# Language UndecidableInstances #-}
--- | The proof-of-work stamp on a mailbox packet (PEP-21, PEP-23).
+-- | The proof-of-work stamp on a mailbox packet (PEP-21).
 --
 -- WHAT IT BOUNDS. An open inbox is @(sender allow all)@, which is anyone
 -- growing the mailbox tree. A stamp makes each DISTINCT message cost work, so
@@ -150,7 +150,7 @@ cheapestFloor xs = minimum (fmap (fromMaybe 0) xs)
 messageKey :: forall s . ForMailbox s => Message s -> HashRef
 messageKey = HashRef . hashObject @HbSync . serialise
 
--- | The identity of a delete: the hash of the signed box (PEP-23).
+-- | The identity of a delete: the hash of the signed box.
 --
 -- What 'messageKey' is for a letter. The same value again names three things:
 -- the work, this peer's routing marker, and the proof block a @Deleted@ entry
@@ -186,7 +186,7 @@ stampBits msg = stampBitsOver @s (messageKey @s msg)
 -- | The same, over whatever the work was solved against.
 --
 -- The one arithmetic, and there is exactly one because a delete pays for a
--- different hash than a letter (PEP-23) and nothing else about the count
+-- different hash than a letter and nothing else about the count
 -- changes. A second copy of these three lines would be a second chance to
 -- disagree about the preimage, which is the value a verifier and a solver have
 -- to agree on down to the byte.
@@ -239,8 +239,8 @@ stampOk d mbox msg st = msMailbox st == mbox && stampBits msg st >= fromIntegral
 -- in two places, and none of the three was reachable by a test: they live
 -- inside the protocol handler, which has no harness.
 --
--- FOUR BRANCHES SINCE PEP-23, which is the reason this had to be a
--- function before that step and not after: a delete gained a stamped form, so
+-- FOUR BRANCHES NOW, since a delete gained a stamped form of its own, which is
+-- the reason this had to become a function before that happened and not after:
 -- the count of places that could disagree grew.
 --
 -- NAMED, because a stamp solved for a mailbox this packet is not addressed to
