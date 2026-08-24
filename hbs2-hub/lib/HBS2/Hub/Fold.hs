@@ -596,7 +596,7 @@ newtype CanonTooNew =
 -- event's seq so the numbering does not shift, and fold the rest -- could then
 -- never run. The gate was moved onto M in the reader ("HBS2.Hub.Repo") and left
 -- standing here, so it kept firing first and the move changed nothing: a tree
--- at @(hub-meta 4) (hub-min 3)@ was refused by a build at 3, which is the exact
+-- at @(hub-meta 2) (hub-min 1)@ was refused by a build at 1, which is the exact
 -- case M exists to admit.
 --
 -- One function because there are two call sites: the reader checks it before
@@ -792,8 +792,8 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
     -- relative to the ones below it is a separate rule and a separate place:
     -- the seq window lives in 'spendable' (out of window is admitted and does
     -- not move the mark) and the number window is the guard below this one (out
-    -- of window is refused). Both are @hub-meta 3@; before it, this comment
-    -- said the gap was a known bound PEP-19 recorded and nothing closed.
+    -- of window is refused). Both are rules of @hub-meta 1@; before they existed
+    -- this comment said the gap was a bound PEP-19 recorded and nothing closed.
     unusable r
       | not numberOK          = Just NumberOnNonOpen
       | ccSeq cc == maxBound  = Just SeqAtTopOfRange
@@ -871,8 +871,8 @@ materializeWith owner rs0 pre = finish (go (sortOn sortKey rs0) st0)
     -- mutiny back out, since a run of files can only creep the cursor by the
     -- window each time.
     --
-    -- AND SO DOES A KEY AUTHORIZED RIGHT NOW, which is the whole of what
-    -- @hub-meta 3@ changed. This branch used to answer 'True' outright, and the
+    -- AND SO DOES A KEY AUTHORIZED RIGHT NOW, which is the whole of what the
+    -- stamp window changed. This branch used to answer 'True' outright, and the
     -- window above was reasoned about as a remedy for a delegation somebody had
     -- already withdrawn -- which is the case where the owner has ALREADY
     -- noticed. A live delegate needed one file at @maxBound - 1@ to strand the
@@ -1312,21 +1312,27 @@ eventParts = fmap ptPart . eventPartRefs
 -- it did understand, gone, with no warning on the writing side and no way back
 -- since canon is append-only.
 --
--- 2 is what 'PartRef' costs, and it costs it per EVENT rather than per repository:
--- a reader of version 1 canon would admit an event this one drops
--- ('PartNotProven') and compute a different event-id for the same letter, so an
--- event that names a part cannot be read by one. An event that names none can,
--- which is most of them and all of them in a tracker nobody has attached
--- anything to.
+-- ONE FOR EVERY SHAPE THIS BUILD WRITES, and that is the answer rather than
+-- the absence of one. It used to answer 2 for an event naming a 'PartRef',
+-- which was the version that shape had been given; the versions were reset to
+-- 1 on 2026-08-24 ('hubMetaVersion'), so every shape this build can write is
+-- readable by every reader of version 1, and this says so.
 --
--- Derived from 'eventPartRefs' rather than from the constructor, because that
--- is the same question and there should not be two answers to it: an @open@
--- with no attachment is readable by a version 1 build and an @open@ with one is
--- not, and the constructor cannot tell them apart.
+-- IT IS NOT DEAD MACHINERY, and deleting it would be the mistake. A tree's
+-- @hub-meta@ is the maximum of what its events NEED ('planCanon'), which is
+-- what stops a repository from being stamped forward by a build that merely
+-- read it: without this the constant went into every commit, so the first
+-- accept by a newer build rewrote @version@ for a canon holding no new event,
+-- and every clone on the older build refused the WHOLE tree -- five hundred
+-- issues it understood perfectly, gone, with no warning on the writing side and
+-- no way back since canon is append-only. That is what the shape is for, and
+-- the next shape older readers cannot decode needs it to be here already.
+--
+-- Take 'eventPartRefs' rather than the constructor when that day comes: an
+-- @open@ with an attachment and one without are different answers, and the
+-- constructor cannot tell them apart.
 metaVersionFor :: AuthorContent -> Word32
-metaVersionFor c
-  | null (eventPartRefs c) = 1
-  | otherwise              = 2
+metaVersionFor _ = 1
 
 eventPartRefs :: AuthorContent -> [PartRef]
 eventPartRefs = \case

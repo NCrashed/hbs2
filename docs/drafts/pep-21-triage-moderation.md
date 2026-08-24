@@ -497,11 +497,12 @@ Publishing a triage ban into canon, which this document leaves as an open
 question, is deferred. It would need a new author-content constructor and an
 admission rule saying who may sign one and what it does, which is a consensus
 change: the deny-list stays loop state until some `hub-meta` bump carries one.
-This was once written as "the earliest is `hub-meta 2`", and 2 and 3 have both
-come and gone without it, which is the argument for naming no number: a
-deferral pinned to the next version reads as a plan the moment that version
-ships for another reason. Recorded here so that nothing plans around a clause
-that does not exist.
+This was once written as "the earliest is `hub-meta 2`", and 2 and 3 both came
+and went without it -- and were then reset away entirely (PEP-19, 2026-08-24),
+which is the argument for naming no number twice over: a deferral pinned to the
+next version reads as a plan the moment that version ships for another reason,
+and the version it was pinned to no longer exists. Recorded here so that
+nothing plans around a clause that does not exist.
 
 Which of the five a refusal gets depends on WHERE it was raised, not on what it
 says. Honouring a request runs every check twice, once over what the letter

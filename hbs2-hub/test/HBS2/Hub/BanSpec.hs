@@ -1,9 +1,10 @@
 -- | The triage deny-list (PEP-21 "Deny-lists").
 --
 -- The layer that decides what enters canon, and the one thing here that is
--- deliberately NOT canon: PEP-21 defers a published ban to hub-meta 2, so this
--- is local, unsigned state. What can be asked of it is what it holds, what it
--- refuses to read, and who it lets through.
+-- deliberately NOT canon: PEP-21 defers a published ban to some future
+-- @hub-meta@ bump and names no number for it, so this is local, unsigned
+-- state. What can be asked of it is what it holds, what it refuses to read,
+-- and who it lets through.
 module HBS2.Hub.BanSpec (spec) where
 
 import HBS2.Hub.Types (HubKey)

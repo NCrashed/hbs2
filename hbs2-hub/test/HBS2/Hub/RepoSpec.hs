@@ -873,12 +873,13 @@ spec = eventVersions >> do
         cw <- either (fail . show) pure (planCanon Nothing (const Nothing) [(p, ev)] [])
         verOf cw `shouldBe` [renderMeta (metaAt hubMetaMin)]
 
-      -- What each EVENT needs is still a per-event question, and the floor
-      -- masking it in the tree is not the same as it having gone away: the next
-      -- rules bump above the floor is read off exactly this function. 2 is what
-      -- a PartRef costs, because a version 1 reader would admit an event a
-      -- version 2 reader drops and compute a different event-id for one letter.
-      it "still reads a part-naming event as needing more than one" $ do
+      -- What each EVENT needs is still a per-event question, and the shape that
+      -- asks it has to stay whatever the answer is today. Every shape this
+      -- build writes is readable by a version 1 reader since the reset
+      -- (2026-08-24), so the answer is 1 for all of them -- and the tree's
+      -- version being the MAXIMUM over its events is what stops a repository
+      -- from being stamped forward by a build that merely read it.
+      it "reads every shape this build writes as needing version one" $ do
         owner <- kp
         alice <- kp
         let repo = fst owner
@@ -887,7 +888,10 @@ spec = eventVersions >> do
             plain = AOpen repo HubIssue "an issue" [] (Just "body") Nothing Nothing 1000
             named = AOpen repo HubIssue "an issue" [] Nothing (Just part) Nothing 1000
         metaVersionFor plain `shouldBe` 1
-        metaVersionFor named `shouldBe` 2
+        -- Including the one that used to answer 2: the part proof is a rule of
+        -- version 1 now, so an event naming a part is not a reason to raise a
+        -- tree's version above one.
+        metaVersionFor named `shouldBe` 1
 
       -- And NEVER below what the tree already said: a version is a floor a
       -- reader has to meet, so lowering it would tell an older build it may
@@ -905,7 +909,7 @@ spec = eventVersions >> do
         cw <- either (fail . show) pure (planCanon (Just ahead) (const Nothing) [(p, ev)] [])
         verOf cw `shouldBe` [renderMeta (metaAt ahead)]
 
-      -- The floor in the other direction, which is what @hub-meta 3@ needed: a
+      -- The floor in the other direction, which is what a tree-wide rule needs: a
       -- rule that is tree-wide rather than per-event means no reader below it
       -- can be trusted with ANY tree, so a declaration below it is raised
       -- rather than kept. Without this a tree holding nothing but events every

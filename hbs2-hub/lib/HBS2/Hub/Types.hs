@@ -950,19 +950,28 @@ usablePartSecret (PartSecret bs) = BS.length bs == (typicalKeyLength :: Int)
 -- A reader that meets a higher one reports it rather than folding. Any change
 -- to the admission rules, to the drop reasons, or to how state is derived from
 -- an admitted event bumps this.
--- 2 since PEP-18's 'PartRef': the parts an event names carry a proof now, which
--- is both a new drop reason ('PartNotProven') and a different encoding for
--- @body-part@ and @bundle-part@. A reader of version 1 canon would admit an
--- event this one drops and compute a different event-id for the same letter, so
--- the two cannot be told apart by anything smaller than this number.
 --
--- 3 is the stamp window ('seqStampWindow', 'numberStampWindow'): a canon box
--- may no longer claim a position arbitrarily far above the log it sits in. That
--- one is TREE-WIDE rather than per-event, which is why it also raises
--- 'hubMetaMin' -- see there for why a reader that disagrees about it does not
--- merely lag behind, it forks.
+-- ONE, AND RESET TO ONE ON 2026-08-24 FROM THREE. It had been bumped twice
+-- during development -- once for PEP-18's part proof, once for the stamp
+-- window -- and both bumps were free, because a version number costs something
+-- only once a tree somebody else might read has been written under it. No
+-- build that writes canon has been released: @hbs2-hub@ is in no tag and in no
+-- released @cabal.project@, so no tree at 1, 2 or 3 exists outside a working
+-- copy. The three numbers recorded development steps nobody could observe, and
+-- carrying them would have meant carrying a compatibility story with no
+-- counterpart -- including one bump (the stamp window) that a newer build
+-- applies to older canon and would answer differently about.
+--
+-- What the bumps were FOR is not lost and is not here: the part proof is
+-- explained at 'PartNotProven' and in PEP-18, the windows at 'seqStampWindow'
+-- and 'numberStampWindow'. Both are rules of version 1 now, which is what they
+-- would have been had they existed on the day this file was written.
+--
+-- THIS IS AVAILABLE EXACTLY ONCE. The first release that ships a writer freezes
+-- the number, and every change after that pays the full price: PEP-19 says so
+-- and this is the last moment it is true.
 hubMetaVersion :: Word32
-hubMetaVersion = 3
+hubMetaVersion = 1
 
 -- | The lowest reader that still produces a SOUND view of what this build
 -- writes: the @(hub-min M)@ of the @version@ file.
@@ -986,15 +995,15 @@ hubMetaVersion = 3
 -- A second CLAUSE and not a second atom, and that is the only extension the
 -- @version@ file has: @parseMeta@ selects a clause by name and tolerates ones it
 -- does not know, while a clause of the wrong arity is refused, so
--- @(hub-meta 3 2)@ would make the tree unreadable to every build that exists.
+-- @(hub-meta 1 2)@ would make the tree unreadable to every build that exists.
 -- Free to add now, impossible to retrofit into readers that have shipped.
 --
--- 3, and the 2-to-3 step is the first one that had to raise it. The stamp
--- window changes @frMaxSeq@ for a tree holding a canon box stamped far above
--- its neighbours, and @frMaxSeq@ IS the cursor: two maintainers on either side
--- of the change would mint from different positions and their canons would not
--- be equivalent. That is not one reader lagging, it is a fork, and a fork is
--- what this number exists to refuse.
+-- 1, with 'hubMetaVersion', and it has never usefully been anything else: see
+-- there for the reset. The kind of change that raises this is the kind the
+-- stamp window was -- it moves @frMaxSeq@, which IS the cursor, so two
+-- maintainers on either side would mint from different positions and their
+-- canons would not be equivalent. That is not one reader lagging, it is a fork,
+-- and a fork is what this number exists to refuse.
 --
 -- ALSO THE FLOOR ON WHAT MAY BE WRITTEN, which is the same fact from the other
 -- side and is why 'planCanon' reads this rather than a constant of its own: if
@@ -1014,11 +1023,16 @@ hubMetaVersion = 3
 -- newer build folds OLDER canon under its own rules too, so every bump must
 -- either leave older canon's outcomes unchanged or raise this number to itself.
 hubMetaMin :: Word32
-hubMetaMin = 3
+hubMetaMin = 1
 
 -- | The version of a single event file: the @(hub-event N)@ of PEP-19.
+--
+-- 1, and reset with 'hubMetaVersion' for the same reason: it had been bumped to
+-- 2 for the part proof's encoding, and no file written under either number
+-- exists outside a working copy. A reader reports this and obeys nobody, so it
+-- is the cheaper of the two to move -- which is not a reason to move it twice.
 hubEventVersion :: Word32
-hubEventVersion = 2
+hubEventVersion = 1
 
 -- | The highest @folded-ts@ canon admits: 2100-01-01T00:00:00Z in epoch
 -- milliseconds.

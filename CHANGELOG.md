@@ -170,6 +170,30 @@
 
 ## Changed
 
+  - **`hbs2-hub`: the canon versions are reset to 1.** `hub-meta`, `hub-min`
+    and `hub-event` had reached 3, 3 and 2 during development. Every one of
+    those bumps was free, because a version number costs something only once a
+    tree somebody else might read has been written under it -- and none had
+    been: `hbs2-hub` is in no tag and in no released `cabal.project`, so no
+    canon at any of those versions exists outside a working copy.
+
+    What it buys beyond tidiness: the 2-to-3 step was the one bump that broke
+    the rule PEP-19 now puts on every bump (leave older canon's outcomes
+    unchanged, or raise `hub-min` to itself). A newer build folding a v2 tree
+    would drop an `open` whose number leapt, which the v2 publisher admitted.
+    Resetting removes the only instance rather than documenting it forever, and
+    canon being append-only there would have been no other way out.
+
+    Every rule those bumps introduced is still here and still enforced -- the
+    part proof, the seq window, the number window -- as rules of version 1. So
+    is the machinery for a future bump: `metaVersionFor` answers 1 for every
+    shape this build writes and stays, because a tree's version being the
+    maximum of what its events need is what stops a repository from being
+    stamped forward by a build that merely read it.
+
+    **This was available exactly once and is now spent.** The first release
+    that ships a writer freezes these numbers.
+
   - **`hbs2-hub`: the canon version floor was never consulted.** PEP-19 gives a
     canon tree two numbers: `(hub-meta N)`, the rules it was written under, and
     `(hub-min M)`, the lowest reader its writer says is still sound about it.

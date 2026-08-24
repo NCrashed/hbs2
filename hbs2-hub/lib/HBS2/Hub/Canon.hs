@@ -209,12 +209,17 @@ renderEvent = renderEventAt Nothing
 -- | The same, writing a version the caller already knows this file had.
 --
 -- WHAT COMPACTION MUST NOT INVENT. Every retained file is re-rendered through
--- here, and with the version taken from this build's constant that erased the
--- only record a tree keeps of having been written under two rule sets: a file
--- declaring @(hub-event 1)@ came back declaring 2, so a reader could no longer
--- tell an old event from a new one, and the one verb that rewrites files was
--- the one that destroyed the evidence. The clause has no consumer yet, which is
--- exactly why it must survive until it does: it cannot be recovered afterwards.
+-- here, and with the version taken from this build's constant it would erase
+-- the only record a tree keeps of which rules each file was written under: a
+-- file declaring an older @(hub-event N)@ would come back declaring this
+-- build's, so a reader could no longer tell an old event from a new one, and
+-- the one verb that rewrites files would be the one that destroyed the
+-- evidence.
+--
+-- Every number is 1 today ('hubEventVersion'), so nothing is being carried yet
+-- and the argument reads as hypothetical. It is not: the clause cannot be
+-- recovered after the fact, so the machinery has to be right before the first
+-- file exists that needs it, not after.
 --
 -- 'Nothing' is a freshly minted event, which is written under this build's
 -- rules and says so.

@@ -553,15 +553,17 @@ versionPath = "version"
 -- 'hubMetaVersion' and nothing else looks at it.
 --
 -- AND THE FOLD IS NOT PARAMETERIZED BY IT, which this used to say was merely
--- not yet true. The rules have forked since ('seqStampWindow' at @hub-meta 3@)
--- and the fold still takes no version: a tree declaring 1 is folded under the
--- rules this build implements, not the ones it was written under. That is the
--- deliberate direction. The two rule sets differ only on a canon box stamped
--- far above the log it sits in, which is a file nobody should have written, and
--- a build that answered such a file by the older rules would strand its own
--- cursor to be faithful to them. Reading strictly is not a downgrade; folding
--- an old tree under old rules WOULD be, since the older rules are the ones with
--- the hole in them.
+-- not yet true and which is now the decision (2026-08-24, PEP-19): one rule
+-- set, the build's own, and a tree it cannot fold soundly is refused rather
+-- than folded under somebody else's rules. So a tree that declares 1 is folded
+-- under the rules this build implements, not the ones it was written under.
+--
+-- Reading an old tree strictly is not a downgrade. Where two rule sets would
+-- differ is on a file nobody should have written -- a canon box claiming a
+-- position the log cannot reach -- and a build faithful to the older rules
+-- there would strand its own cursor to be so. What that direction owes instead
+-- is a rule on future bumps, and PEP-19 states it: leave older canon's outcomes
+-- unchanged, or raise 'hubMetaMin' to itself.
 assumedMetaVersion :: Word32
 assumedMetaVersion = 1
 

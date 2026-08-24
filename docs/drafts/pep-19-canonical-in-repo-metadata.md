@@ -679,8 +679,8 @@ The tree under a `refs/hbs2/meta` commit:
 
 ```
 /
-  version                      ; exactly "(hub-meta 2)\n", a clause like every
-                               ;   other one in this tree
+  version                      ; exactly "(hub-meta 1)\n(hub-min 1)\n", clauses like
+                               ;   every other one in this tree
   threads/
     <thread-id>/
       00000000000000000042-<event-id>   ; name = seq zero-padded to 20 digits + "-" + event-id
@@ -786,23 +786,52 @@ Checked against the two bumps that exist:
     `numberStampWindow` above the log is `NumberTooFarAhead`, a drop, and a v2
     publisher had no such rule.
 
-That second one is unreachable in fact, and the reason is worth recording
-because it expires. No build that writes canon has ever been released --
-`hbs2-hub` is in no tag and in no release's `cabal.project` -- so no tree at
-`hub-meta` 1 or 2 exists outside a working copy. The three versions so far are
-development steps nobody can observe, which is the same thing this document
-says two paragraphs down about the number being free until a writer ships.
+That second one was unreachable in fact, and checking why led to the reset
+below. No build that writes canon has ever been released -- `hbs2-hub` is in
+no tag and in no release's `cabal.project` -- so no tree at `hub-meta` 1, 2 or
+3 existed outside a working copy.
 
 So the rule above has not yet been tested by anything. Its first real test is
 the first bump AFTER the first release, and that is the point at which "check
 it against older canon" stops being a formality.
 
+DONE 2026-08-24: THE VERSIONS ARE RESET TO 1
+--------------------------------------------
+
+`hub-meta`, `hub-min` and `hub-event` are all 1 again. They had reached 3, 3
+and 2 during development, and every one of those bumps was free for the reason
+this document gives two paragraphs down: the number costs something only once a
+tree somebody else might read has been written under it, and none had been.
+
+What that bought, beyond tidiness. The 2-to-3 step is the one bump that broke
+the rule stated just above -- a newer build folding older canon would drop an
+`open` the older publisher admitted -- and it broke it in a way nothing could
+repair afterwards, since canon is append-only. Resetting removes the only
+instance of the problem rather than documenting it forever.
+
+What it did not remove. Every rule those bumps introduced is still here and
+still enforced: the part proof (PEP-18), the seq window and the number window.
+They are rules of version 1 now, which is what they would have been had they
+existed on the day the first line of this was written. The reasoning for each
+lives beside the code that implements it.
+
+The machinery for a future bump is untouched and must stay that way.
+`metaVersionFor` answers 1 for every shape this build writes and is not
+therefore dead: a tree's `hub-meta` is the MAXIMUM of what its events need, and
+that is what stops a repository from being stamped forward by a build that
+merely read it. `renderEventAt` still carries a file's own version through
+compaction rather than restamping it, for the same reason.
+
+THIS WAS AVAILABLE EXACTLY ONCE, and it is now spent. The first release that
+ships a writer freezes these numbers; after that the only way out of a bad bump
+is the flag day.
+
 The second is that `hub-meta` moves while the rules do. Changes that would
 normally require a bump (a new drop reason, a change to the signed encoding, a
 new admission rule) are cheap only because no canon exists yet, which is true
 and has an expiry: the number is free only until something writes a tree
-somebody else might read. It is 2 as of PEP-18's part proof, which was all
-three of those at once. The first release that ships a writer freezes it, and
+somebody else might read. It reached 3 and was reset to 1 on that reasoning
+(above); it is 1 today. The first release that ships a writer freezes it, and
 every change after that pays the full price.
 
 Ordering:
@@ -1445,11 +1474,11 @@ file at a `seq` that is nonetheless taken, handing it out again puts two events
 there, and no ill intent is needed. Such a `seq` came from a cursor, so it is
 always within a step or two of one.
 
-Applying the window ONLY to a withdrawn key, which is what `hub-meta 2` did,
-bounds the case where the owner has already noticed and leaves the one where
-they have not: a delegate whose delegation still stands needs a single file at
-`maxBound - 1` to strand the cursor for good, and the entry point the owner
-would answer it with is gated on the same cursor. Under `hub-meta 3` the window
+Applying the window ONLY to a withdrawn key, which is what an earlier draft of
+this rule did, bounds the case where the owner has already noticed and leaves
+the one where they have not: a delegate whose delegation still stands needs a
+single file at `maxBound - 1` to strand the cursor for good, and the entry
+point the owner would answer it with is gated on the same cursor. The window
 applies to every authorized key. A bound that only takes effect after the harm
 is noticed is not a bound.
 
