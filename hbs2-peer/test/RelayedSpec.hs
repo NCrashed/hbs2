@@ -5,7 +5,8 @@
 -- forwarded once, a different message is a different fact, and the memory
 -- cannot grow without bound.
 --
--- The last one is why this replaced a block. The old marker was a block whose
+-- The last one is why this replaced a block. Four protocols gossip and all
+-- four asked the block store; the old marker was a block whose
 -- address a stranger could compute and whose bytes a stranger could serve, so
 -- "already forwarded" was writable by whoever wanted a letter stopped; and it
 -- was never collected, so the store grew by one block per distinct message
@@ -15,9 +16,9 @@
 -- which is what lets the rollover be watched with eight hashes instead of
 -- sixty-five thousand. The real constant is exercised by one case below, so
 -- that a value the peer could not actually hold would still be caught.
-module MailboxRelayedSpec (tests) where
+module RelayedSpec (tests) where
 
-import HBS2.Peer.Proto.Mailbox.Relayed
+import HBS2.Peer.Proto.Relayed
 
 import HBS2.Hash
 import HBS2.Data.Types.Refs (HashRef(..))

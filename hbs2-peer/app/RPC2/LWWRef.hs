@@ -64,7 +64,15 @@ instance LWWRefContext m => HandleMethod m RpcLWWRefUpdate where
 
     let penv = rpcPeerEnv co
 
-    let nada = LWWRefProtoAdapter dontHandle
+    -- ALWAYS RELAY on this path, and it is not the same question the network
+    -- path asks. This is the owner saying "publish this" over the RPC, so
+    -- suppression would be suppressing the operator: the relay memory exists to
+    -- stop a packet looping through a graph with cycles, and nothing here looped.
+    --
+    -- It also fixes what asking the block store did: that answered "already
+    -- have these bytes" for a re-publication of an unchanged value, so
+    -- `lwwref set` of the value the peer already held announced nothing.
+    let nada = LWWRefProtoAdapter dontHandle (const (pure True))
 
     void $ runMaybeT do
       (puk, _) <- unboxSignedBox0 box & toMPlus

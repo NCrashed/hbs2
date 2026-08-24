@@ -35,7 +35,7 @@ import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Merge
 import HBS2.Peer.Proto.Mailbox.Nonce
-import HBS2.Peer.Proto.Mailbox.Relayed
+import HBS2.Peer.Proto.Relayed
 import HBS2.Peer.Proto.Mailbox.PolicyCache
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
@@ -184,7 +184,7 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- | What this peer has already put back on the wire, so that gossip does
     -- not circulate a message for as long as the graph has cycles. In memory
     -- and bounded by count; it used to be a block whose address a stranger
-    -- could compute, see "HBS2.Peer.Proto.Mailbox.Relayed".
+    -- could compute, see "HBS2.Peer.Proto.Relayed".
   , mpwRelayed            :: Relayed
     -- | The parsed policy for each hosted mailbox, keyed by the hash it was
     -- parsed from, so a policy change invalidates it by not matching. Reading

@@ -27,6 +27,7 @@ import HBS2.Net.PeerLocator
 import HBS2.Peer.Proto
 import HBS2.Peer.Proto.RefChan qualified as R
 import HBS2.Peer.Proto.RefChan.Adapter
+import HBS2.Peer.Proto.Relayed
 import HBS2.Net.Proto.Notify
 import HBS2.Peer.Proto.Mailbox
 import HBS2.OrDie
@@ -988,12 +989,19 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   addProbe rcwProbe
   refChanWorkerEnvSetProbe rce rcwProbe
 
+  -- ONE MEMORY PER PROTOCOL and not one shared between them: the bound is a
+  -- count of distinct packets, so a protocol carrying a flood would otherwise
+  -- age another protocol's entries out and have it forward the same packet
+  -- twice. See "HBS2.Peer.Proto.Relayed".
+  refChanRelayed <- newRelayed
+
   let refChanAdapter =
         RefChanAdapter
         { refChanOnHead = refChanOnHeadFn rce
         , refChanSubscribed = isPolledRef @e brains "refchan"
         , refChanWriteTran = refChanWriteTranFn rce
         , refChanValidatePropose = refChanValidateTranFn @e rce
+        , refChanRelayOnce = relayOnce refChanRelayed
         -- TODO: inject-refchanUpdateNotifyCallback
         , refChanNotifyRely = \r u -> do
            trace "refChanNotifyRely!"
@@ -1217,7 +1225,12 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                         again
 
 
-              let lwwRefProtoA = lwwRefProto (LWWRefProtoAdapter { lwwFetchBlock = download })
+              lwwRelayed <- newRelayed
+
+              let lwwRefProtoA = lwwRefProto (LWWRefProtoAdapter
+                                                { lwwFetchBlock = download
+                                                , lwwRelayOnce  = relayOnce lwwRelayed
+                                                })
                    where download h = liftIO $ withPeerM env $ addDownload @e Nothing h
 
               flip runContT pure do

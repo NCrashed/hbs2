@@ -272,7 +272,10 @@ refChanUpdateProto self pc adapter msg = do
 
     debug $ "RefchanUpdate: ALREADY" <+> pretty h0
 
-    guard =<< liftIO (hasBlock sto h0 <&> isNothing)
+    -- ЭТОТ ПИР, А НЕ ХРАНИЛИЩЕ: то же самое, что и в RefChanNotify, и по той
+    -- же причине. Хеш считается от пакета, который прислал чужой, значит и
+    -- ответ на «уже видели?» мог подсадить чужой. См. "HBS2.Peer.Proto.Relayed".
+    guard =<< lift (refChanRelayOnce adapter (HashRef h0))
 
     case msg of
      Propose chan box -> do

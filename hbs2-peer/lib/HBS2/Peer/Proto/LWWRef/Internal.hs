@@ -32,6 +32,10 @@ import Data.Maybe
 data LWWRefProtoAdapter e m =
   LWWRefProtoAdapter
   { lwwFetchBlock :: Hash HbSync -> m ()
+    -- | Should this peer put this update back on the wire now? See
+    -- "HBS2.Peer.Proto.Relayed", and the call site for what asking the block
+    -- store instead cost.
+  , lwwRelayOnce  :: HashRef -> m Bool
   }
 
 lwwRefProto :: forall e s m proto . ( MonadIO m
@@ -81,7 +85,18 @@ lwwRefProto adapter pkt@(LWWRefProto1 req) = do
         let bs = serialise box
         let h0  = hashObject @HbSync bs
 
-        new <- hasBlock sto h0 <&> isNothing
+        -- THIS PEER, NOT THE STORE. This asked `hasBlock sto h0`, and h0 is the
+        -- hash of the signed box off the wire, so the answer was one a stranger
+        -- could plant: put those bytes on the peers ahead of an update and the
+        -- update stops being relayed by them, silently.
+        --
+        -- The store answer was ALSO wrong for an honest reason, which is what
+        -- made it look right: this peer stores that same box below as the ref's
+        -- value, so once it holds the ref it never gossips the update again --
+        -- conflating "I have relayed this" with "I hold these bytes". They are
+        -- different questions and only the first one is this peer's to answer.
+        -- See "HBS2.Peer.Proto.Relayed".
+        new <- lift $ lwwRelayOnce adapter (HashRef h0)
 
         when new do
           lift $ gossip pkt

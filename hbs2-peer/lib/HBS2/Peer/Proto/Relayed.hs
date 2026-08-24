@@ -5,17 +5,23 @@
 -- circulates for as long as the graph has cycles. The question it answers is
 -- "have WE relayed this", which is a fact about this process and nothing else.
 --
--- WHY IT IS NOT A BLOCK, which is why this module exists. The answer used to
--- be the presence of a block at @hashObject (serialise (RoutedEntry h))@, where
--- @h@ is the hash of a message anybody can read off the wire. So the marker's
--- address was computable by a stranger, and the store it lived in is content
--- addressed and fetched on demand -- which means a stranger could put it there
--- (see the header of @MailboxMerged@ for the delivery route, which is the same
--- one). Planting it on the peers between a sender and a hub kept a chosen
--- letter from ever being forwarded, and nothing said so.
+-- WHY IT IS NOT A BLOCK, which is why this module exists. Every protocol that
+-- gossips wrote this rule as "the store does not hold @hashObject (serialise
+-- packet)@", where the packet is something a stranger sends and can therefore
+-- hash BEFORE sending. The store is content addressed and fetched on demand, so
+-- that stranger can put the block themselves and make the gate answer "already
+-- seen" for a packet nobody has handled. Planted on the peers between a sender
+-- and its destination, it stops a chosen packet from ever being forwarded, and
+-- nothing says so. The block is also never deleted, which is the leak beside it.
 --
--- The general rule again, because this is its second instance: the presence of
--- a block in a GLOBAL content-addressed store cannot carry a LOCAL decision.
+-- THE GENERAL RULE: the presence of a block in a GLOBAL content-addressed store
+-- cannot carry a LOCAL decision. "Do I hold these bytes" is a question about
+-- the network and anybody may change its answer; "have I handled this" is a
+-- question about this process and nobody else may.
+--
+-- FOUR PROTOCOLS ASK IT, which is why this is here and not inside one of them:
+-- the mailbox (where it was fixed first), refchan notify, refchan update and
+-- LWWRef. They had four copies of the wrong answer.
 --
 -- BOUNDED BY COUNT, not by time, and not unbounded as the block marker was
 -- (which is the @$class: leak@ that stood beside it). Two generations: entries
@@ -31,7 +37,7 @@
 -- is forwarded again. That buys an attacker nothing -- re-sending a message
 -- they already hold costs them exactly what sending a new one costs -- and the
 -- alternative, remembering every message forever, is the leak.
-module HBS2.Peer.Proto.Mailbox.Relayed
+module HBS2.Peer.Proto.Relayed
   ( Relayed
   , relayGeneration
   , newRelayed

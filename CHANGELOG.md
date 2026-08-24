@@ -168,6 +168,33 @@
     A drift on either side is a refusal, or a failing test -- the literal
     text is pinned from both packages.
 
+## Security
+
+  - **A stranger could silence a refchan or an LWWRef packet by planting one
+    block.** Three protocols decided "have I already relayed this?" by asking
+    whether the block store held `hashObject (serialise packet)` --
+    `refChanNotifyProto`, `refChanUpdateProto` and `lwwRefProto`. The hash is
+    over a packet a stranger sends, so they can compute it before sending, put
+    the block themselves, and have the gate answer "already seen" for a packet
+    nobody has handled. Planted on the peers between a sender and its
+    destination, a chosen notify, refchan update or ref announcement stops being
+    forwarded, permanently and with nothing said. The block was never deleted
+    either, which is one block per distinct packet, forever.
+
+    The mailbox had the same defect and was fixed first; its relay memory --
+    process-local, keyed by the packet, bounded by count over two generations --
+    is now `HBS2.Peer.Proto.Relayed` and all four protocols use it. The general
+    rule, stated there: the presence of a block in a GLOBAL content-addressed
+    store cannot carry a LOCAL decision.
+
+    Two `hasBlock` calls in the same protocols are not this shape and stay:
+    waiting for a Propose to arrive, and asking a block's size to announce it.
+    Both are questions about the network, which is what the store can answer.
+
+    Repaired along the way: `hbs2-peer lwwref` over RPC re-publishing a value
+    the peer already held announced nothing, because the store said it had the
+    bytes. An explicit publish now publishes.
+
 ## Changed
 
   - **`hbs2-hub`: the canon versions are reset to 1.** `hub-meta`, `hub-min`

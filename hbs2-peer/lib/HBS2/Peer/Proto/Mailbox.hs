@@ -70,7 +70,7 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- It answers a question about THIS PROCESS, which is why it is a method here
   -- rather than a lookup in the block store, where it used to live and where a
   -- stranger could plant the answer. See
-  -- "HBS2.Peer.Proto.Mailbox.Relayed".
+  -- "HBS2.Peer.Proto.Relayed".
   mailboxRelayOnce      :: forall m . MonadIO m => a -> HashRef -> m Bool
 
   -- | Is this nonce one we issued for this mailbox, recently?
@@ -343,7 +343,7 @@ mailboxProto inner adapter mess = deferred @p do
           -- качает по запросу -- значит чужой мог подсадить отметку на пиров
           -- между отправителем и хабом, и выбранное письмо переставало
           -- пересылаться, молча. И он никогда не удалялся, что и был соседний
-          -- $class: leak. См. заголовок "HBS2.Peer.Proto.Mailbox.Relayed".
+          -- $class: leak. См. заголовок "HBS2.Peer.Proto.Relayed".
           when relay do
             fresh <- lift $ mailboxRelayOnce @s adapter h
 

@@ -169,7 +169,7 @@ library
       HBS2.Peer.Proto.Mailbox.Entry
       HBS2.Peer.Proto.Mailbox.Merge
       HBS2.Peer.Proto.Mailbox.Nonce
-      HBS2.Peer.Proto.Mailbox.Relayed
+      HBS2.Peer.Proto.Relayed
       HBS2.Peer.Proto.Mailbox.PolicyCache
       HBS2.Peer.Proto.Mailbox.Ref
       HBS2.Peer.Proto.Mailbox.Policy
@@ -217,7 +217,7 @@ test-suite test
         MailboxMergedSpec
         MailboxQueue
         MailboxQueueSpec
-        MailboxRelayedSpec
+        RelayedSpec
         MailboxPolicyCacheSpec
         MessageParts
         HttpListen

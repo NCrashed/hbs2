@@ -73,7 +73,13 @@ refChanNotifyProto self adapter msg@(Notify rchan box) = do
 
     deferred @proto do
 
-      guard =<< liftIO (hasBlock sto h0 <&> isNothing)
+      -- ЭТОТ ПИР, А НЕ ХРАНИЛИЩЕ. Здесь стояло `hasBlock sto h0`, где h0 --
+      -- хеш пакета, видного на проводе: чужой считает его до отправки, кладёт
+      -- блок, и гейт отвечает «уже видели» про пакет, который никто не
+      -- обрабатывал. Выбранный notify замолкает на всех пирах, куда чужой
+      -- дотянулся, и никто об этом не узнаёт. Плюс блок не удалялся никогда.
+      -- См. "HBS2.Peer.Proto.Relayed".
+      guard =<< lift (refChanRelayOnce adapter (HashRef h0))
 
       (authorKey, bs) <- MaybeT $ pure $ unboxSignedBox0 box
 
