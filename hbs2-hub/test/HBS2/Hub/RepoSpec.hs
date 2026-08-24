@@ -401,6 +401,30 @@ spec = eventVersions >> do
       readCanon (inMemory files) repo >>= \r ->
         fmap (const ()) r `shouldBe` Left (CanonTooNewHere (hubMetaVersion + 1))
 
+    -- THE OTHER HALF OF THAT RULE, and the case the two-number scheme exists
+    -- for. `(hub-min M)` is the writer saying "a reader at M or above is still
+    -- SOUND about this tree", so a tree whose RULES are newer but whose floor
+    -- this build meets must be folded, with events it cannot decode ghosted --
+    -- their seq spent so the numbering does not shift, the rest read.
+    --
+    -- The test above does not reach it: a version file that omits `hub-min`
+    -- gets the floor equal to the rules version, so it refuses on the floor and
+    -- never asks what the rules version alone would do.
+    it "folds a tree whose rules are newer when its floor is one this build meets" $ do
+      owner <- kp
+      alice <- kp
+      let repo = fst owner
+          e = mkEvent alice owner
+                (AOpen repo HubIssue "an issue" [] Nothing Nothing Nothing 1000)
+                (canon repo 1 (Just 1))
+          thr = eventId e
+          files = [ ("version", "(hub-meta " <> Text.pack (show (hubMetaVersion + 1))
+                                  <> ")\n(hub-min " <> Text.pack (show hubMetaVersion) <> ")\n")
+                  , (threadDir thr <> "/" <> eventFileName 1 thr, renderEvent e)
+                  ]
+      readCanon (inMemory files) repo >>= \r ->
+        fmap (const ()) r `shouldBe` Right ()
+
     it "refuses a version file that is present and unreadable" $ do
       owner <- kp
       -- The one file in the tree whose unreadability nothing else can report: it

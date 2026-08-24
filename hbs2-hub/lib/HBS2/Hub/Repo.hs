@@ -342,8 +342,17 @@ instance Pretty CanonUnreadable where
     ToolStalled e     -> "git ran and did not answer:" <+> pretty (safeText e)
     BlobsOutOfStep e  -> "reading the canon files went out of step with git:"
                            <+> pretty (safeText e)
-    CanonTooNewHere n -> "canon was folded under rules newer than this build:"
-                           <+> "hub-meta" <+> pretty n
+    -- NAMES THE CLAUSE IT IS ABOUT, and it named the other one. The number is
+    -- the tree's @(hub-min M)@ -- the lowest reader its writer says is still
+    -- sound about it -- and the line said "hub-meta", which is a different
+    -- clause holding a different and usually larger number. Somebody reading
+    -- this and then opening the @version@ file found neither the name nor the
+    -- value they had been given.
+    CanonTooNewHere m -> "canon is written for readers at hub-meta"
+                           <+> pretty m <+> "or above, and this build is"
+                           <+> pretty hubMetaVersion
+                           <> line <> "  the tree says so in (hub-min"
+                           <+> pretty m <> ")"
     -- ONE PREFIX THAT IS TRUE OF EVERY PAYLOAD, rather than one that is true of
     -- most and special cases for the rest. "Listed and does not read" was false
     -- three ways: of a version that parses and holds a number that is not a
@@ -841,8 +850,8 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
           -- BEFORE the blobs, not after them: the gate used to live inside
           -- foldCanon, which runs last, so a tree stamped newer than this build
           -- was read in full first and thrown away, one cat-file per event.
-          Right (Just mv) | mvMin mv > hubMetaVersion ->
-            pure (Left (CanonTooNewHere (mvMin mv)))
+          Right (Just mv) | Just (MetaTooNew m) <- readableHere mv ->
+            pure (Left (CanonTooNewHere m))
           -- Now the counting, and only now: see the note over the version read.
           _ | length entries > maxCanonFiles ->
                 pure (Left (CanonTooMany (length entries)))
@@ -869,8 +878,13 @@ readCanonAt cs owner commit = csEntries cs commit >>= \case
 
               -- foldCanon and not foldEvents: the tree's version governs the
               -- admission rules, which is the whole reason it is a tree-level file.
-              let rules = maybe assumedMetaVersion mvRules declared
-              pure $ case foldCanon rules owner (fmap snd evs) of
+              --
+              -- A tree with no version file is 'assumedMetaVersion' for both
+              -- numbers -- canon written before the file existed, whose rules
+              -- are 1 and which every build since can read.
+              let declared' = maybe (MetaVersions assumedMetaVersion assumedMetaVersion)
+                                    id declared
+              pure $ case foldCanon declared' owner (fmap snd evs) of
                 Left (MetaTooNew n) -> Left (CanonTooNewHere n)
                 Right fr -> Right CanonState
                   { stCommit  = commit

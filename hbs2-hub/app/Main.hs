@@ -5,7 +5,7 @@
 -- and the help, so that adding a verb is adding a module and one line.
 module Main where
 
-import HBS2.Hub.Types (safeText)
+import HBS2.Hub.Types (safeText,hubMetaVersion,hubMetaMin)
 import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
@@ -231,8 +231,15 @@ main = do
     -- `--version` and `version` were both "unknown verb". Handled here rather
     -- than as a dictionary entry so that it cannot be shadowed and needs no
     -- peer, no repository and no arguments.
-    (w:_, _) | w `elem` ["--version","-V","version"] ->
+    -- AND THE CANON RULES VERSION, which is the number a refusal is about and
+    -- was the one number nothing printed. `hub verify` on a tree written for
+    -- newer readers says "upgrade to a build whose hub-meta is M or above", and
+    -- until this line there was no way to find out what this build's is -- the
+    -- release version is a different number that moves for different reasons.
+    (w:_, _) | w `elem` ["--version","-V","version"] -> do
       putStrLn ("hbs2-hub " <> showVersion Version.version)
+      putStrLn ("hub-meta " <> show hubMetaVersion <> ", reads trees down to hub-min "
+                  <> show hubMetaMin)
 
     -- THE EXIT CODES, PRINTED BY THE TOOL THAT USES THEM.
     --

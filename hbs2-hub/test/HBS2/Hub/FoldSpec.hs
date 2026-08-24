@@ -2,6 +2,7 @@ module HBS2.Hub.FoldSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
+import HBS2.Hub.Canon (MetaVersions(..),metaAt)
 import HBS2.Hub.Bridge (cursorFrom,CanonCursor(..))
 import HBS2.Net.Auth.Credentials
 import HBS2.Data.Types.SignedBox
@@ -1107,18 +1108,37 @@ spec = domains >> do
       map drWhy (frDropped (foldEvents repo [Event padded (evCanonBox real)]))
         `shouldBe` [UndecodableAuthor (fst alice) TrailingData]
 
-    it "refuses to fold canon from a newer consensus version" $ do
+    it "refuses canon whose floor is above this build, and folds what is not" $ do
       owner <- kp
       alice <- kp
       -- The admission rules ARE the format, so folding canon written under
       -- rules this build does not know produces a view that quietly disagrees
-      -- with every up-to-date clone.
+      -- with every up-to-date clone. But WHICH number says that is the whole of
+      -- the two-number scheme, and this gate had it wrong for as long as the
+      -- scheme existed: it refused on @hub-meta@, the rules version.
       let repo = fst owner
           ev = mkEvent alice owner (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1)
                        (canon repo 1 (Just 1))
-      either Just (const Nothing) (foldCanon (hubMetaVersion + 1) repo [ev])
-        `shouldBe` Just (MetaTooNew (hubMetaVersion + 1))
-      either (const []) (HM.keys . frThreads) (foldCanon hubMetaVersion repo [ev])
+          newer = hubMetaVersion + 1
+
+      -- The floor is what refuses. A writer raises it when its bump changed an
+      -- outcome for events a reader here decodes perfectly well: below that, the
+      -- reader is not behind, it is wrong.
+      either Just (const Nothing) (foldCanon (MetaVersions newer newer) repo [ev])
+        `shouldBe` Just (MetaTooNew newer)
+
+      -- And a bump that only ADDED a shape leaves the floor alone, which is the
+      -- case the floor was introduced for and the case that never worked: the
+      -- tree is folded here, with events this build cannot decode ghosted. That
+      -- assertion used to read `metaAt (hubMetaVersion + 1)` and pass for the
+      -- wrong reason -- 'metaAt' clamps the floor to this build, so it was never
+      -- the newer-rules tree it was named after.
+      either (const []) (HM.keys . frThreads)
+        (foldCanon (MetaVersions newer hubMetaVersion) repo [ev])
+        `shouldBe` [eventId ev]
+
+      -- The ordinary case, unchanged.
+      either (const []) (HM.keys . frThreads) (foldCanon (metaAt hubMetaVersion) repo [ev])
         `shouldBe` [eventId ev]
       -- The TREE's version only. A file's own version is one file's problem
       -- and belongs to the reader: taken as a maximum over the tree, it handed

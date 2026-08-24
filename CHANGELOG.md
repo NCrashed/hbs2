@@ -170,6 +170,36 @@
 
 ## Changed
 
+  - **`hbs2-hub`: the canon version floor was never consulted.** PEP-19 gives a
+    canon tree two numbers: `(hub-meta N)`, the rules it was written under, and
+    `(hub-min M)`, the lowest reader its writer says is still sound about it.
+    The split exists so that a bump which only ADDS a shape an older reader
+    cannot decode does not lock that reader out: it folds the tree and ghosts
+    what it cannot read, spending that event's `seq` so the numbering does not
+    shift.
+
+    The gate was moved onto `M` in the reader and left standing on `N` inside
+    `foldCanon`, which runs later, so it fired first and the move changed
+    nothing. A tree at `(hub-meta 4) (hub-min 3)` was refused whole by a build
+    at 3 -- the exact case the floor was added to admit -- and the ghost path
+    could still never run. One function decides it now, and both call sites ask
+    it.
+
+    The refusal also named the wrong clause: it printed the floor as
+    "hub-meta M" while the tree's `version` file says `(hub-min M)` beside a
+    usually larger `hub-meta`. It now names both numbers and this build's own,
+    `hub verify` says which version to upgrade to rather than "upgrade", and
+    `hbs2-hub --version` prints the number those messages are about, which
+    nothing printed before.
+
+    **Decided with it: there will be no per-version rule set.** The fold keeps
+    one, the build's own, and raising `hub-min` is how a bump that would change
+    an older reader's answer refuses that reader instead of misleading it. The
+    price is a flag day per bump of that kind; the price of the alternative is
+    two of everything the fold decides, deletable only when no tree anywhere
+    declares the old version, which for append-only canon is never. PEP-19
+    carries the decision and the rule it puts on future bumps.
+
   - **`hbs2:mailbox:pow-min` becomes a price instead of a switch.** The
     floor decides whether a peer carries a mailbox packet onward. A plain
     message and a delete had no field to carry work in, so they paid a literal

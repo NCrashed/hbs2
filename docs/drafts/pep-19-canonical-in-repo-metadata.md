@@ -739,17 +739,51 @@ its answer would differ from the publisher's.
 Adding an op is the same kind of change and follows the same rule. The
 version file exists for this; the obligation is what was missing.
 
-Two things this does not yet say, both deliberate and both due before a
-release rather than after.
+DECIDED 2026-08-24: ONE RULE SET, NEVER A SELECTOR
+--------------------------------------------------
 
-The first is what a v2 build does with v1 canon. Refusing to fold a HIGHER
-version is specified and implemented; the other direction is not. A v2 build
-meeting canon written under v1 rules has three options (fold it under v1 rules
-and render a v1 view, refuse it, or migrate by rewriting), and which one is
-right depends on what the rule change was. Until there is a second version
-there is nothing to decide between, but the decision has to be written down
-with the bump, not discovered afterwards, and per-version rules imply keeping
-the v1 fold rather than editing it in place.
+The paragraph below used to say this was undecided. It is decided now, and the
+decision is the negative one: `foldEvents` keeps ONE rule set, the build's own,
+and a build that cannot fold a tree soundly refuses it rather than folding it
+under somebody else's rules.
+
+What made the question look open was that refusing on a higher version was too
+strong. That is what `(hub-min M)` answers, and it splits the bumps in two:
+
+  - A bump that only ADDS a shape an older reader cannot decode leaves the
+    floor where it is. The older reader folds the tree and ghosts what it
+    cannot read, spending that event's `seq` so the numbering does not shift.
+    Adding an op is this kind. It is not a flag day.
+
+  - A bump that changes the OUTCOME for events an older reader decodes
+    perfectly well raises the floor to itself, and every reader below it
+    refuses the tree. That is a flag day, and it is meant to be: below the
+    floor such a reader is not behind, it is wrong.
+
+So the cost of having no selector is one flag day per bump of the second kind,
+and only of the second kind. Two of everything the fold decides is the cost of
+having one, permanently: a second rule set can be deleted only when no tree
+anywhere declares the version that selects it, and canon is append-only, so
+that is never. The fold is also the one function in this system that two nodes
+may never disagree about, and a selector doubles the surface on which they can.
+
+THE OTHER DIRECTION IS STILL NOT ANSWERED, and this is the honest part. A
+NEWER build folding OLDER canon applies its own rules to it, because that is
+what one rule set means. That is sound only if a bump is designed so that
+applying the new rules to canon written before it changes no outcome, and
+nothing checks that today.
+
+The 1-to-2 step satisfies it by construction: `PartNotProven` can only reach an
+event that names a part, and no v1 event could. The 2-to-3 step is the one to
+look at -- the stamp window is applied unconditionally in `spendable`, so a
+v3 build meeting a v2 tree that holds a box stamped outside the window would
+drop an event the v2 publisher admitted.
+
+Whether any such tree exists is a question about deployment and not about the
+design. What the design owes is the rule, which is now stated: **every bump
+must either leave older canon's outcomes unchanged, or raise `hub-min` to
+itself.** A bump that does neither is the one shape this scheme cannot
+express, and the answer to it is to make it one of the two.
 
 The second is that `hub-meta` moves while the rules do. Changes that would
 normally require a bump (a new drop reason, a change to the signed encoding, a

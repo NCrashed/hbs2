@@ -1001,6 +1001,18 @@ hubMetaVersion = 3
 -- no reader below M can be trusted with any tree, then no tree may declare
 -- below M. A later bump that only adds a shape older readers cannot decode
 -- leaves this alone and the floor with it.
+--
+-- AND THIS IS THE WHOLE MECHANISM: there is no per-version rule set and there
+-- will not be one (decided 2026-08-24, PEP-19). 'foldEvents' folds under THIS
+-- build's rules, and raising this number is how a bump that would change the
+-- answer for an older reader refuses that reader instead of misleading it. The
+-- price is a flag day per bump of that kind; the price of the alternative is
+-- two of everything the fold decides, deletable only when no tree anywhere
+-- declares the old version, which for append-only canon is never.
+--
+-- What that leaves owed, and PEP-19 states it as a rule on future bumps: a
+-- newer build folds OLDER canon under its own rules too, so every bump must
+-- either leave older canon's outcomes unchanged or raise this number to itself.
 hubMetaMin :: Word32
 hubMetaMin = 3
 

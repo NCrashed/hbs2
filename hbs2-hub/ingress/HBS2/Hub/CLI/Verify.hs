@@ -202,8 +202,16 @@ refusalDoc u = "hbs2-hub:" <+> pretty u <> advice u
              <> " Fetching will not help;" <> line
              <> "  compaction (PEP-19) will, and so will reporting the git version"
              <> " if the format" <> line <> "  has moved."
-      CanonTooNewHere _ -> line <> "  Upgrade; this build would fold it under"
-                             <> " rules it does not implement."
+      -- THE ONE REFUSAL WHOSE REMEDY IS NOT IN THIS REPOSITORY, so it has to
+      -- say what to go and get. "Upgrade" alone leaves somebody comparing
+      -- version strings against a number that is not one of them.
+      CanonTooNewHere m -> line <> "  Upgrade to a build whose hub-meta is"
+                             <+> pretty m <+> "or above (hbs2-hub --version"
+                             <> line <> "  prints it). Folding here would use"
+                             <> " rules this build does not implement, and the"
+                             <> line <> "  writer has said a reader below"
+                             <+> pretty m <+> "gets a different answer, not a"
+                             <> " smaller one."
       -- The one problem whose file cannot be named in the report, because it is
       -- not an event and the report is a report about events.
       --

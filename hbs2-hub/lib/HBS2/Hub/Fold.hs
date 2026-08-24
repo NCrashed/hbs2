@@ -32,6 +32,7 @@ module HBS2.Hub.Fold
   , materialize
   , foldEvents
   , foldCanon
+  , readableHere
   , CanonTooNew(..)
   , Admitted(..)
   , redactable
@@ -48,6 +49,7 @@ module HBS2.Hub.Fold
   ) where
 
 import HBS2.Hub.Types
+import HBS2.Hub.Canon (MetaVersions(..))
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef)
@@ -576,26 +578,50 @@ resolve e = do
 -- file, refused by the reader ("HBS2.Hub.Canon") and reported, exactly like an
 -- event whose author box does not decode.
 newtype CanonTooNew =
-    MetaTooNew Word32   -- ^ the tree's @hub-meta@
+    MetaTooNew Word32   -- ^ the tree's @hub-min@: the lowest reader it trusts
   deriving stock (Eq,Show)
+
+-- | May a reader at this build's version fold a tree that declares these?
+--
+-- THE FLOOR AND NOT THE RULES VERSION, which is what the two-number scheme is
+-- for and what this got wrong for as long as the scheme existed. @(hub-meta N)@
+-- says what rules the tree was written under; @(hub-min M)@ is the writer
+-- saying that a reader at M is still SOUND about it, which is a claim only the
+-- writer can make -- it knows whether its bump changed an outcome for events an
+-- older reader decodes perfectly well, or merely added a shape that reader
+-- cannot decode at all.
+--
+-- Gating on N instead refuses the whole tree over one event an older reader
+-- cannot read, and the ghost path in 'materializeWith' -- built to spend that
+-- event's seq so the numbering does not shift, and fold the rest -- could then
+-- never run. The gate was moved onto M in the reader ("HBS2.Hub.Repo") and left
+-- standing here, so it kept firing first and the move changed nothing: a tree
+-- at @(hub-meta 4) (hub-min 3)@ was refused by a build at 3, which is the exact
+-- case M exists to admit.
+--
+-- One function because there are two call sites: the reader checks it before
+-- fetching blobs, so an unreadable tree costs one file rather than one cat-file
+-- per event, and 'foldCanon' checks it for a caller that did not.
+readableHere :: MetaVersions -> Maybe CanonTooNew
+readableHere mv | mvMin mv > hubMetaVersion = Just (MetaTooNew (mvMin mv))
+                | otherwise                 = Nothing
 
 -- | Fold canon that declares its consensus version: the gate PEP-19 requires.
 --
--- A reader that meets a higher @hub-meta@ than it knows must report it rather
--- than fold, because the admission rules are the format. Folding anyway would
--- produce a view that quietly disagrees with every up-to-date clone, which is
--- worse than showing nothing: the rules govern which events count.
+-- A reader below the tree's floor must report it rather than fold, because
+-- below it the rules govern which events count and it would produce a view that
+-- quietly disagrees with every up-to-date clone. Above the floor and below the
+-- rules version it folds, ghosting what it cannot decode: see 'readableHere'.
 --
 -- 'foldEvents' remains for callers that already hold canon of a known version
 -- (the bridge, which is minting into canon it is reading).
 foldCanon
-  :: Word32   -- ^ the tree's @(hub-meta N)@
+  :: MetaVersions   -- ^ the tree's @(hub-meta N)@ and @(hub-min M)@
   -> HubKey
   -> [Event]
   -> Either CanonTooNew FoldResult
-foldCanon meta owner es
-  | meta > hubMetaVersion = Left (MetaTooNew meta)
-  | otherwise             = Right (foldEvents owner es)
+foldCanon mv owner es =
+  maybe (Right (foldEvents owner es)) Left (readableHere mv)
 
 -- | The whole fold: resolve, then materialize.
 --
