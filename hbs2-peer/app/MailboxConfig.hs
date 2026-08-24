@@ -25,46 +25,28 @@ import Data.HashSet qualified as HS
 import Data.Maybe
 import Safe (lastMay)
 
--- | The least proof-of-work this peer will forward, in leading zero bits.
+-- | The least proof-of-work this peer will FORWARD, in leading zero bits.
 --
--- A peer-wide floor, and it has to be peer-wide rather than per-mailbox: it is
--- consulted before gossip, where the peer does not yet know which mailbox a
--- message is for and usually hosts none of them. What a mailbox charges is
--- @(pow D)@ in its own signed policy, and that one bounds storage.
+-- Peer-wide and not per-mailbox: it is consulted before gossip, where the peer
+-- does not yet know which mailbox a packet is for and usually hosts none of
+-- them. What a mailbox charges for STORAGE is @(pow D)@ in its own signed
+-- policy, which is a different number in a different place.
 --
--- Absent means zero, which forwards a stamped message on the same terms as a
--- plain one.
+-- Absent means zero, and zero is the default: this peer carries a stamped
+-- packet on the same terms as a plain one.
 --
--- WHAT A NON-ZERO FLOOR COSTS SOMEBODY ELSE, said here because the operator who
--- sets it is the only one who can weigh it. A sender solves for what the
--- MAILBOX charges, which is in the mailbox's signed policy; this is a peer's
--- own number and is in nobody's policy. So a peer with a floor of 16 does not
--- forward a message that honestly paid the 12 its destination asked for.
+-- WHAT A NON-ZERO VALUE COSTS SOMEBODY ELSE, said here because the operator who
+-- sets it is the only one who can weigh it. It is in nobody's policy, so a
+-- sender solving what a mailbox asked for can still be refused by a relay on the
+-- way; on a pure relay sitting on the only path, the letter is simply gone. Two
+-- things make that less than invisible, and neither makes it visible: the peer
+-- publishes this number in its meta so a neighbour ONE HOP away can pay it
+-- ('PeerMetaAnnounce.mkPeerMeta'), and refusals are counted into the periodic
+-- report ('mpwPoWNotForwarded'). A relay further out is still silence.
 --
--- On a peer that HOSTS the mailbox the letter still arrives -- the floor gates
--- forwarding only, and the mailbox's own policy decides acceptance. The case
--- that bites is a pure relay: if it is on the only path, the letter is gone.
--- What makes it visible from this side is 'mpwPoWNotForwarded' in the worker,
--- which counts it into the periodic report.
---
--- FROM THE OTHER SIDE it is published (PEP-23 step C): this number goes into
--- the peer's meta as @mailbox-pow-min@, so a neighbour can read what this peer
--- wants and pay it rather than discovering the refusal as silence. That reaches
--- ONE HOP. A relay four hops away with a higher floor still drops the packet
--- with nothing said, and in a flood network with no end-to-end feedback there
--- is nothing to do about that but count it, above.
---
--- SINCE PEP-23 STEP A THIS IS A DIAL AND NOT A SWITCH, which it was not before
--- and which is the reason it stayed at zero. A message and a delete both have a
--- stamped form on the wire now, so a floor prices them; before the delete had a
--- field to carry work in, any non-zero value here stopped this peer relaying all
--- plain mail and all deletes outright, silently and forever.
---
--- What a sender does about it is PEP-23 step D: `hbs2-hub` and
--- `hbs2-peer mailbox delete:message` ask this peer what the road out charges
--- and solve it. A sender that does not ask, or a build older than the stamped
--- forms, still pays zero and is still refused -- so a floor remains a thing to
--- raise deliberately and not a default.
+-- The rest of the reasoning -- why both floodable packets have a stamped form,
+-- what a client will and will not pay for this number, and why the default has
+-- not moved -- is in "HBS2.Peer.Proto.Mailbox.PoW".
 hbs2MailboxPoWMinOpt :: String
 hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
 

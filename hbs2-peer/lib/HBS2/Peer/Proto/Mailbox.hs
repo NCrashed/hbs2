@@ -105,7 +105,7 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- on this path. The only trace was a 'debug' line, which an operator running
   -- at the ordinary level never sees.
   --
-  -- SINCE PEP-23 STEP C the floor is at least KNOWABLE one hop out: a peer
+  -- SINCE PEP-23 the floor is at least KNOWABLE one hop out: a peer
   -- publishes it in its meta and 'mailboxRelayFloor' answers what a client must
   -- pay to leave this machine. A relay further away is still invisible, and
   -- this counter is still the only thing that says the refusal happened.
@@ -211,7 +211,7 @@ class ForMailbox s => IsMailboxService s a where
                -> MailboxRefKey s
                -> m (Either MailboxServiceError ())
 
-  -- | The least work a message must carry to leave this machine (PEP-23 step D).
+  -- | The least work a message must carry to leave this machine (PEP-23).
   --
   -- The maximum of this peer's own 'mailboxPoWFloor' and the largest floor its
   -- neighbours have published. BOTH HALVES ARE NEEDED and the first is the one
@@ -396,19 +396,38 @@ mailboxProto inner adapter mess = deferred @p do
           --
           -- У пакета без штампа `named` истинно, а бит ноль: платить не за кого,
           -- и порог 0 пропускает его как и раньше.
+          --
+          -- Одним проходом (stampWitness): биты и маркер считаются из одного
+          -- ключа бокса, а не двумя независимыми вызовами, каждый из которых
+          -- сериализует бокс заново. Это путь, на котором чужой пакет тратит наш
+          -- CPU, и лишний обход тут не бесплатен.
           let (named, bits, marker) = case stamp of
                 Nothing ->
                   (True, 0, hashObject @HbSync (serialise mess) & HashRef)
                 Just st ->
-                  ( stampNamesDelete mbox st
-                  , deleteStampBits box st
-                  , deleteMarker st box )
+                  let (b, m) = stampWitness @s (deleteKey @s box) st
+                  in (stampNamesDelete mbox st, b, m)
 
           let carry = forwardable floorD named bits
 
-          unless carry do
+          -- ДВЕ ПРИЧИНЫ -- ДВЕ СТРОКИ, как в ветке SendMessageStamped. Одна
+          -- строка «too little work, wanted N» печаталась и тогда, когда бит
+          -- хватало, а штамп называл чужой ящик: оператор читал про работу и шёл
+          -- искать не то. Наблюдаемость тут держится на логах целиком.
+          unless named do
+            debug $ red "mailbox: a delete's stamp names another mailbox"
+                      <+> pretty (AsBase58 mbox)
+
+          unless (bits >= fromIntegral floorD) do
             debug $ red "mailbox: a delete carries too little work to forward"
                       <+> pretty bits <> ", wanted" <+> pretty floorD
+
+          -- И СЧЁТЧИК, которого здесь не было. powNotForwarded в периодическом
+          -- отчёте -- единственное, чем оператору показывают, во что его порог
+          -- обошёлся чужой доставке, и для delete это обещание не выполнялось:
+          -- обе ветки сообщения его дёргают, эта -- нет.
+          unless carry do
+            lift $ mailboxNotForwarded @s adapter
 
           -- Память пира, не блок: тот же разбор, что и у сообщения выше. И
           -- спрашивается ТОЛЬКО когда пересылать собираемся -- иначе ветка,
@@ -481,7 +500,10 @@ mailboxProto inner adapter mess = deferred @p do
 
         floorD <- lift $ mailboxPoWFloor @s adapter
 
-        let bits = stampBits msg stamp
+        -- Одним проходом, как и в delete-ветке: биты и маркер выводятся из
+        -- одного ключа сообщения, а не двумя вызовами, каждый из которых
+        -- сериализует его заново.
+        let (bits, marker) = stampWitness @s (messageKey @s msg) stamp
 
         -- Ящик, названный в штампе, должен быть среди получателей: работа,
         -- решённая для чужого ящика, -- это работа за чужую доставку. И это
@@ -500,7 +522,7 @@ mailboxProto inner adapter mess = deferred @p do
                     <+> pretty bits <> ", wanted" <+> pretty floorD
 
         takeMessageWith (forwardable floorD named bits)
-                        (Submitted (Just stamp)) msg content (stampMarker stamp msg)
+                        (Submitted (Just stamp)) msg content marker
 
       -- NOTE: CheckMailbox-auth
       --   поскольку пир не владеет приватными ключами,
@@ -750,16 +772,11 @@ mailboxProto inner adapter mess = deferred @p do
         -- штамп значит «дальше не понесу».
         --
         -- Что этим НЕ закрыто, честно: при пороге 0 усиление остаётся. Поле под
-        -- штамп теперь есть (PEP-23, шаг A, ветка ниже), но ограничивает оно
+        -- штамп теперь есть (PEP-23, ветка ниже), но ограничивает оно
         -- только тогда, когда порог кто-то поставил; сам дефолт этот шаг не
         -- трогает и не должен.
         takeDeleteWith Nothing box
 
-      -- Тот же delete, но с доказательством работы (PEP-23, шаг A).
-      --
-      -- Тело общее с ветвью выше и обязано остаться общим: расходятся они
-      -- только тем, чем пакет опознаётся для дедупа и сколько бит он несёт, а
-      -- всё дальнейшее -- проверка подписи, рассылка, маркер, приём -- у них
-      -- одно.
+      -- Тот же delete, но с доказательством работы (PEP-23).
       DeleteMessagesStamped box stamp -> takeDeleteWith (Just stamp) box
 

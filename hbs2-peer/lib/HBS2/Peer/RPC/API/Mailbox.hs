@@ -55,7 +55,7 @@ type MailboxAPI = '[ RpcMailboxPoke
 -- input, and a new client's call would reach an old peer that has no idea a
 -- stamp exists and would send the letter without one.
 --
--- NOT bumped for 'RpcMailboxPoWFloor' (PEP-23 step D), and the difference is
+-- NOT bumped for 'RpcMailboxPoWFloor' (PEP-23), and the difference is
 -- what a bump is for. The bumps above changed the meaning of bytes an existing
 -- method already exchanged, so silence was the only safe outcome. Appending a
 -- method changes nothing that exists: an old peer answers a new client's call
@@ -63,7 +63,7 @@ type MailboxAPI = '[ RpcMailboxPoke
 -- the caller reads no floor and sends exactly what it sends today. Refusing to
 -- connect over that would trade a benign degradation for an outage.
 --
--- Bumped again for the stamp on 'RpcMailboxDeleteMessages' (PEP-23 step A),
+-- Bumped again for the stamp on 'RpcMailboxDeleteMessages' (PEP-23),
 -- which is the first kind and not the second: the input became a pair, so an
 -- old client's call arrives at a new peer as an undecodable input, and a new
 -- client's call reaches an old peer that reads the pair as a box and deletes
@@ -112,17 +112,14 @@ type instance Output RpcMailboxList  = Either MailboxServiceError [(MailboxRefKe
 type instance Input RpcMailboxSend  = (Maybe (MessageStamp HBS2Basic), Message HBS2Basic)
 type instance Output RpcMailboxSend = Either MailboxServiceError ()
 
--- The stamp rides beside the box for the reason it rides beside a message, plus
--- one of its own: the bytes stored as the delete proof are @serialise box@, and
--- @admitDeleted@ reads them back and checks the signer, so they have to be the
--- same bytes whether the delete was stamped or not.
+-- Beside the box rather than inside it; see 'DeleteMessagesStamped'.
 type instance Input RpcMailboxDeleteMessages  = (Maybe (MessageStamp HBS2Basic), SignedBox (DeleteMessagesPayload HBS2Basic) HBS2Basic)
 type instance Output RpcMailboxDeleteMessages = (Either MailboxServiceError ())
 
 type instance Input RpcMailboxGet = (PubKey 'Sign HBS2Basic)
 type instance Output RpcMailboxGet = (Maybe HashRef)
 
--- | The least work a message must carry to leave this machine (PEP-23 step D).
+-- | The least work a message must carry to leave this machine (PEP-23).
 --
 -- WHY A CLIENT NEEDS TO ASK. A sender solves what the destination MAILBOX
 -- charges, which is in that mailbox's signed policy. Whether a peer CARRIES the
@@ -132,7 +129,7 @@ type instance Output RpcMailboxGet = (Maybe HashRef)
 -- can fail to leave the machine it was composed on.
 --
 -- The answer is the maximum of this peer's floor and the largest one its
--- neighbours have published in their meta (PEP-23 step C). It reaches one hop:
+-- neighbours have published in their meta (PEP-23). It reaches one hop:
 -- a relay further out with a higher floor is still invisible, and nothing short
 -- of end-to-end feedback would change that.
 --

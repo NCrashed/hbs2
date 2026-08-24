@@ -1,6 +1,6 @@
 {-# Language AllowAmbiguousTypes #-}
 {-# Language UndecidableInstances #-}
--- | The proof-of-work stamp on a mailbox packet (PEP-21, PEP-23 step A).
+-- | The proof-of-work stamp on a mailbox packet (PEP-21, PEP-23).
 --
 -- WHAT IT BOUNDS. An open inbox is @(sender allow all)@, which is anyone
 -- growing the mailbox tree. A stamp makes each DISTINCT message cost work, so
@@ -31,6 +31,7 @@
 module HBS2.Peer.Proto.Mailbox.PoW
   ( PoWDifficulty
   , maxPayableFloor
+  , powBudget
   , payableFloor
   , cheapestFloor
   , messageKey
@@ -44,6 +45,7 @@ module HBS2.Peer.Proto.Mailbox.PoW
   , stampOk
   , forwardable
   , stampMarker
+  , stampWitness
   , deleteMarker
   , solveStamp
   , solveStampOver
@@ -90,6 +92,24 @@ import Data.Word
 maxPayableFloor :: PoWDifficulty
 maxPayableFloor = 20
 
+-- | How long a client will grind before it calls a difficulty impossible.
+--
+-- A BOUND ON TIME AND NOT ON DIFFICULTY, because what a difficulty costs is not
+-- knowable from the number alone: it is the sender's machine and the search is
+-- probabilistic, so the same D takes a different time twice. Time is the thing
+-- the person waiting has an opinion about.
+--
+-- Here rather than in each client because there are two of them --
+-- @hbs2-hub@ and @hbs2-peer mailbox@ -- and they had 300 seconds and 60. One
+-- operation, one wait, one sentence when it fails: on the day somebody raises a
+-- floor, two answers to the same trouble is the thing that wastes an afternoon.
+--
+-- It is not what bounds the RELAY floor, which 'maxPayableFloor' caps at about a
+-- second. What this bounds is a mailbox's own @(pow D)@, which is uncapped by
+-- design and can legitimately be large.
+powBudget :: Timeout 'Seconds
+powBudget = 300
+
 -- | What a client will actually solve for, given what it was told.
 --
 -- 'Nothing' above the cap, and not a clamped value, because the caller has to
@@ -130,7 +150,7 @@ cheapestFloor xs = minimum (fmap (fromMaybe 0) xs)
 messageKey :: forall s . ForMailbox s => Message s -> HashRef
 messageKey = HashRef . hashObject @HbSync . serialise
 
--- | The identity of a delete: the hash of the signed box (PEP-23 step A).
+-- | The identity of a delete: the hash of the signed box (PEP-23).
 --
 -- What 'messageKey' is for a letter. The same value again names three things:
 -- the work, this peer's routing marker, and the proof block a @Deleted@ entry
@@ -166,7 +186,7 @@ stampBits msg = stampBitsOver @s (messageKey @s msg)
 -- | The same, over whatever the work was solved against.
 --
 -- The one arithmetic, and there is exactly one because a delete pays for a
--- different hash than a letter (PEP-23 step A) and nothing else about the count
+-- different hash than a letter (PEP-23) and nothing else about the count
 -- changes. A second copy of these three lines would be a second chance to
 -- disagree about the preimage, which is the value a verifier and a solver have
 -- to agree on down to the byte.
@@ -219,7 +239,7 @@ stampOk d mbox msg st = msMailbox st == mbox && stampBits msg st >= fromIntegral
 -- in two places, and none of the three was reachable by a test: they live
 -- inside the protocol handler, which has no harness.
 --
--- FOUR BRANCHES SINCE PEP-23 STEP A, which is the reason this had to be a
+-- FOUR BRANCHES SINCE PEP-23, which is the reason this had to be a
 -- function before that step and not after: a delete gained a stamped form, so
 -- the count of places that could disagree grew.
 --
@@ -266,37 +286,50 @@ forwardable d named bits = named && bits >= fromIntegral d
 -- suppression: a bounded, exponentially-priced amplification instead of an
 -- unbounded denial, and the peer's floor cuts the cheap end of it off.
 stampMarker :: forall s . ForMailbox s => MessageStamp s -> Message s -> HashRef
-stampMarker st@MessageStamp1{..} msg =
-  HashRef (hashObject @HbSync (serialise (msMailbox, stampBits @s msg st, msg)))
+stampMarker st msg = snd (stampWitness @s (messageKey @s msg) st)
 
--- | The gossip dedup identity of a stamped delete (PEP-23 step A).
+-- | The work a stamp carries and the identity a peer dedups it by, together.
 --
--- Built like 'stampMarker' and for all three of its reasons, restated because
--- the delete branch is where getting this wrong would be easy: the plain branch
--- marks a delete with the hash of the whole wire value, and a stamped one cannot
--- do that.
+-- ONE PASS, and the two used to be two calls: a caller asked 'stampBits' and
+-- then 'stampMarker', which asked 'stampBits' again, and each of them hashed the
+-- message or the box from scratch. Three serialisations of a value a stranger
+-- chose the size of, on the path where this peer decides whether to spend
+-- anything on it at all.
 --
--- THE NONCE IS OUT. The wire value contains it, so marking by the wire value
--- would make a re-stamp of one box under a fresh nonce look like a new delete
--- and buy a second flood per solution.
+-- They also have to agree. The bits are IN the marker (see 'stampMarker'), so a
+-- caller computing them separately and passing them in could pass a number from
+-- another message and mint a marker nothing else would ever match. Returning
+-- both from one place removes the question.
 --
--- THE WORK IS IN. Without the bits, anyone who saw a stamped delete could mint
--- @MessageStamp1 mbox 0@ -- free, and carried wherever a peer's floor is zero --
--- and race it ahead of the honest copy, which would then be suppressed as seen
--- everywhere it had not yet reached, while the free copy is refused for want of
--- work by the peers that charge. With the bits in, suppressing a copy worth D
--- bits costs D bits.
+-- The marker covers the target's HASH rather than the target itself, which is
+-- the same identity for one fewer serialisation: @messageKey@ and @deleteKey@
+-- are injective by construction, and the marker never leaves this process --
+-- 'mailboxRelayOnce' is a bounded in-memory set, not a wire value and not a
+-- block.
+stampWitness :: forall s . ForMailbox s => HashRef -> MessageStamp s -> (Int, HashRef)
+stampWitness h st@MessageStamp1{..} = (bits, marker)
+  where
+    bits   = stampBitsOver @s h st
+    marker = HashRef (hashObject @HbSync (serialise (msMailbox, bits, h)))
+
+-- | The gossip dedup identity of a stamped delete.
 --
--- It is also NOT the plain branch's marker, which is the hash of the whole
--- 'MailBoxProto' value and so differs by construction: stripping a stamp and
--- re-sending the delete plain does not suppress the honest stamped copy. It
--- gains an attacker nothing either -- acceptance was never gated by the floor,
--- so a stripped delete still takes effect wherever it arrives.
+-- 'stampMarker' over 'deleteKey', with the same three properties and the same
+-- honest accounting of what they leave open: the nonce is out so a re-stamp is
+-- not a new packet, the work is in so a free stamp cannot suppress a paid one,
+-- and it differs from the plain branch's marker so a stripped stamp cannot
+-- either.
+--
+-- WHAT THAT LEAVES, said as plainly as 'stampMarker' says it and not softer. At
+-- a floor of zero -- the default -- stripping the stamp buys an attacker a
+-- second full flood for one signature, and a re-stamp at k bits buys another
+-- flood for each reachable k, which for small k is free. What the construction
+-- buys is that suppression is priced rather than free, and that the amplifica-
+-- tion is bounded and exponential in k rather than unbounded; the floor is what
+-- cuts the cheap end of it off, and until somebody sets one it does not.
 deleteMarker :: forall s . ForMailbox s
              => MessageStamp s -> SignedBox (DeleteMessagesPayload s) s -> HashRef
-deleteMarker st@MessageStamp1{..} box =
-  HashRef (hashObject @HbSync (serialise (msMailbox, bits, box)))
-  where bits = deleteStampBits @s box st
+deleteMarker st box = snd (stampWitness @s (deleteKey @s box) st)
 
 -- | Grind until the stamp meets the difficulty.
 --

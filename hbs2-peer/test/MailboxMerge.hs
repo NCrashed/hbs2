@@ -132,7 +132,7 @@ mailboxMergeTests = testGroup "mailbox merge (issue #15)"
       admitDeleted (mailboxOf owner) victim (proofBytes owner bothOf)
         @?= MergeUnsupportedPred
 
-  -- PEP-23 step B: a delete names a SET, spelled with the Or the wire format
+  -- PEP-23: a delete names a SET, spelled with the Or the wire format
   -- already had. `hub drop` on a triage queue was one packet, one signature and
   -- (after the stamp) one grind per letter; a set makes it one per batch.
   , testCase "accepts a proof whose set contains the message the entry removes" do
@@ -245,12 +245,23 @@ mailboxMergeTests = testGroup "mailbox merge (issue #15)"
       -- larger than 'defMaxDatagram' is one nobody receives -- silently, since
       -- an oversized datagram is not an error anything here reports.
       --
-      -- The margin covers what this test cannot see: the protocol framing around
-      -- the payload, which is the (id, bytes) tuple plus a constructor tag.
+      -- THE WHOLE WIRE VALUE and not just the signed box, which is what this
+      -- measured first and which stopped being the packet the moment a delete
+      -- could carry a stamp: the box alone is 2931 bytes and the packet around
+      -- it is 2982. Measuring the part rather than the whole is how a bound
+      -- ends up justifying a number it no longer covers.
+      --
+      -- The stamped form is the larger of the two, so it is the one measured.
+      -- The margin left over covers only what is outside this value: the
+      -- protocol framing, which is the (id, bytes) tuple.
       owner <- newCredentials @S
-      let full = LBS.length (proofBytes owner (deleteOfMany (mhs maxDeleteTargets)))
-      assertBool ("a full batch encodes to " <> show full <> " bytes")
-                 (full < fromIntegral defMaxDatagram - 256)
+      let payload = deleteOfMany (mhs maxDeleteTargets)
+          box     = makeSignedBox @S (_peerSignPk owner) (_peerSignSk owner) payload
+          stamp   = MessageStamp1 (_peerSignPk owner) maxBound
+          packet  = serialise (MailBoxProtoV1 @S @() (DeleteMessagesStamped box stamp))
+          full    = LBS.length packet
+      assertBool ("a full stamped batch encodes to " <> show full <> " bytes")
+                 (full < fromIntegral defMaxDatagram - 128)
 
   , testCase "refuses a predicate that names no message at all" do
       -- Well formed and authorising nothing. It is not an attack and not a

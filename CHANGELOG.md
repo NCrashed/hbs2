@@ -170,166 +170,91 @@
 
 ## Changed
 
-  - **A neighbour cannot set the price of your outgoing mail (PEP-23 review).**
-    Five defects found reviewing the four steps above, all in the same place:
-    part of the relay floor a client is handed comes out of a neighbour's
-    peer-meta, and a neighbour is anybody who finished a handshake.
+  - **PEP-23: `hbs2:mailbox:pow-min` becomes a price instead of a switch.** The
+    floor decides whether a peer carries a mailbox packet onward. A plain
+    message and a delete had no field to carry work in, so they paid a literal
+    zero, and any non-zero floor stopped that peer relaying all plain mail and
+    all deletes outright -- silently, permanently, and with nothing a sender
+    could do about it. So the only safe floor was zero, and at zero a delete was
+    an unbounded broadcast primitive costing one signature. Four changes, of
+    which one touches the wire.
+
+    *A delete names a set of messages.* `Or` had been in the delete predicate on
+    the wire since the mailbox protocol was written and no reader honoured it,
+    so every tombstone cost its own signature and its own gossiped packet --
+    and a reject drops a letter and every rewrapped copy of it. A payload now
+    denotes the set its `MessageHashEq` leaves name, up to `maxDeleteTargets`
+    (64), which is what fits a datagram and is asserted by a test. `And`, `Nop`
+    and a predicate naming nothing stay refused, separately from naming too
+    many: a reader that took the leaves it recognised and ignored the rest would
+    act on half a sentence. Issue #15 is unaffected -- a proof must still name
+    the message the entry deletes. No wire format changed; an older peer relays
+    such a delete and declines to merge it.
+
+    *A peer publishes the floor it enforces,* as `mailbox-pow-min` in its peer
+    meta, which costs no wire change: an unknown key in that list is already
+    ignored. Omitted at zero, told to every neighbour regardless of class -- a
+    floor is a price, not a location. The mailbox worker's report gains
+    `powFloorNeighbourMin` beside `powNotForwarded`: one says what this peer's
+    floor cost somebody else, the other what somebody else's costs this peer.
+
+    *A sender pays for the road out, not only for storage.* What a mailbox
+    charges decides whether a letter is stored; what a peer charges decides
+    whether it is carried. Each charging recipient is solved at
+    `max (policy D) floor`, and a letter whose recipients all charge nothing
+    gets one stamp at the floor rather than none -- one for the road and not one
+    per recipient, since a relay asks only that the packet carry work for some
+    recipient of it. The number comes from the new `RpcMailboxPoWFloor`, which
+    answers the peer's own floor together with its neighbours'.
+    `hbs2-peer mailbox send` and `delete:message` pay it too.
+
+    *A delete can carry proof of work.* `DeleteMessagesStamped` is appended
+    after `SendMessageStamped` -- the one wire change. The work binds to the
+    hash of the signed box, which is also the hash of the proof block a
+    `Deleted` entry names, so one identity covers the work, the marker and the
+    block; a letter's stamp cannot be spent on a delete. The stamped delete gets
+    its own dedup marker with the nonce out and the work in. An older peer
+    cannot decode the constructor, so a stamped delete travels only over
+    upgraded peers -- the cost `SendMessageStamped` already accepted, and one
+    that applies only when somebody stamps. `RpcMailboxDeleteMessages` takes the
+    stamp, so `MailboxAPIProto` is bumped. `PROTOCOL.md` now states the
+    append-only exception for protocol 13001 outright rather than leaving the
+    freeze contradicted by the source.
+
+    **The default floor stays zero,** so all of this is inert until an operator
+    sets one. Moving that default is a separate decision and is not taken here.
+
+  - **A neighbour cannot set the price of your outgoing mail.** Five defects
+    found reviewing the above, all around one fact: part of the floor a client
+    is handed comes out of a neighbour's peer-meta, and a neighbour is anybody
+    who finished a handshake.
 
     The floor was read with `readMay` at `Word8`, whose derived `Read` goes
     through `Integer` and then `fromInteger` -- so `"-1"` parsed as **255**, the
-    largest floor there is, and `"300"` as 44. `peerMetaNat` reads an `Integer`
-    and refuses anything out of range rather than clamping. The same trap sat
-    one key over on `listen-tcp`, a `Word16`, where `"-1"` was a request to
-    probe port 65535; fixed with it.
+    largest floor there is. `peerMetaNat` reads an `Integer` and refuses what
+    does not fit; the same trap sat one key over on `listen-tcp`, where `"-1"`
+    was a request to probe port 65535.
 
     The peer took the MAXIMUM over its neighbours and called it "what decides
-    whether the packet travels at all". It is not: a packet is gossiped to every
-    neighbour at once and each decides separately, so one willing neighbour is
-    enough and the number is the MINIMUM. The maximum is what reaching all of
-    them would cost. Under the maximum, one peer publishing a large number
-    priced everything this node sent.
+    whether the packet travels at all". It is not: each neighbour decides
+    separately, so one willing neighbour is enough and the number is the
+    MINIMUM. Under the maximum, one peer publishing a large number priced
+    everything this node sent.
 
-    Neither client survived a floor it could not reach: the hub ground for its
-    whole 300-second budget and then threw `PoWTooHard`, and
-    `hbs2-peer mailbox delete:message` waited a minute and threw. So an
-    unpayable floor stopped outgoing mail rather than merely refusing to carry
-    it. `maxPayableFloor` (20 bits, about a second) caps what a client will
-    solve for a RELAY floor -- never what a mailbox charges in its own signed
-    policy -- and above it both clients send unstamped and say why.
-
-    `hbs2-peer mailbox send` stayed unstamped on the grounds that a serialised
-    message does not say what its recipients charge. True of the mailbox price
-    and false of the relay floor, which does not depend on the recipients at
-    all; it now pays it.
+    Neither client survived a floor it could not reach -- both ground and then
+    threw -- so an unpayable floor stopped outgoing mail rather than merely not
+    being carried. `maxPayableFloor` (20 bits, about a second) caps what a
+    client will solve for a RELAY floor, never for what a mailbox charges in its
+    own signed policy; above it both send unstamped and say why. The two clients
+    also waited 300 seconds and 60 with different messages, and now share
+    `powBudget`.
 
     And, unrelated to proof-of-work: `mailbox delete:message` signed with
-    whatever key keyman returned without checking it was the key asked for.
+    whatever key keyman returned without checking it was the one asked for.
     keyman answers with the credentials of the FILE holding a key, so a mailbox
-    key kept as a secondary in its keyring produced a delete signed by another
-    identity -- which the peer takes as a delete against a mailbox nobody has,
-    reporting success while the message stays. The hub has had this check since
-    it was written.
-
-  - **A mailbox delete can carry proof of work (PEP-23 step A).** This is the
-    one wire change in PEP-23 and the one that makes `hbs2:mailbox:pow-min` a
-    price rather than a switch. A delete had no field to carry work in, so it
-    paid a literal zero, and any non-zero floor stopped a peer relaying every
-    delete outright -- silently, permanently, and with no way for the owner to
-    satisfy it. No operator could set a floor without partitioning deletes.
-
-    `DeleteMessagesStamped` is appended to the mailbox payload, after
-    `SendMessageStamped`, and the work binds to the hash of the SIGNED BOX --
-    which is also the hash of the proof block a `Deleted` entry names, so one
-    identity covers the work, the routing marker and the block. Work solved for
-    a letter cannot be spent on a delete: the two hashes are digests of
-    differently-typed values.
-
-    The dedup marker for a stamped delete leaves the nonce out and puts the WORK
-    in, for the reasons the message stamp's marker does: without the first, a
-    re-stamp under a fresh nonce buys a second flood per solution; without the
-    second, anyone who saw a delete could mint a free stamp and race it ahead of
-    the honest copy, suppressing it everywhere it had not yet reached.
-
-    Both senders solve it: `hbs2-hub` when it drops, and
-    `hbs2-peer mailbox delete:message`, which is the escape hatch the hub points
-    an operator at and would otherwise have stopped working the moment anybody
-    set a floor. `RpcMailboxDeleteMessages` takes the stamp, so
-    `MailboxAPIProto` is bumped -- an existing method's input changed meaning,
-    which is what a bump is for.
-
-    An older peer cannot decode the new constructor, so a stamped delete travels
-    only over upgraded peers. That is the cost `SendMessageStamped` already
-    accepted and it applies only when somebody stamps, which at the default
-    floor of zero nobody does. `PROTOCOL.md` now states the append-only
-    exception for protocol 13001 outright, rather than leaving the freeze
-    contradicted by the source, and lists the payload's constructors.
-
-  - **`hbs2-hub` pays for the road out, not only for storage (PEP-23 step D).**
-    A sender solved exactly what the destination mailbox charges, which answers
-    the wrong half of the question: what a mailbox charges decides whether the
-    letter is stored, and what a peer charges decides whether it is carried at
-    all. A letter to a mailbox that charges nothing therefore carried nothing,
-    and any peer with a floor dropped it -- including the sender's own, since a
-    submission over the RPC runs the same forwarding rule as a packet off the
-    wire, so a letter could fail to leave the machine it was composed on.
-
-    Each charging recipient is now solved at `max (policy D) floor`, and a
-    letter whose recipients all charge nothing gets one stamp at the floor
-    instead of none. One stamp for the road and not one per recipient: a
-    mailbox's policy is satisfied only by a stamp naming that mailbox, but a
-    relay asks only that the packet carry work for some recipient of it, so one
-    copy reaches every host that charges nothing.
-
-    The number comes from the new `RpcMailboxPoWFloor`, which answers the
-    maximum of the peer's own floor and the largest its neighbours published.
-    `MailboxAPIProto` is NOT bumped, unlike the two bumps recorded beside it:
-    those changed the meaning of bytes an existing method already exchanged,
-    where silence is the only safe outcome, while an absent method answers
-    `ErrorMethodNotFound` and the client reads no floor and sends what it sent
-    before. At the default floor of zero nothing is stamped that would not have
-    been and nothing is stamped harder.
-
-  - **A peer publishes the mailbox relay floor it enforces (PEP-23 step C).**
-    `hbs2:mailbox:pow-min` decides whether this peer carries a mailbox packet
-    onward, and it was in nobody's policy and readable by nobody: a sender
-    solves what the destination MAILBOX charges, so a relay refusing a letter
-    that honestly paid that price was silence at both ends.
-
-    It goes into the peer's meta as `mailbox-pow-min`, which costs no wire
-    change at all -- `PeerMeta` is an association list, an unknown key is
-    ignored, and the protocol is already rate limited and already answers only
-    authenticated peers. Omitted at zero, since absent is what a reader already
-    takes for zero. Unlike the public address beside it, it is told to every
-    neighbour: a floor is a price, not a location.
-
-    The mailbox worker's periodic report gains `powFloorNeighbours`, the
-    largest floor any neighbour published, which is the counterpart to
-    `powNotForwarded`: one says what this peer's floor cost somebody else, the
-    other what somebody else's costs this peer. A neighbour that has not
-    answered contributes nothing rather than a zero, because "said nothing" and
-    "carries anything" are different claims.
-
-    It reaches one hop. A relay further away with a higher floor still drops a
-    packet in silence, and in a flood network with no end-to-end feedback there
-    is nothing to do about that but count it. A not-forwarded reply message was
-    considered and rejected: it travels one hop back too, since gossip keeps no
-    reverse path, so it buys nothing a published number does not and costs a
-    reply primitive that would need bounding.
-
-    `mkPeerMeta` moves to its own module and loses a `PeerEnv` argument it never
-    used, which is what makes any of this testable: what a config announces
-    could previously only be seen by running a peer and capturing a packet.
-
-  - **A mailbox delete names a set of messages, not one (PEP-23 step B).** The
-    predicate language has had `Or` on the wire since the mailbox protocol was
-    written and no reader honoured it, so every tombstone cost its own signed
-    payload and its own gossiped packet. `hub inbox reject` drops a letter and
-    every rewrapped copy of it, and `hub inbox accept` drops what it folded, so
-    a triage session was one flood per letter.
-
-    A payload now denotes the set of hashes its `MessageHashEq` leaves name, up
-    to `maxDeleteTargets` (64) of them, which is one signature and one packet
-    per 64 letters. The bound is what fits a datagram -- gossip goes over UDP,
-    and a packet over 4096 bytes is one nobody receives, silently -- and a full
-    batch measures 2931 bytes, asserted by a test so the constant cannot drift
-    from what justifies it.
-
-    What is NOT honoured stays refused, and the distinction is the point:
-    `And`, `Nop`, and a predicate naming no message at all are all
-    `MergeUnsupportedPred`, because a reader that collected the leaves it
-    recognised and ignored the rest would act on part of a sentence it only
-    partly understood. Naming more than the cap is its own verdict
-    (`MergeTooManyTargets`): the merge path reads proofs out of the block
-    store, where a value is up to 256 KiB rather than one datagram, so without
-    a ceiling one signature buys thousands of entries and merge-queue slots.
-
-    The property issue #15 is about is unchanged. A proof still has to name the
-    message the entry deletes, so a public delete box stapled to somebody
-    else's letter is still `MergeWrongTarget`; a set widens what one box
-    authorises to what its signer actually wrote down and by nothing else.
-
-    Older peers relay such a delete and refuse to merge it, which is the
-    degradation the verdict was written for -- no wire format changed.
+    key kept as a secondary in its keyring produced a delete against a mailbox
+    nobody has, reported as success. The hub has had this check since it was
+    written.
 
   - **`hbs2-hub --help`: the list says what each verb is for, and `hub issue`
     answers.** Forty-one names in one alphabetical column said which words exist

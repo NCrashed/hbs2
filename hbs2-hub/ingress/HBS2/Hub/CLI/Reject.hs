@@ -208,7 +208,7 @@ rejectEntries = do
       copies <- copiesOf ig (rjMailbox rj) (rjMessage rj)
 
       -- ONE DELETE FOR THE WHOLE SET, and it used to be one per copy. A delete
-      -- names a set since PEP-23 step B, so a letter arriving under a dozen
+      -- names a set since PEP-23, so a letter arriving under a dozen
       -- envelopes is a dozen tombstones bought with one signature and one packet
       -- rather than a dozen of each.
       --

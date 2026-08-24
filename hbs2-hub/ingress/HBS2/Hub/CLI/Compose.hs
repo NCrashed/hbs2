@@ -19,7 +19,6 @@ module HBS2.Hub.CLI.Compose
   , stampsFor
   , relayFloor
   , solveWithin
-  , powBudget
   , checkReplyChannel
   , attachToLetter
   , issueUsage
@@ -56,7 +55,7 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.Credentials.Sigil (Sigil,loadSigil)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
-import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,maxPayableFloor,payableFloor)
+import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,maxPayableFloor,payableFloor,powBudget)
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
@@ -287,7 +286,7 @@ sendPayload ob sender rcpts parts payload = do
 
   pure (HashRef h)
 
--- | What the sender's own peer says a letter must pay to leave (PEP-23 step D).
+-- | What the sender's own peer says a letter must pay to leave (PEP-23).
 --
 -- SILENCE IS ZERO, deliberately. A peer older than this method answers
 -- 'ErrorMethodNotFound', which arrives here as 'Nothing', and so does a peer
@@ -336,7 +335,7 @@ relayFloor t api = do
 -- broken policy file on somebody else's peer would be a worse failure than
 -- sending work-free into a mailbox that may want work.
 --
--- THE RELAY FLOOR IS THE SECOND PRICE (PEP-23 step D), and it answers a
+-- THE RELAY FLOOR IS THE SECOND PRICE (PEP-23), and it answers a
 -- different question from the first: what a mailbox charges decides whether the
 -- letter is STORED, what a peer charges decides whether it is CARRIED. The
 -- floor comes from 'RpcMailboxPoWFloor' and is the sender's own peer plus the
@@ -408,15 +407,6 @@ stampsFor floorD policyFor msg = do
                                <+> pretty (AsBase58 mbox) <> line )
            solveWithin powBudget d mbox (solveStamp d mbox msg)
 
--- | How long a grind is allowed to take before it is called impossible.
---
--- A bound and not a difficulty limit, because what a difficulty costs is not
--- knowable from the number alone: it is the sender's machine, and the search is
--- probabilistic, so the same D takes a different time twice. Time is the thing
--- the person waiting actually has an opinion about.
-powBudget :: Timeout 'Seconds
-powBudget = 300
-
 -- | Grind, or give up saying so.
 --
 -- 'solveStamp' and 'solveDeleteStamp' are pure and unbounded by design (neither
@@ -425,7 +415,7 @@ powBudget = 300
 -- nonce has been found.
 --
 -- TAKES THE UNFORCED SEARCH rather than the thing being paid for, because there
--- are two of those now: a letter and a delete (PEP-23 step A). What the bound
+-- are two of those now: a letter and a delete (PEP-23). What the bound
 -- is about is time, and time does not care which. The difficulty and the
 -- mailbox are still arguments because they are what 'PoWTooHard' has to say.
 solveWithin :: MonadUnliftIO m

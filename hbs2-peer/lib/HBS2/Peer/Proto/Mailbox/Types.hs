@@ -204,7 +204,7 @@ data MailBoxProtoMessage s e =
   -- stamped message travels only over a path of upgraded peers, and an old one
   -- in the path drops it in silence.
   | SendMessageStamped (Message s) (MessageStamp s)
-  -- | The same delete, carrying a proof of work (PEP-23 step A).
+  -- | The same delete, carrying a proof of work (PEP-23).
   --
   -- APPENDED LAST, and the rule above applies to it in turn: the next
   -- constructor goes below this one, not above it.
@@ -214,24 +214,17 @@ data MailBoxProtoMessage s e =
   -- ownership of A KEY and not of a mailbox anybody hosts: the key is RECOVERED
   -- from the signature rather than read off the wire, so "signed by the mailbox
   -- key" is satisfied by a keypair minted for the occasion, and one signature
-  -- bought a flood at fan-out per hop through peers that host no mailbox.
+  -- bought a flood at fan-out per hop through peers that host no mailbox. What
+  -- the field is worth against that, and what it is not, is in
+  -- "HBS2.Peer.Proto.Mailbox.PoW".
   --
-  -- WHAT IT ACTUALLY FIXES TODAY, which is not that flood. A peer's floor is
-  -- zero by default and prices nothing. What the field changes is that a
-  -- non-zero floor becomes a PRICE instead of a switch: before it, a delete
-  -- carried a literal zero and any floor above zero stopped this peer relaying
-  -- deletes at all, silently and forever, so no operator could set one.
+  -- The stamp rides BESIDE the box and not inside it, for the reason it rides
+  -- beside a message above, plus one of its own: the bytes stored as the delete
+  -- proof are @serialise box@, which @admitDeleted@ reads back and checks the
+  -- signer of, so they must be identical whether the delete arrived stamped or
+  -- plain.
   --
-  -- The stamp rides BESIDE the box and not inside it, for two reasons. The
-  -- owner must be able to re-grind without re-signing; and the bytes stored as
-  -- the delete proof are @serialise box@, which @admitDeleted@ reads back and
-  -- checks the signer of, so they must be identical whether the delete arrived
-  -- stamped or plain.
-  --
-  -- Same deployment cost as 'SendMessageStamped', and it applies only when
-  -- somebody actually stamps: a peer that cannot parse this constructor neither
-  -- relays nor accepts it, so a stamped delete travels only over upgraded
-  -- peers. At floor zero nothing stamps a delete and nothing changes.
+  -- Same deployment cost as 'SendMessageStamped' and for the same reason.
   | DeleteMessagesStamped (SignedBox (DeleteMessagesPayload s) s) (MessageStamp s)
   deriving stock (Generic)
 

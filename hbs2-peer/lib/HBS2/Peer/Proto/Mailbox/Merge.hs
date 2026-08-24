@@ -94,7 +94,7 @@ enqueueMerge k h m
 maxMergeQueue :: Int
 maxMergeQueue = 4096
 
--- | The most messages one delete payload may name (PEP-23 step B).
+-- | The most messages one delete payload may name (PEP-23).
 --
 -- A gossiped packet has to fit 'defMaxDatagram', which is 4096 bytes, and a
 -- datagram over that is one nobody receives -- silently, since nothing here
@@ -215,7 +215,7 @@ data MergeVerdict =
     --
     -- The predicate language is wider than any reader implements, so this is a
     -- refusal and not a failure: an older reader must not guess what a newer one
-    -- meant by a delete. Since PEP-23 step B, @Or@ IS honoured, and what is left
+    -- meant by a delete. Since PEP-23, @Or@ IS honoured, and what is left
     -- here is @And@, @Nop@, and a predicate naming no message at all. See
     -- 'deleteTargets'.
   | MergeUnsupportedPred
@@ -252,7 +252,7 @@ instance Pretty MergeVerdict where
 -- argument. Both used to be discarded at the match site: the entry's in a @_@
 -- pattern, the payload's by never reading @dmpPredicate@ on this path at all.
 --
--- SINCE PEP-23 STEP B a payload names a SET (see 'deleteTargets'), and the
+-- SINCE PEP-23 a payload names a SET (see 'deleteTargets'), and the
 -- property this function exists to protect is unchanged by that: the proof must
 -- still name the message the entry deletes, so a public delete box stapled to
 -- somebody else's letter is still 'MergeWrongTarget'. A set widens what one box

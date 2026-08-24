@@ -16,7 +16,7 @@ import HBS2.Data.Types.SignedBox
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.Entry
-import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,solveDeleteStamp,maxPayableFloor,payableFloor)
+import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,solveDeleteStamp,maxPayableFloor,payableFloor,powBudget)
 
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Net.Messaging.Unix (UNIX)
@@ -592,6 +592,10 @@ relayFloorWithin t api = do
       pure 0
 
 -- | Grind a stamp, or say what could not be ground.
+--
+-- 'powBudget' and not a number of its own: `hbs2-hub` grinds the same kind of
+-- work for the same kind of packet, and the two waited 300 seconds and 60 with
+-- two different sentences at the end. One operation, one wait, one answer.
 stampWithin :: MonadUnliftIO m
             => PoWDifficulty
             -> Doc AnsiStyle              -- ^ what is being paid for, for the messages
@@ -601,9 +605,9 @@ stampWithin floorD what search
   | floorD == 0 = pure Nothing
   | otherwise = do
       warn $ "solving" <+> pretty floorD <+> "bits of work for" <+> what
-      race (pause (TimeoutSec 60)) (liftIO (evaluate search))
+      race (pause powBudget) (liftIO (evaluate search))
         >>= \case
           Left ()  -> liftIO $ throwIO $ userError $ show
                         ( "cannot solve" <+> pretty floorD <+> "bits of work for"
-                            <+> what <+> "in a minute" )
+                            <+> what <+> "in" <+> pretty powBudget )
           Right st -> pure (Just st)
