@@ -16,8 +16,10 @@ import HBS2.Data.Types.SignedBox
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.Entry
+import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,solveDeleteStamp,maxPayableFloor,payableFloor)
 
 import HBS2.Peer.RPC.API.Mailbox
+import HBS2.Net.Messaging.Unix (UNIX)
 import HBS2.Peer.RPC.API.Storage
 import HBS2.Peer.RPC.Client.StorageClient
 import HBS2.KeyMan.Keys.Direct
@@ -38,6 +40,7 @@ import Data.Config.Suckless.Script
 import Data.List qualified as List
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.Set qualified as Set
 import Data.Maybe
 import Data.Word
 import Lens.Micro.Platform
@@ -148,11 +151,33 @@ runMailboxCLI rpc s = do
               mess <- deserialiseOrFail @(Message HBS2Basic) blob
                         & either (const $ error "malformed message") pure
 
-              -- Без штампа, и это плумбинг, а не упущение: сюда приходит уже
-              -- сериализованное сообщение, а решать за него работу можно только
-              -- зная, какому ящику она нужна и сколько. Это знание есть у hub,
-              -- который читает policy перед отправкой; здесь -- нет.
-              callRpcWaitMay @RpcMailboxSend t api (Nothing, mess)
+              -- ЦЕНУ ЯЩИКА здесь по-прежнему не решают, и это плумбинг, а не
+              -- упущение: сколько просит ящик, написано в его подписанной
+              -- policy, а её читает hub перед отправкой -- здесь этого знания
+              -- нет.
+              --
+              -- А ПОЛ РЕЛЕЯ решают, потому что он от получателей не зависит
+              -- вовсе: это число про дорогу из этой машины, и спрашивается оно
+              -- одним RPC. Ровно тот же довод, что и у delete:message ниже --
+              -- запасной путь, который перестал бы работать в тот момент, когда
+              -- кто-нибудь поставит порог.
+              --
+              -- Штамп называет ПЕРВОГО получателя: реле просит лишь, чтобы пакет
+              -- нёс работу за кого-то из них (stampNames), а policy того, кто
+              -- берёт письмо на диск, проверяется только если она что-то просит.
+              -- Сообщение без получателей штамповать не за кого -- и такое
+              -- письмо всё равно никуда не адресовано.
+              floorD <- relayFloorWithin t api
+
+              let rcpts = maybe mempty (messageRecipients . snd)
+                            (unboxSignedBox0 (messageContent mess))
+
+              stamp <- case Set.toList rcpts of
+                         []      -> pure Nothing
+                         (r : _) -> stampWithin floorD "the road out"
+                                      (solveStamp floorD r mess)
+
+              callRpcWaitMay @RpcMailboxSend t api (stamp, mess)
                 >>= orThrowUser "rpc call timeout"
                 >>= orThrowPassIO
 
@@ -320,12 +345,47 @@ runMailboxCLI rpc s = do
                creds <- runKeymanClientRO (loadCredentials ref)
                          >>= orThrowUser ("can't load credentials for" <+> pretty (AsBase58 ref))
 
+               -- THE KEY THAT SIGNS HAS TO BE THE KEY THAT WAS ASKED FOR, and
+               -- it was not checked. keyman answers with the credentials of the
+               -- FILE holding a key, and that file's PRIMARY sign key is what
+               -- comes back -- so a mailbox key kept as a secondary in its
+               -- keyring produced a delete box signed by a different identity.
+               --
+               -- What that cost. The peer takes the signer of the payload AS the
+               -- mailbox being deleted from, so the delete went to a mailbox
+               -- nobody has: `admitDeleted` answers MergeWrongMailbox and the
+               -- message stays, with this command reporting success. Since the
+               -- stamp exists there is a second failure on top -- the stamp names
+               -- `ref` and the box recovers to another key, so
+               -- 'stampNamesDelete' is false and no peer carries the packet at
+               -- any floor.
+               --
+               -- The hub has had this check since it was written ('signerOf');
+               -- this is the same two lines.
+               unless (view peerSignPk creds == ref) do
+                 orThrowUser ( "the key for" <+> pretty (AsBase58 ref)
+                                 <+> "is not the primary key of the keyring holding it"
+                                 <> line
+                                 <> "  a delete is signed by the mailbox's own key, and this"
+                                 <+> "one would be signed by"
+                                 <+> pretty (AsBase58 (view peerSignPk creds)) )
+                   (Nothing @())
+
                let expr  = MailboxMessagePredicate1 (Op (MessageHashEq mess))
                let messP = DeleteMessagesPayload @HBS2Basic expr
 
                let box = makeSignedBox @HBS2Basic (view peerSignPk creds) (view peerSignSk creds) messP
 
-               callRpcWaitMay @RpcMailboxDeleteMessages t api box
+               -- WITH A STAMP FOR THE ROAD OUT, like `send` above and for the
+               -- same reason: this command is the escape hatch the hub points an
+               -- operator at when its own drop fails, and without a stamp it
+               -- would be an escape hatch that stops working the moment anybody
+               -- sets a floor.
+               floorD <- relayFloorWithin t api
+               stamp  <- stampWithin floorD "the delete"
+                           (solveDeleteStamp floorD ref box)
+
+               callRpcWaitMay @RpcMailboxDeleteMessages t api (stamp, box)
                   >>= orThrowUser "rpc call timeout"
                   >>= orThrowPassIO
 
@@ -491,3 +551,59 @@ deleteMessageDesc = [qc|
 |]
 
 
+
+-- | Solve what the road out charges for a delete, if it charges anything.
+--
+-- Nothing means no stamp, and it means it in the two cases that look different
+-- and are not: the peer says the floor is zero, or the peer will not say. The
+-- second is an older build with no such method, and reading its silence as a
+-- price would either refuse to delete or grind for nobody. What follows either
+-- way is the unstamped call this command has always made.
+--
+-- BOUNDED HERE, because the solvers are pure and do not terminate for a
+-- difficulty nobody can reach -- deliberately, since how long a caller will sit
+-- through a search is not a decision they can make. Forcing to WHNF is the whole
+-- search: the constructor does not exist until a nonce is found.
+--
+-- A minute, and not the RPC timeout: what a difficulty costs is not knowable
+-- from the number, since it is the operator's machine and the search is
+-- probabilistic. Time is the thing the person waiting has an opinion about.
+--
+-- AND CAPPED, because part of the answer is a stranger's. The peer folds in what
+-- its neighbours published in their meta, and a neighbour is anybody who
+-- finished a handshake: without a ceiling, one of them announcing 255 would burn
+-- a minute here and then fail the command outright. Above 'maxPayableFloor' this
+-- answers 'Nothing' and says so, which sends what this command sent before any
+-- floor existed. A packet that may not be carried beats a command that refuses
+-- to run.
+relayFloorWithin :: MonadUnliftIO m
+                 => Timeout 'Seconds
+                 -> ServiceCaller MailboxAPI UNIX
+                 -> m PoWDifficulty
+relayFloorWithin t api = do
+  asked <- callRpcWaitMay @RpcMailboxPoWFloor t api () <&> fromMaybe 0
+  case payableFloor asked of
+    Just d  -> pure d
+    Nothing -> do
+      warn $ "the road out wants" <+> pretty asked
+               <+> "bits of work, which is more than this tool will do"
+               <+> parens ("the cap is" <+> pretty maxPayableFloor)
+               <> line <> "  sending without proof-of-work"
+      pure 0
+
+-- | Grind a stamp, or say what could not be ground.
+stampWithin :: MonadUnliftIO m
+            => PoWDifficulty
+            -> Doc AnsiStyle              -- ^ what is being paid for, for the messages
+            -> MessageStamp HBS2Basic     -- ^ the search, unforced
+            -> m (Maybe (MessageStamp HBS2Basic))
+stampWithin floorD what search
+  | floorD == 0 = pure Nothing
+  | otherwise = do
+      warn $ "solving" <+> pretty floorD <+> "bits of work for" <+> what
+      race (pause (TimeoutSec 60)) (liftIO (evaluate search))
+        >>= \case
+          Left ()  -> liftIO $ throwIO $ userError $ show
+                        ( "cannot solve" <+> pretty floorD <+> "bits of work for"
+                            <+> what <+> "in a minute" )
+          Right st -> pure (Just st)

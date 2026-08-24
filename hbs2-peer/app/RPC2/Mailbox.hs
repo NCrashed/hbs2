@@ -100,11 +100,11 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxSend where
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxDeleteMessages where
 
-  handleMethod sbox = do
+  handleMethod (stamp, sbox) = do
     co <- getRpcContext @MailboxAPI @RPC2Context
     let w = rpcMailboxService co
     debug $ "rpc.RpcMailboxDeleteMessages"
-    mailboxSendDelete w sbox
+    mailboxSendDelete w stamp sbox
 
 instance (ForMailboxRPC m) => HandleMethod m RpcMailboxPoWFloor where
 

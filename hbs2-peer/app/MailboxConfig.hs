@@ -54,11 +54,17 @@ import Safe (lastMay)
 -- with nothing said, and in a flood network with no end-to-end feedback there
 -- is nothing to do about that but count it, above.
 --
--- The floor is also a switch and not yet a dial, and that is the standing
--- reason to leave it at zero. An unstamped message and a delete carry no work
--- field, so they pay a literal zero: any non-zero value here stops this peer
--- relaying all plain mail and all deletes rather than pricing them. PEP-23
--- step A is what would change that.
+-- SINCE PEP-23 STEP A THIS IS A DIAL AND NOT A SWITCH, which it was not before
+-- and which is the reason it stayed at zero. A message and a delete both have a
+-- stamped form on the wire now, so a floor prices them; before the delete had a
+-- field to carry work in, any non-zero value here stopped this peer relaying all
+-- plain mail and all deletes outright, silently and forever.
+--
+-- What a sender does about it is PEP-23 step D: `hbs2-hub` and
+-- `hbs2-peer mailbox delete:message` ask this peer what the road out charges
+-- and solve it. A sender that does not ask, or a build older than the stamped
+-- forms, still pays zero and is still refused -- so a floor remains a thing to
+-- raise deliberately and not a default.
 hbs2MailboxPoWMinOpt :: String
 hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
 

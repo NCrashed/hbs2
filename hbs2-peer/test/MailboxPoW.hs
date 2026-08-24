@@ -12,7 +12,8 @@ module MailboxPoW (mailboxPoWTests, mailboxConfigTests) where
 import HBS2.Prelude.Plated
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (HbSync,hashObject)
-import HBS2.Net.Auth.Credentials (peerSignPk)
+import HBS2.Net.Auth.Credentials (PeerCredentials,peerSignPk,peerSignSk)
+import HBS2.Data.Types.SignedBox (SignedBox,makeSignedBox)
 import HBS2.Peer.Proto.Mailbox.PoW
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Base58 (AsBase58(..))
@@ -172,9 +173,11 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         assertBool "and not where more is" (not (carries 20 solved))
 
         -- AN UNSTAMPED PACKET PAYS ZERO, which is what the two branches that
-        -- have no stamp field on the wire -- an unstamped message and a delete
-        -- -- rely on: at the default floor of zero they are carried exactly as
-        -- they always were, and any floor an operator set means what they said.
+        -- carry no stamp -- a plain message and a plain delete -- rely on: at
+        -- the default floor of zero they are carried exactly as they always
+        -- were, and any floor an operator set means what they said. Since
+        -- PEP-23 step A both have a stamped sibling, so a floor prices them
+        -- rather than stopping them.
         assertBool "an unstamped packet goes at floor zero" (forwardable 0 True 0)
         assertBool "and stops at any floor above it" (not (forwardable 1 True 0))
 
@@ -248,6 +251,117 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- bytes that will occupy disk.
         messageKey msg @?= HashRef (hashObject @HbSync (serialise msg))
 
+  -- PEP-23 step A: a delete pays too, and everything the message stamp had to
+  -- get right has to be got right again for a different hash.
+  , testCase "a delete's work is solved and verified over the same preimage" $ do
+      owner <- fst <$> aPeer
+      let mbox = view peerSignPk owner
+          box  = deleteBoxOf owner (HashRef (hashObject @HbSync (serialise @String "m1")))
+          st   = solveDeleteStamp 6 mbox box
+      assertBool "the solved stamp carries at least what was asked"
+        (deleteStampBits box st >= 6)
+      -- The check a relay makes: the stamp names the mailbox that signed it.
+      assertBool "and it names the mailbox the box is signed by"
+        (stampNamesDelete mbox st)
+
+  , testCase "work for a letter is not work for a delete" $
+      withStore $ \sto -> do
+        alice <- aPeer
+        (bobC, bobS) <- aPeer
+        let bob = view peerSignPk bobC
+
+        msg <- aMessage sto alice [bobS] (B8.pack "a letter")
+
+        -- The two identities are digests of differently-typed values, so a
+        -- solution cannot be moved between them. Asserted rather than argued,
+        -- because the preimage function is deliberately shared and sharing it
+        -- is exactly how a domain separation gets lost.
+        let box = deleteBoxOf bobC (messageKey msg)
+            forLetter = solveStamp 6 bob msg
+        assertBool "a letter's stamp does not pay for a delete"
+          (deleteStampBits box forLetter < 6 || stampBits msg forLetter /= 6)
+        assertBool "the two keys differ"
+          (deleteKey box /= messageKey msg)
+
+  , testCase "a delete's marker leaves the nonce out and the work in" $ do
+      owner <- fst <$> aPeer
+      let mbox = view peerSignPk owner
+          box  = deleteBoxOf owner (HashRef (hashObject @HbSync (serialise @String "m1")))
+          bitsOf n = deleteStampBits box (MessageStamp1 mbox n)
+
+      -- THE SAME PROPERTY 'stampMarker' HAS, restated for the delete branch,
+      -- which is where getting it wrong would be easy: the plain branch marks a
+      -- delete by the whole wire value, and doing that for a stamped one would
+      -- make every fresh nonce look like a new delete and buy a flood each.
+      case take 2 [ n | n <- [1 .. 4096 :: Word64], bitsOf n == 0 ] of
+        [n1, n2] -> deleteMarker (MessageStamp1 mbox n1) box
+                      @?= deleteMarker (MessageStamp1 mbox n2) box
+        _ -> assertFailure "no two zero-bit nonces in four thousand"
+
+      -- AND THE WORK IS IN IT. Without the bits, anyone who saw a stamped
+      -- delete could mint a free stamp, have it carried wherever a floor is
+      -- zero, and suppress the honest copy as seen everywhere it had not
+      -- reached, while the free copy is refused by the peers that charge.
+      let weak   = head [ MessageStamp1 mbox n | n <- [0 ..], bitsOf n == 0 ]
+          strong = solveDeleteStamp 8 mbox box
+      assertBool "a free stamp does not suppress a solved one"
+        (deleteMarker weak box /= deleteMarker strong box)
+
+      -- And a stamp for another mailbox is another marker, so one solution
+      -- cannot speak for a delete it was not solved for.
+      other <- fst <$> aPeer
+      assertBool "two mailboxes are two markers"
+        (deleteMarker (MessageStamp1 mbox 1) box
+           /= deleteMarker (MessageStamp1 (view peerSignPk other) 1) box)
+
+  , testCase "the delete key is the name the proof block already has" $ do
+      owner <- fst <$> aPeer
+      let box = deleteBoxOf owner (HashRef (hashObject @HbSync (serialise @String "m1")))
+      -- Not a tautology, and 'mailboxAcceptDelete' is why: it stores
+      -- `serialise box` and names the entry's proof by that block's hash. One
+      -- identity for the work, the marker and the block, as with a message.
+      deleteKey box @?= HashRef (hashObject @HbSync (serialise box))
+
+  -- WHAT A CLIENT DOES WITH A NUMBER SOMEBODY ELSE PICKED. Both rules below are
+  -- about the same fact: part of the relay floor comes out of a neighbour's
+  -- peer-meta, and a neighbour is anybody who finished a handshake.
+  , testCase "one expensive neighbour does not price the whole node" $ do
+      -- A MINIMUM, and it was a maximum for a day. A packet is gossiped to every
+      -- neighbour at once and each decides separately whether to carry it on, so
+      -- one willing neighbour is enough for it to travel. Under a maximum, a
+      -- single peer announcing 255 set the price of everything this node sends;
+      -- under a minimum it can only make itself unreachable.
+      cheapestFloor [Just 4, Just 255, Just 12] @?= 4
+
+      -- A neighbour that published nothing counts as zero HERE, which is the
+      -- opposite of what the same absence means about one peer -- and is the
+      -- same safe direction: silence is not evidence of a price, and under a
+      -- minimum the unknown neighbour is the one that might carry it free.
+      cheapestFloor [Just 12, Nothing] @?= 0
+      cheapestFloor [Nothing, Nothing] @?= 0
+
+      -- Nobody to be carried by is nothing to pay.
+      cheapestFloor [] @?= 0
+
+      -- And when every neighbour has spoken, the cheapest of them is the price.
+      cheapestFloor [Just 8, Just 12] @?= 8
+
+  , testCase "a floor nobody could pay is not paid" $ do
+      -- The valve. Without it, a neighbour publishing 255 had this machine grind
+      -- its whole budget and THEN refuse to send: both clients treated an
+      -- unreachable floor as fatal, so one stranger could stop all outgoing mail
+      -- rather than merely refuse to carry it.
+      payableFloor 0 @?= Just 0
+      payableFloor maxPayableFloor @?= Just maxPayableFloor
+      payableFloor (maxPayableFloor + 1) @?= Nothing
+      payableFloor 255 @?= Nothing
+
+      -- Nothing and not a clamp, because the caller has to tell "free" from "too
+      -- dear to bother": solving 20 when 255 was asked satisfies nobody who
+      -- asked for 255, so the honest move is to send unstamped and say why.
+      assertBool "the cap is a difficulty an ordinary machine actually reaches"
+        (maxPayableFloor <= 24)
+
   , testCase "leading zero bits are counted across bytes" $ do
       leadingZeroBits (B8.pack "\x00\x00\xff") @?= 16
       leadingZeroBits (B8.pack "\x0f") @?= 4
@@ -300,3 +414,14 @@ mailboxConfigTests = testGroup "PEP-21: the mailbox options a peer reads"
   where
     conf :: String -> [Syntax C]
     conf = either (error . show) id . parseTop
+
+-- | A delete box these credentials signed, naming one message.
+--
+-- The shape 'hub drop' produces for a single letter, and what a peer stores as
+-- the proof block. Built here rather than taken from a fixture because what the
+-- work binds to is the BOX -- key, payload and signature together -- so a test
+-- about the work has to hold the same value the peer will.
+deleteBoxOf :: PeerCredentials S -> HashRef -> SignedBox (DeleteMessagesPayload S) S
+deleteBoxOf creds h =
+  makeSignedBox @S (view peerSignPk creds) (view peerSignSk creds)
+    (DeleteMessagesPayload (MailboxMessagePredicate1 (Op (MessageHashEq h))))

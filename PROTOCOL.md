@@ -47,6 +47,44 @@ ProtocolIds do not get new payload versions. Peers running `0.25.3.0`
 interoperate with the prior `0.24.x` line and will interoperate with
 all future releases that respect this freeze.
 
+### The one exception: 13001 (mailbox)
+
+`MailBoxProto` (13001) may gain constructors **at the end** of
+`MailBoxProtoMessage`, and nothing else. It may not renumber, remove or
+change an existing constructor, and it may not change the shape of any
+payload an existing constructor carries.
+
+This is a real exception to the paragraph above and is written down
+rather than taken quietly: `SendMessageStamped` (PEP-21) and
+`DeleteMessagesStamped` (PEP-23) were both added this way, and pretending
+otherwise would leave a re-implementer with a spec the source contradicts.
+
+What makes it safe to allow here and nowhere else:
+
+  - `serialise` tags every constructor by position, including the sole
+    constructor of a one-constructor type, so appending leaves the bytes
+    of every existing constructor byte-identical.
+  - A peer that meets an unknown constructor fails to decode the packet
+    and drops it silently (`runProto`), exactly as it does for an unknown
+    ProtocolId. It does not relay it and does not act on it.
+  - Both additions so far are proof-of-work witnesses, which are opt-in:
+    nothing sends one unless a peer's `hbs2:mailbox:pow-min` is non-zero,
+    and that is zero by default.
+
+The consequence a re-implementer must plan for: a stamped packet travels
+only over a path of peers that understand it, and an older peer in the
+path is a black hole rather than a peer enforcing less. The mailbox
+feature accepted that cost deliberately (PEP-21, "The PoW deployment
+cost").
+
+The RPC service APIs under `hbs2-peer/lib/HBS2/Peer/RPC/API/` are NOT
+covered by this freeze and never were: they are Unix-socket-only, they
+carry a version constant of their own (e.g. `MailboxAPIProto`), and that
+constant is bumped whenever an existing method's input or output changes
+meaning so that a mismatched client refuses to connect instead of acting
+on misread bytes. Appending a method does not bump it, since an older
+peer answers `ErrorMethodNotFound` and a caller reads that as "no answer".
+
 A break of this commitment requires a major version bump and a new
 section in this document. The "Re-verification on change" list at the
 end remains the canonical place to record what to check whenever a
@@ -229,11 +267,25 @@ Current assignments for `L4Proto` (UDP/TCP peers) are:
 | 12001 | `LWWRefProto` |
 | 13001 | `MailBoxProto HBS2Basic` |
 
-The mailbox protocol (13001) is the wire layer behind the experimental
-mailbox feature; its application surface is not exposed in this fork's
-CLI but the protocol IDs are assigned in
-[`Proto.hs:161`](hbs2-peer/lib/HBS2/Peer/Proto.hs#L161) so peers that
-implement it interoperate.
+The mailbox protocol (13001) is the wire layer behind the mailbox
+feature, which `hbs2-peer mailbox` and `hbs2-hub` both drive. Its payload
+is `MailBoxProtoV1` wrapping one of:
+
+| tag | constructor | carries |
+|-----|-------------|---------|
+| 0 | `SendMessage` | a `Message` |
+| 1 | `CheckMailbox` | an optional nonce and a mailbox key |
+| 2 | `MailboxStatus` | a peer-signed `MailBoxStatusPayload` |
+| 3 | `DeleteMessages` | an owner-signed `DeleteMessagesPayload` |
+| 4 | `SendMessageStamped` | a `Message` and a `MessageStamp` (PEP-21) |
+| 5 | `DeleteMessagesStamped` | a delete box and a `MessageStamp` (PEP-23) |
+
+Tags 4 and 5 are the append-only extension described under Stability. A
+`MessageStamp` is `(mailbox key, nonce :: Word64)`, unsigned and
+self-verifying: the work is the leading zero bits of
+`blake2b-256(CBOR (mailbox key, target hash, nonce))`, where the target
+hash is that of the serialised `Message` for tag 4 and of the serialised
+signed delete box for tag 5.
 
 Several additional IDs in the same registry cover Unix-socket-only
 protocols (notify channels, validators, the RPC service IDs); those

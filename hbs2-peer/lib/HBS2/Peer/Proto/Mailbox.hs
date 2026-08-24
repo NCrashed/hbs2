@@ -101,10 +101,14 @@ class ForMailbox s => IsMailboxProtoAdapter s a where
   -- solves for what the MAILBOX charges, which is in the mailbox's signed
   -- policy; the floor above is a peer's own number and is in nobody's policy.
   -- So a relay set to 16 does not carry a message that honestly paid the 12 its
-  -- destination asked for, and neither end learns why -- there is no reply on
-  -- this path, and the sender cannot observe a floor they never knew about. The
-  -- only trace was a 'debug' line, which an operator running at the ordinary
-  -- level never sees.
+  -- destination asked for, and the sender does not learn why: there is no reply
+  -- on this path. The only trace was a 'debug' line, which an operator running
+  -- at the ordinary level never sees.
+  --
+  -- SINCE PEP-23 STEP C the floor is at least KNOWABLE one hop out: a peer
+  -- publishes it in its meta and 'mailboxRelayFloor' answers what a client must
+  -- pay to leave this machine. A relay further away is still invisible, and
+  -- this counter is still the only thing that says the refusal happened.
   --
   -- A warning per message would be worse than nothing: the floor earns its keep
   -- exactly when a flood is arriving, which is when a line per message is its
@@ -178,6 +182,7 @@ class ForMailbox s => IsMailboxService s a where
 
   mailboxSendDelete :: forall m . MonadIO m
                     => a
+                    -> Maybe (MessageStamp s) -- ^ proof of work, when a relay on the way charges for one
                     -> SignedBox (DeleteMessagesPayload s) s
                     -> m (Either MailboxServiceError ())
 
@@ -362,6 +367,62 @@ mailboxProto inner adapter mess = deferred @p do
           lift do
             let whoever = if inner then Nothing else Just pip
             void $ mailboxAcceptMessage adapter whoever origin msg content
+
+    -- ОДНО ТЕЛО НА ОБЕ ФОРМЫ DELETE, как и у сообщения выше: расходятся они
+    -- только тем, сколько бит несёт пакет и чем он опознаётся для дедупа, а всё
+    -- дальнейшее -- проверка подписи, рассылка, маркер, приём -- у них общее и
+    -- обязано остаться общим.
+    --
+    -- Порядок тот же, что и у сообщения со штампом, и обе его половины
+    -- существенны. Проверка ДО рассылки -- иначе штамп ограничивал бы только
+    -- диск, а флуд уже ушёл ко всем известным пирам. ДО маркера -- иначе маркер,
+    -- записанный для пакета с негодным штампом, погасил бы годную копию того же
+    -- delete везде, куда она ещё не дошла.
+    let takeDeleteWith stamp box = do
+
+          let r = unboxSignedBox0 box
+
+          (mbox, spp) <- ContT $ maybe1 r none
+
+          floorD <- lift $ mailboxPoWFloor @s adapter
+
+          -- Сколько бит несёт пакет и чем он опознаётся -- единственное, чем
+          -- различаются две формы.
+          --
+          -- `named` для delete -- это «штамп называет тот ящик, который подписал
+          -- этот бокс» (stampNamesDelete): работа, решённая за чужой ящик, -- это
+          -- работа за чужое удаление. Ключ восстановлен из подписи выше, так что
+          -- проверка бесплатна.
+          --
+          -- У пакета без штампа `named` истинно, а бит ноль: платить не за кого,
+          -- и порог 0 пропускает его как и раньше.
+          let (named, bits, marker) = case stamp of
+                Nothing ->
+                  (True, 0, hashObject @HbSync (serialise mess) & HashRef)
+                Just st ->
+                  ( stampNamesDelete mbox st
+                  , deleteStampBits box st
+                  , deleteMarker st box )
+
+          let carry = forwardable floorD named bits
+
+          unless carry do
+            debug $ red "mailbox: a delete carries too little work to forward"
+                      <+> pretty bits <> ", wanted" <+> pretty floorD
+
+          -- Память пира, не блок: тот же разбор, что и у сообщения выше. И
+          -- спрашивается ТОЛЬКО когда пересылать собираемся -- иначе ветка,
+          -- которая не пересылает, съела бы первое появление и погасила
+          -- следующую копию везде, куда та ещё не дошла.
+          when carry do
+            fresh <- lift $ mailboxRelayOnce @s adapter marker
+
+            when fresh $ lift do
+              gossip mess
+
+          mailboxAcceptDelete adapter (MailboxRefKey mbox) spp box
+
+          none
 
     -- Подпись дешевле диска, поэтому она первой в обеих ветках.
     let unboxMessage msg = ContT $ maybe1 (unboxSignedBox0 @(MessageContent s) (messageContent msg)) none
@@ -682,43 +743,23 @@ mailboxProto inner adapter mess = deferred @p do
         -- бы усиление ценой самой доставки, а это не размен, а поломка.
         --
         -- Гейтом служит то же, чем гейтится сообщение без штампа: ПОРОГ
-        -- ЭТОГО ПИРА. Delete штампа не несёт -- поля для него на проводе нет --
-        -- значит несёт ноль бит работы, и это не «неизвестно сколько»: порог 0
-        -- (умолчание) пропускает его как и раньше, а любой ненулевой порог
-        -- означает ровно то, что оператор им сказал. Приём это не гейтит, как и
-        -- в обеих ветках сообщения: слабый штамп значит «дальше не понесу».
+        -- ЭТОГО ПИРА. Delete без штампа несёт ноль бит работы, и это не
+        -- «неизвестно сколько»: порог 0 (умолчание) пропускает его как и
+        -- раньше, а любой ненулевой порог означает ровно то, что оператор им
+        -- сказал. Приём это не гейтит, как и в обеих ветках сообщения: слабый
+        -- штамп значит «дальше не понесу».
         --
-        -- Что этим НЕ закрыто, честно: при пороге 0 усиление остаётся, и
-        -- ограничить его без поля под штамп на проводе нельзя. Это тот же
-        -- открытый вопрос, что и у SendMessage без штампа, и решается он там
-        -- же -- версией протокола, а не здесь.
-        let r = unboxSignedBox0 box
+        -- Что этим НЕ закрыто, честно: при пороге 0 усиление остаётся. Поле под
+        -- штамп теперь есть (PEP-23, шаг A, ветка ниже), но ограничивает оно
+        -- только тогда, когда порог кто-то поставил; сам дефолт этот шаг не
+        -- трогает и не должен.
+        takeDeleteWith Nothing box
 
-        (mbox, spp) <- ContT $ maybe1 r none
-
-        floorD <- lift $ mailboxPoWFloor @s adapter
-
-        -- Through 'forwardable', like both message branches: a delete carries no
-        -- stamp -- there is no field for one on the wire -- so it pays zero bits.
-        let carry = forwardable floorD True 0
-
-        unless carry do
-          debug $ red "mailbox: a delete carries no work to forward"
-                    <+> parens ("floor is" <+> pretty floorD <+> "bits")
-
-        -- Память пира, не блок: тот же разбор, что и у сообщения выше. И
-        -- спрашивается ТОЛЬКО когда пересылать собираемся -- иначе ветка,
-        -- которая не пересылает, съела бы первое появление и погасила
-        -- следующую копию везде, куда та ещё не дошла.
-        when carry do
-          let h = hashObject @HbSync (serialise mess) & HashRef
-
-          fresh <- lift $ mailboxRelayOnce @s adapter h
-
-          when fresh $ lift do
-            gossip mess
-
-        mailboxAcceptDelete adapter (MailboxRefKey mbox) spp box
-
-        none
+      -- Тот же delete, но с доказательством работы (PEP-23, шаг A).
+      --
+      -- Тело общее с ветвью выше и обязано остаться общим: расходятся они
+      -- только тем, чем пакет опознаётся для дедупа и сколько бит он несёт, а
+      -- всё дальнейшее -- проверка подписи, рассылка, маркер, приём -- у них
+      -- одно.
+      DeleteMessagesStamped box stamp -> takeDeleteWith (Just stamp) box
 

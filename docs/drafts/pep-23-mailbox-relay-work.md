@@ -1,7 +1,8 @@
 PEP-23: a work field on every floodable mailbox packet
 
-Status: draft, started 2026-08-23. Steps B, C and D implemented 2026-08-23;
-        step A, the one wire change, is still a proposal.
+Status: implemented 2026-08-23, all four steps. What remains open is the
+        decision this proposal deliberately does not take: whether the default
+        `pow-min` should move off zero. See "Order of work" at the end.
 Author: NCrashed (Anton Gushcha)
 Extends: PEP-21 (triage, moderation, retention: the stamp and the peer floor).
 Related: PEP-17 (hbs2-hub umbrella), PEP-18 (letter), PEP-22 (`hub drop`).
@@ -204,11 +205,11 @@ solveDeleteStamp :: PoWDifficulty -> MailboxKey s
 with `solveStamp` and `stampBits` becoming one-line wrappers, so the existing
 tests in `hbs2-peer/test/MailboxPoW.hs` keep testing what they test.
 
-The `stampNames` analogue is `msMailbox st == mbox`, where `mbox` is the key
-recovered from the signature. The relay has already paid for that recovery on
-this branch before it decides anything, so the check is free. Call it
-`stampSignedFor`. Its job is the same as `stampNames`: work solved for
-somebody else's mailbox is work for somebody else's delivery.
+The `stampNames` analogue is `stampNamesDelete mbox st`, which is
+`msMailbox st == mbox` with `mbox` the key recovered from the signature. The
+relay has already paid for that recovery on this branch before it decides
+anything, so the check is free. Its job is the same as `stampNames`: work
+solved for somebody else's mailbox is work for somebody else's delivery.
 
 The dedup marker
 ----------------
@@ -356,6 +357,39 @@ an older build with no such key, or a neighbour whose meta has not arrived yet.
 Reporting the second as the first would name a floor of zero for a peer that
 may charge sixteen bits.
 
+READ AS AN `Integer` AND RANGE-CHECKED, which the first version of this got
+wrong and which matters because the value is a stranger's bytes. The derived
+`Read` for `Word8` goes through `Integer` and then `fromInteger`, which WRAPS:
+`readMay "-1" :: Maybe Word8` is `Just 255`, and `"300"` is `Just 44`. So a
+minus sign was the cheapest way to publish the largest floor there is.
+`peerMetaNat` reads an `Integer` and refuses anything outside the target's
+range -- refuses rather than clamps, which is the same reading `poWFloorFrom`
+takes of an out-of-range number in this peer's own config. The same trap sat
+one key over on `listen-tcp`, a `Word16`, and is fixed with it.
+
+The cheapest neighbour, not the dearest
+---------------------------------------
+
+The first version took the MAXIMUM over neighbours and justified it as "the
+number that decides whether the packet travels at all". That is the wrong
+answer to that question. A packet is gossiped to every neighbour at once and
+each of them applies `forwardable` separately, so ONE willing neighbour is
+enough for it to travel; the maximum is what reaching ALL of them would cost,
+which is a different and far more expensive promise.
+
+The difference is not only wording. Under a maximum, one handshaked peer
+publishing a large number set the price of everything this node sent, and
+because both clients treated an unpayable floor as fatal it stopped outgoing
+mail rather than merely refusing to carry it. Under a minimum a hostile
+neighbour can only make itself unreachable.
+
+Under a minimum a neighbour that published nothing counts as ZERO, which is
+the opposite of what the same absence means when asking about one peer, and is
+the same safe direction in both cases: silence is not evidence of a price, and
+under a minimum the unknown neighbour is exactly the one that might carry the
+packet for free. `cheapestFloor` is pure and separate from the walk over the
+neighbour table, because it is the whole of the decision and the walk is not.
+
 `mkPeerMeta` moves out of `PeerTypes` into its own module on the way, and loses
 a `PeerEnv` argument it never used. That is what makes the publishing side
 testable at all: it is a function of a config and a recipient, with no peer, no
@@ -456,6 +490,58 @@ merely absent answers `ErrorMethodNotFound`, which `callRpcWaitMay` reports as
 `powBudget` and `solveWithin` already bound what a grind is allowed to cost,
 and `PoWTooHard` already says so.
 
+A ceiling on what a client will pay
+-----------------------------------
+
+Part of the number a client is handed comes out of a neighbour's peer-meta, so
+it is untrusted input, and a time budget is not enough of a bound: what it
+bounds is how long the failure takes. Both clients treated a floor they could
+not reach as FATAL -- the hub threw `PoWTooHard` and the peer CLI threw a
+`userError` -- so one neighbour announcing an unpayable number stopped this
+machine's outgoing mail rather than merely declining to carry it.
+
+`maxPayableFloor` is 20 bits, about a second of hashing, and `payableFloor`
+answers `Nothing` above it. A client that gets `Nothing` sends UNSTAMPED and
+says why, which is exactly what it did before any of this existed: a letter
+that may not travel is strictly better than a letter that is never composed.
+
+It caps the RELAY FLOOR only. What a mailbox charges comes out of its own
+signed policy, the sender chose to write there, and that is a price with an
+author who can be held to it; only the floor is a number somebody else picked
+for you.
+
+It is also a statement about the largest floor worth SETTING. Above 20 bits no
+honest client will pay, so the floor stops being a price and becomes a way of
+talking to nobody -- which is worth knowing before the default is ever moved.
+
+Both senders in `hbs2-peer` pay too
+-----------------------------------
+
+`hbs2-peer mailbox send` was left unstamped with the note that a message
+arrives already serialised, so what its recipients charge cannot be found out
+here. True of the MAILBOX price and false of the relay floor, which does not
+depend on the recipients at all; and the message is deserialised by then, so
+`messageRecipients` is one `unboxSignedBox0` away, exactly as in `stampsFor`.
+It now solves the floor and names the first recipient -- a relay asks only that
+the packet carry work for SOME recipient of it. This is the same argument that
+put a stamp on `delete:message`: an escape hatch that stops working the moment
+somebody sets a floor is not an escape hatch.
+
+And `delete:message` signs with the key it was asked for
+--------------------------------------------------------
+
+Unrelated to proof-of-work and worth fixing on its own. It took
+`loadCredentials ref` and signed with `view peerSignPk creds` without checking
+the two agree. keyman answers with the credentials of the FILE holding a key,
+and that file's PRIMARY sign key is what comes back, so a mailbox key kept as a
+secondary in its keyring produced a delete signed by another identity. The peer
+takes the signer AS the mailbox, so the delete went to a mailbox nobody has:
+`MergeWrongMailbox`, the message stays, and the command reports success. Since
+step A there is a second failure on top -- the stamp names `ref`, the box
+recovers to another key, `stampNamesDelete` is false and no peer carries the
+packet at any floor. The hub has had this check since it was written
+(`signerOf`); this is the same two lines.
+
 
 Not in this proposal
 ==================
@@ -485,8 +571,17 @@ deployment cost, accepted deliberately", and it applies only when somebody
 actually stamps a delete, which at a floor of 0 nobody needs to.
 
 Step B is softer: an old peer decodes a set-valued delete, relays it, and
-refuses to merge it with `MergeUnsupportedPred`. Steps C and D change no
-format at all.
+refuses to merge it with `MergeUnsupportedPred`. Step C changes no format at
+all.
+
+THE RPC IS A SEPARATE SURFACE and step A touches it too: the stamp has to
+reach the peer, so `RpcMailboxDeleteMessages` takes a pair now, and that DOES
+bump `MailboxAPIProto` -- an existing method's input changed meaning, which is
+exactly the case the two earlier bumps recorded there were for. `hbs2-peer` and
+`hbs2-hub` ship in one release, so a mismatch is a refusal to connect between
+binaries that are meant to be upgraded together, which is the failure worth
+having. Step D's `RpcMailboxPoWFloor` was appended and needed no bump, and the
+difference between the two cases is written down beside the constant.
 
 `PROTOCOL.md` says the wire is frozen as of 0.25.3.0, that future wire-level
 features receive new protocol ids, and that existing ids do not get new
@@ -520,8 +615,12 @@ Steps B, C and D break nothing and are useful on their own, so they go first:
      `fillPeerMeta` change, for the reason recorded under step C.
   3. D, the client difficulty in `stampsFor`, plus `RpcMailboxPoWFloor` and
      `mailboxRelayFloor` behind it. DONE 2026-08-23.
-  4. A, the wire change: the constructor, the preimage split, the marker, and
-     the `forwardable` call on the new branch.
+  4. A, the wire change: the `DeleteMessagesStamped` constructor, the preimage
+     split (`stampBitsOver`, `solveStampOver`, `deleteKey`), `deleteMarker`,
+     `stampNamesDelete`, one shared `takeDeleteWith` body over both delete
+     forms, the stamp on `RpcMailboxDeleteMessages`, and the grind in both
+     senders (`hub drop` and `hbs2-peer mailbox delete:message`).
+     DONE 2026-08-23.
 
 Then the part that actually wants the current moment. After A, a non-zero
 `pow-min` finally means something other than "stop relaying", and it becomes
@@ -531,8 +630,16 @@ crosses a stock peer. The network today is the author's node and two
 volunteers, so the flag day costs three upgrades. It will not be that cheap
 again, and if the default is going to move it should move now.
 
-This proposal does not pick the number. It says that picking it is a separate,
-deliberate decision that A makes available and that nothing before A does.
+This proposal does not pick the number, and did not pick it when A landed. It
+says that picking it is a separate, deliberate decision that A makes available
+and that nothing before A did. THE DEFAULT IS STILL ZERO, so everything the
+four steps built is inert until an operator sets a floor; that is the intended
+state, not an unfinished one.
+
+What the decision needs, when it is taken: a difficulty a contributor's laptop
+solves in a few seconds and a flooder cannot repeat cheaply, measured rather
+than guessed, and the knowledge that every sender older than these builds is
+cut off from every peer that raises it.
 
 
 What this does not fix

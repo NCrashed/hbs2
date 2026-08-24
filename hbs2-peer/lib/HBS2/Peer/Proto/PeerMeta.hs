@@ -108,10 +108,33 @@ parsePeerMeta = either (const Nothing) Just . deserialiseOrFail . LBS.fromStrict
 -- format. That is what makes it the cheap place to publish a number, and it is
 -- why this accessor is here rather than repeated at each call site: the values
 -- are written with 'show' and read with 'readMay', and those two have to be
--- decided together. A key that is absent, or whose value will not parse as @v@,
--- is 'Nothing' -- there is no third answer, because a peer that did not say a
--- thing and a peer that said it in a way this build cannot read are the same
--- amount of knowledge.
+-- decided together.
+--
+-- DO NOT USE IT FOR A BOUNDED INTEGER. The claim that a value which will not
+-- parse is 'Nothing' is false for 'Word8', 'Word16' and their relatives,
+-- because the derived 'Read' for those goes through 'Integer' and then
+-- 'fromInteger', which WRAPS:
+--
+-- > readMay "-1"   :: Maybe Word8  == Just 255
+-- > readMay "300"  :: Maybe Word8  == Just 44
+--
+-- The value in a peer's meta is a stranger's bytes, so a wrap is not a corner
+-- case: @-1@ is the cheapest way to write the largest number there is. Use
+-- 'peerMetaNat', which reads an 'Integer' and refuses anything outside the
+-- target's range.
 peerMetaValue :: Read v => Text -> PeerMeta -> Maybe v
 peerMetaValue k =
   (readMay . Text.unpack . TE.decodeUtf8 =<<) . lookup k . unPeerMeta
+
+-- | A bounded non-negative number out of a peer's meta.
+--
+-- Reads an 'Integer' -- which cannot wrap -- and answers 'Nothing' unless the
+-- value fits @v@. REFUSED AND NOT CLAMPED, which is the same reading
+-- @poWFloorFrom@ takes of a number out of range in this peer's own config: a
+-- clamped 4096 would become a value nobody wrote, and here the person who did
+-- not write it is a stranger.
+peerMetaNat :: forall v . (Integral v, Bounded v) => Text -> PeerMeta -> Maybe v
+peerMetaNat k m = do
+  n <- peerMetaValue @Integer k m
+  guard (n >= fromIntegral (minBound @v) && n <= fromIntegral (maxBound @v))
+  pure (fromIntegral n)

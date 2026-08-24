@@ -27,6 +27,7 @@ import HBS2.Peer.Proto.Peer
 import HBS2.Peer.Proto.BlockInfo
 import HBS2.Peer.Proto.LWWRef
 import HBS2.Peer.Proto.Mailbox.Types (PoWDifficulty)
+import HBS2.Peer.Proto.Mailbox.PoW (cheapestFloor)
 import HBS2.Net.Proto.Sessions
 import HBS2.Prelude.Plated
 import HBS2.Storage
@@ -302,33 +303,47 @@ getKnownPeers  = do
 -- period and @fillPeerMeta@ asks again for the peer it does not know.
 peerMetaPoWFloor :: MonadIO m => PeerInfo e -> m (Maybe PoWDifficulty)
 peerMetaPoWFloor pinfo =
-  liftIO $ readTVarIO (_peerMeta pinfo) <&> (>>= peerMetaValue "mailbox-pow-min")
+  liftIO $ readTVarIO (_peerMeta pinfo) <&> (>>= peerMetaNat "mailbox-pow-min")
 
--- | The largest mailbox relay floor any neighbour has published.
+-- | The cheapest mailbox relay floor among this peer's neighbours.
 --
--- A MAXIMUM and not a list, because a mailbox packet is gossiped to every
--- neighbour at once: the number that decides whether it travels at all is the
--- largest one any of them wants. A neighbour that has published nothing
--- contributes nothing rather than a zero -- see 'peerMetaPoWFloor' -- so this
--- under-reports while meta is still arriving, which is the safe direction: it
--- asks a sender for no more work than this peer can show a reason for.
+-- A MINIMUM, and it used to be a maximum, which answered a different question
+-- than the one it was asked. A packet is gossiped to every neighbour at once
+-- and each of them decides separately whether to carry it on, so ONE willing
+-- neighbour is enough for the packet to travel: the number that decides whether
+-- it goes anywhere is the smallest any of them wants. The maximum is what
+-- reaching ALL of them would cost, which is a different and much more expensive
+-- promise that nothing here makes.
 --
--- One spelling for two readers: the mailbox worker's periodic report, which
--- publishes it beside what this peer's own floor cost somebody else, and
+-- The difference is not only wording. The value comes out of a neighbour's
+-- peer-meta, which is a stranger's bytes, and under a maximum a single
+-- handshaked peer publishing a large number set the price for everything this
+-- node sends. Under a minimum it can only make itself unreachable.
+--
+-- A NEIGHBOUR THAT HAS PUBLISHED NOTHING COUNTS AS ZERO here, which is the
+-- opposite of what 'peerMetaPoWFloor' does with the same absence and is right
+-- for the same reason: silence is not evidence of a price, and under a minimum
+-- "no evidence" means "this may be the free path". Both readings under-report,
+-- which is the safe direction -- a sender is never asked for more work than
+-- this peer can show a reason for.
+--
+-- Zero with no neighbours at all, since there is nobody to be carried by.
+--
+-- One spelling for two readers: the mailbox worker's periodic report and
 -- 'mailboxRelayFloor', which answers a client that is about to grind.
-knownPeersPoWFloor :: forall e m . ( MonadIO m
-                                   , HasPeer e
-                                   , HasPeerLocator e m
-                                   , Sessions e (PeerInfo e) m
-                                   )
-                   => m PoWDifficulty
-knownPeersPoWFloor = do
+neighbourPoWFloor :: forall e m . ( MonadIO m
+                                  , HasPeer e
+                                  , HasPeerLocator e m
+                                  , Sessions e (PeerInfo e) m
+                                  )
+                  => m PoWDifficulty
+neighbourPoWFloor = do
   pl <- getPeerLocator @e
   ps <- knownPeers @e pl
   floors <- forM ps $ \p -> runMaybeT do
               pinfo <- MaybeT $ find (PeerInfoKey p) id
               MaybeT $ peerMetaPoWFloor pinfo
-  pure $ maximum (0 : catMaybes floors)
+  pure (cheapestFloor floors)
 
 pingPeerWait :: forall e m . ( MonadIO m
                              , Request e (PeerHandshake e) m

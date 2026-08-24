@@ -56,13 +56,19 @@ type MailboxAPI = '[ RpcMailboxPoke
 -- stamp exists and would send the letter without one.
 --
 -- NOT bumped for 'RpcMailboxPoWFloor' (PEP-23 step D), and the difference is
--- what a bump is for. Both bumps above changed the meaning of bytes an existing
+-- what a bump is for. The bumps above changed the meaning of bytes an existing
 -- method already exchanged, so silence was the only safe outcome. Appending a
 -- method changes nothing that exists: an old peer answers a new client's call
 -- with 'ErrorMethodNotFound', which 'callRpcWaitMay' reports as 'Nothing', and
 -- the caller reads no floor and sends exactly what it sends today. Refusing to
 -- connect over that would trade a benign degradation for an outage.
-type MailboxAPIProto =  0x056091510d3b2ecb
+--
+-- Bumped again for the stamp on 'RpcMailboxDeleteMessages' (PEP-23 step A),
+-- which is the first kind and not the second: the input became a pair, so an
+-- old client's call arrives at a new peer as an undecodable input, and a new
+-- client's call reaches an old peer that reads the pair as a box and deletes
+-- nothing. Same reasoning as the send stamp two paragraphs up, same remedy.
+type MailboxAPIProto =  0x8f2a44c71b0e35d9
 
 
 instance HasProtocol UNIX  (ServiceProto MailboxAPI UNIX) where
@@ -106,7 +112,11 @@ type instance Output RpcMailboxList  = Either MailboxServiceError [(MailboxRefKe
 type instance Input RpcMailboxSend  = (Maybe (MessageStamp HBS2Basic), Message HBS2Basic)
 type instance Output RpcMailboxSend = Either MailboxServiceError ()
 
-type instance Input RpcMailboxDeleteMessages  = (SignedBox (DeleteMessagesPayload HBS2Basic) HBS2Basic)
+-- The stamp rides beside the box for the reason it rides beside a message, plus
+-- one of its own: the bytes stored as the delete proof are @serialise box@, and
+-- @admitDeleted@ reads them back and checks the signer, so they have to be the
+-- same bytes whether the delete was stamped or not.
+type instance Input RpcMailboxDeleteMessages  = (Maybe (MessageStamp HBS2Basic), SignedBox (DeleteMessagesPayload HBS2Basic) HBS2Basic)
 type instance Output RpcMailboxDeleteMessages = (Either MailboxServiceError ())
 
 type instance Input RpcMailboxGet = (PubKey 'Sign HBS2Basic)

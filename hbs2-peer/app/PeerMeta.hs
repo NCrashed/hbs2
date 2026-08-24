@@ -112,7 +112,7 @@ fillPeerMeta mtcp probePeriod = do
                       debug $ "*** GOT VERY GOOD META *** " <+> pretty p <+> viaShow peerMeta
 
                       -- 3) пробить, что есть tcp
-                      forM_ (peerMetaValue "listen-tcp" peerMeta) \listenTCPPort -> lift do
+                      forM_ (peerMetaNat "listen-tcp" peerMeta) \listenTCPPort -> lift do
                        mTcpAddr <- replacePort p listenTCPPort
                        -- skipped for name-carrying (e.g. .onion) peers
                        forM_ mTcpAddr \peerTCPAddrPort -> do

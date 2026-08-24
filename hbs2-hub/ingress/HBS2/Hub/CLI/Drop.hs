@@ -36,13 +36,15 @@ module HBS2.Hub.CLI.Drop
 
 import HBS2.Hub.Types
 import HBS2.Hub.Ingress (rpcTimeout)
-import HBS2.Hub.CLI.Common (signerFor,signingPair)
+import HBS2.Hub.CLI.Common (signerFor,signingPair,saying)
+import HBS2.Hub.CLI.Compose (relayFloor,solveWithin,powBudget)
 
 import HBS2.CLI.Prelude
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.SignedBox (makeSignedBox)
 import HBS2.Peer.Proto.Mailbox
+import HBS2.Peer.Proto.Mailbox.PoW (solveDeleteStamp)
 import HBS2.Peer.Proto.Mailbox.Merge (deleteNaming)
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
@@ -117,9 +119,25 @@ dropMessages mbox msgs =
     Just creds -> do
       api <- getClientAPI @MailboxAPI @UNIX
 
+      -- What the road out charges, asked once for the whole set rather than per
+      -- batch: it is a property of this machine's neighbourhood and does not
+      -- change between two signatures (PEP-23 steps C and D).
+      floorD <- relayFloor rpcTimeout api
+
       let send payload = do
             let box = uncurry (makeSignedBox @HubScheme) (signingPair creds) payload
-            callRpcWaitMay @RpcMailboxDeleteMessages rpcTimeout api box >>= \case
+
+            -- SOLVED PER BOX, and it has to be: the work binds to the hash of
+            -- the signed box, so each batch pays for its own. At the default
+            -- floor of zero there is no stamp and this is the call this tool
+            -- has always made.
+            stamp <- if floorD == 0 then pure Nothing else do
+                       liftIO $ saying ( "hbs2-hub: solving" <+> pretty floorD
+                                           <+> "bits of work for the delete" <> line )
+                       Just <$> solveWithin powBudget floorD mbox
+                                  (solveDeleteStamp floorD mbox box)
+
+            callRpcWaitMay @RpcMailboxDeleteMessages rpcTimeout api (stamp, box) >>= \case
               Nothing        -> pure (Left DropPeerSilent)
               Just (Left e)  -> pure (Left (DropRefused (Text.pack (show e))))
               Just (Right _) -> pure (Right ())

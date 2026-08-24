@@ -17,6 +17,9 @@ module HBS2.Hub.CLI.Compose
   , sendLetterWith
   , sendPayload
   , stampsFor
+  , relayFloor
+  , solveWithin
+  , powBudget
   , checkReplyChannel
   , attachToLetter
   , issueUsage
@@ -53,7 +56,7 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.Credentials.Sigil (Sigil,loadSigil)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Policy (policyPoW)
-import HBS2.Peer.Proto.Mailbox.PoW (solveStamp)
+import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,maxPayableFloor,payableFloor)
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
@@ -250,7 +253,7 @@ sendPayload ob sender rcpts parts payload = do
   -- already in flight, and it pays" kept whichever stamp arrived first and
   -- dropped the rest -- and a letter to two charging mailboxes reached one of
   -- them. Nothing hostile was involved: it is what this loop sends.
-  floorD <- relayFloor ob
+  floorD <- relayFloor (obTimeout ob) (obMailbox ob)
   stamps <- stampsFor floorD (readPolicyWith (obStorage ob) (obMailbox ob)) msg
 
   -- Checked, not voided. callRpcWaitMay answers Nothing on a timeout, and
@@ -295,10 +298,27 @@ sendPayload ob sender rcpts parts payload = do
 --
 -- Asked once per letter and not once per recipient: the number is a property of
 -- the road out of this machine, not of who the letter is addressed to.
-relayFloor :: MonadUnliftIO m => Outbound -> m PoWDifficulty
-relayFloor ob =
-  callRpcWaitMay @RpcMailboxPoWFloor (obTimeout ob) (obMailbox ob) ()
-    <&> fromMaybe 0
+--
+-- AND CAPPED, because part of this number is a stranger's. The peer folds in
+-- what its neighbours published in their meta, and a neighbour is anybody who
+-- finished a handshake; without a ceiling one of them announcing 255 would have
+-- this machine grind for its whole 'powBudget' and then refuse to send at all.
+-- Above 'maxPayableFloor' the answer is "pay nothing", which sends the letter
+-- exactly as it was sent before any floor existed -- a letter that may not
+-- travel is strictly better than a letter that is never composed.
+relayFloor :: MonadUnliftIO m
+           => Timeout 'Seconds -> ServiceCaller MailboxAPI UNIX -> m PoWDifficulty
+relayFloor t api = do
+  asked <- callRpcWaitMay @RpcMailboxPoWFloor t api () <&> fromMaybe 0
+  case payableFloor asked of
+    Just d  -> pure d
+    Nothing -> do
+      liftIO $ saying ( "hbs2-hub: the road out wants" <+> pretty asked
+                          <+> "bits of work, which is more than this tool will do"
+                          <+> parens ("the cap is" <+> pretty maxPayableFloor) <> line
+                          <> "  sending without proof-of-work; the letter may not"
+                          <+> "be carried past a peer that charges that much" <> line )
+      pure 0
 
 -- | Solve what the recipients charge, and what the road out charges.
 --
@@ -380,13 +400,13 @@ stampsFor floorD policyFor msg = do
     [] | floorD > 0, (mbox:_) <- rcpts -> do
            liftIO $ saying ( "hbs2-hub: solving" <+> pretty floorD
                                <+> "bits of work to leave this peer" <> line )
-           pure <$> solveWithin powBudget floorD mbox msg
+           pure <$> solveWithin powBudget floorD mbox (solveStamp floorD mbox msg)
        | otherwise -> pure []
 
     _ -> for charging $ \(mbox, d) -> do
            liftIO $ saying ( "hbs2-hub: solving" <+> pretty d <+> "bits of work for"
                                <+> pretty (AsBase58 mbox) <> line )
-           solveWithin powBudget d mbox msg
+           solveWithin powBudget d mbox (solveStamp d mbox msg)
 
 -- | How long a grind is allowed to take before it is called impossible.
 --
@@ -399,17 +419,23 @@ powBudget = 300
 
 -- | Grind, or give up saying so.
 --
--- 'solveStamp' is pure and unbounded by design (it cannot know what the caller
--- will sit through), so the bound belongs here. Forcing to WHNF is the whole
--- search: the constructor does not exist until a nonce has been found.
+-- 'solveStamp' and 'solveDeleteStamp' are pure and unbounded by design (neither
+-- can know what the caller will sit through), so the bound belongs here.
+-- Forcing to WHNF is the whole search: the constructor does not exist until a
+-- nonce has been found.
+--
+-- TAKES THE UNFORCED SEARCH rather than the thing being paid for, because there
+-- are two of those now: a letter and a delete (PEP-23 step A). What the bound
+-- is about is time, and time does not care which. The difficulty and the
+-- mailbox are still arguments because they are what 'PoWTooHard' has to say.
 solveWithin :: MonadUnliftIO m
             => Timeout 'Seconds
             -> PoWDifficulty
             -> HubKey
-            -> Message HubScheme
+            -> MessageStamp HubScheme   -- ^ the search, unforced
             -> m (MessageStamp HubScheme)
-solveWithin t d mbox msg =
-  race (pause t) (liftIO (evaluate (solveStamp d mbox msg)))
+solveWithin t d mbox search =
+  race (pause t) (liftIO (evaluate search))
     >>= either (\() -> throwIO (PoWTooHard (show ( pretty d <+> "bits for"
                                                      <+> pretty (AsBase58 mbox)))))
                pure

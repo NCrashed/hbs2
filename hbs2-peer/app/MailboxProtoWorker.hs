@@ -710,10 +710,10 @@ instance ( s ~ Encryption e, e ~ L4Proto
   -- work that still does not leave the building.
   mailboxRelayFloor MailboxProtoWorker{..} = do
     mine <- readTVarIO mpwPoWFloor
-    theirs <- liftIO $ withPeerM mpwPeerEnv (knownPeersPoWFloor @e)
+    theirs <- liftIO $ withPeerM mpwPeerEnv (neighbourPoWFloor @e)
     pure (max mine theirs)
 
-  mailboxSendDelete w@MailboxProtoWorker{..} box = do
+  mailboxSendDelete w@MailboxProtoWorker{..} stamp box = do
     debug $ red "mailboxSendDelete"
 
     flip runContT pure do
@@ -737,7 +737,9 @@ instance ( s ~ Encryption e, e ~ L4Proto
       liftIO $ withPeerM mpwPeerEnv do
         me <- ownPeer @e
         runResponseM me $ do
-          mailboxProto @e True w (MailBoxProtoV1 (DeleteMessages box))
+          mailboxProto @e True w (MailBoxProtoV1 (maybe (DeleteMessages box)
+                                                        (DeleteMessagesStamped box)
+                                                        stamp))
 
       okay ()
 
@@ -1153,10 +1155,14 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
         -- somebody else; this says what somebody else's floor costs this peer,
         -- and until the number was published there was nothing to read it from.
         --
-        -- Through 'knownPeersPoWFloor', which is also what 'mailboxRelayFloor'
-        -- answers a client with: what an operator is shown and what a sender is
-        -- asked to pay have to be the same number.
-        theirFloor <- liftIO $ withPeerM mpwPeerEnv (knownPeersPoWFloor @e)
+        -- The CHEAPEST neighbour and not the dearest, which is the number that
+        -- decides whether a packet goes anywhere at all: each neighbour decides
+        -- separately, so one willing carrier is enough. See 'neighbourPoWFloor'.
+        --
+        -- Through the same function 'mailboxRelayFloor' answers a client with:
+        -- what an operator is shown and what a sender is asked to pay have to be
+        -- the same number.
+        theirFloor <- liftIO $ withPeerM mpwPeerEnv (neighbourPoWFloor @e)
 
         values <- atomically do
           mpwFetchQSize <- readTVar mpwFetchQ <&> HS.size
@@ -1177,7 +1183,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                  , ("inMailboxDownloadQ", fromIntegral inMailboxDownloadQSize)
                  , ("inMessageQueueDropped", fromIntegral dropped)
                  , ("powNotForwarded", fromIntegral notFwd)
-                 , ("powFloorNeighbours", fromIntegral theirFloor)
+                 , ("powFloorNeighbourMin", fromIntegral theirFloor)
                  ]
         acceptReport pro values
         debug $ "I'm" <+> yellow "mailboxProtoWorker"

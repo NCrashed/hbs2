@@ -35,7 +35,7 @@ said :: String -> Maybe PeerMeta
 said = saidTo (Set.singleton Clearnet)
 
 floorSaid :: String -> Maybe Word8
-floorSaid src = peerMetaValue "mailbox-pow-min" =<< said src
+floorSaid src = peerMetaNat "mailbox-pow-min" =<< said src
 
 peerMetaTests :: TestTree
 peerMetaTests = testGroup "PEP-23: the relay floor a peer publishes"
@@ -67,7 +67,7 @@ peerMetaTests = testGroup "PEP-23: the relay floor a peer publishes"
       -- reachable on its class (PEP-05 G). A floor is a price and not a
       -- location: there is nobody this peer would refuse to carry for and also
       -- want to keep the reason from.
-      let f classes = peerMetaValue @Word8 "mailbox-pow-min"
+      let f classes = peerMetaNat @Word8 "mailbox-pow-min"
                         =<< saidTo classes "(hbs2:mailbox:pow-min 9)"
       f (Set.singleton Clearnet) @?= Just 9
       f (Set.singleton Onion)    @?= Just 9
@@ -80,7 +80,7 @@ peerMetaTests = testGroup "PEP-23: the relay floor a peer publishes"
       -- this step cost no compatibility.
       let m = said "http-listen \"0.0.0.0\"\n(hbs2:mailbox:pow-min 3)"
       (peerMetaValue @Integer "http-port" =<< m) @?= Just 5005
-      (peerMetaValue @Word8 "mailbox-pow-min" =<< m) @?= Just 3
+      (peerMetaNat @Word8 "mailbox-pow-min" =<< m) @?= Just 3
 
   , testCase "a key that is absent and a key that will not parse are one answer" do
       -- Deliberately, and 'peerMetaPoWFloor' depends on it: a peer that said
@@ -88,6 +88,35 @@ peerMetaTests = testGroup "PEP-23: the relay floor a peer publishes"
       -- same amount of knowledge, which is none -- and neither is a floor of
       -- zero, which would be a claim that it carries anything.
       let m = PeerMeta [ ("mailbox-pow-min", TE.encodeUtf8 "twelve") ]
-      peerMetaValue @Word8 "mailbox-pow-min" m @?= Nothing
-      peerMetaValue @Word8 "nothing-said-about-this" m @?= Nothing
+      peerMetaNat @Word8 "mailbox-pow-min" m @?= Nothing
+      peerMetaNat @Word8 "nothing-said-about-this" m @?= Nothing
+
+  -- THE READER IS READING A STRANGER'S BYTES, and 'peerMetaValue' is the wrong
+  -- tool for a bounded number: the derived Read for Word8 goes through Integer
+  -- and then fromInteger, which WRAPS. So "-1" -- the cheapest thing to write --
+  -- parsed as 255, the largest floor there is, and a neighbour could set the
+  -- price of everything this node sends by publishing a minus sign.
+  , testCase "a number out of range is refused, not wrapped" do
+      let said' v = PeerMeta [ ("mailbox-pow-min", TE.encodeUtf8 v) ]
+      -- What the wrapping reader answered, kept here so the case cannot be
+      -- quietly reverted to it: Just 255, Just 44, Just 232.
+      peerMetaValue @Word8 "mailbox-pow-min" (said' "-1")   @?= Just 255
+      -- What this build answers.
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "-1")     @?= Nothing
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "300")    @?= Nothing
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "1000")   @?= Nothing
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "twelve") @?= Nothing
+      -- Refused and not clamped, which is the same reading `poWFloorFrom` takes
+      -- of a number out of range in this peer's OWN config: a clamped 300 would
+      -- be a floor nobody wrote, and here the person who did not write it is a
+      -- stranger.
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "0")      @?= Just 0
+      peerMetaNat @Word8 "mailbox-pow-min" (said' "255")    @?= Just 255
+
+  , testCase "a port out of range is refused too" do
+      -- The same trap one key over, and it predates the floor: `listen-tcp` is
+      -- read as a Word16, so "-1" was a request to ping port 65535 and "70000"
+      -- one to ping 4464.
+      let m = PeerMeta [ ("listen-tcp", TE.encodeUtf8 "-1") ]
+      peerMetaNat @Word16 "listen-tcp" m @?= Nothing
   ]
