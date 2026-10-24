@@ -141,6 +141,7 @@ library
       HBS2.Git3.State.Internal.Index
       HBS2.Git3.State.Internal.Segment
       HBS2.Git3.State.Internal.LWWBlock
+      HBS2.Git3.State.Internal.Wait
       HBS2.Git3.Config.Local
       HBS2.Git3.Git
       HBS2.Git3.Git.Pack
@@ -196,6 +197,7 @@ test-suite spec
 
   other-modules:
       HBS2.Git3.Repo.MailboxSpec
+      HBS2.Git3.State.WaitSpec
       -- HBS2.Git3.Git.PackSpec
       -- Data.Config.Suckless.KeyValueSpec
       -- Data.Config.Suckless.AesonSpec

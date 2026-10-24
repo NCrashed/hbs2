@@ -308,7 +308,23 @@ main =  flip runContT pure do
 
       _ -> pure Nothing
 
-    recover $ connectedDo $ withStateDo do
+    -- On the original stderr, for the reason the command loop below gives:
+    -- the status pump clears each line it prints, so an error that only went
+    -- through it would be erased by the next line, and the process ends here.
+    -- A repository that cannot be found fails in this block, before any
+    -- command is read, and used to be a helper that never said a word.
+    let fatal :: String -> Git3 IO ()
+        fatal e = do
+          readTVarIO out >>= \case
+            Just h  -> liftIO do
+              hPutDoc h (line <> red "hbs2-git:" <+> pretty e <> line)
+              hFlush h
+            Nothing -> none
+          liftIO $ Exit.exitWith (Exit.ExitFailure 1)
+
+    handle (\(e :: RepoWaitError) -> fatal (show e)) $
+     handle (\(e :: HBS2GitException) -> fatal (show e)) $
+     recover $ connectedDo $ withStateDo do
 
       waitRepo Nothing =<< getGitRepoKeyThrow
 

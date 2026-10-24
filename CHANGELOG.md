@@ -1132,6 +1132,28 @@
 
 ## Fixed
 
+  - **`git push` to a repository whose lwwref has no value hung forever and
+    printed nothing.** Every wait for a repository -- push, fetch, clone and
+    the `repo:` commands -- polled for the lwwref, then the manifest, then the
+    reflog, with no deadline at all (`waitRepo Nothing`; `waitRepo (Just t)`
+    bounded only the reflog). An lwwref nobody holds and one that has not
+    arrived yet look the same to a peer, so a lost repository was a command
+    that never returned. Each stage now gives up after `HBS2_GIT_REPO_WAIT`
+    seconds (60 by default; `repo:wait:timeout` sets it from the CLI or
+    `.hbs2-git3/config`) and says which stage, for example:
+
+        repository <key> not found: its lwwref has no value on this peer or
+        its neighbours (waited 60s). To wait longer, set
+        HBS2_GIT_REPO_WAIT to a number of seconds.
+
+    A reflog that is still arriving is not cut off: that limit counts from the
+    last time the number of missing blocks went down.
+
+    The remote helper also printed nothing when it failed before reading its
+    first command, which is where a repository that cannot be found fails: the
+    status pump erases each line it prints when the next one comes. Those
+    errors now go to the original stderr, as the command loop's already did.
+
   - **`hbs2-peer` refused every ping and was left with no peers.** The
     handshake signs only a nonce of `pingNonceSize` bytes, which closed a
     signing oracle. The size was written as 32, taken from the `BS.take 32` in

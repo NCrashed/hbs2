@@ -14,6 +14,7 @@ import HBS2.Git3.State.Internal.LWWBlock as Exported
 import HBS2.Git3.State.Internal.RefLog as Exported
 import HBS2.Git3.State.Internal.Segment as Exported
 import HBS2.Git3.State.Internal.Index as Exported
+import HBS2.Git3.State.Internal.Wait as Exported
 
 import HBS2.Net.Auth.GroupKeySymm
 
@@ -137,6 +138,7 @@ nullGit3Env = Git3Disconnected
                 <*> newTVarIO defCompressionLevel
                 <*> newTVarIO defIndexBlockSize
                 <*> newTVarIO Nothing
+                <*> (newTVarIO =<< repoWaitFromEnv)
                 <*> pure Nothing
 
 
@@ -202,6 +204,7 @@ recover m = fix \again -> do
         -- debug $ yellow $ "REPOKEY" <+> pretty (AsBase58 rk)
 
         dict <- asks gitRuntimeDict
+        waitT <- asks gitRepoWait
 
         connected <- Git3Connected soname sto peer refLogAPI lwwAPI
                         <$> newTVarIO rk
@@ -210,6 +213,7 @@ recover m = fix \again -> do
                         <*> newTVarIO defSegmentSize
                         <*> newTVarIO defCompressionLevel
                         <*> newTVarIO defIndexBlockSize
+                        <*> pure waitT
                         <*> pure dict
 
 
@@ -236,6 +240,22 @@ data CWRepo =
   | CAborted
 
 
+-- | Wait until the repository can be used: its lwwref has a value, the
+-- manifest it points at can be read, and the reflog that manifest names has a
+-- value whose blocks are all here.
+--
+-- EVERY STAGE IS BOUNDED. An lwwref that nobody holds and one that has not
+-- arrived yet look the same from here, so without a deadline a repository
+-- that is gone is a `git push` that never returns and never says anything.
+-- The limit is 'getRepoWaitTimeout', and each stage gives up with a
+-- 'RepoWaitError' that says which stage it was and what to do.
+--
+-- The argument only changes the reflog stage. With @Just t@ the caller needs
+-- the manifest and nothing else: the reflog is waited for at most @t@ and its
+-- absence is not an error, as it never was. With 'Nothing' (push, fetch,
+-- anything that reads or writes history) the reflog is required, and a reflog
+-- whose blocks stop arriving is reported rather than waited on forever; one
+-- that keeps arriving is never cut off.
 waitRepo :: forall m . HBS2GitPerks m
          => Maybe (Timeout 'Seconds)
          -> GitRepoKey
@@ -243,6 +263,8 @@ waitRepo :: forall m . HBS2GitPerks m
 waitRepo timeout repoKey = do
 
   status $ yellow "waitRepo" <+> pretty (AsBase58 repoKey)
+
+  limit <- getRepoWaitTimeout
 
   ask >>= \case
     Git3Disconnected{} -> throwIO Git3PeerNotConnected
@@ -257,42 +279,36 @@ waitRepo timeout repoKey = do
 
         when (rlv && rlog) $ done ()
 
-        let wait w what x = pause @'Seconds w >> what x
+        status "wait for peer"
 
-        callCC \forPeer -> do
+        void $ lift (pollUntil limit (callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repoKey, "lwwref", 31)))
+                 >>= orThrow (RepoPeerNotAnswering limit)
 
-          status "wait for peer"
-
-          lift (callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repoKey, "lwwref", 31))
-                   >>= maybe (wait 1 forPeer ()) (const none)
-
-        pFetch <- ContT $ withAsync $ forever do
+        -- Asked often at first, when an answer is most likely, and every ten
+        -- seconds after that.
+        pFetch <- ContT $ withAsync $ flip fix 1 \next i -> do
                     void  (callRpcWaitMay @RpcLWWRefFetch (TimeoutSec 1) lwwAPI (LWWRefKey repoKey))
-                    pause @'Seconds 10
+                    pause @'Seconds i
+                    next (min 10 (i * 2))
 
-        lww <- flip fix 2 \next i -> do
-                  status $ "wait for" <+> pretty (AsBase58 repoKey)
-                  lift (callRpcWaitMay @RpcLWWRefGet (TimeoutSec 1) lwwAPI (LWWRefKey repoKey))
-                    >>= \case
-                           Just (Just x)  -> pure x
-                           _              -> wait i next (i*1.05)
+        status $ "wait for" <+> pretty (AsBase58 repoKey)
+
+        lww <- lift (pollUntil limit (join <$> callRpcWaitMay @RpcLWWRefGet (TimeoutSec 1) lwwAPI (LWWRefKey repoKey)))
+                 >>= orThrow (RepoNotFound repoKey limit)
 
         setGitRepoKey repoKey
 
         status $ "lwwref value" <+> pretty (lwwValue lww)
 
-        mf <- flip fix 3 $ \next i -> do
-                  status $ "wait for manifest" <+> pretty i
-                  lift (try @_ @SomeException getRepoManifest) >>= \case
-                    Left{}  -> wait i next (i*1.10)
-                    Right x -> pure x
+        status "wait for manifest"
+
+        mf <- lift (pollUntil limit (either (const Nothing) Just <$> try @_ @SomeException getRepoManifest))
+                >>= orThrow (RepoManifestUnreadable repoKey (lwwValue lww) limit)
 
         reflog <- getRefLog mf & orThrow GitRepoManifestMalformed
 
         lift (callRpcWaitMay @RpcPollAdd (TimeoutSec 1) peerAPI (reflog, "reflog", 11))
                  >>= orThrow RpcTimeout
-
-        let waiter = maybe (forever (pause @'Seconds 3600)) pause timeout
 
         ContT $ withAsync $ do
                 pause @'Seconds 1
@@ -300,33 +316,34 @@ waitRepo timeout repoKey = do
                   debug $ "fetch reflog" <+> pretty (AsBase58 reflog)
                   void $ lift (callRpcWaitMay @RpcRefLogFetch (TimeoutSec 2) reflogAPI reflog)
                   pause @'Seconds i
-                  next (i*1.05)
+                  next (min 10 (i*1.5))
 
+        status $ "wait for reflog" <+> pretty (AsBase58 reflog)
 
-        void $ lift $ race waiter do
+        rv' <- lift $ pollUntil (fromMaybe limit timeout)
+                        (join <$> callRpcWaitMay @RpcRefLogGet (TimeoutSec 2) reflogAPI reflog)
 
-          rv <- flip fix 1 \next i -> do
-                    status $ "wait for reflog" <+> pretty i <+> pretty (AsBase58 reflog)
-                    lift (callRpcWaitMay @RpcRefLogGet (TimeoutSec 2) reflogAPI reflog)
-                      >>= \case
-                             Just (Just x)  -> pure x
-                             Nothing        -> debug "fucking RPC timeout!" >>  wait i next (i*1.05)
-                             _              -> wait i next (i*1.05)
+        case rv' of
+          Nothing | isJust timeout -> done ()
+                  | otherwise      -> throwIO (RepoRefLogEmpty repoKey reflog limit)
 
-          atomically $ writeTVar gitRefLogVal (Just rv)
+          Just rv -> do
+            atomically $ writeTVar gitRefLogVal (Just rv)
 
-          cancel pFetch
+            cancel pFetch
 
-          status $ "reflog" <+> pretty (AsBase58 reflog) <+> pretty rv
+            status $ "reflog" <+> pretty (AsBase58 reflog) <+> pretty rv
 
-          flip fix 5 $ \next w -> do
+            synced <- lift $ pollProgress (fromMaybe limit timeout) do
+              try @_ @OperationError (findMissedBlocks sto rv) >>= \case
+                Left{}  -> pure (Left maxBound)
+                Right missed
+                  | L.null missed -> pure (Right ())
+                  | otherwise -> do
+                      status $ "wait reflog to sync in consistent state" <+> pretty (length missed)
+                      pure (Left (length missed))
 
-            handle (\(e :: OperationError) -> pause @'Seconds w >> next (w*1.10)) do
-              missed <- findMissedBlocks sto rv
-              if L.null missed then do
-                updateRepoKey repoKey
-              else do
-                status $ "wait reflog to sync in consistent state" <+> pretty w
-                pause @'Seconds w
-                next (w*1.01)
-
+            case synced of
+              Right () -> lift (updateRepoKey repoKey)
+              Left n | isJust timeout -> none
+                     | otherwise      -> throwIO (RepoRefLogIncomplete repoKey reflog n limit)
