@@ -229,6 +229,7 @@ test-suite test
                   , TestByPassFlow
                   , TestEncryptedTree
                   , TestFrameBound
+                  , TestTCPRedial
 
     -- other-extensions:
 

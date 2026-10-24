@@ -1144,6 +1144,19 @@
     0.25.4/0.25.5 peers talk again, and a test asks the real instance what it
     produces instead of a comment saying it.
 
+  - **A TCP neighbour that was down for a moment was not dialled again
+    until a queue aged out.**
+    A send asks for a connection only when it finds no out-queue for the peer,
+    and creates the queue as it asks. The queue was removed only when a
+    connection that had come up went down, so a connect that failed outright,
+    say during the neighbour's restart, left a queue with no connection under
+    it. Every later send went into it and asked for nothing, and the ping loop,
+    sending every thirty seconds, kept the sweep from collecting it. A dial
+    that fails before the cookie exchange now removes its queue, and the next
+    send dials again. Older releases have the same defect: after a restart a
+    node waited for its neighbours' queues to age out, a quarter of an hour on
+    our bootstrap node, before anybody dialled it again.
+
   - **The deny-list and the sent log were read whole, and reading them is
     quadratic.** The S-expression parser is superlinear in the number of forms
     handed to it at once: the deny-list measured 42 ms at 1024 bans, 1.97 s at
