@@ -86,6 +86,7 @@ ncqStorageOpen fp upd = do
   ncqFileLock       <- newTVarIO Nothing
   ncqCurrentFossils <- newTVarIO mempty
   ncqReplQueue      <- newTVarIO mempty
+  ncqStateDumpSem   <- atomically $ newTSem 1
 
   let ncq0 = NCQStorage{..} -- & upd
 

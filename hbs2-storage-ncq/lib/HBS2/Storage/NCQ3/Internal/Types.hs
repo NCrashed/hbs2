@@ -130,6 +130,8 @@ data NCQStorage =
   , ncqRunSem          :: TSem
   , ncqReplQueue       :: TVar (HashMap FileKey [STM ()])
   , ncqFileLock        :: TVar (Maybe FileLock)
+  , ncqStateDumpSem    :: TSem
+    -- ^ one state dump at a time, so ncqStateKey only moves forward
   }
   deriving stock (Generic)
 
