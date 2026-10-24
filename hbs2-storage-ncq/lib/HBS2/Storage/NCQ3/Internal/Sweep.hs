@@ -58,33 +58,43 @@ ncqRemoveEmptyFossils me@NCQStorage{..} = flip runContT pure $ callCC \exit -> d
     ncqStateDelDataFile fk
     ncqStateDelFact (P (PData (DataFile fk) 0))
 
+-- | Delete the data and index files this process dropped from the state,
+--   once no state (in memory, in use, or on disk) names them any more.
+--
+-- ONLY WHAT WAS DROPPED, NOT WHATEVER IS UNKNOWN. This used to delete every
+-- f- and i- file not named by a live state, so when the state on disk was old
+-- it deleted everything written after it. A file can be unknown to the state
+-- because the state is behind; it is obsolete only if this process removed it
+-- (a merge, a compaction, an empty fossil). Unknown files are dealt with once,
+-- at start-up, by 'ncqTryLoadState', which never deletes them.
 ncqSweepFiles :: forall m . MonadUnliftIO m => NCQStorage -> m ()
 ncqSweepFiles me@NCQStorage{..} = do
 
   debug "ncqSweepFiles"
 
-  fossils <- ncqListFilesBy me (List.isPrefixOf "f-")
-  indexes <- ncqListFilesBy me (List.isPrefixOf "i-")
+  obsolete <- readTVarIO ncqObsoleteFiles <&> HS.toList
 
-  stateFiles  <- ncqListFilesBy me (List.isPrefixOf "s-") <&> fmap snd
+  unless (List.null obsolete) do
 
-  liveOnDisk <- for stateFiles (readStateMay me)
-                  <&> mconcat . catMaybes
-                  <&> HS.fromList . universeBi @_ @FileKey
+    stateFiles  <- ncqListFilesBy me (List.isPrefixOf "s-") <&> fmap snd
 
-  live <- ncqLiveKeys me <&> (<> liveOnDisk)
+    liveOnDisk <- for stateFiles (readStateMay me)
+                    <&> mconcat . catMaybes
+                    <&> HS.fromList . universeBi @_ @FileKey
 
-  debug $ "ALIVE" <+> pretty (HS.toList live)
+    live <- ncqLiveKeys me <&> (<> liveOnDisk)
 
-  for_ indexes $ \(_, k) -> unless (HS.member k live) do
-    let fn = ncqGetFileName me (IndexFile k)
-    debug $ yellow "REMOVING" <+> pretty (takeFileName fn)
-    removeFile fn
+    debug $ "ALIVE" <+> pretty (HS.toList live)
 
-  for_ fossils $ \(_, k) -> unless (HS.member k live) do
-    let fn = ncqGetFileName me (DataFile k)
-    debug $ yellow "REMOVING" <+> pretty (takeFileName fn)
-    removeFile fn
+    for_ obsolete $ \name -> do
+      let k = fromString @FileKey name
+      let fn = ncqGetFileName me name
+      unless (HS.member k live) do
+        here <- doesFileExist fn
+        when here do
+          debug $ yellow "REMOVING" <+> pretty (takeFileName fn)
+          removeFile fn
+        atomically $ modifyTVar ncqObsoleteFiles (HS.delete name)
 
 
 ncqSweepObsoleteStates :: forall m .  MonadUnliftIO m => NCQStorage -> m ()

@@ -87,6 +87,7 @@ ncqStorageOpen fp upd = do
   ncqCurrentFossils <- newTVarIO mempty
   ncqReplQueue      <- newTVarIO mempty
   ncqStateDumpSem   <- atomically $ newTSem 1
+  ncqObsoleteFiles  <- newTVarIO mempty
 
   let ncq0 = NCQStorage{..} -- & upd
 

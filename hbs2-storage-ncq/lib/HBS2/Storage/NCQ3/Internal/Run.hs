@@ -25,6 +25,8 @@ import Data.List qualified as List
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
 import Data.Vector qualified as V
+import Lens.Micro.Platform (over)
+import Data.Generics.Labels ()
 import System.FileLock as FL
 import System.Posix.Files qualified as PFS
 import System.Posix.IO as PosixBase
@@ -55,6 +57,27 @@ ncqRemoveGarbage me = do
 
   dirFiles wd <&> filter garb >>= mapM_ rm
 
+-- | Load the state at start-up and reconcile it with what is on disk.
+--
+-- A STATE FILE IS A HINT, THE DATA FILES ARE THE TRUTH. Background state
+-- dumps used to stop after the first one of a session (see 'ncqStateDump'),
+-- so the newest state on disk could be weeks older than the data. Start-up
+-- then took that state, deleted every other state file, and the sweep deleted
+-- every data and index file the state did not mention: all data written since
+-- that state. Now:
+--
+--   * the newest state (by key) that passes 'checkState' is loaded, as before;
+--   * newer state files that could not be loaded go to quarantine, not away;
+--   * older state files are left to 'ncqSweepObsoleteStates', which removes
+--     them only once a newer state is on disk;
+--   * the file sequence is moved past every key already on disk, so no new
+--     file reuses the name of an old one;
+--   * a data file the state does not know is adopted: it is checked, its
+--     unsynced tail (if any) is cut off and kept in quarantine, and it is
+--     indexed with its own mtime, so what was written later still wins;
+--   * an index file the state does not know goes to quarantine (its data file
+--     is indexed again if it is not known either);
+--   * nothing is deleted.
 ncqTryLoadState :: forall m. MonadUnliftIO m
                 => NCQStorage
                 -> m ()
@@ -66,71 +89,50 @@ ncqTryLoadState me@NCQStorage{..} = do
   stateFiles <- ncqListFilesBy me ( List.isPrefixOf "s-" )
                   <&> List.sortOn ( Down . snd )
 
-  r <- flip fix  ([], ncqState0, stateFiles) $ \next -> \case
-            (r, s, []) -> pure (r,s,[])
-            (l, s0, (_,s):ss) -> do
+  (rejected, new@NCQState{..}) <- flip fix ([], stateFiles) $ \next -> \case
+    (l, []) -> pure (l, ncqState0)
+    (l, (_,s):ss) -> do
+      ms <- try @_ @SomeException (readStateMay me s) <&> either (const Nothing) id
+      case ms of
+        Nothing -> next (s : l, ss)
+        Just ns -> do
+          ok <- checkState ns
+          debug $ "state status" <+> pretty s <+> pretty ok
+          if ok then pure (l, ns) else next (s : l, ss)
 
-              readStateMay me s >>= \case
-                Nothing -> next (s : l, s0, ss)
-                Just ns  -> do
-                  ok <- checkState ns
-                  debug $ "state status" <+> pretty s <+> pretty ok
-                  if ok then
-                    pure (l <> fmap snd ss, ns, ss)
-                  else
-                    next (s : l, s0, ss)
-
-  let (bad, new@NCQState{..}, rest) = r
+  for_ rejected $ \s -> do
+    warn $ red "state rejected" <+> pretty (toFileName (StateFile s))
+    void $ ncqQuarantineFile me (ncqGetFileName me (StateFile s))
 
   atomically $ modifyTVar ncqState (<> new)
 
-  for_ [ (d,s) | P (PData d s) <- Set.toList ncqStateFacts ] $ \(dataFile,s) -> do
+  -- never hand out a key some file already has
+  onDisk <- ncqListFilesBy me (\f -> any (`List.isPrefixOf` f) ["f-","i-","s-"])
+  let keys = [ k | (_,k) <- onDisk, k /= ncqNullStateKey ]
+  unless (List.null keys) do
+    let next = succ (maximum keys)
+    atomically $ modifyTVar ncqState (over #ncqStateFileSeq (max next))
 
-    let path = ncqGetFileName me dataFile
-    realSize <- fileSize path
+  -- indexes the state does not know
+  let knownIdx = HS.fromList (fmap snd ncqStateIndex)
+  idxOnDisk <- ncqListFilesBy me (\f -> List.isPrefixOf "i-" f && List.isSuffixOf ".cq" f)
+  for_ idxOnDisk $ \(_,k) -> when (k /= ncqNullStateKey && not (HS.member k knownIdx)) do
+    warn $ red "index not in state" <+> pretty (toFileName (IndexFile k))
+    void $ ncqQuarantineFile me (ncqGetFileName me (IndexFile k))
 
-    let sizewtf = realSize /= fromIntegral s
+  -- data files the state does not know
+  let knownData = ncqStateFiles <> HS.fromList [ k | P (PData (DataFile k) _) <- Set.toList ncqStateFacts ]
+  dataOnDisk <- ncqListFilesBy me (\f -> List.isPrefixOf "f-" f && List.isSuffixOf ".data" f)
+  orphans <- for [ (ts,k) | (ts,k) <- dataOnDisk, k /= ncqNullStateKey, not (HS.member k knownData) ] $ \(ts,k) -> do
+    warn $ red "data file not in state, adopting" <+> pretty (toFileName (DataFile k))
+    ncqStateUpdate me $ ncqStateAddFact (P (PData (DataFile k) 0))
+    pure (DataFile k, 0, Just ts)
 
-    flip fix 0 $ \again i -> do
+  let pending = [ (d, s, Nothing) | P (PData d s) <- Set.toList ncqStateFacts ] <> orphans
 
-      good <- try @_ @NCQFsckException (ncqFileFastCheck path)
-
-      let corrupted = isLeft good
-
-      if | not corrupted && realSize <= typicalFileTailRecordLen  -> do
-
-            warn $ "skip indexing" <+> pretty realSize <+> pretty (takeFileName path)
-
-         | not corrupted -> do
-
-            debug $ "indexing" <+> pretty dataFile
-            void  $ ncqIndexFile me Nothing dataFile
-
-         | otherwise -> do
-
-            o <- ncqFileTryRecover path
-            warn $ "ncqFileTryRecover" <+> pretty path <+> pretty o <+> parens (pretty realSize)
-
-            let best = if i < 1 then max s o else s
-
-            warn $ red "trim"
-                <+> pretty s
-                <+> pretty best
-                <+> red (pretty (fromIntegral best - realSize))
-                <+> pretty (takeFileName path)
-
-            liftIO $ PFS.setFileSize path (fromIntegral best)
-
-            if i <= 1 then again (succ i) else none
-
-
-  for_ (bad <> fmap snd rest) $ \f -> do
-    let old = ncqGetFileName me (StateFile f)
-    rm old
+  for_ pending $ \(dataFile, s, mts) -> ncqRecoverDataFile me dataFile s mts
 
   where
-
-    -- TODO: created-but-not-indexed-file?
 
     checkState NCQState{..} = flip runContT pure $ callCC \exit -> do
 
@@ -140,19 +142,6 @@ ncqTryLoadState me@NCQStorage{..} = do
         here <- doesFileExist dataFile
 
         unless here $ exit False
-
-        -- lift  (try @_ @SomeException (ncqFileFastCheck dataFile)) >>= \case
-        --   Right () -> none
-        --   Left e -> do
-        --     warn (viaShow e)
-        --     let known = HM.lookup fk facts
-        --     fs <- fileSize dataFile
-        --     warn $ "file is incomplete (or damaged)"
-        --               <+> pretty dataFile
-        --               <+> "actual:" <+> pretty fs
-        --               <+> "known:"  <+> pretty known
-        --     let ok = isJust known && Just (fromIntegral fs) >= known
-        --     unless ok $ exit False
 
       for_ ncqStateIndex $ \(_,fk) -> do
 
@@ -164,6 +153,80 @@ ncqTryLoadState me@NCQStorage{..} = do
           exit False
 
       pure True
+
+-- | Bring a data file that is not indexed yet (a pending fact of the state,
+--   or a file the state did not know) into the index.
+--
+-- @s@ is the size the state last recorded as synced, @mts@ the timestamp to
+-- index it with ('Nothing': now).
+--
+-- A FILE WHOSE END IS NOT A SYNC RECORD is cut back to the last one, but the
+-- bytes cut off are first copied into quarantine. A file in which nothing can
+-- be vouched for is moved to quarantine whole. In no case is data deleted.
+ncqRecoverDataFile :: forall m . MonadUnliftIO m
+                   => NCQStorage
+                   -> DataFile FileKey
+                   -> Word64
+                   -> Maybe POSIXTime
+                   -> m ()
+ncqRecoverDataFile me dataFile s mts = flip runContT pure $ callCC \exit -> do
+
+  let path = ncqGetFileName me dataFile
+  let dropFact = ncqStateUpdate me (ncqStateDelFact (P (PData dataFile 0)))
+
+  here <- doesFileExist path
+
+  unless here do
+    warn $ red "pending data file is missing" <+> pretty (takeFileName path)
+    dropFact
+    exit ()
+
+  realSize <- fileSize path
+
+  when (realSize == 0) do
+    -- an empty file the last session opened; the empty fossil sweep drops it
+    exit ()
+
+  let fastCheck = lift (try @_ @SomeException (ncqFileFastCheck path)) <&> isRight
+
+  good <- fastCheck
+
+  when good do
+    if realSize <= typicalFileTailRecordLen then do
+      warn $ "skip indexing" <+> pretty realSize <+> pretty (takeFileName path)
+    else do
+      debug $ "indexing" <+> pretty dataFile
+      void $ lift $ ncqIndexFile me mts dataFile
+    exit ()
+
+  o <- lift (try @_ @SomeException (ncqFileTryRecover path)) <&> either (const 0) fromIntegral
+
+  let lo = min realSize o
+  let hi = min realSize (max (fromIntegral s) lo)
+
+  warn $ "ncqFileTryRecover" <+> pretty (takeFileName path)
+           <+> "size" <+> pretty realSize
+           <+> "synced" <+> pretty s
+           <+> "recovered" <+> pretty o
+
+  when (hi == 0) do
+    void $ ncqQuarantineFile me path
+    dropFact
+    exit ()
+
+  void $ ncqQuarantineTail me path lo
+
+  for_ (List.nub [hi, lo]) $ \cut -> when (cut > 0) do
+    warn $ red "trim" <+> pretty (takeFileName path) <+> pretty realSize <+> "=>" <+> pretty cut
+    liftIO $ PFS.setFileSize path (fromIntegral cut)
+    ok <- fastCheck
+    when ok do
+      ncqSyncPath path
+      void $ lift $ ncqIndexFile me mts dataFile
+      exit ()
+
+  void $ ncqQuarantineFile me path
+  dropFact
 
 
 ncqStorageRun :: forall m . MonadUnliftIO m
@@ -426,6 +489,11 @@ ncqStorageRun ncq@NCQStorage{..} = withSem ncqRunSem $ flip runContT pure do
 
       atomically $ modifyTVar ncqCurrentFossils (HS.insert fk)
 
+      -- the file exists before any state can name it
+      let fname = ncqGetFileName ncq (DataFile fk)
+      let flags = defaultFileFlags { exclusive = False }
+      fd <- liftIO (openFdCompat fname Posix.WriteOnly (Just 0o666) flags)
+
       ncqStateUpdate ncq do
         ncqStateAddFact (P (PData (DataFile fk) 0))
         -- FIXM: asap-remove-this
@@ -435,10 +503,7 @@ ncqStorageRun ncq@NCQStorage{..} = withSem ncqRunSem $ flip runContT pure do
         --  почему мы вообще его сюда засунули?
         -- ncqStateAddDataFile fk
 
-      let fname = ncqGetFileName ncq (DataFile fk)
-      -- touch fname
-      let flags = defaultFileFlags { exclusive = False }
-      (fk,) <$> liftIO (openFdCompat fname Posix.WriteOnly (Just 0o666) flags)
+      pure (fk, fd)
 
     spawnActivity m = do
       a <- ContT $ withAsync m

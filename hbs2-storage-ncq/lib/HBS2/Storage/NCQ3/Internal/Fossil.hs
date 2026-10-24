@@ -135,12 +135,17 @@ ncqFossilMergeStep me@NCQStorage{..}  = flip runContT pure $ callCC \exit -> do
 
     appendTailSection fd
 
+  -- the state will drop f1 and f2 for this file, and the sweep will delete
+  -- them, so it has to be on disk first, not in the page cache
+  ncqSyncPath outFile
+
   f3 <- DataFile <$> ncqGetNewFileKey me DataFile
 
   let newFile = ncqGetFileName me f3
 
   debug $ "MOVED" <+> pretty outFile <+> pretty newFile
   moveFile outFile newFile
+  ncqSyncPath (takeDirectory newFile)
 
   let f1p = ncqGetFileName me f1
   ts1 <- liftIO (PFS.getFileStatus f1p) <&> PFS.modificationTimeHiRes

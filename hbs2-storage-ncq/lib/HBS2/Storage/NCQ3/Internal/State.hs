@@ -128,12 +128,14 @@ ncqStateAddDataFile fk = do
   NCQStorage{..} <- ask
   StateOP $ lift do
     modifyTVar ncqState (over #ncqStateFiles (HS.insert fk))
+    modifyTVar ncqObsoleteFiles (HS.delete (toFileName (DataFile fk)))
 
 ncqStateDelDataFile :: FileKey -> StateOP ()
 ncqStateDelDataFile fk = do
   sto@NCQStorage{..} <- ask
   StateOP $ lift do
     modifyTVar ncqState (over #ncqStateFiles (HS.delete fk))
+    modifyTVar ncqObsoleteFiles (HS.insert (toFileName (DataFile fk)))
     ncqDelCachedDataSTM sto fk
 
 ncqStateAddFact :: Fact -> StateOP ()
@@ -156,12 +158,14 @@ ncqStateAddIndexFile ts fk  = do
   NCQStorage{..} <- ask
   StateOP $ lift do
     modifyTVar' ncqState (sortIndexes . over #ncqStateIndex ((Down ts, fk) :))
+    modifyTVar ncqObsoleteFiles (HS.delete (toFileName (IndexFile fk)))
 
 ncqStateDelIndexFile :: FileKey  -> StateOP ()
 ncqStateDelIndexFile fk  = do
   sto@NCQStorage{..} <- ask
   StateOP $ lift do
     modifyTVar' ncqState (over #ncqStateIndex $ filter f)
+    modifyTVar ncqObsoleteFiles (HS.insert (toFileName (IndexFile fk)))
     ncqDelCachedIndexSTM sto fk
 
   where f (_,b) = b /= fk

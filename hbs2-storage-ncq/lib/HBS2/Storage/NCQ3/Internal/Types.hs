@@ -132,6 +132,9 @@ data NCQStorage =
   , ncqFileLock        :: TVar (Maybe FileLock)
   , ncqStateDumpSem    :: TSem
     -- ^ one state dump at a time, so ncqStateKey only moves forward
+  , ncqObsoleteFiles   :: TVar (HashSet FilePath)
+    -- ^ names of files this process dropped from the state. The sweep
+    --   deletes these and nothing else.
   }
   deriving stock (Generic)
 
@@ -245,4 +248,9 @@ logErr loc m = handle (\(e::SomeException) -> err (pretty loc <> ":" <> viaShow 
 
 ncqNullStateKey :: FileKey
 ncqNullStateKey = FileKey maxBound
+
+-- | Subdirectory of the work dir where start-up puts the files it cannot
+--   account for (and the tails it cuts off), instead of deleting them.
+ncqQuarantineDirName :: FilePath
+ncqQuarantineDirName = "quarantine"
 
