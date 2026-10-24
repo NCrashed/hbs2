@@ -856,7 +856,11 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   stn <- getNumCapabilities  <&> max 2 . div 1
 
-  w <- liftIO $ async (ncqStorageRun s)
+  -- ncqWithStorage above already runs the storage. A second ncqStorageRun
+  -- here waited on the run semaphore and, when the first run ended (on a
+  -- GoAgainException, during the respawn pause), started the storage again
+  -- with no stop request, loading state and opening a data file on its way
+  -- out of the process.
   -- liftIO $ replicateM stn $ asyncBound $ liftIO $ simpleStorageWorker s
 
   localMulticast <- liftIO $ (headMay <$> parseAddrUDP (fromString defLocalMulticast)
