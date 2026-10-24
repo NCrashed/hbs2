@@ -218,6 +218,7 @@ test-suite test
         MailboxQueue
         MailboxQueueSpec
         RelayedSpec
+        PingNonceSpec
         MailboxPolicyCacheSpec
         MessageParts
         HttpListen

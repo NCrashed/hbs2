@@ -1132,6 +1132,18 @@
 
 ## Fixed
 
+  - **`hbs2-peer` refused every ping and was left with no peers.** The
+    handshake signs only a nonce of `pingNonceSize` bytes, which closed a
+    signing oracle. The size was written as 32, taken from the `BS.take 32` in
+    the `HasNonces` instance, but that instance takes from a crypto_box nonce,
+    which is 24 bytes, and every released peer sends 24. A node with the check
+    answered no ping at all: older peers and nodes of its own build never got a
+    pong, never listed it as known, and their TCP connections to it closed after
+    67 seconds without a frame. The log showed `refused to sign a ping nonce of
+    length 24`. The size is 24 now, the wire is unchanged, so this node and
+    0.25.4/0.25.5 peers talk again, and a test asks the real instance what it
+    produces instead of a comment saying it.
+
   - **The deny-list and the sent log were read whole, and reading them is
     quadratic.** The S-expression parser is superlinear in the number of forms
     handed to it at once: the deny-list measured 42 ms at 1024 bans, 1.97 s at
