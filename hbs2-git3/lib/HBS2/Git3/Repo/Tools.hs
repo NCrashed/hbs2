@@ -101,7 +101,28 @@ updateRepoHead :: (HBS2GitPerks m)
                -> [Syntax C]
                -> [HashRef]
                -> Git3 m ()
-updateRepoHead repo manifest gkRefs' = do
+updateRepoHead = writeRepoHead True
+
+-- | Publish a repository head that owes nothing to the current one.
+--
+-- 'updateRepoHead' reads the current head to carry its group keys forward,
+-- and fails when it cannot. That is right for an edit and wrong for
+-- @repo:init <key>@ over a value that is lost or unreadable, where there is
+-- nothing to carry and the read is the very thing that fails.
+replaceRepoHead :: (HBS2GitPerks m)
+                => GitRepoKey
+                -> [Syntax C]
+                -> [HashRef]
+                -> Git3 m ()
+replaceRepoHead = writeRepoHead False
+
+writeRepoHead :: (HBS2GitPerks m)
+              => Bool
+              -> GitRepoKey
+              -> [Syntax C]
+              -> [HashRef]
+              -> Git3 m ()
+writeRepoHead keepOld repo manifest gkRefs' = do
 
   debug "updateRepoHead"
 
@@ -117,7 +138,7 @@ updateRepoHead repo manifest gkRefs' = do
   manifestTree <- createTreeWithMetadata sto Nothing mempty (LBS8.pack (show mfs))
                      >>= orThrowPassIO
 
-  lwwRef <- getRepoRefMaybe
+  lwwRef <- if keepOld then getRepoRefMaybe else pure Nothing
 
   let rHeadOld = lwwValue <$> lwwRef
 

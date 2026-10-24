@@ -73,6 +73,8 @@ renderRepoWaitError = \case
   RepoNotFound k t -> unwords
     [ "repository", key k, "not found: its lwwref has no value on this peer"
     , "or its neighbours (waited", secs t <> ")."
+    , "If you own its key, run `hbs2-git3 repo:init" , key k <> "`"
+    , "to publish it again."
     , longer
     ]
 
@@ -80,6 +82,8 @@ renderRepoWaitError = \case
     [ "repository", key k <> ": its lwwref points at", show (pretty h) <> ","
     , "but the manifest could not be read from this peer or its neighbours"
     , "(waited", secs t <> "): its blocks are missing."
+    , "If they are lost for good and you own the key, run"
+    , "`hbs2-git3 repo:init --force", key k <> "` to publish a new manifest over it."
     , longer
     ]
 

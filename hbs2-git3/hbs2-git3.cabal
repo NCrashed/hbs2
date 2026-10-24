@@ -197,6 +197,7 @@ test-suite spec
 
   other-modules:
       HBS2.Git3.Repo.MailboxSpec
+      HBS2.Git3.Repo.InitSpec
       HBS2.Git3.State.WaitSpec
       -- HBS2.Git3.Git.PackSpec
       -- Data.Config.Suckless.KeyValueSpec

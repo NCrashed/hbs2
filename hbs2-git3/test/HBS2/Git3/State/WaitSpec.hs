@@ -115,16 +115,22 @@ spec = do
 
     let k = "2v3ubvkrQaWzhBCZW14JDWUW1LGBMnkirWeJJvZxnNUV" :: String
 
-    it "names the key and says it was not found" do
+    it "names the key, says it was not found, and says how to publish it again" do
       let s = show (RepoNotFound aKey 60)
       s `shouldSatisfy` isInfixOf ("repository " <> k <> " not found")
       s `shouldSatisfy` isInfixOf "its lwwref has no value on this peer or its neighbours"
+      s `shouldSatisfy` isInfixOf ("`hbs2-git3 repo:init " <> k <> "`")
       s `shouldSatisfy` isInfixOf "waited 60s"
       s `shouldSatisfy` isInfixOf repoWaitEnvVar
 
     it "names the value whose manifest it could not read" do
       show (RepoManifestUnreadable aKey aHashRef 60)
         `shouldSatisfy` isInfixOf "points at 8yqJyq5jxKmDdMwzGvQhx3srKuc1FqmxCYSZKz5yzXWJ"
+
+    it "points at --force only for a manifest that cannot be read" do
+      show (RepoManifestUnreadable aKey aHashRef 60)
+        `shouldSatisfy` isInfixOf ("`hbs2-git3 repo:init --force " <> k <> "`")
+      show (RepoNotFound aKey 60) `shouldSatisfy` (not . isInfixOf "--force")
 
     it "says some blocks when it does not know how many" do
       show (RepoRefLogIncomplete aKey aKey maxBound 60) `shouldSatisfy` isInfixOf ": some block(s)"

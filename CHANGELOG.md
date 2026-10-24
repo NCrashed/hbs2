@@ -2,6 +2,37 @@
 
 ## Added
 
+  - **`hbs2-git3 repo:init <repo>`: a lost repository can be published again
+    under the key it had.** `repo:init` could only make a new key, so a
+    repository whose lwwref value was lost (the ncq3 rollback did this to real
+    ones) could come back only under a new URL, and every clone, remote and
+    link would point at nothing. It now takes the key as an hbs23:// URL, a
+    base58 key or the name of a git remote, waits for the key's value
+    (`HBS2_GIT_REPO_WAIT`, 60 seconds by default), and then:
+
+      - no value: publishes a fresh manifest and reflog under that key, with
+        the private key from hbs2-keyman, and reuses a git remote that already
+        points at it. Without the private key it refuses and says so;
+      - a value whose manifest can be read: changes nothing, and says so. Not
+        even with `--force`: a new manifest names a new, empty reflog, and
+        every clone would see a repository with no branches;
+      - a value whose manifest cannot be read: refuses, since "cannot be read
+        here" may mean "not here yet" and an lwwref keeps the newest value.
+        `--force` replaces it.
+
+    Then `git push <remote> --all` and `--tags` publish the history again. A
+    clone needs no cleaning first: local state is kept per reflog, the new
+    repository has a new one, and what the clone kept about the lost reflog
+    is not read again (its `.hbs2-git3/<reflog>` directory can be removed).
+
+    `repo:init` with no repository works as before, with one change: it always
+    writes the reflog's first, empty entry, which only `--new` used to do.
+    Without it a reflog has no value, and a push waits for one.
+
+    `hbs2-git3/test/e2e/reinit.sh` walks through all of it on one throwaway
+    peer on 127.0.0.1 in a temporary HOME: push, wipe the storage, the push
+    that now fails, re-init from a clone with stale state, push again, clone.
+
   - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
     Every thread in canon began as a letter, so opening one meant composing a
     Tier B letter to your own mailbox, waiting for the peer to settle it, and
@@ -1143,8 +1174,8 @@
     `.hbs2-git3/config`) and says which stage, for example:
 
         repository <key> not found: its lwwref has no value on this peer or
-        its neighbours (waited 60s). To wait longer, set
-        HBS2_GIT_REPO_WAIT to a number of seconds.
+        its neighbours (waited 60s). If you own its key, run
+        `hbs2-git3 repo:init <key>` to publish it again.
 
     A reflog that is still arriving is not cut off: that limit counts from the
     last time the number of missing blocks went down.
