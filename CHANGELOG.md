@@ -1154,6 +1154,11 @@
     status pump erases each line it prints when the next one comes. Those
     errors now go to the original stderr, as the command loop's already did.
 
+  - **An lwwref update was read back before the peer had taken it.** The peer
+    answers the update RPC before it stores the value, so a manifest edit
+    followed by a read could see the value it replaced, or none. Writing the
+    repository head now waits until it reads back.
+
   - **`hbs2-peer` refused every ping and was left with no peers.** The
     handshake signs only a nonce of `pingNonceSize` bytes, which closed a
     signing oracle. The size was written as 32, taken from the `BS.take 32` in

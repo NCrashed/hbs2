@@ -147,6 +147,20 @@ updateRepoHead repo manifest gkRefs' = do
   callRpcWaitMay @RpcLWWRefUpdate (TimeoutSec 1) lwwAPI box
     >>= orThrow RpcTimeout
 
+  -- The peer takes an update in the background and answers before it has, so
+  -- whatever reads the repository next would read the value this replaces, or
+  -- none at all: `repo:init` reads the manifest back straight after writing it,
+  -- and over an lwwref with no value that read failed with GitRepoRefEmpty.
+  -- Wait until it reads back.
+  limit <- getRepoWaitTimeout
+  seen <- pollUntil limit do
+            v <- callRpcWaitMay @RpcLWWRefGet (TimeoutSec 1) lwwAPI (LWWRefKey repo)
+            pure $ if (lwwValue <$> join v) == Just (coerce blk) then Just () else Nothing
+
+  when (isNothing seen) do
+    warn $ "hbs2-peer has not taken the new value of" <+> pretty (AsBase58 repo)
+             <+> "yet; a newer one may be in the way"
+
 updateGroupKey :: HBS2GitPerks m => GitRepoKey -> HashRef -> Git3 m ()
 updateGroupKey repo new = do
   waitRepo (Just 10) repo
