@@ -16,7 +16,7 @@ import HBS2.Hub.Repo.GitBundle (publishTo,Published(..),PublishedCanon(..),Publi
 import HBS2.Prelude.Plated (Doc)
 
 import Control.Monad (void)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf,isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
@@ -84,9 +84,9 @@ spec = do
 
     it "tells an unchanged remote from one it moved" $ do
       shown (publishDoc "origin" (Published (PublishedSame "abc") PullsNone))
-        `shouldSatisfy` isInfixOf "already there"
+        `shouldSatisfy` isInfixOf "already on origin, unchanged"
       shown (publishDoc "origin" (Published (PublishedMoved "abc") PullsNone))
-        `shouldSatisfy` isInfixOf "published"
+        `shouldSatisfy` isInfixOf "sent to origin"
 
     -- The one that needs a person. It has to say what to do, because what to
     -- do is not guessable: the answer is a sync, and a sync with the repository
@@ -108,9 +108,48 @@ spec = do
     -- does not do that".
     it "says either way whether there were staged proposals" $ do
       shown (publishDoc "origin" (Published PublishedNone PullsMoved))
-        `shouldSatisfy` isInfixOf "staged proposals published"
+        `shouldSatisfy` isInfixOf "staged proposals (refs/hbs2/pulls/*) sent to origin"
       shown (publishDoc "origin" (Published PublishedNone PullsNone))
         `shouldSatisfy` isInfixOf "no staged proposals"
+
+    -- THE REPORT THAT LOOKED LIKE NOTHING HAPPENED. A run that sent canon and
+    -- had no proposals to send ended on "no staged proposals here to
+    -- publish", and the operator could not tell from it that canon had gone.
+    -- The canon line names its ref and the remote, and the last line says
+    -- what the run sent.
+    it "says canon was sent, and does not end on the proposals" $ do
+      let out = publishDoc "practice-forum"
+                  (Published (PublishedMoved "abc") PullsNone)
+      shown out `shouldSatisfy`
+        isInfixOf "canon (refs/hbs2/meta) sent to practice-forum: abc"
+      fmap show out `shouldSatisfy` \ls -> case reverse ls of
+        (l : _) -> "published: canon sent to practice-forum" `isInfixOf` l
+        []      -> False
+
+    it "says an unchanged remote is up to date, by name" $ do
+      let out = publishDoc "practice-forum"
+                  (Published (PublishedSame "abc") PullsNone)
+      shown out `shouldSatisfy`
+        isInfixOf "canon (refs/hbs2/meta) already on practice-forum, unchanged: abc"
+      shown out `shouldSatisfy`
+        isInfixOf "up to date: practice-forum already holds this canon"
+
+    it "says both went when both went" $
+      shown (publishDoc "origin" (Published (PublishedMoved "abc") PullsMoved))
+        `shouldSatisfy` isInfixOf "published: canon and the staged proposals sent to origin"
+
+    it "says nothing was published when there was nothing" $
+      shown (publishDoc "origin" (Published PublishedNone PullsNone))
+        `shouldSatisfy` isInfixOf "nothing published"
+
+    -- A refusal ends on what to do; a closing "published" line would
+    -- contradict it.
+    it "adds no closing line to a refusal" $ do
+      let out = fmap show (publishDoc "origin"
+                             (Published (PublishedRefused "deadbeef") PullsHeld))
+      out `shouldNotSatisfy` any (isPrefixOf "published:")
+      out `shouldNotSatisfy` any (isPrefixOf "up to date")
+      out `shouldNotSatisfy` any (isPrefixOf "nothing published")
 
   describe "PEP-22 hub publish: what it does" $ do
 

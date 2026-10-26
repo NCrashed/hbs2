@@ -139,18 +139,28 @@ publishEntries = do
 --
 -- A function of the answer and nothing else, so a test can ask what a given
 -- outcome prints without a git, a remote or a repository.
+--
+-- ONE LINE PER THING IT CARRIES, EACH NAMING ITS REF, AND THEN ONE THAT SAYS
+-- WHAT THE RUN CAME TO. The per-thing lines used to be all there was, and the
+-- last of them was "no staged proposals here to publish": read on its own, or
+-- read last, it said nothing had happened on a run that had just sent canon,
+-- and the operator went to `hub status` to find out. The closing line says
+-- what was sent, in words that cannot be taken for "nothing".
 publishDoc :: Text -> Published -> [Doc ann]
-publishDoc remote p = canonLine <> pullsLine
+publishDoc remote p = canonLine <> pullsLine <> summaryLine
   where
-    to = "to" <+> pretty (safeText remote)
+    r  = pretty (safeText remote)
+    to = "to" <+> r
 
     canonLine = case pbCanon p of
       PublishedNone ->
-        [ "no canon in this repository: nothing has been folded here yet" ]
+        [ "no canon in this repository: nothing has been folded here yet,"
+            <+> "so none was sent" ]
       PublishedSame c ->
-        [ "canon already there" <+> to <> ":" <+> pretty (safeText c) ]
+        [ "canon (refs/hbs2/meta) already on" <+> r <> ", unchanged:"
+            <+> pretty (safeText c) ]
       PublishedMoved c ->
-        [ "canon published" <+> to <> ":" <+> pretty (safeText c) ]
+        [ "canon (refs/hbs2/meta) sent" <+> to <> ":" <+> pretty (safeText c) ]
       -- The one that needs a person, so it says what to do rather than what
       -- went wrong.
       PublishedRefused theirs ->
@@ -161,15 +171,37 @@ publishDoc remote p = canonLine <> pullsLine
         ]
 
     pullsLine = case pbPulls p of
-      PullsMoved -> [ "staged proposals published" <+> to ]
+      PullsMoved -> [ "staged proposals (refs/hbs2/pulls/*) sent" <+> to ]
       -- Said rather than left out: a maintainer who has just staged one and
       -- sees no line about it should be able to tell "there were none" from
       -- "this verb does not do that".
-      PullsNone  -> [ "no staged proposals here to publish" ]
+      PullsNone  -> [ "no staged proposals (refs/hbs2/pulls/*) here to send" ]
       PullsHeld  ->
         [ "staged proposals NOT published either: they are numbered out of"
             <+> "canon, and this clone's"
         , "  canon is behind. Sync first, as above." ]
+
+    -- A refusal ends on what to do, and a closing line after it would bury
+    -- that, so there is none.
+    summaryLine = case (pbCanon p, pbPulls p) of
+      (PublishedRefused{}, _) -> []
+      (_, PullsHeld)          -> []
+      (PublishedMoved{}, PullsMoved) ->
+        [ "published: canon and the staged proposals sent" <+> to ]
+      (PublishedMoved{}, PullsNone) ->
+        [ "published: canon sent" <+> to <> "; there were no staged proposals" ]
+      (PublishedSame{}, PullsMoved) ->
+        [ "published: the staged proposals sent" <+> to
+            <> ";" <+> r <+> "already held this canon" ]
+      (PublishedSame{}, PullsNone) ->
+        [ "up to date:" <+> r <+> "already holds this canon and there are no"
+            <+> "staged proposals, so nothing needed sending" ]
+      (PublishedNone, PullsMoved) ->
+        [ "published: the staged proposals sent" <+> to
+            <> "; there is no canon here" ]
+      (PublishedNone, PullsNone) ->
+        [ "nothing published: this repository has no canon and no staged"
+            <+> "proposals" ]
 
 -- | And what it exits with.
 publishCode :: Published -> Int

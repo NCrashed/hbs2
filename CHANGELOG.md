@@ -334,6 +334,17 @@
 
 ## Changed
 
+  - **`hbs2-hub publish` says what it sent.** A run that pushed canon to a
+    remote with no proposals staged ended on "no staged proposals here to
+    publish", and an operator who had just run `inbox accept` could not tell
+    from it whether anything had gone; `hub status` was the way to find out.
+    Each line now names its ref and the remote (`canon (refs/hbs2/meta) sent
+    to practice-forum: <commit>`, or `already on practice-forum, unchanged`),
+    the proposals line says `no staged proposals (refs/hbs2/pulls/*) here to
+    send`, and a closing line says what the run came to: `published: canon
+    sent to <remote>; there were no staged proposals`, `up to date: <remote>
+    already holds this canon ...`, or `nothing published: ...`. A refusal
+    keeps its remedy as the last line. Exit codes do not change.
   - **Flag day: a peer now asks 18 bits of work to relay mailbox packets
     unless told otherwise.** `hbs2:mailbox:pow-min` used to default to zero,
     so the proof of work added for letters and deletes priced nothing unless

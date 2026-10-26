@@ -440,6 +440,19 @@ which pushes `refs/hbs2/meta` and `refs/hbs2/pulls/*`. Without the
 second, `hbs2-hub pr checkout` in somebody else's clone has nothing to
 check out.
 
+It says what it did with each, then what the run came to:
+
+```
+canon (refs/hbs2/meta) sent to practice-forum: <commit>
+no staged proposals (refs/hbs2/pulls/*) here to send
+published: canon sent to practice-forum; there were no staged proposals
+```
+
+A remote that already holds this canon gets `canon (refs/hbs2/meta)
+already on <remote>, unchanged: <commit>`, and a run with nothing to
+send ends on `up to date: <remote> already holds this canon and there
+are no staged proposals, so nothing needed sending`. Both exit 0.
+
 Canon is never force-pushed. If the remote holds canon your clone does
 not have, because a second maintainer folded something, nothing is
 written and it says so; `hbs2-hub sync --repo <repo-key>` folds both and
