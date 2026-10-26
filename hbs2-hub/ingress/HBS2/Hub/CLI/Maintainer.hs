@@ -27,6 +27,7 @@ module HBS2.Hub.CLI.Maintainer
   , maintainerUseArgs
   , MaintainerUse(..)
   , Maintainer(..)
+  , Who(..)
   , maintainerDoc
   , maintainersContract
   , maintainersOrder
@@ -34,6 +35,9 @@ module HBS2.Hub.CLI.Maintainer
   , Pointless(..)
   , pointless
   , codeNotDelegated
+  , maintainerWrite
+  , maintainerUseIt
+  , maintainerCanon
   ) where
 
 import HBS2.Hub.Types
@@ -47,7 +51,8 @@ import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.Render (contractVersion,renderDocument,key58)
 import HBS2.Hub.CLI.Argv (badArgs,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
-                         ,flagOneOf,flagOneOfMaybe,flagRepoMaybe,maintainerKeyFlags)
+                         ,flagOneOf,flagOneOfMaybe,flagRepoMaybe,maintainerKeyFlags
+                         ,flagMaybe,flagWord)
 import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),signingAs,defaultFrom
                            ,signerEnvVar,signerGitKey,writeSignerConfig,clearSignerConfig)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey)
@@ -61,6 +66,8 @@ import Data.Aeson (Value,object,(.=))
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.HashMap.Strict qualified as HM
+import Data.Word (Word64)
 import Data.List (sortOn)
 import System.Exit (die)
 import System.Environment (lookupEnv)
@@ -137,9 +144,18 @@ uselessly why owner = case why of
 -- | What a maintainer verb was asked to do.
 data Maintainer = Maintainer
   { mnRepo :: RepoRef
-  , mnKey  :: HubKey
+  , mnWho  :: Who
   , mnDry  :: Writing
   }
+  deriving stock (Eq,Show)
+
+-- | Which key, as the owner knows it.
+--
+-- By the key itself, or as the author of a thread already in canon: the
+-- person somebody wants as a maintainer is usually the one who has been
+-- sending the good pull requests, and their number is what the owner has in
+-- front of them, not their forty-four characters of base58.
+data Who = WhoKey HubKey | WhoAuthorOf Word64
   deriving stock (Eq,Show)
 
 maintainerUsage :: Doc ()
@@ -258,65 +274,14 @@ maintainerEntries = do
              <> line <> "sign with the repository key. `hbs2-hub status` and"
              <> line <> "`hbs2-hub whoami --repo` say which key would sign." )
     $ entry $ bindMatch "hub:maintainer:use" $ nil_ \case
-        (maintainerUseArgs -> Just mu) -> lift (useIt mu)
+        (maintainerUseArgs -> Just mu) -> lift (maintainerUseIt mu)
         other -> liftIO (badArgs maintainerUsage other)
 
   where
 
-    useIt = \case
-      UseClear -> do
-        clearSignerConfig >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
-        liftIO $ print $ vcat
-          [ "unset git config" <+> pretty signerGitKey
-          , "canon writes in this clone sign as the repository key again, unless"
-              <+> "--as or" <+> pretty signerEnvVar <+> "names another"
-          ]
-
-      UseKey repo k -> do
-        -- TreatAsEmpty: an empty canon is one where only the owner may bless,
-        -- which the check below says with the remedy, rather than a refusal
-        -- about canon that names none.
-        (_, fr) <- canonOf repo
-        unless (k == repo || HS.member k (frMaintainers fr)) $
-          liftIO $ refuse (show ( pretty (AsBase58 k)
-                                    <+> "is not a maintainer of this repository"
-                                    <+> "in canon here" <> line
-                                    <> "  nothing was set. The owner adds one with"
-                                    <+> "`hbs2-hub maintainer add`; if that"
-                                    <> line <> "  happened in another clone,"
-                                    <+> "`hbs2-hub sync --repo"
-                                    <+> pretty (AsBase58 repo) <> "` brings it here." ))
-                          codeNotDelegated
-
-        void $ signingAs codeNoCanonKey (Signer k FromFlag)
-
-        writeSignerConfig k >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
-
-        liftIO $ print $ vcat
-          [ "set git config" <+> pretty signerGitKey <+> pretty (AsBase58 k)
-          , "canon writes in this clone now sign as"
-              <+> (if k == repo then "the repository key" else "that maintainer key")
-              <+> "when --as is not given"
-          ]
-
-        -- The one override this cannot see from inside the clone.
-        envv <- liftIO (lookupEnv signerEnvVar)
-        case defaultFrom FromEnv (Text.pack <$> envv) of
-          Right (Just other) | other /= k -> liftIO $ saying
-            ( "hbs2-hub:" <+> pretty signerEnvVar <+> "is set to"
-                <+> pretty (AsBase58 other) <+> "in this environment,"
-                <> line <> "  and it wins over git config: unset it for this to apply."
-                <> line )
-          Left e -> liftIO $ saying ("hbs2-hub:" <+> pretty e <> line)
-          _ -> pure ()
-
-    gitSaid e = "git config would not write" <+> pretty signerGitKey <> ":"
-                  <+> pretty e
-                  <> line <> "  run this inside the repository's git clone"
-
     writeVerb name what kind =
       brief what
-        $ args [ arg "string" "--repo repo-key", arg "string" "--maintainer-key key"
+        $ args [ arg "string" "--repo repo-key", arg "string" "--maintainer-key key | --author-of n"
                , arg "string" "[--dry-run]" ]
         $ desc ( (case kind of
                     Delegate -> "Lets a key bless canon events for this repository."
@@ -343,62 +308,130 @@ maintainerEntries = do
                  <> line <> "A repo key and a maintainer key are the same thirty-two"
                  <> line <> "bytes of base58, which is what makes it worth running." )
         $ entry $ bindMatch name $ nil_ \case
-            (maintainerArgs -> Just mn) -> lift (write kind mn)
+            (maintainerArgs -> Just mn) -> lift (maintainerWrite kind mn)
             other -> liftIO (badArgs maintainerUsage other)
 
-    canonOf repo =
-      -- TreatAsEmpty: a delegation may be the first event canon holds. Naming a
-      -- co-maintainer before anybody has filed an issue is an ordinary order of
-      -- work, and this used to refuse it -- the only reason being that accept
-      -- and this verb had each written the answer themselves.
-      withCanon TreatAsEmpty repo withGitCanon
 
-    write kind mn = do
-      -- The repo key, not a key of the caller's choosing: rule 5 admits no
-      -- other signer, so taking one would take a value that can only be wrong.
-      creds <- signerFor (mnRepo mn)
-                  >>= maybe (liftIO (refuse (show ( "cannot sign as"
-                                                      <+> pretty (AsBase58 (mnRepo mn))
-                                                      <> line
-                                                      <> "  no keyring here holds it as its own"
-                                                      <+> "signing key, and"
-                                                      <> line
-                                                      <> "  only the repository's own key may"
-                                                      <+> "delegate or revoke" ))
-                                            codeNotDelegated))
-                            pure
+-- | `hub maintainer use`, callable: set or clear this clone's default signer.
+maintainerUseIt :: MonadUnliftIO m => MaintainerUse -> m ()
+maintainerUseIt = \case
+  UseClear -> do
+    clearSignerConfig >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
+    liftIO $ print $ vcat
+      [ "unset git config" <+> pretty signerGitKey
+      , "canon writes in this clone sign as the repository key again, unless"
+          <+> "--as or" <+> pretty signerEnvVar <+> "names another"
+      ]
 
-      (parent, fr) <- canonOf (mnRepo mn)
+  UseKey repo k -> do
+    -- TreatAsEmpty: an empty canon is one where only the owner may bless,
+    -- which the check below says with the remedy, rather than a refusal
+    -- about canon that names none.
+    (_, fr) <- maintainerCanon repo
+    unless (k == repo || HS.member k (frMaintainers fr)) $
+      liftIO $ refuse (show ( pretty (AsBase58 k)
+                                <+> "is not a maintainer of this repository"
+                                <+> "in canon here" <> line
+                                <> "  nothing was set. The owner adds one with"
+                                <+> "`hbs2-hub maintainer add`; if that"
+                                <> line <> "  happened in another clone,"
+                                <+> "`hbs2-hub sync --repo"
+                                <+> pretty (AsBase58 repo) <> "` brings it here." ))
+                      codeNotDelegated
 
-      now <- liftIO getPOSIXTime <&> floor . (* 1000)
+    void $ signingAs codeNoCanonKey (Signer k FromFlag)
 
-      let ctx = TriageCtx (signingPair creds) (const True) (mnRepo mn)
-          content = eventOf kind (mnRepo mn) (mnKey mn) now
-          eventOf = \case { Delegate -> ADelegate ; Revoke -> ARevoke }
+    writeSignerConfig k >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
 
-      -- WHAT THE EVENT WOULD DO, ASKED BEFORE IT IS SIGNED. See 'pointless'.
-      for_ (pointless kind (mnRepo mn) (mnKey mn) (frMaintainers fr)) $ \why ->
-        liftIO (refuse (show (uselessly why (mnRepo mn))) codeNotDelegated)
+    liftIO $ print $ vcat
+      [ "set git config" <+> pretty signerGitKey <+> pretty (AsBase58 k)
+      , "canon writes in this clone now sign as"
+          <+> (if k == repo then "the repository key" else "that maintainer key")
+          <+> "when --as is not given"
+      ]
 
-      acc <- blessed codeNotDelegated
-               (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
+    -- The one override this cannot see from inside the clone.
+    envv <- liftIO (lookupEnv signerEnvVar)
+    case defaultFrom FromEnv (Text.pack <$> envv) of
+      Right (Just other) | other /= k -> liftIO $ saying
+        ( "hbs2-hub:" <+> pretty signerEnvVar <+> "is set to"
+            <+> pretty (AsBase58 other) <+> "in this environment,"
+            <> line <> "  and it wins over git config: unset it for this to apply."
+            <> line )
+      Left e -> liftIO $ saying ("hbs2-hub:" <+> pretty e <> line)
+      _ -> pure ()
 
-      commit <- committing (oneStop codeNotDelegated) (mnDry mn) parent
-                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
-                  "hub: maintainer set" now
 
-      liftIO $ print $ vcat
-        [ "event" <+> pretty (eventId (acEvent acc))
-        , "commit" <+> pretty commit
-        , "maintainers are now:"
-        ]
-      -- From the view the bridge just advanced, which is the fold's own answer
-      -- and not this verb's arithmetic about it.
-      liftIO $ mapM_ print
-        [ "  " <> pretty (AsBase58 k)
-        | k <- sortOn (show . pretty . AsBase58) (HS.toList (cvMaintainers (acView acc))) ]
+gitSaid :: Text -> Doc ann
+gitSaid e = "git config would not write" <+> pretty signerGitKey <> ":"
+              <+> pretty e
+              <> line <> "  run this inside the repository's git clone"
 
-      liftIO (saying (notPublishedYet <> line))
+-- | Canon as this clone holds it, for a maintainer write.
+maintainerCanon repo =
+  -- TreatAsEmpty: a delegation may be the first event canon holds. Naming a
+  -- co-maintainer before anybody has filed an issue is an ordinary order of
+  -- work, and this used to refuse it -- the only reason being that accept
+  -- and this verb had each written the answer themselves.
+  withCanon TreatAsEmpty repo withGitCanon
+
+-- | `hub maintainer add` / `remove`, callable.
+maintainerWrite :: MonadUnliftIO m => Delegating -> Maintainer -> m ()
+maintainerWrite kind mn = do
+  -- The repo key, not a key of the caller's choosing: rule 5 admits no
+  -- other signer, so taking one would take a value that can only be wrong.
+  creds <- signerFor (mnRepo mn)
+              >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                  <+> pretty (AsBase58 (mnRepo mn))
+                                                  <> line
+                                                  <> "  no keyring here holds it as its own"
+                                                  <+> "signing key, and"
+                                                  <> line
+                                                  <> "  only the repository's own key may"
+                                                  <+> "delegate or revoke" ))
+                                        codeNotDelegated))
+                        pure
+
+  (parent, fr) <- maintainerCanon (mnRepo mn)
+
+  mnKey <- case mnWho mn of
+    WhoKey k -> pure k
+    WhoAuthorOf n ->
+      case [ tsAuthor t | t <- HM.elems (frThreads fr), tsNumber t == Just n ] of
+        (a:_) -> do
+          liftIO (saying ("hbs2-hub: #" <> pretty n <+> "was opened by" <+> pretty (AsBase58 a) <> line))
+          pure a
+        [] -> liftIO (refuse (show ("there is no #" <> pretty n <+> "in canon here" :: Doc ())) codeNotDelegated)
+
+  now <- liftIO getPOSIXTime <&> floor . (* 1000)
+
+  let ctx = TriageCtx (signingPair creds) (const True) (mnRepo mn)
+      content = eventOf kind (mnRepo mn) mnKey now
+      eventOf = \case { Delegate -> ADelegate ; Revoke -> ARevoke }
+
+  -- WHAT THE EVENT WOULD DO, ASKED BEFORE IT IS SIGNED. See 'pointless'.
+  for_ (pointless kind (mnRepo mn) mnKey (frMaintainers fr)) $ \why ->
+    liftIO (refuse (show (uselessly why (mnRepo mn))) codeNotDelegated)
+
+  acc <- blessed codeNotDelegated
+           (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
+
+  commit <- committing (oneStop codeNotDelegated) (mnDry mn) parent
+              (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+              "hub: maintainer set" now
+
+  liftIO $ print $ vcat
+    [ "event" <+> pretty (eventId (acEvent acc))
+    , "commit" <+> pretty commit
+    , "maintainers are now:"
+    ]
+  -- From the view the bridge just advanced, which is the fold's own answer
+  -- and not this verb's arithmetic about it.
+  liftIO $ mapM_ print
+    [ "  " <> pretty (AsBase58 k)
+    | k <- sortOn (show . pretty . AsBase58) (HS.toList (cvMaintainers (acView acc))) ]
+
+  liftIO (saying (notPublishedYet <> line))
 
 -- Both values behind flags, for the reason every verb here has them: a repo
 -- key and a maintainer key are the same thirty-two bytes of base58, and the
@@ -408,11 +441,17 @@ maintainerArgs :: forall c . IsContext c => [Syntax c] -> Maybe Maintainer
 maintainerArgs syn = do
   -- Through 'repoFlags' and 'maintainerKeyFlags': see 'authorKeyFlags' for why
   -- --key could not stay one name for four different kinds of key.
-  kvs  <- flagsAndSwitches (repoFlags <> maintainerKeyFlags) ["--dry-run"] syn
+  kvs  <- flagsAndSwitches (repoFlags <> maintainerKeyFlags <> ["--author-of"]) ["--dry-run"] syn
   repo <- flagRepo asKey kvs
-  k    <- flagOneOf asKey maintainerKeyFlags kvs
+  k    <- flagOneOfMaybe asKey maintainerKeyFlags kvs
+  n    <- flagMaybe kvs "--author-of" flagWord
+  -- Exactly one way of saying who.
+  who  <- case (k, n) of
+    (Just v, Nothing)  -> Just (WhoKey v)
+    (Nothing, Just m)  -> Just (WhoAuthorOf (fromIntegral m))
+    _                  -> Nothing
   dry  <- flagSwitch kvs "--dry-run"
-  pure (Maintainer repo k (writingOf dry))
+  pure (Maintainer repo who (writingOf dry))
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
 

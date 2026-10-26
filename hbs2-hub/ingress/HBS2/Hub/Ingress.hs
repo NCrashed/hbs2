@@ -296,7 +296,7 @@ data InboxRead = InboxRead
     -- | Tree blocks the walk could not read, by hash.
     --
     -- The hashes and not only a count: a hash is the one thing anybody can act
-    -- on (@hbs2-peer download@ takes one), and the first version of this threw
+    -- on (@hbs2-peer fetch@ takes one), and the first version of this threw
     -- them at stderr, the second threw them away to gain a counter. Both.
   , irMissing :: [HashRef]
     -- | Whether the walk gave up at 'maxMailboxBlocks' before reaching the end

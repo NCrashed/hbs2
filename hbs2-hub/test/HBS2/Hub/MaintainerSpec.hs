@@ -148,9 +148,9 @@ spec = do
       repo <- fst <$> kp
       k    <- fst <$> kp
       maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k])
-        `shouldBe` Just (Maintainer repo k ForReal)
+        `shouldBe` Just (Maintainer repo (WhoKey k) ForReal)
       maintainerArgs (argv ["--key", b58 k, "--repo", b58 repo])
-        `shouldBe` Just (Maintainer repo k ForReal)
+        `shouldBe` Just (Maintainer repo (WhoKey k) ForReal)
 
     -- Both are keys of one type, so the swap is well typed: it would delegate
     -- the repository to itself and name a maintainer nobody has a repo for.
@@ -160,6 +160,15 @@ spec = do
       maintainerArgs (argv ["--repo", b58 k]) `shouldBe` Nothing
       maintainerArgs (argv ["--key", b58 k]) `shouldBe` Nothing
       maintainerArgs (argv [b58 k, b58 k]) `shouldBe` Nothing
+
+    it "names the maintainer by a thread they opened" $ do
+      repo <- fst <$> kp
+      k    <- fst <$> kp
+      maintainerArgs (argv ["--repo", b58 repo, "--author-of", "7"])
+        `shouldBe` Just (Maintainer repo (WhoAuthorOf 7) ForReal)
+      -- One way of saying who, not two.
+      maintainerArgs (argv ["--repo", b58 repo, "--author-of", "7", "--key", b58 k])
+        `shouldBe` Nothing
 
     it "refuses a repeated flag rather than choosing one" $ do
       repo <- fst <$> kp
@@ -178,7 +187,7 @@ spec = do
         `shouldBe` Just DryRun
       -- A switch, so it cannot swallow the key after it.
       maintainerArgs (argv ["--repo", b58 repo, "--dry-run", "--key", b58 k])
-        `shouldBe` Just (Maintainer repo k DryRun)
+        `shouldBe` Just (Maintainer repo (WhoKey k) DryRun)
       maintainerArgs (argv ["--repo", b58 repo, "--key", b58 k, "--dry-run", "x"])
         `shouldBe` Nothing
 

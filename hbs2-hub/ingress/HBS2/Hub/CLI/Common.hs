@@ -347,7 +347,7 @@ doubtDoc mbox msg = \case
         <+> "entries" <> line
       <> "  brings back letters that were settled." <> line
       <> indent 2 (vsep (fmap pretty (take 10 hs))) <> line
-      <> "  `hbs2-peer download <hash>` asks for one. Nothing was written."
+      <> "  `hbs2-peer fetch <hash>` asks for one. Nothing was written."
   -- The same two directions, because it is the same defect: part of the tree
   -- was not read. What differs is the remedy, and there is no fetch that fixes
   -- this one -- the mailbox is bigger than the walk, and it stays bigger on

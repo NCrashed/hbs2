@@ -19,6 +19,8 @@ import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Comment
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
+import HBS2.Hub.CLI.Identity
+import HBS2.Hub.CLI.Project
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
 import HBS2.Hub.CLI.Mcp
@@ -40,6 +42,7 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run
 
 import HBS2.Peer.RPC.API.LWWRef
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client.Unix (UNIX)
@@ -56,6 +59,7 @@ hubEntries :: forall c m . ( IsContext c
                            , HasStorage m
                            , HasClientAPI MailboxAPI UNIX m
                            , HasClientAPI LWWRefAPI UNIX m
+                           , HasClientAPI PeerAPI UNIX m
                            , Exception (BadFormException c)
                            ) => MakeDictM c m ()
 hubEntries = do
@@ -80,6 +84,8 @@ hubEntries = do
   ownEntries
   policyEntries
   banEntries
+  identityEntries
+  projectEntries
 
 -- | AN ALLOWLIST, and it is the whole of what this tool answers to.
 --
@@ -142,6 +148,8 @@ peerFulNames =
   , "hub:policy:show", "hub:policy:pow", "hub:policy:default"
   , "hub:block", "hub:unblock"
   , "hub:whoami"
+  , "hub:identity:init"
+  , "hub:project:open"
   -- It reads the mailbox: see the mailbox line in its report.
   , "hub:status"
   ]

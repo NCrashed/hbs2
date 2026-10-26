@@ -55,6 +55,30 @@ disk rather than truth.
   published record naming an encryption key. `hbs2-cli
   hbs2:sigil:create:from-keyring <keyring-file>` makes one.
 
+The short way to all of that:
+
+```
+hbs2-hub identity init
+```
+
+It makes a signing key in `hbs2-keyman` (or reuses the one it made
+before, or `--author <key>`), stores its sigil, creates your mailbox
+with a policy that accepts replies, and writes `git config --global
+hbs2.hub.author` and `hbs2.hub.sender`.
+
+**Defaults from the clone.** Every verb completes its command line
+before it reads it, from what the clone already knows: `--repo` from
+`HBS2_HUB_REPO`, then `git config hbs2.hub.repo`, then the clone's
+`hbs23://` remote (`origin`, or the only one); `--author` and
+`--sender` from `HBS2_HUB_AUTHOR` / `HBS2_HUB_SENDER`, then the git
+config `identity init` wrote; for `pr new` and `pr revise`, `--onto`
+from the remote's HEAD and `--from` from the branch checked out; for
+`updates`, `--mailbox` is your author key; for `maintainer use`,
+`--maintainer-key` is your author key. A verb that signs or sends says
+what it filled in (`hbs2-hub: using ...`). A flag given by hand is
+never changed. The examples below spell every flag out, which is what
+works outside a clone.
+
 If you are not sure you have those, ask:
 
 ```
@@ -99,8 +123,22 @@ and the staged proposals in one go.
 
 ## Opening a project to contributors
 
-You need a mailbox on your peer, a policy on it, and the repository
-saying where it is.
+The short way, in your clone, after `hbs2-hub identity init`:
+
+```
+hbs2-hub project open [--pow <bits>]
+hbs2-hub publish
+```
+
+It does the four steps below, keeping any that are already done, and
+one more: it makes your identity a maintainer and this clone's default
+signer (`hbs2-hub maintainer use`). The repository key that
+`repo:init` makes can sign and cannot encrypt, and an acknowledgement
+is sealed from the key that signed the event, so without this no
+contributor ever gets one. `--no-maintainer` skips that step.
+
+By hand, you need a mailbox on your peer, a policy on it, and the
+repository saying where it is.
 
 **1. Create the mailbox.** Pick or generate a sign keypair; its public
 key is the mailbox's address.
@@ -361,7 +399,7 @@ The owner verbs write canon directly, without a letter:
 hbs2-hub issue open   --repo <repo-key> --title "the tests hang on aarch64"
 hbs2-hub issue close  --repo <repo-key> --number 7 --note "fixed in 1.2"
 hbs2-hub issue label  --repo <repo-key> --number 7 --label bug --label aarch64
-hbs2-hub issue assign --repo <repo-key> --number 7 --to <key>
+hbs2-hub issue assign --repo <repo-key> --number 7 --assignee <key>
 hbs2-hub issue reply  --repo <repo-key> --number 7 --body "can you try 1.2?"
 hbs2-hub redact       --repo <repo-key> --event <event-id>
 ```
@@ -482,9 +520,16 @@ who may push is git's question, not this tool's.
 ## More than one maintainer
 
 ```
-hbs2-hub maintainer add  --repo <repo-key> --key <their-key>
+hbs2-hub maintainer add  --repo <repo-key> --maintainer-key <their-key>
+hbs2-hub maintainer add  --repo <repo-key> --author-of <number>
 hbs2-hub maintainer list --repo <repo-key>
 ```
+
+`--author-of` names the key that opened thread `<number>` in canon,
+which is usually how the owner knows the person: by the pull requests
+they sent. The verb says which key that was before it signs anything.
+The new maintainer then runs `hbs2-hub maintainer use` in their clone,
+which with an identity set up needs no arguments.
 
 Only the repository's own key may write a delegation, and there is no
 `--as`. A delegate that could delegate could grow the maintainer set,
@@ -546,8 +591,8 @@ way.
 Two deny-lists, at two layers, and they are not interchangeable.
 
 ```
-hbs2-hub ban   --repo <repo-key>    --key <author-key>
-hbs2-hub block --mailbox <mbox-key> --key <envelope-key>
+hbs2-hub ban   --repo <repo-key>    --author-key <author-key>
+hbs2-hub block --mailbox <mbox-key> --envelope-key <envelope-key>
 ```
 
 `ban` is the inner author key, which is inside the signed box, so it

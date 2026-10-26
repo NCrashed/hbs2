@@ -43,7 +43,8 @@ import HBS2.Hub.Sent (Sent(..),recordSent)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagEvery,flagMaybe,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (refuse,codePeerSilent,saying,manifestCode,signerFor,signingPair
                            ,askingKeyman)
-import HBS2.Hub.Repo.Manifest (sigilFor)
+import HBS2.Hub.Repo.Manifest (sigilFor,fetchSigil)
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Hub.CLI.Policy (readPolicyWith,PolicyReader,PolicyGone(..))
 
 import HBS2.CLI.Prelude
@@ -494,7 +495,7 @@ unsendable = \case
   SigilNotFound h ->
     "this node does not hold the sigil" <+> pretty h
       <> line <> "  nothing was sent. A sigil is a block like any other:"
-      <+> "`hbs2-peer download" <+> pretty h <> "`"
+      <+> "`hbs2-peer fetch" <+> pretty h <> "`"
       <> line <> "  fetches it, and `hbs2-hub whoami --sender" <+> pretty h
       <+> "` says what it names."
   MalformedSigil h ->
@@ -547,6 +548,7 @@ composeEntries :: forall c m . ( IsContext c
                                , HasStorage m
                                , HasClientAPI MailboxAPI UNIX m
                                , HasClientAPI LWWRefAPI UNIX m
+                               , HasClientAPI PeerAPI UNIX m
                                , Exception (BadFormException c)
                                ) => MakeDictM c m ()
 composeEntries = do
@@ -594,6 +596,7 @@ composeEntries = do
                          >>= either (\e -> liftIO (refuse (show (pretty e))
                                                           (manifestCode e)))
                                     pure
+          void (fetchSigil rcptSigil)
 
           -- 'signerFor' and not 'loadCredentials': keyman resolves a key to the
           -- FILE that holds it and answers with that file's PRIMARY
@@ -863,5 +866,5 @@ readBody = \case
 queuedNext :: Doc ann
 queuedNext =
   "the peer has it, and nothing is in canon until a maintainer folds it;"
-    <> line <> "  `hbs2-hub updates --repo <key> --mailbox <your-mailbox>` is"
+    <> line <> "  `hbs2-hub updates`, in this clone, is"
     <+> "what comes back."

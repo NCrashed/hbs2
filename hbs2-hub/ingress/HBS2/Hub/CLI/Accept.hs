@@ -88,7 +88,8 @@ import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo)
 import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
-import HBS2.Hub.Repo.Manifest (mailboxFor)
+import HBS2.Hub.Repo.Manifest (mailboxFor,fetchSigil)
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -322,6 +323,7 @@ acceptEntries :: forall c m . ( IsContext c
                               , HasStorage m
                               , HasClientAPI MailboxAPI UNIX m
                               , HasClientAPI LWWRefAPI UNIX m
+                              , HasClientAPI PeerAPI UNIX m
                               , Exception (BadFormException c)
                               ) => MakeDictM c m ()
 acceptEntries = do
@@ -355,7 +357,7 @@ acceptEntries = do
              <> line <> "wrong in both directions: a missing chunk of Exists"
              <> line <> "entries hides letters, one of Deleted entries brings back"
              <> line <> "letters that were already settled -- and folding one of"
-             <> line <> "those puts it in every clone forever. hbs2-peer download"
+             <> line <> "those puts it in every clone forever. hbs2-peer fetch"
              <> line <> "<hash> asks for a block; --incomplete folds anyway, and"
              <> line <> "exists so that one block nobody can serve cannot make a"
              <> line <> "mailbox permanently unacceptable-from."
@@ -731,7 +733,12 @@ acceptEntries = do
       -- and tested. What it did not have was this call.
       acked <- case ackFor acc of
         Nothing -> pure (Left AckNotAsked)
-        Just ackRec ->
+        Just ackRec -> do
+          -- The contributor's sigil is THEIR block, and this peer has usually
+          -- never seen it: fetched first, or every first ack fails.
+          case reply of
+            ReplyTo _ h -> void (fetchSigil h)
+            _ -> pure ()
           sendAck (Outbound sto api rpcTimeout) canonKey creds reply ackRec
 
       -- LAST, and only now: everything above can refuse, and a letter dropped

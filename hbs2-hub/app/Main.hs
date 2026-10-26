@@ -7,6 +7,8 @@ module Main where
 
 import HBS2.Hub.Types (safeText,hubMetaVersion,hubMetaMin)
 import HBS2.Hub.CLI.Argv (verbOf)
+import HBS2.Hub.CLI.Defaults (defaultsFor,wantsOf,Want(..))
+import HBS2.Hub.CLI.Say (saying)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Codes (codesDoc)
@@ -188,7 +190,22 @@ main = do
                   <> unwords (fmap (show . pretty) ks)
                   <> "\nThis is a bug in this build, not in your setup." )
 
-  case (argv, verbOf (bound dict) argv) of
+  -- WHAT THE CLONE ALREADY KNOWS, filled in before any verb parses its
+  -- arguments: the repository from the hbs23 remote, the author and sender
+  -- from `hub identity init`, the branches for a pull request. See
+  -- 'HBS2.Hub.CLI.Defaults'. Said on stderr for a verb that signs or sends,
+  -- for the reason 'HBS2.Hub.CLI.Signer.canonSigner' says what it chose.
+  argv' <- case verbOf (bound dict) argv of
+    Just (ListVal (SymbolVal (Id v) : _)) | "hub:" `Text.isPrefixOf` v -> do
+      let (ws, rest) = splitAt (length (Text.splitOn ":" v) - 1) argv
+      filled <- defaultsFor v rest
+      let added = drop (length rest) filled
+      when (not (List.null added) && WRepoFirst `notElem` wantsOf v) $
+        saying ("hbs2-hub: using" <+> hsep (fmap pretty added) <> line)
+      pure (ws <> filled)
+    _ -> pure argv
+
+  case (argv', verbOf (bound dict) argv') of
 
     -- No arguments: the help, and NOTHING ELSE. This branch used to read stdin
     -- and run it as a script, and that was arbitrary code execution from any

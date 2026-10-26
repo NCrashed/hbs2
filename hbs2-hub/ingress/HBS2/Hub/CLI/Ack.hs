@@ -46,6 +46,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Ingress (PeerSilent(..))
 import HBS2.Hub.CLI.Compose (Outbound(..),sendPayload,NotStored(..),PoWTooHard(..))
+import System.Exit (ExitCode)
 
 import HBS2.CLI.Prelude
 
@@ -167,6 +168,9 @@ sendAck ob canonKey creds reply rec = do
               `catch` (\(e :: PeerSilent) -> pure (Left (AckNotSent (tshow e))))
               `catch` (\(e :: NotStored)  -> pure (Left (AckNotSent (tshow e))))
               `catch` (\(e :: PoWTooHard) -> pure (Left (AckNotSent (tshow e))))
+              -- A refusal on the way out has already said why on stderr and then
+              -- exited; what reaches here is its exit code, which says nothing.
+              `catch` (\(_ :: ExitCode) -> pure (Left (AckNotSent "the reason is printed above")))
               -- And the sigil, which is a MailboxServiceError or a
               -- SigilNotFound out of the message layer rather than one of the
               -- three above. Caught by shape, because the alternative is an

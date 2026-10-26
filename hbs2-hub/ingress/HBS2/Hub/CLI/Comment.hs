@@ -34,7 +34,8 @@ import HBS2.Hub.CLI.Common (refuse,codePeerSilent,manifestCode,withCanon,OnMissi
                            ,signerFor,signingPair)
 import HBS2.Hub.Repo (readCanon,stFold,numberIndexOf)
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.Manifest (sigilFor)
+import HBS2.Hub.Repo.Manifest (sigilFor,fetchSigil)
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Hub.CLI.Verify (codeOf)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Compose (queuedNext,Outbound(..),sendLetter,letterBody,readBody,codeNoKey
@@ -105,6 +106,7 @@ commentEntries :: forall c m . ( IsContext c
                                , HasStorage m
                                , HasClientAPI MailboxAPI UNIX m
                                , HasClientAPI LWWRefAPI UNIX m
+                               , HasClientAPI PeerAPI UNIX m
                                , Exception (BadFormException c)
                                ) => MakeDictM c m ()
 commentEntries = do
@@ -192,6 +194,7 @@ commentEntries = do
                     >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
                                pure
                 (Nothing, Nothing) -> liftIO (die (show commentUsage))
+      void (fetchSigil rcpt)
 
       creds <- signerFor (cmAuthor cm)
                  >>= maybe (liftIO (refuse (show ( "cannot sign as"

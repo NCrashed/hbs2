@@ -8,7 +8,7 @@ project through an encrypted mailbox.
 This page is the short version: what to type for the common jobs. The
 [full guide](hbs2-hub.md) explains each step and the rules behind it.
 To watch the whole thing run on your machine in a minute and a half,
-see the [demo repository](https://github.com/NCrashed/hbs2-hub-demo).
+see the [demo repository](https://github.com/NCrashed/hbs2-demo).
 
 ## Five words
 
@@ -30,71 +30,71 @@ see the [demo repository](https://github.com/NCrashed/hbs2-hub-demo).
 - A running `hbs2-peer` ([QUICKSTART.md](../QUICKSTART.md)).
 - `hbs2-hub`, `hbs2-git3` and `git-remote-hbs23` on your `PATH`.
 
+## Once, for everybody: an identity
+
+```
+hbs2-hub identity init
+```
+
+This makes a signing key (in `hbs2-keyman`), the sigil that lets a
+maintainer answer you, and a mailbox on your peer where those answers
+land. It remembers the key and the sigil in `git config --global`
+(`hbs2.hub.author`, `hbs2.hub.sender`), so you never type them. Run it
+again any time: it reuses what is there.
+
+## Inside a clone, most flags fill themselves in
+
+In a clone of an hbs2 project, `hbs2-hub` reads what it needs from the
+clone:
+
+- `--repo` from the `hbs23://` remote (`origin`, or the only one);
+- `--author` and `--sender` from your identity;
+- for `pr new`, `--onto` is the branch the remote's HEAD names and
+  `--from` is the branch you are on.
+
+It says what it filled in on stderr (`hbs2-hub: using --repo ...`). A
+flag you type always wins. To override a default for a session, set
+`HBS2_HUB_REPO`, `HBS2_HUB_AUTHOR` or `HBS2_HUB_SENDER`; for one clone,
+`git config hbs2.hub.repo <key>`.
+
 ## Contributing to a project
-
-### Once: an identity
-
-```
-mkdir -p ~/.hbs2-keyman/keys
-hbs2-cli hbs2:keyring:new > ~/.hbs2-keyman/keys/me.key
-hbs2-keyman update
-hbs2-cli hbs2:keyring:show ~/.hbs2-keyman/keys/me.key    # sign-key: <my-key>
-hbs2-cli hbs2:sigil:create:from-keyring ~/.hbs2-keyman/keys/me.key > me.sigil
-hbs2-cli hbs2:sigil:store:file me.sigil                  # prints <my-sigil>
-hbs2-peer mailbox create --key <my-key> hub
-```
-
-`<my-key>` signs your letters and appears in the project's record as
-the author. `<my-sigil>` lets the owner answer you. The mailbox is
-where answers arrive.
-
-### Once per project: clone it and check
 
 ```
 git clone hbs23://<repo-key> project
 cd project
-hbs2-hub whoami --author <my-key> --sender <my-sigil> --repo <repo-key>
-hbs2-peer fetch <recipient-sigil>
 ```
 
-`whoami` checks that your key and sigil belong together, and prints
-the project's mailbox and the sigil to seal letters to. The `fetch`
-brings that sigil to your peer; without it the first letter fails with
-"this node does not hold the sigil".
-
-### Report a bug
+Report a bug:
 
 ```
 echo "What happened, and how to reproduce it." |
-  hbs2-hub issue new --repo <repo-key> --author <my-key> --sender <my-sigil> \
-                     --title "Short summary" --body -
+  hbs2-hub issue new --title "Short summary" --body -
 ```
 
-Your peer does a little proof-of-work first ("solving 18 bits of
-work"), well under a second on a recent laptop. It is what keeps
-mailboxes from being flooded.
-
-### Send a fix
+Send a fix, from a branch:
 
 ```
 git checkout -b my-fix
 # edit, commit
-hbs2-hub pr new --repo <repo-key> --author <my-key> --sender <my-sigil> \
-                --title "Fix the thing" --onto master --from my-fix
+hbs2-hub pr new --title "Fix the thing"
 ```
 
-Only your new commits travel, as a git bundle inside the letter.
+Only your new commits travel, as a git bundle inside the letter. Your
+peer does a little proof-of-work before sending ("solving 18 bits of
+work"), well under a second on a recent laptop; it is what keeps
+mailboxes from being flooded.
 
-### See what happened
+See what happened:
 
 ```
-hbs2-hub sync --repo <repo-key>
-hbs2-hub issue list <repo-key>
-hbs2-hub pr list <repo-key>
-hbs2-hub issue show <repo-key> <number>
+hbs2-hub updates           # the owner's replies, in your mailbox
+hbs2-hub sync              # fetch the project's record
+hbs2-hub issue list
+hbs2-hub pr list
+hbs2-hub issue show <number>
 ```
 
-Until the owner accepts your letter, it is not in the list. That is
+Until the owner accepts your letter, it is not in the lists. That is
 the design, not a delay: nothing a stranger sends becomes part of the
 project by itself.
 
@@ -102,57 +102,57 @@ project by itself.
 
 ### Once: open it to contributions
 
-Starting from a repository you pushed with `hbs2-git3`:
+In your clone of a repository you pushed with `hbs2-git3`, after
+`hbs2-hub identity init`:
 
 ```
-mkdir -p ~/.hbs2-keyman/keys
-hbs2-cli hbs2:keyring:new > ~/.hbs2-keyman/keys/mailbox.key
-hbs2-keyman update
-hbs2-cli hbs2:keyring:show ~/.hbs2-keyman/keys/mailbox.key   # sign-key: <mailbox-key>
-hbs2-peer mailbox create --key <mailbox-key> hub
-hbs2-hub policy default --mailbox <mailbox-key> --sender allow --peer allow
-hbs2-cli hbs2:sigil:create:from-keyring ~/.hbs2-keyman/keys/mailbox.key > mailbox.sigil
-hbs2-cli hbs2:sigil:store:file mailbox.sigil                 # prints <mailbox-sigil>
-hbs2-git3 repo:mailbox:set   <repo-key> --key <mailbox-key>
-hbs2-git3 repo:mailbox:sigil <repo-key> --key <mailbox-key> --sigil <mailbox-sigil>
-hbs2-hub status --repo <repo-key>
+hbs2-hub project open
+hbs2-hub publish
 ```
 
-Then give people the repo key. That is all they need.
+`project open` makes the project's mailbox and lets anyone write to it,
+stores its sigil, and declares both in the repository, so a contributor
+needs only the repo key. It also makes your identity a maintainer and
+this clone's default signer, because the repository key cannot encrypt
+and replies are sealed by the key that signs. `--pow 20` makes each
+letter cost about a second of work, for a project that gets spam. Run
+it again any time: what is already in place is kept.
+
+Then give people the repo key.
 
 ### Go through what arrived
 
 ```
-hbs2-hub inbox --repo <repo-key>               # one line per letter
-hbs2-hub inbox --repo <repo-key> --long        # with full ids
-hbs2-hub inbox --repo <repo-key> --follow      # keep running, print new letters
-hbs2-hub inbox show --mailbox <mailbox-key> --repo <repo-key> --message <id>
+hbs2-hub inbox                      # one line per letter
+hbs2-hub inbox --long               # with full ids
+hbs2-hub inbox --follow             # keep running, print new letters
+hbs2-hub inbox show --message <id>  # one letter, whole
 ```
 
 Take a letter into the record, or turn it down:
 
 ```
-hbs2-hub inbox accept --repo <repo-key> --message <id>
-hbs2-hub inbox reject --repo <repo-key> --mailbox <mailbox-key> --message <id>
+hbs2-hub inbox accept --message <id>
+hbs2-hub inbox reject --message <id>
 ```
 
-Accepting cannot be undone: once published, it is in every clone.
-Every verb that writes the record takes `--dry-run` to show what it
-would write first.
+Accepting cannot be undone: once published, it is in every clone. The
+contributor gets a reply in their mailbox either way. Every verb that
+writes the record takes `--dry-run` to show what it would write first.
 
 A letter that asks you to close, reopen or label something is granted
-with `hbs2-hub inbox honour --repo <repo-key> --message <id>`.
+with `hbs2-hub inbox honour --message <id>`.
 
 ### Review and merge a pull request
 
 ```
-hbs2-hub pr checkout --repo <repo-key> --number <n> --branch review
+hbs2-hub pr checkout --number <n> --branch review
 git diff master review
 git checkout master
 git merge --no-ff review
 git push origin master
-hbs2-hub pr merge --repo <repo-key> --number <n> --commit <merge-commit> --into refs/heads/master
-hbs2-hub issue close --repo <repo-key> --number <issue> --note "Fixed by #<n>."
+hbs2-hub pr merge --number <n> --commit <merge-commit> --into refs/heads/master
+hbs2-hub issue close --number <issue> --note "Fixed by #<n>."
 ```
 
 The merge is ordinary git, in whatever style you like. `pr merge` only
@@ -166,33 +166,45 @@ hbs2-hub publish
 
 Nothing you did above is visible to anyone until this runs. If it
 refuses because the remote has canon you do not (another maintainer
-published first), run `hbs2-hub sync --repo <repo-key>` and publish
-again.
+published first), run `hbs2-hub sync` and publish again.
 
 ### Write to the record directly
 
 ```
-hbs2-hub issue open   --repo <repo-key> --title "Release checklist"
-hbs2-hub issue label  --repo <repo-key> --number <n> --label bug
-hbs2-hub issue assign --repo <repo-key> --number <n> --assignee <key>
-hbs2-hub issue close  --repo <repo-key> --number <n> --note "Done."
+hbs2-hub issue open   --title "Release checklist"
+hbs2-hub issue label  --number <n> --label bug
+hbs2-hub issue assign --number <n> --assignee <key>
+hbs2-hub issue reply  --number <n> --body "Thanks, looking."
+hbs2-hub issue close  --number <n> --note "Done."
 ```
 
 ### Share the work
 
+The person you want is usually somebody who has already sent issues or
+pull requests. Add them by the number of one of their threads:
+
 ```
-hbs2-hub maintainer add  --repo <repo-key> --maintainer-key <their-key>
-hbs2-hub maintainer list --repo <repo-key>
+hbs2-hub maintainer add --author-of <number>
+hbs2-hub publish
 ```
 
-A maintainer can accept letters and write to the record. Publishing
-needs push access to the repository.
+(`--maintainer-key <key>` works too.) On their side, once they have
+synced:
+
+```
+hbs2-hub maintainer use
+```
+
+which makes their identity the key their clone signs the record with.
+A maintainer can accept letters and write to the record. Publishing it
+still needs push access to the repository, which `maintainer add` does
+not give.
 
 ### Keep spam out
 
 ```
-hbs2-hub policy pow --mailbox <mailbox-key> --bits 20   # each letter costs ~1 s of work
-hbs2-hub ban   --repo <repo-key>       --author-key <author-key>
+hbs2-hub project open --pow 20      # each letter costs about a second of work
+hbs2-hub ban   --author-key <author-key>
 hbs2-hub block --mailbox <mailbox-key> --envelope-key <envelope-key>
 ```
 
@@ -204,13 +216,15 @@ proof-of-work price is per letter.
 
 | You see | It means | Do |
 | --- | --- | --- |
-| `this node does not hold the sigil <hash>` | your peer has not fetched the project's sigil | `hbs2-peer fetch <hash>`, then retry |
+| `fetching sigil ... from the network`, then `this node does not hold the sigil` | your peer could not get the project's sigil from its neighbours | check `hbs2-peer peers`; retry later |
+| a verb asks for `--repo` | you are not in a clone with an `hbs23://` remote, or it has several and none is `origin` | `cd` into the clone, or pass `--repo` |
+| a verb asks for `--author` or `--sender` | no identity on this machine | `hbs2-hub identity init` |
 | `nothing waiting` in `inbox`, but a letter was sent | it has not arrived yet | wait, or use `inbox --follow` |
-| the issue you sent is not in `issue list` | the owner has not accepted it, or not published | ask the owner; `hbs2-hub sync` again later |
-| `no acknowledgement: no encryption key for <repo-key>` | the repository key cannot seal replies | nothing to fix for the record; contributors read it with `sync` |
-| `publish` says the remote holds canon you do not | someone else published first | `hbs2-hub sync --repo <repo-key>`, then `publish` |
+| the issue you sent is not in `issue list` | the owner has not accepted it, or not published | `hbs2-hub updates`; `hbs2-hub sync` again later |
+| `no acknowledgement: the signer ... has no encryption key` | the project signs with the repository key | owner: `hbs2-hub project open` once |
+| `publish` says the remote holds canon you do not | someone else published first | `hbs2-hub sync`, then `publish` |
 | `repository ... not found` on clone | your peer cannot reach a peer that has it | check `hbs2-peer peers`; see [multi-machine.md](multi-machine.md) |
 
-`hbs2-hub verify <repo-key>` rechecks every signature in the record and
-needs no network. `hbs2-hub --codes` lists the exit codes for scripts.
+`hbs2-hub verify` rechecks every signature in the record and needs no
+network. `hbs2-hub --codes` lists the exit codes for scripts.
 `hbs2-hub help <verb>` documents any command.

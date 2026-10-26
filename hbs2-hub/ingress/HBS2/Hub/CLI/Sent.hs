@@ -95,7 +95,7 @@ sentNote n =
   pretty n <+> "letter(s) this node handed to its peer."
     <> line <> "  That is what the log records: not that a mailbox took them,"
     <+> "and not that anybody read them."
-    <> line <> "  `hbs2-hub updates --repo <key> --mailbox <your-mailbox>`"
+    <> line <> "  `hbs2-hub updates`, in the clone,"
     <+> "is what came back."
 
 -- | The log as a document (@hub sent --json@).

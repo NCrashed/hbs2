@@ -25,6 +25,7 @@ module HBS2.Hub.Repo.Manifest
   , codeNoManifest
   , mailboxFor
   , sigilFor
+  , fetchSigil
   , byHandOr
   , sigilTrouble
   , mailboxOf
@@ -36,6 +37,7 @@ import HBS2.Hub.Canon (clausesWith)
 import HBS2.Hub.Letter (sigilOwner)
 import HBS2.Hub.Manifest
 import HBS2.Hub.Ingress (rpcTimeout,bounded,PeerSilent(..),TreeWeight(..),weighTree)
+import HBS2.Hub.CLI.Say (saying)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -48,13 +50,14 @@ import HBS2.Net.Auth.Credentials.Sigil (loadSigil,Sigil)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.LWWRef
 import HBS2.Peer.RPC.API.LWWRef
+import HBS2.Peer.RPC.API.Peer (PeerAPI,RpcFetch)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import Control.Monad.Except (runExceptT,throwError)
 import Data.Coerce (coerce)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (listToMaybe,isJust)
 import Data.Text.Encoding qualified as Text
 import Data.ByteString.Lazy qualified as LBS
 import Streaming.Prelude qualified as S
@@ -243,7 +246,7 @@ readManifest repo = do
     walkText = \case
       MerkleHashNotFound h ->
         "block " <> hashText h <> " of the manifest log is not here yet"
-          <> " (`hbs2-peer download " <> hashText h <> "` asks for it)"
+          <> " (`hbs2-peer fetch " <> hashText h <> "` asks for it)"
       MerkleDeserialiseFailure h _ ->
         "block " <> hashText h <> " of the manifest log is not a merkle node"
 
@@ -401,3 +404,34 @@ mailboxOf mf = mbKey <$> mailboxByTier Nothing mf
 -- and not this reader's.
 sigilOf :: HubKey -> [Syntax C] -> Maybe HashRef
 sigilOf mbox mf = listToMaybe (sigilsFor mbox mf)
+
+-- | Make sure this peer holds a sigil before anything is sealed to it.
+--
+-- A contributor's peer has never seen the project's sigil: the manifest NAMES
+-- it, and naming a block does not fetch it. Every composing verb then refused
+-- with "this node does not hold the sigil" and a command to type, on the first
+-- letter anybody sends to a project, which is exactly when they know least.
+--
+-- So ask the peer for it and wait a little, saying so on stderr. 'False' when
+-- it did not arrive; the caller goes on anyway, and the send refuses with the
+-- usual explanation, which is still the right one then.
+fetchSigil :: forall m . ( MonadUnliftIO m
+                         , HasStorage m
+                         , HasClientAPI PeerAPI UNIX m
+                         )
+           => HashRef -> m Bool
+fetchSigil h = do
+  sto <- getStorage
+  let here = hasBlock sto (coerce h) <&> isJust
+  here >>= \case
+    True -> pure True
+    False -> do
+      liftIO $ saying ("hbs2-hub: fetching sigil" <+> pretty h <+> "from the network" <> line)
+      api <- getClientAPI @PeerAPI @UNIX
+      void $ callRpcWaitMay @RpcFetch rpcTimeout api h
+      let wait :: Int -> m Bool
+          wait 0 = pure False
+          wait n = here >>= \case
+            True  -> pure True
+            False -> pause @'Seconds 1 >> wait (n - 1)
+      wait 30

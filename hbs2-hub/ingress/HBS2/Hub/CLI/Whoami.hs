@@ -229,7 +229,13 @@ whoamiEntries = do
             can <- isJust <$> signerFor (sgKey s)
             liftIO $ print $ "canon signer" <+> signerDoc s
               <> line <> "  " <> if can then "this machine can sign as it"
-                                         else "NO SIGNING KEY HERE for it"
+                                         -- Said as what it means for the
+                                         -- reader. Most people asking about a
+                                         -- repository are contributors, who
+                                         -- never sign canon, and capitals told
+                                         -- them something was broken.
+                                         else "not held here: fine for sending letters,"
+                                                <+> "needed only to accept them"
 
         mf <- readManifest repo
         liftIO $ case mf of

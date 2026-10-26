@@ -218,7 +218,7 @@ spec1 = do
     it "reads the flags in any order" $ do
       mbox <- aKey
       let h = mh "a message"
-          want = Just (ShowArgs mbox h Nothing False)
+          want = Just (ShowArgs (Just mbox) h Nothing False)
       showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h)])
         `shouldBe` want
       showArgs (argv ["--message", show (pretty h), "--mailbox", b58 mbox])
@@ -229,7 +229,13 @@ spec1 = do
       let h = mh "a message"
       showArgs (argv [ "--mailbox", b58 mbox, "--message", show (pretty h)
                      , "--repo", b58 repo ])
-        `shouldBe` Just (ShowArgs mbox h (Just repo) False)
+        `shouldBe` Just (ShowArgs (Just mbox) h (Just repo) False)
+
+    it "takes the mailbox from the repository when only the repository is named" $ do
+      repo <- aKey
+      let h = mh "a message"
+      showArgs (argv ["--message", show (pretty h), "--repo", b58 repo])
+        `shouldBe` Just (ShowArgs Nothing h (Just repo) False)
 
     it "refuses a form with no mailbox or no message" $ do
       mbox <- aKey
@@ -470,7 +476,7 @@ asJson = describe "PEP-22 hub inbox show --json: the letter as a document" $ do
       mbox <- aKey
       let h = mh "a message"
       showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h), "--json"])
-        `shouldBe` Just (ShowArgs mbox h Nothing True)
+        `shouldBe` Just (ShowArgs (Just mbox) h Nothing True)
       showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h), "--json", "yes"])
         `shouldBe` Nothing
 

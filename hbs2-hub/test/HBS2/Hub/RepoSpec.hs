@@ -226,7 +226,7 @@ spec = eventVersions >> do
       owner <- kp
       -- A path the tree lists whose blob will not read. Different from a
       -- malformed file and reported all the same: the first is a broken read of
-      -- something that exists, and the path is what `hbs2-peer download` takes.
+      -- something that exists, and the path is what `hbs2-peer fetch` takes.
       let repo = fst owner
           p = B8.pack "threads/t/00000000000000000001-x"
           listed = inMem (pure (Right "deadbeef"))

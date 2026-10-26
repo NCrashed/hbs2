@@ -935,7 +935,7 @@ holes =
       k <- aKey
       let said = show (doubtDoc k (mh "m")
                         (MailboxHoles [ mh (B8.pack (show i)) | i <- [1 .. 50 :: Int] ]))
-      said `shouldSatisfy` isInfixOf "hbs2-peer download"
+      said `shouldSatisfy` isInfixOf "hbs2-peer fetch"
       said `shouldSatisfy` isInfixOf "Nothing was written"
       said `shouldSatisfy` isInfixOf "50 block(s)"
       -- both directions named, because a reader who only hears about one will
@@ -955,7 +955,7 @@ holes =
       said `shouldSatisfy` isInfixOf "Deleted"
       said `shouldSatisfy` isInfixOf "No fetch fixes this"
       said `shouldSatisfy` isInfixOf "Nothing was written"
-      said `shouldSatisfy` (not . isInfixOf "hbs2-peer download")
+      said `shouldSatisfy` (not . isInfixOf "hbs2-peer fetch")
 
     -- The other direction of the same answer, shared by both verbs because both
     -- printed it word for word. With --incomplete this is the refusal that may

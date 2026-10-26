@@ -44,16 +44,22 @@ spec =
       let h = aHash "a letter"
       rejectArgs (argv [ "--mailbox", b58 mbox, "--message", show (pretty h)
                        , "--repo", b58 repo ])
-        `shouldBe` Just (Reject mbox h repo Nothing False)
+        `shouldBe` Just (Reject (Just mbox) h repo Nothing False)
       rejectArgs (argv [ "--message", show (pretty h), "--repo", b58 repo
                        , "--mailbox", b58 mbox ])
-        `shouldBe` Just (Reject mbox h repo Nothing False)
+        `shouldBe` Just (Reject (Just mbox) h repo Nothing False)
 
     -- REQUIRED, and it was optional. Without a repository there is no canon to
     -- ask whether this letter was already folded, so the one check this verb
     -- makes ran only when the caller happened to pass a flag they were told was
     -- optional -- and a reject of a folded letter says the letter was not
     -- taken, which is a false sentence about something canon holds.
+    it "takes the mailbox from the repository when none is named" $ do
+      repo <- aKey
+      let h = aHash "a letter"
+      rejectArgs (argv ["--message", show (pretty h), "--repo", b58 repo])
+        `shouldBe` Just (Reject Nothing h repo Nothing False)
+
     it "refuses a call with any required value missing" $ do
       k <- aKey
       let h = aHash "a letter"

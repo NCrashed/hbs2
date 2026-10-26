@@ -38,6 +38,8 @@ module HBS2.Hub.CLI.Policy
   , readPolicyWith
   , PolicyReader
   , policyOf
+  , submitPolicy
+  , policyLines
   , maxPolicyClauses
   , PolicyGone(..)
   , policyGoneCode
@@ -342,7 +344,7 @@ policyEntries = do
               ]
             Just (v, p) -> liftIO $ print $ vcat
               [ "version" <+> pretty v
-              , pretty (safeText (policyText p))
+              , policyLines (policyText p)
               ]
         other -> liftIO (badArgs policyUsage other)
 
@@ -504,35 +506,12 @@ policyEntries = do
         saying ("nothing to change; the policy was not rewritten" <> line)
         exitSuccess
 
-      creds <- signerFor mbox
-                 >>= maybe (liftIO (refuse (show ( "cannot sign as"
-                                                     <+> pretty (AsBase58 mbox)
-                                                     <> line
-                                                     <> "  the mailbox's own key signs its"
-                                                     <+> "policy" ))
-                                           codeNotSet))
-                           pure
-
-      sto <- getStorage
-      api <- getClientAPI @MailboxAPI @UNIX
-
-      href <- liftIO (writeAsMerkle sto (LBS.pack (Text.unpack (policyText p'))))
-
-      let payload = SetPolicyPayload mbox v (HashRef href)
-          box = uncurry (makeSignedBox @HubScheme) (signingPair creds) payload
-
-      callRpcWaitMay @RpcMailboxSetPolicy rpcTimeout api (mbox, box)
-        >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox policy")) codePeerSilent))
-                  pure
-        >>= either (\e -> liftIO (refuse (show ("the peer refused the policy:"
-                                                  <+> viaShow e))
-                                         codeNotSet))
-                   pure
+      void (submitPolicy mbox v p')
 
       liftIO $ print $ vcat
         [ said
         , "policy version" <+> pretty v
-        , pretty (safeText (policyText p'))
+        , policyLines (policyText p')
         ]
 
 -- Both values behind flags, and both are keys of one type.
@@ -601,3 +580,49 @@ policyShowArgs :: forall c . IsContext c => [Syntax c] -> Maybe HubKey
 policyShowArgs syn = do
   kvs <- flagsOf ["--mailbox"] syn
   flagOnce kvs "--mailbox" >>= \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
+
+-- | A policy as it reads, one clause a line.
+--
+-- Escaped a line at a time rather than whole, because 'safeText' escapes the
+-- newlines too and printed a policy as one line of @\\u{0a}@. Indented, so that
+-- a policy somebody else wrote cannot print a line that passes for this tool's
+-- own @policy version@.
+policyLines :: Text -> Doc ann
+policyLines t = vcat [ indent 2 (pretty (safeText l)) | l <- Text.lines t ]
+
+-- | Sign a policy with the mailbox's own key, store it, and hand it to the peer.
+--
+-- The half of `hub policy default` and friends that is about the wire, out of
+-- their where-block so that `hub project open` writes a policy the same way
+-- rather than a fourth way. Refuses, with the codes those verbs use, on a key
+-- this machine does not hold and on a peer that will not take it.
+submitPolicy :: forall m . ( MonadUnliftIO m
+                           , HasStorage m
+                           , HasClientAPI MailboxAPI UNIX m
+                           )
+             => HubKey -> PolicyVersion -> BasicPolicy HBS2Basic -> m HashRef
+submitPolicy mbox v p' = do
+  creds <- signerFor mbox
+             >>= maybe (liftIO (refuse (show ( "cannot sign as"
+                                                 <+> pretty (AsBase58 mbox)
+                                                 <> line
+                                                 <> "  the mailbox's own key signs its"
+                                                 <+> "policy" ))
+                                       codeNotSet))
+                       pure
+
+  sto <- getStorage
+  api <- getClientAPI @MailboxAPI @UNIX
+
+  href <- liftIO (writeAsMerkle sto (LBS.pack (Text.unpack (policyText p'))))
+
+  let payload = SetPolicyPayload mbox v (HashRef href)
+      box = uncurry (makeSignedBox @HubScheme) (signingPair creds) payload
+
+  callRpcWaitMay @RpcMailboxSetPolicy rpcTimeout api (mbox, box)
+    >>= maybe (liftIO (refuse (show (PeerSilent "the mailbox policy")) codePeerSilent))
+              pure
+    >>= either (\e -> liftIO (refuse (show ("the peer refused the policy:"
+                                              <+> viaShow e))
+                                     codeNotSet))
+               pure

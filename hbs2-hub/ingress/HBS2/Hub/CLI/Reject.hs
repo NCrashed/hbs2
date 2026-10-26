@@ -29,16 +29,19 @@ module HBS2.Hub.CLI.Reject
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
+import HBS2.Hub.Repo.Manifest (mailboxFor,fetchSigil)
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
+import HBS2.Peer.RPC.API.LWWRef (LWWRefAPI)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.CLI.Drop (dropMessages,DropTrouble(..))
 import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..)
                         ,rawMessage,LetterRaw(..),rpcTimeout)
-import HBS2.Hub.Letter (AckRecord(..),openLetterAs,EnvelopeSigner(..))
+import HBS2.Hub.Letter (AckRecord(..),openLetterAs,EnvelopeSigner(..),ReplyChannel(..))
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
 import HBS2.Hub.CLI.Signer (resolveSignerIn,signerEnvVar,signerPrecedenceHelp,Signer(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.Bridge (originFits,viewOf)
-import HBS2.Hub.CLI.Common (overRpc,refuse,saying,signerFor,codePeerSilent
+import HBS2.Hub.CLI.Common (overRpc,refuse,saying,signerFor,codePeerSilent,manifestCode
                            ,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Argv (badArgs,flagOnce,flagMaybe,flagsAndSwitches,flagSwitch
                          ,repoFlags,flagRepo)
@@ -76,7 +79,7 @@ codeNotRejected = 33
 
 -- | What @hub inbox reject@ was asked to drop.
 data Reject = Reject
-  { rjMailbox :: HubKey
+  { rjMailbox :: Maybe HubKey   -- ^ absent: the one the repository manifest declares
   , rjMessage :: HashRef
     -- | The repository whose canon to check first.
     --
@@ -103,12 +106,14 @@ data Reject = Reject
 
 rejectUsage :: Doc ()
 rejectUsage =
-  "usage: hbs2-hub inbox reject --repo <key> --mailbox <key> --message <hash> [--as <key>] [--silent]"
+  "usage: hbs2-hub inbox reject --repo <key> --message <hash> [--mailbox <key>] [--as <key>] [--silent]"
 
 rejectEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
                               , HasStorage m
                               , HasClientAPI MailboxAPI UNIX m
+                              , HasClientAPI PeerAPI UNIX m
+                              , HasClientAPI LWWRefAPI UNIX m
                               , Exception (BadFormException c)
                               ) => MakeDictM c m ()
 rejectEntries = do
@@ -164,6 +169,12 @@ rejectEntries = do
   where
 
     reject rj = do
+      -- The mailbox named, or the one the repository declares, as `inbox`
+      -- and `inbox accept` have it.
+      mbox <- maybe (mailboxFor Nothing (rjRepo rj)
+                       >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e))) pure)
+                    pure (rjMailbox rj)
+
       -- Canon first, when there is a canon to ask. A letter already folded is
       -- refused before anything is signed: the refusal is about what canon
       -- promises, and asking after would mean having signed a delete for it.
@@ -195,7 +206,7 @@ rejectEntries = do
                                         <+> "or no mailbox key at the time) it is a"
                                         <+> "queue entry and not a decision:"
                                         <> line <> "    hbs2-peer mailbox delete:message"
-                                        <+> pretty (AsBase58 (rjMailbox rj))
+                                        <+> pretty (AsBase58 mbox)
                                         <+> pretty (rjMessage rj) ))
                               codeAlreadyFolded
 
@@ -208,7 +219,7 @@ rejectEntries = do
       -- Bounded by the page the queue shows, because that is the set this can
       -- know without an unbounded walk, and because it is the set the operator
       -- was looking at when they typed this.
-      copies <- copiesOf ig (rjMailbox rj) (rjMessage rj)
+      copies <- copiesOf ig mbox (rjMessage rj)
 
       -- ONE DELETE FOR THE WHOLE SET, and it used to be one per copy. A delete
       -- names a set, so a letter arriving under a dozen envelopes is a dozen
@@ -217,7 +228,7 @@ rejectEntries = do
       --
       -- The peer is silent for the reason 'PeerSilent' says and NOT for the
       -- reason a missing key is, so the three answers keep their own codes.
-      dropMessages (rjMailbox rj) (rjMessage rj : copies) >>= \case
+      dropMessages mbox (rjMessage rj : copies) >>= \case
         Right () -> pure ()
         Left DropPeerSilent -> liftIO (refuse (show (PeerSilent "the mailbox delete"))
                                               codePeerSilent)
@@ -299,6 +310,7 @@ rejectEntries = do
                                    , akMergeCommit = Nothing
                                    , akNote = Nothing
                                    }
+              case reply of { ReplyTo _ h -> void (fetchSigil h) ; _ -> pure () }
               sendAck (Outbound sto api rpcTimeout) canonKey c reply rec'
 
     tshow :: Show a => a -> Text
@@ -309,7 +321,7 @@ rejectArgs :: forall c . IsContext c => [Syntax c] -> Maybe Reject
 rejectArgs syn = do
   kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message","--as"])
                            ["--silent"] syn
-  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  mbox <- flagMaybe kvs "--mailbox" asKey
   h    <- flagOnce kvs "--message" >>= asHash
   repo <- flagRepo asKey kvs
   as   <- flagMaybe kvs "--as" asKey

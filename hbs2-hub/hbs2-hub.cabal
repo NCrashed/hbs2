@@ -153,6 +153,9 @@ library hub-ingress
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
       HBS2.Hub.CLI.Signer
+      HBS2.Hub.CLI.Defaults
+      HBS2.Hub.CLI.Identity
+      HBS2.Hub.CLI.Project
       HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
@@ -235,6 +238,7 @@ test-suite spec
       HBS2.Hub.CommonSpec
       HBS2.Hub.CompactSpec
       HBS2.Hub.DictSpec
+      HBS2.Hub.DefaultsSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
       HBS2.Hub.StatusSpec

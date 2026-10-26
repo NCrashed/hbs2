@@ -47,13 +47,14 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Bridge (TriageError(..))
-import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf
+import HBS2.Hub.CLI.Common (overRpc,refuse,saying,utcOf,manifestCode
                            ,codeMailboxUnknown,codePeerSilent
                            ,withCanon,OnMissing(..)
                            ,mailboxDoubt,doubtDoc,notInMailboxDoc)
 import HBS2.Hub.CLI.Accept (codeLetterUnreadable)
 import HBS2.Hub.CLI.Inbox (dispositionName)
-import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,flagOnce,repoFlags,flagRepoMaybe)
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,flagOnce,flagMaybe,repoFlags,flagRepoMaybe)
+import HBS2.Hub.Repo.Manifest (mailboxFor)
 import HBS2.Hub.CLI.Verify (codeOf)
 
 import HBS2.CLI.Prelude
@@ -61,6 +62,7 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Peer.RPC.API.Mailbox
+import HBS2.Peer.RPC.API.LWWRef (LWWRefAPI)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
@@ -70,7 +72,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
-import Control.Monad (join)
+import Control.Monad (join,guard)
 import Data.List qualified as List
 import Data.Maybe (isJust)
 import Data.Word (Word64)
@@ -129,20 +131,21 @@ data Shown = Shown
 
 showUsage :: Doc ()
 showUsage =
-  "usage: hbs2-hub inbox show --mailbox <key> --message <hash> [--repo <key>] [--json]"
+  "usage: hbs2-hub inbox show --message <hash> (--repo <key> | --mailbox <key>) [--json]"
 
 showEntries :: forall c m . ( IsContext c
                             , MonadUnliftIO m
                             , HasStorage m
                             , HasClientAPI MailboxAPI UNIX m
+                            , HasClientAPI LWWRefAPI UNIX m
                             , Exception (BadFormException c)
                             ) => MakeDictM c m ()
 showEntries = do
 
   brief "show one letter from the ingress mailbox, whole"
-    $ args [ arg "string" "--mailbox mailbox-key"
-           , arg "string" "--message message-hash"
-           , arg "string" "[--repo repo-key]", arg "string" "[--json]" ]
+    $ args [ arg "string" "--message message-hash"
+           , arg "string" "[--repo repo-key]"
+           , arg "string" "[--mailbox mailbox-key]", arg "string" "[--json]" ]
     $ desc ( "Read-only. Opens one letter and prints what it asks for,"
              <> line <> "including the title and the body the queue does not show."
              <> line
@@ -185,8 +188,16 @@ showEntries = do
                    >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
                               pure
 
+      -- The mailbox named, or the one the repository declares, as `inbox` and
+      -- `inbox accept` have it. The parser has already refused neither.
+      mbox <- case (shMailbox sa, shRepo sa) of
+        (Just k, _)       -> pure k
+        (Nothing, Just r) -> mailboxFor Nothing r
+                               >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
+                                          pure
+        (Nothing, Nothing) -> liftIO (die (show showUsage))
+
       let ig = (overRpc sto api) { igAllowed = allowed }
-          mbox = shMailbox sa
           msg = shMessage sa
 
       -- The live set and not the queue: this is a membership question, and
@@ -722,7 +733,7 @@ partsDoc ps = [ field "part" (hashDoc h <+> facts f) | (h, f) <- ps ]
 -- the same reason: a mailbox key, a repo key and a message hash are all
 -- thirty-two bytes of base58.
 data ShowArgs = ShowArgs
-  { shMailbox :: HubKey
+  { shMailbox :: Maybe HubKey   -- ^ absent: the one the repository manifest declares
   , shMessage :: HashRef
   , shRepo    :: Maybe RepoRef
     -- | The letter as a document rather than as a report. See 'letterContract'.
@@ -733,9 +744,11 @@ data ShowArgs = ShowArgs
 showArgs :: forall c . IsContext c => [Syntax c] -> Maybe ShowArgs
 showArgs syn = do
   kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--message"]) ["--json"] syn
-  mbox <- flagOnce kvs "--mailbox" >>= asKey
+  mbox <- flagMaybe kvs "--mailbox" asKey
   h    <- flagOnce kvs "--message" >>= asHash
   repo <- flagRepoMaybe asKey kvs
+  -- One of the two says which mailbox: by hand, or through the manifest.
+  guard (isJust mbox || isJust repo)
   asJson <- flagSwitch kvs "--json"
   pure (ShowArgs mbox h repo asJson)
   where
