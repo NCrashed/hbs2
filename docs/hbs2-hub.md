@@ -733,6 +733,103 @@ What is NOT there: an index document for list views and an activity
 document for a timeline. PEP-22 leaves both schemas open, so pinning them
 here would be inventing a contract rather than implementing one.
 
+## For an AI agent: the MCP server
+
+```
+hbs2-hub mcp --repo <repo-key>
+```
+
+is a [Model Context Protocol](https://modelcontextprotocol.io) server:
+JSON-RPC 2.0 on stdin and stdout, one message per line. An agent such as
+Claude Code starts it itself and gets the forge as typed tools with JSON
+schemas, so it does not have to compose command lines. You do not run it
+by hand.
+
+Registering it with Claude Code, from the clone the agent will work in:
+
+```
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key>
+```
+
+`--scope project` writes it into the project's `.mcp.json` instead, for
+everyone who works in that repository, and `-e HBS2_HUB_REPO=<repo-key>`
+passes a default through the environment rather than the command line.
+A maintainer who triages adds the mailbox and, for a delegate, the canon
+key; a contributor who comments adds the author key and sender sigil:
+
+```
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key> \
+    --mailbox <mailbox-key> --as <canon-key>
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key> \
+    --author <your-sign-key> --sender <your-sigil>
+claude mcp add hbs2-hub-ro -- hbs2-hub mcp --repo <repo-key> --read-only
+```
+
+Each of these is a default that a tool call may override, so a call names
+what differs and not the repository it has named every time. Each also
+reads from the environment (`HBS2_HUB_REPO`, `HBS2_HUB_MAILBOX`,
+`HBS2_HUB_AS`, `HBS2_HUB_AUTHOR`, `HBS2_HUB_SENDER`, `HBS2_HUB_REMOTE`,
+`HBS2_HUB_DIR`); a flag wins over the environment. A value that does not
+read as a key is refused at startup rather than ignored.
+
+The verbs run in `--dir`, by default the directory the client started
+the server in, which for Claude Code is the project. That has to be a
+clone with canon in it: see the `sync` tool.
+
+The tools:
+
+| Tool | Verb | |
+|---|---|---|
+| `status` | `status` | where this clone stands |
+| `whoami` | `whoami` | which keys this machine has |
+| `issue_list`, `pr_list` | `issue list`, `pr list` | filters: `status`, `label` |
+| `issue_show`, `pr_show` | `issue show --json`, `pr show --json` | the render contract, as structured content |
+| `log` | `log` | |
+| `verify` | `verify` | a finding is a result, not a tool error |
+| `inbox_list` | `inbox --json` | the queue document; `after`, `limit` |
+| `inbox_show` | `inbox show` | one letter, body included |
+| `inbox_wait` | `inbox --follow --json` | blocks until a letter arrives |
+| `inbox_accept` | `inbox accept` | writes canon |
+| `inbox_honour` | `inbox honour` | writes canon |
+| `inbox_reject` | `inbox reject` | writes the mailbox |
+| `issue_open`, `issue_close`, `issue_label` | `issue open`, `close`, `label` | write canon; `kind: pr` for a pull request |
+| `issue_comment` | `issue comment` | sends a letter |
+| `publish` | `publish` | pushes canon to a remote |
+| `sync` | `sync` | fetches into this clone |
+
+Each tool runs one verb of the same `hbs2-hub` binary, as a child
+process, and returns what it printed, its exit code and what the code
+means (the table `--codes` prints). The tool layer decides nothing the
+verb does not: the checks a call relies on are the verb's own, and so is
+the refusal of an argument the tool does not take.
+
+**Writes.** Every tool that writes takes `dry_run`, and its description
+says that canon is public and permanent once published. `inbox_accept`,
+`inbox_honour`, `issue_open`, `issue_close` and `issue_label` pass it to
+the verb's own `--dry-run`, which runs every check and prints the event
+without signing anything. `inbox_reject`, `issue_comment`, `publish` and
+`sync` have no dry run of their own; for them `dry_run` shows the command
+that would run and runs a read-only look instead (`inbox show`, `whoami`,
+`status`). `--read-only` offers none of the writing tools at all.
+
+**Waiting for letters.** `inbox_wait` runs the follower described under
+[Triage](#triage) and returns at the first read that holds a letter the
+caller has not seen, or at `timeout_seconds` (300 by default, at most an
+hour). Pass `known`, the message hashes you have already seen: a letter
+not among them is returned at once, so nothing that arrived between two
+calls is missed. Each answer carries `seen` for the next call. A client
+that sends a progress token gets a progress notification every fifteen
+seconds while it waits. It is a tool and not a server notification
+because a client shows a tool's result to the model and, today, does not
+show it a notification; and because the follower already knows when the
+mailbox moved.
+
+A read can be cancelled, and the verb under it is stopped; a write runs
+to its end, since half an accept is worse than either outcome. Every
+verb is stopped after `--timeout` seconds (600 by default). When the
+client goes away, reads in flight are stopped and writes are left to
+finish.
+
 ## Scripting
 
 Exit codes are a contract: they may be added to and are never

@@ -34,6 +34,29 @@
     with and where it came from (`signer.key`, `signer.source`), as the
     text report does. Notes stay on stderr and the exit codes do not change.
 
+  - **`hbs2-hub mcp`: the forge as tools for an AI agent.** A Model Context
+    Protocol server on stdin and stdout (JSON-RPC 2.0, protocol revisions
+    2024-11-05 through 2025-06-18), so that Claude Code or any other MCP
+    client gets typed tools with JSON schemas instead of a shell and a
+    manual: status, whoami, issue and pr list and show, log, verify, the
+    inbox (list, show, wait), accept, honour, reject, issue open, close,
+    label and comment, publish and sync.
+
+    Each tool runs one verb of the same binary as a child process and hands
+    back its output, its exit code and what the code means. The verbs leave
+    the process to refuse and print their answers on stdout, which is the
+    protocol channel, so in-process they would have needed a captured file
+    descriptor and a caught exit in every call; as children they can also be
+    timed out and cancelled. `issue_show`, `pr_show` and `inbox_list` return
+    the JSON documents as structured content.
+
+    Every write takes `dry_run`, through the verb's own `--dry-run` where it
+    has one, and says in its description that canon is public and permanent
+    once published. `inbox_wait` blocks until a letter arrives, by running
+    `inbox --follow --json`. The repository, mailbox, canon key, author,
+    sender and remote can be server defaults (flags or `HBS2_HUB_*`), and
+    `--read-only` offers no tool that writes.
+
   - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
     they arrive.** Watching a queue meant running `hub inbox` every minute,
     paying the settle wait and a keyman lookup per letter each time, and
