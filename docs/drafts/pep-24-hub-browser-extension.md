@@ -75,15 +75,15 @@ Three parts, and only the last one holds anything that matters:
                              +----------------------+         +------------------+
 ```
 
-  - Content script: finds the repository, reads `.hbs2/hub`, injects a small
-    "hbs2" entry point (a tab in the repository header, a section on the
-    issues and pulls lists). It renders lists as text nodes only and opens
-    everything else in extension pages. It never sends a write request.
+  - Content script: finds the repository, reads `.hbs2/hub`, adds an "hbs2"
+    tab to the repository header, the hbs2 rows to GitHub's issue and pull
+    request panel, and draws a thread in place. Everything it draws is text
+    nodes. It never sends a write request.
   - Background service worker: owns the one native messaging connection, routes
     requests, enforces which origin may ask for what (see Threat model).
-  - Extension pages: the thread view, the forms, the maintainer inbox. They
-    run in the extension's origin, not GitHub's, so canon text is never put
-    into GitHub's DOM beyond a list line.
+  - Extension pages: the forms and the maintainer inbox, which write, run in
+    the extension's origin. Reading views (the rows and the thread) are also
+    drawn inside GitHub's page, from text nodes only, see "Canon text".
   - `hbs2-hub native-host`: a long-running child the browser starts. It is the
     `hub mcp` tool layer behind a different framing: each request names a
     tool and its arguments, and the host runs the verb as a child process,
@@ -244,10 +244,13 @@ On github.com/<owner>/<repo>, when a pointer or a mapping exists:
   - an "hbs2" tab in the repository header, with open issue and PR counts;
   - on `/issues` and `/pulls`, a section listing hbs2 threads (from `index`),
     each line opening the thread view;
-  - the thread view, an extension page: title, status, labels, body, comments,
-    and for a PR the onto/base/tip and the precomputed diff (PEP-22), every
-    item attributed by `author` and `canon_by` key, with the user's own
-    identity and the repository's maintainers named;
+  - the thread itself, drawn in place on the issues or pulls page at
+    `#hbs2/<kind>/<number>`, under GitHub's own header and laid out like a
+    GitHub issue: title and number, state, the conversation as comment boxes
+    with a generated face per key, labels and participants down the side,
+    and for a PR its coordinates and precomputed diff (PEP-22). Every item is
+    attributed by `author` and `canon_by` key. The same view is the
+    extension's own thread page, and later the standalone frontend's;
   - "New issue (hbs2)" and "New pull request (hbs2)" buttons, opening forms in
     extension pages;
   - for a maintainer (the identity is in `maintainer list`), an inbox page
@@ -283,9 +286,11 @@ canon. Everything below is about who can make it sign.
     author or canon key, title and body), rendered by the extension, not by the
     page. Where a verb has `--dry-run`, the summary is the dry run's output.
   - CANON TEXT. Titles, bodies and comments are a stranger's bytes (PEP-22).
-    They are inserted as text nodes, never as HTML; markdown, when rendered,
-    goes through a sanitizer with no raw HTML, no scripts, no event attributes,
-    and links limited to `https:`. Control characters are escaped as PEP-22
+    They are inserted as text nodes, never as HTML, on GitHub's page as in
+    the extension's. Markdown is read by the extension's own small reader
+    into a tree and built with DOM calls: raw HTML in a body stays text, and
+    a link keeps only an http(s) target. Nothing that reads is a way to
+    write: the content script's port stays read-only wherever it draws. Control characters are escaped as PEP-22
     requires of every renderer.
   - A POINTER THAT LIES. `.hbs2/hub` can name any key. It cannot forge a
     thread, since canon is verified against the key it names (the repository
