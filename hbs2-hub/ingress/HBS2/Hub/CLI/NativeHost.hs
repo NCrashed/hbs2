@@ -24,7 +24,9 @@ import Data.Maybe (fromMaybe)
 import Data.Version (showVersion)
 import Paths_hbs2_hub qualified as Version
 import System.Directory
-import System.Environment (getExecutablePath)
+import System.Environment (getExecutablePath,lookupEnv)
+import Control.Monad (filterM)
+import Data.Maybe (listToMaybe)
 import System.FilePath ((</>),takeDirectory)
 
 data NativeArgs
@@ -117,8 +119,9 @@ nativeHostEntries =
         serveNative (HostConfig mcp cache 60) stdin stdout
 
       Install ro chrome firefox -> do
-        self <- getExecutablePath
+        real <- getExecutablePath
         home <- getHomeDirectory
+        self <- stablePath home real
         dataDir <- getXdgDirectory XdgData "hbs2-hub"
         let wrapper = dataDir </> "native-host"
         createDirectoryIfMissing True dataDir
@@ -162,3 +165,21 @@ nativeHostEntries =
 
     say :: Doc () -> IO ()
     say = print
+
+    -- A path that survives an upgrade. Under Nix the running binary is a store
+    -- path, which the next `nix profile upgrade` and a garbage collection take
+    -- away, and the launcher with it. A profile link that resolves to this same
+    -- binary names it as well and follows upgrades; the first one found wins,
+    -- and the real path is the fallback.
+    stablePath home real = do
+      user <- fromMaybe "" <$> lookupEnv "USER"
+      let candidates =
+            [ home </> ".nix-profile" </> "bin" </> "hbs2-hub"
+            , "/etc/profiles/per-user" </> user </> "bin" </> "hbs2-hub"
+            , "/run/current-system/sw/bin/hbs2-hub" ]
+      realC <- canonicalizePath real
+      let same c = do
+            e <- doesFileExist c
+            if e then (== realC) <$> canonicalizePath c else pure False
+      found <- filterM same candidates
+      pure (fromMaybe real (listToMaybe found))
