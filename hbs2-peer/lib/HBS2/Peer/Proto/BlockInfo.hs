@@ -7,6 +7,7 @@ import HBS2.Peer.Proto.Peer
 import HBS2.Net.Proto.Sessions
 import HBS2.Events
 import HBS2.Hash
+import HBS2.Defaults (defMaxBlockSize)
 
 import HBS2.System.Logger.Simple
 
@@ -31,6 +32,7 @@ blockSizeProto :: forall e m proto . ( MonadIO m
                                      , EventEmitter e proto m
                                      , EventEmitter e (AnyBlockSizeEvent e) m
                                      , Sessions e (KnownPeer e) m
+                                     , Pretty (Peer e)
                                      , proto ~ BlockInfo e
                                      )
                => GetBlockSize  HbSync m
@@ -61,8 +63,27 @@ blockSizeProto getBlockSize onNoBlock =
 
     BlockSize h sz  -> deferred @proto do
       that <- thatPeer @proto
-      emit @e (BlockSizeEventKey @e that) (BlockSizeEvent (that, h, sz))
-      emit @e AnyBlockSizeEventKey (AnyBlockSizeEvent h (Just sz) that)
+
+      -- A SIZE IS NOT A NUMBER SOMEBODY TYPED. This was emitted as given, and
+      -- the requester turns it into @calcChunks sz defChunkSize@ and takes that
+      -- list's length, so a handshaked peer answering 2^40 had this node build
+      -- and walk about a billion elements before a byte of the block moved.
+      -- See 'defMaxBlockSize', and 'defMaxFrame' for the same hole one layer
+      -- down.
+      --
+      -- ANSWERED AS "NO BLOCK" rather than dropped in silence, and the
+      -- difference is a whole timeout: a dropped answer leaves the requester
+      -- waiting out 'defBlockInfoTimeout' before it tries another peer, and
+      -- what this peer has established is exactly what NoBlock says -- that
+      -- one is not getting this block from that peer.
+      if sz < 0 || sz > defMaxBlockSize then do
+        warn $ "block size out of range from" <+> pretty that
+                 <+> parens (pretty sz <> ", max" <+> pretty defMaxBlockSize)
+        emit @e (BlockSizeEventKey that) (NoBlockEvent (that, h))
+        emit @e AnyBlockSizeEventKey (AnyBlockSizeEvent h Nothing that)
+      else do
+        emit @e (BlockSizeEventKey @e that) (BlockSizeEvent (that, h, sz))
+        emit @e AnyBlockSizeEventKey (AnyBlockSizeEvent h (Just sz) that)
       -- evHasBlock ( that, h, Just sz )
 
 data AnyBlockSizeEvent e

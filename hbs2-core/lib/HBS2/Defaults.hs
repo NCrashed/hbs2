@@ -49,6 +49,28 @@ defChunkSize = 1024
 defBlockSize :: Integer
 defBlockSize =  256 * 1024
 
+-- | The largest block size this peer will believe a stranger about.
+--
+-- THE SAME HOLE AS 'defMaxFrame', one number over. A download starts by asking
+-- a peer how big a block is, and the answer is an 'Integer' off the wire. It
+-- was taken as given: the size becomes @calcChunks size defChunkSize@, whose
+-- length the requester then computes, so a handshaked peer answering with 2^40
+-- has this node build and walk a list of about a billion elements before a
+-- single byte of the block is transferred. Nothing else bounded it.
+--
+-- ABOVE ANY BLOCK THIS CODEBASE CHUNKS, sixty-four times over, and deliberately
+-- not 'defBlockSize' itself. What a writer chunks at is a decision about
+-- writing and a reader that pinned itself to it would refuse a tree written by
+-- a build that chose differently. This is the other line: "a size a block
+-- could have" against "a number somebody typed". The one writer that does not
+-- chunk, @hbs2:peer:storage:block:put@, refuses anything above it, so a block
+-- this build stores is a block every other peer will fetch.
+--
+-- It is not a memory budget either. What it removes is the part where one peer
+-- picks the number.
+defMaxBlockSize :: Integer
+defMaxBlockSize = 16 * 1024 * 1024
+
 defStorePath :: IsString a => a
 defStorePath = "hbs2"
 

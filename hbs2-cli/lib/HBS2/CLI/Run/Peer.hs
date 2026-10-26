@@ -9,6 +9,7 @@ import HBS2.Hash
 import HBS2.Base58
 import HBS2.Data.Types.Refs
 import HBS2.Storage
+import HBS2.Defaults (defMaxBlockSize)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.CLI.Detect
 import HBS2.Peer.RPC.Client.Unix
@@ -99,29 +100,34 @@ peerEntries = do
         (flags, rest)  = L.partition isAnnounceFlag syn
         doAnnounce     = not (L.null flags)
 
+    -- Stored whole, so it must stay under what other peers will believe a
+    -- block's size to be: above 'defMaxBlockSize' every one of them answers
+    -- "no block", and the block exists only here.
+    let putSmall lbs = do
+          let n = LBS.length lbs
+          when (fromIntegral n > defMaxBlockSize) do
+            throwIO $ userError [qc|block too large: {n} bytes, max {defMaxBlockSize}; store it as a tree|]
+          sto <- getStorage
+          putBlock sto lbs
+
     let putArgs = \case
 
           [isOpaqueOf @LBS.ByteString -> Just lbs] -> do
-            sto <- getStorage
-            putBlock sto lbs >>= orThrowUser "storage error" <&> (Just . HashRef)
+            putSmall lbs >>= orThrowUser "storage error" <&> (Just . HashRef)
 
           [isOpaqueOf @BS.ByteString -> Just bs] -> do
-            sto <- getStorage
-            putBlock sto (LBS.fromStrict bs) >>= orThrowUser "storage error" <&> (Just . HashRef)
+            putSmall (LBS.fromStrict bs) >>= orThrowUser "storage error" <&> (Just . HashRef)
 
           -- FIXME: deprecate-this
           [ListVal [SymbolVal "blob", LitStrVal s]] -> do
-            sto <- getStorage
-            putBlock sto (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
+            putSmall (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
 
           [LitStrVal s] -> do
-            sto <- getStorage
-            putBlock sto (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
+            putSmall (LBS8.pack (Text.unpack s)) >>= orThrowUser "storage error" <&> (Just . HashRef)
 
           [] -> do
             bs <- liftIO BS.getContents
-            sto <- getStorage
-            putBlock sto (LBS.fromStrict bs) <&> fmap HashRef
+            putSmall (LBS.fromStrict bs) <&> fmap HashRef
 
           e -> throwIO $ BadFormException @c (mkList e)
 

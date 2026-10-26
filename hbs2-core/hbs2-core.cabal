@@ -229,6 +229,7 @@ test-suite test
                   , TestByPassFlow
                   , TestEncryptedTree
                   , TestFrameBound
+                  , TestBlockSizeBound
 
     -- other-extensions:
 

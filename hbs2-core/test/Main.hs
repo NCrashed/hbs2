@@ -10,6 +10,7 @@ import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
 import TestFrameBound
+import TestBlockSizeBound
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -43,6 +44,12 @@ main =
               testFrameTakesWhatThisBuildSends
           , testCase "ends with the stream when a promised frame stops arriving"
               testFrameDoesNotAllocateWhatWasPromised
+          ]
+      , testGroup "a block is as big as the far end says"
+          [ testCase "the ceiling admits anything this build writes"
+              testBlockSizeCeilingIsAboveAnythingWritten
+          , testCase "and keeps the work a declared size buys finite"
+              testBlockSizeCeilingBoundsTheWork
           ]
       , testGroup "an encrypted flow belongs to the peer, not to the flow key"
           [ testCase "is not taken over by a stranger who names the nonce first"
