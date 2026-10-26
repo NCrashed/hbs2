@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,18 +18,22 @@ jobs:
       - uses: actions/checkout@v4
 
       # The image ships Command Line Tools 27 next to Xcode 26.6, and the link
-      # step ended up with the CLT's SDK and Xcode's ld, which cannot read the
-      # SDK's .tbd stubs ("unknown architecture arm64e.x1"). Pin both halves to
-      # the default Xcode, before ghcup configures GHC against them.
-      - name: Pin the macOS toolchain to one Xcode
+      # step ends up with the CLT's SDK and Xcode's ld, which cannot read the
+      # SDK's .tbd stubs ("unknown architecture arm64e.x1"). Pointing both at
+      # Xcode did not move the SDK: something on GHC's link path names the CLT
+      # one regardless. So use the CLT for the linker too, which reads its own
+      # SDK, before ghcup configures GHC against it.
+      - name: Use one macOS toolchain, the Command Line Tools
         if: runner.os == 'macOS'
         run: |
-          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> "$GITHUB_ENV"
-          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
-          xcode-select -p
-          xcrun --sdk macosx --show-sdk-path
+          CLT=/Library/Developer/CommandLineTools
+          echo "DEVELOPER_DIR=$CLT" >> "$GITHUB_ENV"
+          echo "SDKROOT=$CLT/SDKs/MacOSX.sdk" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR=$CLT SDKROOT=$CLT/SDKs/MacOSX.sdk
+          xcrun --find clang
+          xcrun --find ld
           xcrun ld -v 2>&1 | head -1
+          readlink "$SDKROOT"
 
       - name: Set up Haskell toolchain
         uses: haskell-actions/setup@v2
@@ -36,6 +41,17 @@ jobs:
         with:
           ghc-version: '9.6.6'
           cabal-version: '3.12.1.0'
+
+      # Fails in seconds rather than ten minutes into the dependencies, and
+      # says which compiler and linker GHC was configured with.
+      - name: Check that GHC can link (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ghc --info | grep -E '"(C compiler command|C compiler link flags|ld command|ld flags)"'
+          cd "$RUNNER_TEMP"
+          echo 'main = putStrLn "linked"' > Link.hs
+          ghc -v1 -dynamic Link.hs -o link-check
+          ./link-check
 
       - name: Install system libraries (Linux)
         if: runner.os == 'Linux'
