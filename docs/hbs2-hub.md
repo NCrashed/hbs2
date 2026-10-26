@@ -7,6 +7,9 @@ encrypted mailbox rather than through an account on a server.
 
 There is no web interface yet. Everything below is the command line.
 
+For the short version, the commands for each common job without the
+reasoning, see [hub-quickstart.md](hub-quickstart.md).
+
 ## Status
 
 Working and new. It ships for the first time in this release and has not
