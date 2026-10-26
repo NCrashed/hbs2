@@ -646,7 +646,8 @@ instance ( s ~ Encryption e, e ~ L4Proto
 
       what <- case loaded of
         Nothing -> do
-          err $ red "mailboxSetPolicy FUCKED"
+          -- The first policy this mailbox has had: nothing to compare it with.
+          debug $ "mailbox: first policy for" <+> pretty (AsBase58 who)
           putBlock mpwStorage (serialise sbox)
             >>= orThrowError (MailboxSetPolicyFailed "storage error")
             <&> HashRef

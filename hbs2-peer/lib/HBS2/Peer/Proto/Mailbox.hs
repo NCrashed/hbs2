@@ -698,16 +698,24 @@ mailboxProto inner adapter mess = deferred @p do
         -- ЧТО ЭТО ЛОМАЕТ, прямо: узел с этой сборкой не возьмёт дерево у пира,
         -- который нонс не эхает, то есть у любой выпущенной версии -- эхо
         -- появилось после 0.25.5.0. Policy при этом продолжает ходить, так что
-        -- расходится именно синхронизация ящиков, и молчать об этом нельзя:
-        -- сообщение ниже идёт warn, а не debug.
+        -- расходится именно синхронизация ящиков. Сообщение об этом было warn;
+        -- с 0.26.0.0 оно debug, почему -- сказано у него самого.
         let origin | fresh = StatusAnswered
                    | otherwise = StatusUnasked
 
+        -- DEBUG, NOT WARN, and the warn was wrong more often than right. The
+        -- ordinary unasked status comes from a peer of THIS build: setting a
+        -- policy gossips the mailbox status to every neighbour, which is how
+        -- the policy travels, and that status answers no nonce by
+        -- construction. So every policy change anywhere printed "upgrade it"
+        -- on every neighbour, about a peer that was up to date. Nothing it
+        -- would have told an operator is still true after 0.26.0.0 either:
+        -- the PoW flag day already cuts off every peer that predates the echo.
+        -- The tree is ignored exactly as before; only the noise is gone.
         when (origin == StatusUnasked) do
-          warn $ red "mailbox:" <+> "status is not an answer to anything we asked;"
-                   <+> "its tree was ignored and this mailbox will not sync from"
-                   <+> pretty (AsBase58 who) <> line
-                   <> "  a peer older than the nonce echo cannot answer one; upgrade it."
+          debug $ red "mailbox:" <+> "status from" <+> pretty (AsBase58 who)
+                    <+> "answers no nonce of ours (a policy broadcast, or an older peer);"
+                    <+> "its policy is taken and its tree ignored"
 
         -- NOTE: possible-poisoning-attack
         --  левый пир генерирует merkle tree сообщений и посылает его.
