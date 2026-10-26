@@ -101,7 +101,28 @@ updateRepoHead :: (HBS2GitPerks m)
                -> [Syntax C]
                -> [HashRef]
                -> Git3 m ()
-updateRepoHead repo manifest gkRefs' = do
+updateRepoHead = writeRepoHead True
+
+-- | Publish a repository head that owes nothing to the current one.
+--
+-- 'updateRepoHead' reads the current head to carry its group keys forward,
+-- and fails when it cannot. That is right for an edit and wrong for
+-- @repo:init <key>@ over a value that is lost or unreadable, where there is
+-- nothing to carry and the read is the very thing that fails.
+replaceRepoHead :: (HBS2GitPerks m)
+                => GitRepoKey
+                -> [Syntax C]
+                -> [HashRef]
+                -> Git3 m ()
+replaceRepoHead = writeRepoHead False
+
+writeRepoHead :: (HBS2GitPerks m)
+              => Bool
+              -> GitRepoKey
+              -> [Syntax C]
+              -> [HashRef]
+              -> Git3 m ()
+writeRepoHead keepOld repo manifest gkRefs' = do
 
   debug "updateRepoHead"
 
@@ -117,7 +138,7 @@ updateRepoHead repo manifest gkRefs' = do
   manifestTree <- createTreeWithMetadata sto Nothing mempty (LBS8.pack (show mfs))
                      >>= orThrowPassIO
 
-  lwwRef <- getRepoRefMaybe
+  lwwRef <- if keepOld then getRepoRefMaybe else pure Nothing
 
   let rHeadOld = lwwValue <$> lwwRef
 
@@ -146,6 +167,20 @@ updateRepoHead repo manifest gkRefs' = do
 
   callRpcWaitMay @RpcLWWRefUpdate (TimeoutSec 1) lwwAPI box
     >>= orThrow RpcTimeout
+
+  -- The peer takes an update in the background and answers before it has, so
+  -- whatever reads the repository next would read the value this replaces, or
+  -- none at all: `repo:init` reads the manifest back straight after writing it,
+  -- and over an lwwref with no value that read failed with GitRepoRefEmpty.
+  -- Wait until it reads back.
+  limit <- getRepoWaitTimeout
+  seen <- pollUntil limit do
+            v <- callRpcWaitMay @RpcLWWRefGet (TimeoutSec 1) lwwAPI (LWWRefKey repo)
+            pure $ if (lwwValue <$> join v) == Just (coerce blk) then Just () else Nothing
+
+  when (isNothing seen) do
+    warn $ "hbs2-peer has not taken the new value of" <+> pretty (AsBase58 repo)
+             <+> "yet; a newer one may be in the way"
 
 updateGroupKey :: HBS2GitPerks m => GitRepoKey -> HashRef -> Git3 m ()
 updateGroupKey repo new = do

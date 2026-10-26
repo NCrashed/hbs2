@@ -519,7 +519,31 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
 
           whoAddr <- toPeerAddr who
 
-          liftIO $ newClientThread env $ do
+          -- A DIAL THAT NEVER REACHED THE FAR END LEAVES NO QUEUE BEHIND.
+          --
+          -- 'sendTo' asks for a connection only when it finds no out-queue for
+          -- the peer, and creates that queue in the same step. The queue goes
+          -- away in the bracket below, which is reached only once the
+          -- connection is up. So when the connect itself failed (the far end
+          -- restarting, a refused port, a SOCKS error) the queue stayed, every
+          -- later send found it and asked for nothing, and the peer was not
+          -- dialled again until the sweep collected the queue. The ping loop
+          -- sends to a known peer every thirty seconds, which held the sweep
+          -- off for as long as the peer stayed known. One refused connect
+          -- during a neighbour's restart was enough.
+          --
+          -- Only a dial that failed before the cookie exchange is undone here.
+          -- A connection that came up is cleaned by its own bracket, and one
+          -- dropped as a duplicate after the handshake keeps the old behaviour,
+          -- since dialling it again would only find the same duplicate.
+          shook <- newTVarIO False
+
+          let forgetFailedDial = atomically do
+                ok   <- readTVar shook
+                conn <- readTVar _tcpPeerConn <&> HM.member who
+                unless (ok || conn) $ modifyTVar _tcpSent (HPSQ.delete who)
+
+          liftIO $ newClientThread env $ flip U.finally forgetFailedDial $ do
             let (host, port) = case whoAddr of
                   L4Address _ (IPAddrPort (ip,p)) -> (show ip, p)
                   L4AddressName _ h p             -> (Text.unpack h, p)
@@ -531,6 +555,7 @@ runMessagingTCP env@MessagingTCP{..} = liftIO do
 
                 debug $ "OPEN CLIENT CONNECTION" <+> pretty host <+> pretty port <+> pretty remoteAddr
                 cookie <- handshake Client env so
+                atomically $ writeTVar shook True
                 let connId = connectionId cookie myCookie
 
                 when (cookie == myCookie) $ do

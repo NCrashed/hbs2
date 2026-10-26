@@ -230,6 +230,7 @@ test-suite test
                   , TestEncryptedTree
                   , TestFrameBound
                   , TestBlockSizeBound
+                  , TestTCPRedial
 
     -- other-extensions:
 

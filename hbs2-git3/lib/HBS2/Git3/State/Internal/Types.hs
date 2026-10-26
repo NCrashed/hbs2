@@ -110,6 +110,7 @@ data Git3Env =
     , gitCompressionLevel  :: TVar Int
     , gitIndexBlockSize    :: TVar Natural
     , gitRepoKey           :: TVar (Maybe GitRepoKey)
+    , gitRepoWait          :: TVar (Timeout 'Seconds)
     , gitRuntimeDict       :: Maybe RuntimeDict
     }
   | Git3Connected
@@ -124,6 +125,7 @@ data Git3Env =
     , gitPackedSegmentSize :: TVar Int
     , gitCompressionLevel  :: TVar Int
     , gitIndexBlockSize :: TVar Natural
+    , gitRepoWait          :: TVar (Timeout 'Seconds)
     , gitRuntimeDict       :: Maybe RuntimeDict
     }
 
@@ -238,3 +240,13 @@ getStatePathM = do
   k <- getGitRemoteKey >>= orThrow RefLogNotSet
   getStatePath (AsBase58 k) >>= orThrow StateDirNotDefined
 
+
+-- | How long a command waits for a repository's lwwref, manifest and reflog
+-- before it says why it is giving up (see "HBS2.Git3.State.Internal.Wait").
+getRepoWaitTimeout :: (MonadIO m, MonadReader Git3Env m) => m (Timeout 'Seconds)
+getRepoWaitTimeout = asks gitRepoWait >>= readTVarIO
+
+setRepoWaitTimeout :: (MonadIO m, MonadReader Git3Env m) => Timeout 'Seconds -> m ()
+setRepoWaitTimeout t = do
+  e <- asks gitRepoWait
+  atomically $ writeTVar e t

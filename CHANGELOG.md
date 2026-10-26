@@ -12,6 +12,37 @@
     read-only. The peer has no mailbox notification to subscribe to, so this
     polls the ref, which is one local call.
 
+  - **`hbs2-git3 repo:init <repo>`: a lost repository can be published again
+    under the key it had.** `repo:init` could only make a new key, so a
+    repository whose lwwref value was lost (the ncq3 rollback did this to real
+    ones) could come back only under a new URL, and every clone, remote and
+    link would point at nothing. It now takes the key as an hbs23:// URL, a
+    base58 key or the name of a git remote, waits for the key's value
+    (`HBS2_GIT_REPO_WAIT`, 60 seconds by default), and then:
+
+      - no value: publishes a fresh manifest and reflog under that key, with
+        the private key from hbs2-keyman, and reuses a git remote that already
+        points at it. Without the private key it refuses and says so;
+      - a value whose manifest can be read: changes nothing, and says so. Not
+        even with `--force`: a new manifest names a new, empty reflog, and
+        every clone would see a repository with no branches;
+      - a value whose manifest cannot be read: refuses, since "cannot be read
+        here" may mean "not here yet" and an lwwref keeps the newest value.
+        `--force` replaces it.
+
+    Then `git push <remote> --all` and `--tags` publish the history again. A
+    clone needs no cleaning first: local state is kept per reflog, the new
+    repository has a new one, and what the clone kept about the lost reflog
+    is not read again (its `.hbs2-git3/<reflog>` directory can be removed).
+
+    `repo:init` with no repository works as before, with one change: it always
+    writes the reflog's first, empty entry, which only `--new` used to do.
+    Without it a reflog has no value, and a push waits for one.
+
+    `hbs2-git3/test/e2e/reinit.sh` walks through all of it on one throwaway
+    peer on 127.0.0.1 in a temporary HOME: push, wipe the storage, the push
+    that now fails, re-init from a clone with stale state, push again, clone.
+
   - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
     Every thread in canon began as a letter, so opening one meant composing a
     Tier B letter to your own mailbox, waiting for the peer to settle it, and
@@ -1161,6 +1192,58 @@
     preserve.
 
 ## Fixed
+
+  - **`git push` to a repository whose lwwref has no value hung forever and
+    printed nothing.** Every wait for a repository -- push, fetch, clone and
+    the `repo:` commands -- polled for the lwwref, then the manifest, then the
+    reflog, with no deadline at all (`waitRepo Nothing`; `waitRepo (Just t)`
+    bounded only the reflog). An lwwref nobody holds and one that has not
+    arrived yet look the same to a peer, so a lost repository was a command
+    that never returned. Each stage now gives up after `HBS2_GIT_REPO_WAIT`
+    seconds (60 by default; `repo:wait:timeout` sets it from the CLI or
+    `.hbs2-git3/config`) and says which stage, for example:
+
+        repository <key> not found: its lwwref has no value on this peer or
+        its neighbours (waited 60s). If you own its key, run
+        `hbs2-git3 repo:init <key>` to publish it again.
+
+    A reflog that is still arriving is not cut off: that limit counts from the
+    last time the number of missing blocks went down.
+
+    The remote helper also printed nothing when it failed before reading its
+    first command, which is where a repository that cannot be found fails: the
+    status pump erases each line it prints when the next one comes. Those
+    errors now go to the original stderr, as the command loop's already did.
+
+  - **An lwwref update was read back before the peer had taken it.** The peer
+    answers the update RPC before it stores the value, so a manifest edit
+    followed by a read could see the value it replaced, or none. Writing the
+    repository head now waits until it reads back.
+
+  - **`hbs2-peer` refused every ping and was left with no peers.** The
+    handshake signs only a nonce of `pingNonceSize` bytes, which closed a
+    signing oracle. The size was written as 32, taken from the `BS.take 32` in
+    the `HasNonces` instance, but that instance takes from a crypto_box nonce,
+    which is 24 bytes, and every released peer sends 24. A node with the check
+    answered no ping at all: older peers and nodes of its own build never got a
+    pong, never listed it as known, and their TCP connections to it closed after
+    67 seconds without a frame. The log showed `refused to sign a ping nonce of
+    length 24`. The size is 24 now, the wire is unchanged, so this node and
+    0.25.4/0.25.5 peers talk again, and a test asks the real instance what it
+    produces instead of a comment saying it.
+
+  - **A TCP neighbour that was down for a moment was not dialled again
+    until a queue aged out.**
+    A send asks for a connection only when it finds no out-queue for the peer,
+    and creates the queue as it asks. The queue was removed only when a
+    connection that had come up went down, so a connect that failed outright,
+    say during the neighbour's restart, left a queue with no connection under
+    it. Every later send went into it and asked for nothing, and the ping loop,
+    sending every thirty seconds, kept the sweep from collecting it. A dial
+    that fails before the cookie exchange now removes its queue, and the next
+    send dials again. Older releases have the same defect: after a restart a
+    node waited for its neighbours' queues to age out, a quarter of an hour on
+    our bootstrap node, before anybody dialled it again.
 
   - **The deny-list and the sent log were read whole, and reading them is
     quadratic.** The S-expression parser is superlinear in the number of forms

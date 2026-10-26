@@ -99,6 +99,27 @@ compression      ;  prints compression level
 
               _ -> throwIO (BadFormException @C nil)
 
+        brief "how long to wait for a repository to be found, in seconds" $
+          desc ( "Push, fetch and every repo: command wait this long for the"
+                 <> line <> "repository's lwwref, its manifest and its reflog, then"
+                 <> line <> "say which one is missing. 60 by default, or the"
+                 <> line <> "HBS2_GIT_REPO_WAIT environment variable, which is also"
+                 <> line <> "what git-remote-hbs23 reads. Without an argument, prints it." ) $
+          examples [qc|
+repo:wait:timeout 300 ; in .hbs2-git3/config
+HBS2_GIT_REPO_WAIT=300 git push origin master
+          |] $
+          entry $ bindMatch "repo:wait:timeout" $ nil_ $ \case
+            [ LitIntVal n ] | n > 0 -> lift $ setRepoWaitTimeout (fromIntegral n)
+
+            [ LitScientificVal n ] | n > 0 -> lift $ setRepoWaitTimeout (realToFrac n)
+
+            [] -> lift do
+              t <- getRepoWaitTimeout
+              liftIO $ print $ pretty (round @_ @Integer (realToFrac @_ @Double t))
+
+            _ -> throwIO (BadFormException @C nil)
+
         brief "sets packed segment size in bytes"
          $ entry $ bindMatch "segment" $ nil_ $ \case
             [ LitIntVal n ] -> lift do

@@ -11,6 +11,7 @@ import TestByPassFlow
 import TestEncryptedTree
 import TestFrameBound
 import TestBlockSizeBound
+import TestTCPRedial
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -66,6 +67,10 @@ main =
               testEncryptedTreeAppendStillDedups
           , testCase "reads a tree written before the nonce moved into the block"
               testEncryptedTreeReadsLegacyMethod1
+          ]
+      , testGroup "a TCP peer that was down when we dialled it"
+          [ testCase "is dialled again once it is back"
+              testTCPRedialsAfterFailedDial
           ]
       ]
 
