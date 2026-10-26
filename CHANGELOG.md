@@ -1345,6 +1345,23 @@
 
 ## Fixed
 
+  - **`hbs2-hub inbox --follow` survives a peer restart.** The follower
+    called through the RPC client every verb is handed, which is built once
+    and retries in the background forever. When the local peer restarted it
+    never picked the new one up, and its stderr turned into a stream of
+    `MessagingUnix. runClient failed, probably server is gone` and `failed to
+    connect` lines, one pair a second, which a watcher merging stderr read as
+    events. The follower now opens its own connection, notices when it drops,
+    and reconnects to the same socket after 1, 2, 4 and 8 seconds and then
+    every 15. It prints `the peer is gone; waiting for it to come back` once
+    and `the peer is back; following again` once, both on stderr, and the RPC
+    layer's warnings are off while it runs. What it has printed is kept
+    across the reconnect and the first read on the new connection is a whole
+    one, so a letter that arrived during the outage is printed and none is
+    printed twice. `--json` stdout carries only queue documents as before;
+    exit codes do not change. `hub mcp`'s `inbox_wait` runs this follower and
+    waits a restart out the same way.
+
   - **`git push` to a repository whose lwwref has no value hung forever and
     printed nothing.** Every wait for a repository -- push, fetch, clone and
     the `repo:` commands -- polled for the lwwref, then the manifest, then the

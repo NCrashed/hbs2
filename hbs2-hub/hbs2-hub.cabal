@@ -117,10 +117,12 @@ library hub-ingress
                     , containers
                     , suckless-conf
                     , directory
+                    , network
     exposed-modules:
       HBS2.Hub.Deny
       HBS2.Hub.Ingress
       HBS2.Hub.Mcp
+      HBS2.Hub.PeerLink
       HBS2.Hub.Sent
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.Manifest

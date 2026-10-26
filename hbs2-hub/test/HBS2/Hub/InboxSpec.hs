@@ -21,7 +21,10 @@ import Data.HashMap.Strict qualified as HM
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Codec.Serialise (serialise)
 import Codec.Serialise qualified as CBOR
-import Control.Exception (bracket,try)
+import Control.Exception (bracket,try,throwIO,Exception)
+import Data.IORef (newIORef,readIORef,modifyIORef,atomicModifyIORef)
+import Data.Functor ((<&>))
+import HBS2.Hub.PeerLink (PeerGone(..))
 import Data.ByteString qualified as BS
 import Control.Monad (forM_)
 import Data.Either (isLeft)
@@ -590,3 +593,79 @@ following = do
       HM.size (snd (freshRows seen gone)) `shouldBe` 0
       HM.size (snd (freshRows seen gone { irTruncated = True })) `shouldBe` 1
       HM.size (snd (freshRows seen gone { irMissing = [mh "hole"] })) `shouldBe` 1
+
+  describe "PEP-22 hub inbox --follow: a peer that restarts" $ do
+
+    -- Each connection the follower opens is a list of answers, taken in the
+    -- order the follower asks: 'Up' answers a root or a wait, 'Page' a read,
+    -- and 'Down' is the connection dropping under the call. 'Nothing' is an
+    -- attempt that found nobody at the socket. When the script runs out the
+    -- follower is stopped, and what it printed and said is the result.
+    let page lvs = InboxRead lvs [] False True 0 0 Nothing
+                     (HS.fromList (concat [ lvMessage lv : lvCopies lv | lv <- lvs ]))
+        letter n = view (mh n) Nothing (Left NotForUs)
+        a = letter "a" ; b = letter "b" ; c = letter "c"
+
+        run :: [Maybe [Answer]] -> IO [Seen]
+        run script = do
+          links <- newIORef script
+          out   <- newIORef []
+          let note x = modifyIORef out (x :)
+              pop q = atomicModifyIORef q (\case { (x:xs) -> (xs, Just x) ; [] -> ([], Nothing) })
+              session q = FollowSession
+                { ssRoot   = pop q <&> \case { Just Up -> Right Nothing ; _ -> Left PeerGone }
+                , ssRead   = pop q <&> \case { Just (Page r) -> Right r ; _ -> Left PeerGone }
+                , ssChange = \_ -> pop q <&> \case { Just Up -> Right (Just (mh "root")) ; _ -> Left PeerGone }
+                }
+              fw = Follower
+                { fwLink  = \_ k -> pop links >>= \case
+                    Nothing        -> throwIO StopFollowing
+                    Just Nothing   -> pure Nothing
+                    Just (Just as) -> newIORef as >>= fmap Just . k . session
+                , fwEmit  = \first _ fresh -> note (Printed first (fmap lvMessage fresh))
+                , fwNotes = const []
+                , fwSay   = note . Said
+                , fwPause = note . Paused
+                }
+          _ <- try @StopFollowing (followLoop fw)
+          reverse <$> readIORef out
+
+    it "says once that the peer went and once that it came back, and prints only what is new" $ do
+      seen <- run [ Just [Up, Page (page [a]), Up, Page (page [a, b]), Down]
+                  , Nothing
+                  , Nothing
+                  , Just [Up, Page (page [a, b, c]), Down] ]
+      seen `shouldBe`
+        [ Printed True [mh "a"], Printed False [mh "b"]
+        , Said followGone, Paused 1, Paused 2, Paused 4
+        , Said followBack, Printed False [mh "c"]
+        , Said followGone, Paused 1 ]
+
+    -- The first document of a --json follower is printed even when empty: it
+    -- is the baseline. A follower that never reached the peer has printed
+    -- nothing, so its first read after the wait is still the first.
+    it "waits for a peer that is gone before the first read, and the first read is still the first" $ do
+      seen <- run [ Nothing, Just [Up, Page (page []), Down] ]
+      seen `shouldBe`
+        [ Said followGone, Paused 1, Said followBack, Printed True []
+        , Said followGone, Paused 1 ]
+
+    -- A socket that accepts before the peer answers is not the peer back.
+    it "does not call the peer back until a call on the new connection is answered" $ do
+      seen <- run [ Just [Up, Page (page [a]), Down]
+                  , Just [Down]
+                  , Just [Up, Page (page [a]), Down] ]
+      seen `shouldBe`
+        [ Printed True [mh "a"], Said followGone, Paused 1, Paused 2
+        , Said followBack, Printed False []
+        , Said followGone, Paused 1 ]
+
+data Answer = Up | Page InboxRead | Down
+
+data Seen = Printed Bool [HashRef] | Said String | Paused (Timeout 'Seconds)
+  deriving stock (Eq,Show)
+
+data StopFollowing = StopFollowing
+  deriving stock Show
+
+instance Exception StopFollowing

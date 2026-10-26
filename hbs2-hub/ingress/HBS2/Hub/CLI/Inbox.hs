@@ -32,6 +32,13 @@ module HBS2.Hub.CLI.Inbox
   , inboxArgs
   , freshRows
   , FollowStopped(..)
+  , FollowSession(..)
+  , Follower(..)
+  , FollowState(..)
+  , followLoop
+  , followGone
+  , followBack
+  , followBackoff
   , InboxArgs(..)
   , Width(..)
   , utcOf
@@ -50,6 +57,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Letter
 import HBS2.Hub.Render (contractVersion,renderContract,opName,declaredAt,b58,key58)
 import HBS2.Hub.Ingress
+import HBS2.Hub.PeerLink (PeerGone(..),withPeerLink,socketOf)
 import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagWord,repoFlags,flagRepo,flagRepoMaybe
@@ -156,7 +164,11 @@ inboxEntries = do
              <> line <> "those letters. Still read-only. A note on stderr is said"
              <> line <> "when it first applies, not on every read. SIGINT and"
              <> line <> "SIGTERM end it with 0; a peer that stops answering or a"
-             <> line <> "mailbox it no longer holds end it with their own codes." )
+             <> line <> "mailbox it no longer holds end it with their own codes."
+             <> line <> "A peer that restarts does not: it says once on stderr that"
+             <> line <> "the peer is gone, reconnects with a backoff, says once that"
+             <> line <> "it is back, and reads the queue again, printing only what"
+             <> line <> "it has not printed." )
     -- Both spellings, because PEP-22 specifies the flag: the bare key is what
     -- the spec calls `--mailbox <key>`, and a form the spec names has to be
     -- accepted under that name or the divergence has merely moved.
@@ -206,7 +218,7 @@ inboxEntries = do
       -- while a follower runs applies from its next read on: a follower that
       -- kept the list it started with would go on showing the letters the ban
       -- was made to take out of the queue.
-      let readOnce = do
+      let readRaw ig = do
             allowed <- denyingFor mrepo
                          >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
                                     pure
@@ -217,12 +229,18 @@ inboxEntries = do
             -- investigation in the other. While both left with 1, a hook could not
             -- tell either from a typo.
             --
-            -- Chained, so the second handler covers the first as well as the
-            -- body. That is harmless here: 'refuse' leaves through 'exitWith',
-            -- whose exception is an ExitCode and is caught by neither.
-            readInboxFrom ((overRpc sto api) { igAllowed = allowed }) mbox
+            -- Chained, so the PeerSilent handler in 'readOnce' covers this one
+            -- as well as the body. That is harmless: 'refuse' leaves through
+            -- 'exitWith', whose exception is an ExitCode and is caught by
+            -- neither.
+            readInboxFrom (ig { igAllowed = allowed }) mbox
                           (iaAfter ia) (fromMaybe maxInboxLetters (iaLimit ia))
               `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
+
+          -- PeerSilent is caught out here and not in 'readRaw', because the
+          -- follower has to see it first: a call that timed out on a socket the
+          -- peer had closed is a restart to wait out, not a refusal.
+          readOnce = readRaw (overRpc sto api)
               `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
           -- 128 plus SIGPIPE, what a shell reports for a program a pipe killed.
@@ -235,7 +253,7 @@ inboxEntries = do
             (\e -> if isResourceVanishedError e then Just () else Nothing)
             (\_ -> exitWith (ExitFailure 141))
 
-      if iaFollow ia then followInbox (overRpc sto api) mbox readOnce printing else do
+      if iaFollow ia then followInbox api mbox readRaw printing else do
 
         r <- readOnce
 
@@ -271,39 +289,57 @@ inboxEntries = do
         -- queue to attach one to: a page that was incomplete on one read can be
         -- whole on the next. The notes still say it, each time it starts to
         -- apply.
-        followInbox ig mb readOnce printing = do
+        --
+        -- OVER ITS OWN CONNECTION, opened again whenever the peer comes back:
+        -- "HBS2.Hub.PeerLink" says why the one this verb was handed cannot be
+        -- used for that. The loop itself is 'followLoop'.
+        followInbox api mb readRaw printing = do
           me <- liftIO myThreadId
           liftIO $ for_ [sigINT, sigTERM] $ \s ->
             installHandler s (Catch (throwTo me FollowStopped)) Nothing
 
-          let root = igRoot ig mb
-                       `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
-              change seen = awaitRootChange ig mb seen
-                       `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
-                       `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
+          -- The messaging layer's own warnings are off for as long as this
+          -- runs. The connection this verb was handed stays open and unused,
+          -- and while the peer is away it retries every second with a warning
+          -- and an error each time, which a watcher merging stderr reads as
+          -- events. The follower says once that the peer is gone and once that
+          -- it is back. Nothing in the hub itself logs through these levels.
+          liftIO $ setLoggingOff @WARN >> setLoggingOff @ERROR
 
-              -- The root is taken BEFORE the read and not after it. Taken after,
-              -- a letter landing between the two would move a root this loop
-              -- then calls seen, and the letter would wait for the next one. The
-              -- other order costs at most a read that finds nothing new.
-              go first seen shown said = do
-                r <- readOnce
-                let (fresh, shown') = freshRows shown r
-                printing $ do
-                  if iaJson ia
-                    then when (first || not (List.null fresh)) $
-                           LBS.putStr (Aeson.encode (queueContract r { irLetters = fresh }) <> "\n")
-                    else for_ fresh $ \lv -> print (render (iaWidth ia) lv) >> hFlush stdout
-                  hFlush stdout
-                let notes = fmap show (inboxNotes (isJust (iaRepo ia)) r :: [Doc ()])
-                liftIO $ for_ [ n | n <- notes, n `notElem` said ] $ \n ->
-                  saying (pretty n <> line)
-                seen' <- change seen
-                go False seen' shown' notes
+          let silent (e :: PeerSilent) = liftIO (refuse (show e) codePeerSilent)
+              unknown (e :: MailboxUnknown) = liftIO (refuse (show e) codeMailboxUnknown)
+
+              openLink away k = withPeerLink (socketOf api) $ \sto mbapi over -> do
+                let ig = overRpc sto mbapi
+                k FollowSession
+                    -- The first call on a new connection is the one that says
+                    -- whether the peer is back, and after an outage a peer
+                    -- whose socket is up before its services are is not back
+                    -- yet. Every other silence is the peer stuck, as before.
+                    { ssRoot   = over away (igRoot ig mb) `catch` silent
+                    , ssRead   = over False (readRaw ig) `catch` silent
+                    , ssChange = \seen -> over False (awaitRootChange ig mb seen)
+                                            `catch` unknown `catch` silent
+                    }
+
+              emit first r fresh = printing $ do
+                if iaJson ia
+                  then when (first || not (List.null fresh)) $
+                         LBS.putStr (Aeson.encode (queueContract r { irLetters = fresh }) <> "\n")
+                  else for_ fresh $ \lv -> print (render (iaWidth ia) lv) >> hFlush stdout
+                hFlush stdout
+
+              follower = Follower
+                { fwLink  = openLink
+                , fwEmit  = emit
+                , fwNotes = \r -> fmap show (inboxNotes (isJust (iaRepo ia)) r :: [Doc ()])
+                , fwSay   = \n -> liftIO (saying (pretty n <> line))
+                , fwPause = pause
+                }
 
           withRunInIO $ \unlift ->
             E.handle (\FollowStopped -> E.handle (\(_ :: IOException) -> pure ()) (hFlush stdout) >> exitSuccess)
-                   (unlift (root >>= \s -> go True s mempty []))
+                   (unlift (followLoop follower))
 
 -- | What this verb takes, in the words somebody typing it would use.
 inboxUsage :: Doc ann
@@ -348,6 +384,115 @@ freshRows shown r = (fresh, kept)
     shown' = HM.union (HM.fromList [ (n, row) | (lv, row) <- rows, n <- names lv ]) shown
     kept | irTruncated r || not (List.null (irMissing r)) = shown'
          | otherwise = HM.filterWithKey (\k _ -> HS.member k (irLive r)) shown'
+
+-- | What a follower asks the peer over one connection. Each answer is
+-- 'Left' 'PeerGone' when the connection dropped under the call.
+data FollowSession m = FollowSession
+  { ssRoot   :: m (Either PeerGone (Maybe HashRef))
+    -- ^ the mailbox root now; the first call on every connection
+  , ssRead   :: m (Either PeerGone InboxRead)
+    -- ^ one read of the queue
+  , ssChange :: Maybe HashRef -> m (Either PeerGone (Maybe HashRef))
+    -- ^ wait until the root is not this one
+  }
+
+-- | Everything 'followLoop' does to the outside world, so that what it prints
+-- across a peer restart can be asked about without a peer.
+data Follower m = Follower
+  { fwLink  :: Bool
+            -> (FollowSession m -> m (FollowState, Bool))
+            -> m (Maybe (FollowState, Bool))
+    -- ^ Open a connection and run the body over it; 'Nothing' when there was
+    -- nothing to connect to. The flag is whether the peer was away, which
+    -- makes the first call lenient (see 'HBS2.Hub.PeerLink.Over').
+  , fwEmit  :: Bool -> InboxRead -> [LetterView] -> m ()
+    -- ^ print the fresh rows of a read; the flag is whether nothing has been
+    -- printed yet, which @--json@ answers with a document even when empty
+  , fwNotes :: InboxRead -> [String]
+    -- ^ what is true about a read, for stderr
+  , fwSay   :: String -> m ()
+    -- ^ one line on stderr
+  , fwPause :: Timeout 'Seconds -> m ()
+  }
+
+-- | What a follower carries from one read to the next, and from one connection
+-- to the next.
+data FollowState = FollowState
+  { fsShown :: HashMap HashRef String   -- ^ see 'freshRows'
+  , fsSaid  :: [String]                 -- ^ the notes the last read said
+  , fsFirst :: Bool                     -- ^ nothing printed yet
+  }
+
+-- | The line a follower prints when the peer goes, once per outage.
+followGone :: String
+followGone = "the peer is gone; waiting for it to come back"
+
+-- | And when it is back and the follower is reading again.
+followBack :: String
+followBack = "the peer is back; following again"
+
+-- | How long a follower waits between two attempts to reach a peer that went
+-- away: quickly at first, since a restart takes seconds, and then every
+-- fifteen seconds for as long as it takes.
+followBackoff :: [Timeout 'Seconds]
+followBackoff = [1, 2, 4, 8] <> repeat 15
+
+-- | THE FOLLOWER. Read, print what is new, wait for the root to move, again;
+-- and when the peer goes away, wait for it and go on from where it was.
+--
+-- WHAT IT HAS PRINTED OUTLIVES THE CONNECTION. The state 'freshRows' keeps is
+-- carried across a reconnect, and the first thing done on a new connection is
+-- a whole read, not a wait for the root to move: a letter that arrived while
+-- the peer was away is printed then, and one printed before the outage is not
+-- printed again. The root is taken BEFORE each read and not after: taken
+-- after, a letter landing between the two would move a root this loop then
+-- calls seen, and it would wait for the next one.
+--
+-- ONE LINE EACH WAY. 'followGone' when a connection drops or the first one
+-- cannot be made, then nothing however many attempts it takes, then
+-- 'followBack' once a new connection has answered. Both through 'fwSay',
+-- which is stderr: a JSON stream on stdout carries documents and nothing else.
+--
+-- Never returns. It is stopped from outside, by a signal or by a refusal.
+followLoop :: Monad m => Follower m -> m a
+followLoop fw = attempt (FollowState mempty [] True) False followBackoff
+  where
+    attempt st away delays = fwLink fw away (session st away) >>= \case
+      Just (st', True) -> do
+        fwSay fw followGone
+        retry st' followBackoff
+      Just (st', False) -> waiting st'
+      Nothing           -> waiting st
+      where
+        waiting s = do
+          unless away (fwSay fw followGone)
+          retry s delays
+
+    retry st ds = do
+      let (d, ds') = case ds of
+                       (x:xs) -> (x, xs)
+                       []     -> (15, [])
+      fwPause fw d
+      attempt st True ds'
+
+    -- (state, whether the connection worked before it dropped)
+    session st away s = ssRoot s >>= \case
+      Left PeerGone -> pure (st, False)
+      Right root -> do
+        when away (fwSay fw followBack)
+        go st root
+      where
+        go st0 seen = ssRead s >>= \case
+          Left PeerGone -> pure (st0, True)
+          Right r -> do
+            let (fresh, shown') = freshRows (fsShown st0) r
+                notes = fwNotes fw r
+            fwEmit fw (fsFirst st0) r fresh
+            for_ [ n | n <- notes, n `notElem` fsSaid st0 ] (fwSay fw)
+            let st1 = FollowState shown' notes False
+            ssChange s seen >>= \case
+              Left PeerGone -> pure (st1, True)
+              Right seen'   -> go st1 seen'
 
 -- | How a follower is told to stop: SIGINT or SIGTERM, delivered to the thread
 -- that runs it.

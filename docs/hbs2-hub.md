@@ -282,6 +282,23 @@ next read may be whole. SIGINT and SIGTERM stop it with `0`. A peer that
 stops answering (`18`) or no longer holds the mailbox (`17`) stops it
 too, so a supervisor that restarts it sees why.
 
+A peer that restarts does not stop it. When the connection to the peer
+drops, the follower says so once on stderr, tries the same socket again
+after 1, 2, 4 and 8 seconds and then every 15, and says once more when
+the peer answers:
+
+```
+the peer is gone; waiting for it to come back
+the peer is back; following again
+```
+
+Nothing else is printed while it waits; the RPC layer's own retry
+warnings are switched off for as long as the follower runs. The first
+thing it does on the new connection is read the whole queue, so a letter
+that arrived while the peer was away is printed then, and one printed
+before is not printed again. With `--json` stdout still carries only
+`queue` documents.
+
 One letter in full, body included:
 
 ```
@@ -851,7 +868,8 @@ none of the writing tools at all.
 caller has not seen, or at `timeout_seconds` (300 by default, at most an
 hour). Pass `known`, the message hashes you have already seen: a letter
 not among them is returned at once, so nothing that arrived between two
-calls is missed. Each answer carries `seen` for the next call. A client
+calls is missed. Each answer carries `seen` for the next call. A peer
+restart during the wait is waited out like any other follower's. A client
 that sends a progress token gets a progress notification every fifteen
 seconds while it waits. It is a tool and not a server notification
 because a client shows a tool's result to the model and, today, does not
