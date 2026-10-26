@@ -2,6 +2,66 @@
 
 ## Added
 
+  - **`hbs2-hub issue reply` / `pr reply`: a maintainer comments straight
+    onto canon.** Answering in a thread meant `issue comment` with a sender
+    sigil and an author key, which sealed a Tier B letter to the repository's
+    own mailbox, and then the same maintainer finding it with `inbox` and
+    folding it with `inbox accept`: three commands and a round trip to say
+    something they had already decided to say. `reply` takes `--repo`,
+    `--number` or `--thread`, `--body` (`-` reads stdin), optional
+    `--reply-to`, `--as` and `--dry-run`, and writes an ordinary comment event
+    through the same owner path `issue open` uses. The bridge refuses a key
+    that may not bless canon before anything is signed, and readers and
+    `hub verify` treat the comment like any other. It carries no origin.
+  - **`hbs2-hub inbox show --json`: a letter a program can decide on.** An
+    agent triaging a mailbox read each letter as the human report (fields,
+    then the body quoted line by line with `  | `) and scraped it to decide
+    between accept and reject. The `letter` document carries the identity,
+    the subject (thread, number once canon holds it, title of an open), the
+    whole body unescaped and untruncated, the attachments measured, and
+    `triage.verdict`: `would_fold`, `pending`, `already_folded`, `refused` or
+    `unreadable`, with `triage.reason.code` for all but the first. The
+    verdict is a preview from what a read can see; `inbox accept` still runs
+    the full check. With `--repo` it also says whether the letter is aimed at
+    that repository and at a thread its canon holds.
+
+  - **`--json` on `hbs2-hub log`, `maintainer list`, `status`, `sent` and
+    `updates`.** The other read verbs of a triage loop, each a document under
+    the same contract counter (`log`, `maintainers`, `status`, `sent`,
+    `updates`), with every key present and `null` where nothing applies. `log`
+    carries provenance and no text, so a redaction has one place to be
+    honoured. `status` names the key a write without `--as` would sign
+    with and where it came from (`signer.key`, `signer.source`), as the
+    text report does. Notes stay on stderr and the exit codes do not change.
+
+  - **`hbs2-hub mcp`: the forge as tools for an AI agent.** A Model Context
+    Protocol server on stdin and stdout (JSON-RPC 2.0, protocol revisions
+    2024-11-05 through 2025-06-18), so that Claude Code or any other MCP
+    client gets typed tools with JSON schemas instead of a shell and a
+    manual: status, whoami, issue and pr list and show, log, verify, the
+    inbox (list, show, wait), accept, honour, reject, issue open, close,
+    label, reply and comment, publish and sync.
+
+    Each tool runs one verb of the same binary as a child process and hands
+    back its output, its exit code and what the code means. The verbs leave
+    the process to refuse and print their answers on stdout, which is the
+    protocol channel, so in-process they would have needed a captured file
+    descriptor and a caught exit in every call; as children they can also be
+    timed out and cancelled. `status`, `log`, `issue_show`, `pr_show`,
+    `inbox_list` and `inbox_show` return the JSON documents as structured
+    content.
+
+    Every write takes `dry_run`, through the verb's own `--dry-run` where it
+    has one, and says in its description that canon is public and permanent
+    once published. `issue_reply` is `issue reply`, a maintainer's comment
+    straight onto canon; `issue_comment` stays the contributor's letter.
+    `inbox_wait` blocks until a letter arrives, by running `inbox --follow
+    --json`. The repository, mailbox, author, sender and remote can be
+    server defaults (flags or `HBS2_HUB_*`), and `--read-only` offers no
+    tool that writes. The canon key is passed as `--as` only when the
+    server or the call names one, so `HBS2_HUB_AS` and `git config
+    hbs2.hub.as` choose it as they do on a command line.
+
   - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
     they arrive.** Watching a queue meant running `hub inbox` every minute,
     paying the settle wait and a keyman lookup per letter each time, and
@@ -42,6 +102,24 @@
     `hbs2-git3/test/e2e/reinit.sh` walks through all of it on one throwaway
     peer on 127.0.0.1 in a temporary HOME: push, wipe the storage, the push
     that now fails, re-init from a clone with stale state, push again, clone.
+  - **A default for `--as`: `HBS2_HUB_AS`, `git config hbs2.hub.as`, and
+    `hbs2-hub maintainer use`.** Every verb that writes canon signed with the
+    repository key unless told otherwise, so a delegate whose machine also held
+    that key ran `inbox accept` without `--as` and blessed the event as the
+    owner. The order is now `--as`, then `HBS2_HUB_AS`, then
+    `git config hbs2.hub.as`, then the repository key; a value that is not a
+    key is refused rather than skipped. `maintainer use --repo R
+    --maintainer-key K` checks that K is a maintainer here and can sign, and
+    sets the config; `--clear` removes it. `status` and `whoami --repo` name
+    the key that would sign and where it came from, writes print a
+    `signed by` line, and a default that chose the signer is said on stderr.
+    `pr merge` parses `--as` as optional now (`pmAs :: Maybe HubKey`).
+
+    The acknowledgement that failed after such an accept said only "no
+    encryption key for <key>". It now says that key is the signer, that an
+    ack is sealed from the signer and so needs an encryption key in its
+    keyring, that the event is in canon anyway, and how to sign as another
+    key.
 
   - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
     Every thread in canon began as a letter, so opening one meant composing a
@@ -270,6 +348,36 @@
     peers stops at the first hop of the other kind. A mailbox host still
     TAKES unstamped mail addressed to it; only relaying is gated.
     `(hbs2:mailbox:pow-min 0)` restores the old behaviour on one peer.
+  - **`hbs2-hub inbox` on a mailbox nothing was ever sent to answers in a
+    round, and says it is empty.** An owner who created the hub mailbox, set
+    its policy and declared it in the repository got twenty seconds of waiting
+    and "the peer produced no copy of this mailbox within 8 rounds. That is NOT
+    the same as an empty mailbox". It was the honest answer from where the hub
+    stood: the peer writes a mailbox ref only when a merge lands, so no ref is
+    an empty mailbox or one whose first copy is still downloading, and the ref
+    cannot say which.
+
+    The peer can. A new RPC method, `RpcMailboxPending`, reports what it has in
+    flight for a mailbox it holds: copies other peers announced that are still
+    downloading, and letters anywhere between its input queue and the ref. The
+    stages hand a letter on by marking the next stage before unmarking their
+    own, so a letter on its way is never reported as nothing. No ref and an
+    idle peer is empty, and `hub inbox` settles on that one round after the
+    fetch (the round gives other peers time to answer it), with exit 0 and an
+    empty list; `--json` says `"settled": true`, and `--follow` prints its
+    first read at once. While something is in flight the old wait and the old
+    answer stand.
+
+    Appended to the mailbox API without a protocol bump: an older peer answers
+    "no such method" at once, and the hub then waits the way it did. `hbs2-peer
+    mailbox get` uses the same answer to tell the two kinds of "no ref" apart,
+    and `hbs2-peer mailbox pending KEY` prints it (`idle`, `downloading N`,
+    `ingesting`).
+  - **`hbs2-hub inbox --json` clamps `declared_at` like the thread document
+    does.** It is the author's own clock, which nothing bounds, and the queue
+    passed it through raw while the thread contract and the terminal both cap
+    it at the ceiling canon admits. A sender could put a number there that a
+    JSON reader holding doubles gets back changed.
 
   - **`hbs2-peer mailbox create --key KEY hub` works as documented.** The
     `mailbox` subcommand hands its arguments to the mailbox command line, and

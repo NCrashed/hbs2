@@ -161,18 +161,20 @@ spec2 :: Spec
 spec2 =
   describe "PEP-20 hub pr merge: arguments" $ do
 
-    it "reads a complete call and defaults the canon key to the repo" $ do
+    -- No --as is Nothing and not the repo key: the default is decided later,
+    -- from HBS2_HUB_AS and git config (see HBS2.Hub.SignerSpec).
+    it "reads a complete call and leaves the canon key to the default" $ do
       repo <- aKey
       prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
                         , "--commit", "abc", "--into", "refs/heads/master" ])
-        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" repo ForReal)
+        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" Nothing ForReal)
 
     it "takes a delegate's key when one is named" $ do
       repo <- aKey ; bob <- aKey
       fmap pmAs (prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
                                    , "--commit", "abc", "--into", "master"
                                    , "--as", b58 bob ]))
-        `shouldBe` Just bob
+        `shouldBe` Just (Just bob)
 
     it "refuses a call missing any of the four" $ do
       repo <- aKey

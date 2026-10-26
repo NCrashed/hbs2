@@ -9,7 +9,8 @@ module HBS2.Hub.StatusSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Sent (Sent(..))
 import HBS2.Hub.CLI.Status
-import HBS2.Hub.CLI.Sent (sentDoc,sentNote,SentArgs(..),sentArgs)
+import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),SignerTrouble(..))
+import HBS2.Hub.CLI.Sent (sentDoc,sentNote,SentArgs(..),sentArgs,sentContract)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Base58 (AsBase58(..))
@@ -20,7 +21,13 @@ import HBS2.Prelude.Plated (Doc,pretty)
 
 import Data.Config.Suckless (C,Syntax)
 import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Aeson (Value(..))
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable (toList)
 import Data.List (isInfixOf)
+import Data.Text qualified as Text
 import Test.Hspec
 
 aKey :: IO HubKey
@@ -42,6 +49,7 @@ said = unlines . fmap show
 plain :: RepoRef -> Standing
 plain repo = Standing
   { stRepo = repo, stCanSign = True, stCanon = Just "cafe1234"
+  , stSigner = Right (Signer repo RepoKeyDefault), stMaintains = True
   , stThreads = 3, stEvents = 9, stKeys = 2
   , stPublished = Right [("origin", Level)], stMailbox = Nothing, stWaiting = Right 0
   }
@@ -123,9 +131,9 @@ spec = do
     it "takes the repository, and probes every remote unless one is named" $ do
       repo <- aKey
       statusArgs (argv ["--repo", b58 repo])
-        `shouldBe` Just (StatusArgs repo Nothing)
+        `shouldBe` Just (StatusArgs repo Nothing False)
       statusArgs (argv ["--repo", b58 repo, "--remote", "upstream"])
-        `shouldBe` Just (StatusArgs repo (Just "upstream"))
+        `shouldBe` Just (StatusArgs repo (Just "upstream") False)
 
     it "refuses a call with no repository, and a flag it does not know" $ do
       repo <- aKey
@@ -162,7 +170,131 @@ spec = do
 
     it "reads its two flags" $ do
       repo <- aKey
-      sentArgs (argv []) `shouldBe` Just (SentArgs Nothing False)
-      sentArgs (argv ["--repo", b58 repo]) `shouldBe` Just (SentArgs (Just repo) False)
-      sentArgs (argv ["--long"]) `shouldBe` Just (SentArgs Nothing True)
+      sentArgs (argv []) `shouldBe` Just (SentArgs Nothing False False)
+      sentArgs (argv ["--repo", b58 repo]) `shouldBe` Just (SentArgs (Just repo) False False)
+      sentArgs (argv ["--long"]) `shouldBe` Just (SentArgs Nothing True False)
       sentArgs (argv ["--long", "yes"]) `shouldBe` Nothing
+
+    it "reads --json" $ do
+      sentArgs (argv ["--json"]) `shouldBe` Just (SentArgs Nothing False True)
+      sentArgs (argv ["--json", "--json"]) `shouldBe` Nothing
+
+  describe "PEP-22 hub sent --json: the log as a document" $ do
+
+    let one repo = Sent { seThread = mh "t", seEvent = mh "e", seMessage = mh "m"
+                        , seRepo = Just repo, seAuthor = repo, seAt = 1000
+                        , seWhat = "issue new", seTitle = Just "x\ESC[2Kfake"
+                        }
+        reply repo = (one repo) { seRepo = Nothing, seTitle = Nothing, seWhat = "comment" }
+
+    it "says which document it is, and under which contract" $ do
+      repo <- aKey
+      let v = sentContract Nothing [one repo]
+      at ["contract"] v `shouldBe` Just (Number 1)
+      at ["document"] v `shouldBe` Just (String "sent")
+      at ["filter_repo"] v `shouldBe` Just Null
+
+    -- Whole identifiers, and the title exactly as written: the escape is a
+    -- \u001b in the bytes, which no terminal interprets.
+    it "carries whole identifiers and the title byte for byte" $ do
+      repo <- aKey
+      let [row] = rows (sentContract (Just repo) [one repo])
+      at ["message"] row `shouldBe` Just (str (show (pretty (mh "m"))))
+      at ["event"] row `shouldBe` Just (str (show (pretty (mh "e"))))
+      at ["thread"] row `shouldBe` Just (str (show (pretty (mh "t"))))
+      at ["repo"] row `shouldBe` Just (str (b58 repo))
+      at ["handed_at"] row `shouldBe` Just (Number 1000)
+      at ["title"] row `shouldBe` Just (String "x\ESC[2Kfake")
+      LBS.unpack (Aeson.encode row) `shouldSatisfy` not . isInfixOf "\ESC"
+
+    it "keeps every key on a row that names no repository" $ do
+      repo <- aKey
+      let [row] = rows (sentContract Nothing [reply repo])
+      at ["repo"] row `shouldBe` Just Null
+      at ["title"] row `shouldBe` Just Null
+      at ["what"] row `shouldBe` Just (String "comment")
+
+  describe "PEP-22 hub status --json: the standing as a document" $ do
+
+    it "says which document it is, and carries the canon" $ do
+      repo <- aKey
+      let v = statusContract (plain repo)
+      at ["document"] v `shouldBe` Just (String "status")
+      at ["repo"] v `shouldBe` Just (str (b58 repo))
+      at ["signing"] v `shouldBe` Just (Bool True)
+      at ["canon","commit"] v `shouldBe` Just (String "cafe1234")
+      at ["canon","threads"] v `shouldBe` Just (Number 3)
+
+    -- The same question the text report's signing line answers: which key,
+    -- and from where, not only whether.
+    it "names the key that would sign and where it came from" $ do
+      repo <- aKey ; deleg <- aKey
+      let dflt = statusContract (plain repo)
+          env = statusContract (plain repo) { stSigner = Right (Signer deleg FromEnv)
+                                            , stMaintains = False }
+          cfg = statusContract (plain repo) { stSigner = Right (Signer deleg FromGitConfig) }
+          bad = statusContract (plain repo) { stSigner = Left (NotAKey FromEnv "nope") }
+      at ["signer","key"] dflt `shouldBe` Just (str (b58 repo))
+      at ["signer","source"] dflt `shouldBe` Just (String "repo_key")
+      at ["signer","maintainer"] dflt `shouldBe` Just (Bool True)
+      at ["signer","error"] dflt `shouldBe` Just Null
+      at ["signer","key"] env `shouldBe` Just (str (b58 deleg))
+      at ["signer","source"] env `shouldBe` Just (String "env")
+      at ["signer","maintainer"] env `shouldBe` Just (Bool False)
+      at ["signer","source"] cfg `shouldBe` Just (String "git_config")
+      at ["signer","key"] bad `shouldBe` Just Null
+      at ["signer","error"] bad `shouldSatisfy` \case
+        Just (String e) -> "HBS2_HUB_AS" `Text.isInfixOf` e
+        _ -> False
+
+    it "names each remote and what it answered" $ do
+      repo <- aKey
+      let v = statusContract (plain repo)
+                { stPublished = Right [ ("origin", Level), ("forum", Diverged "beef")
+                                      , ("gone", RemoteSilent "no route") ] }
+          Just (Array rs) = at ["published","remotes"] v
+          states = [ (at ["name"] r, at ["state"] r) | r <- toList rs ]
+      states `shouldBe` [ (Just "origin", Just "level"), (Just "forum", Just "diverged")
+                        , (Just "gone", Just "silent") ]
+      at ["published","error"] v `shouldBe` Just Null
+
+    -- Nothing to have published is not "no remotes", and the two must not read
+    -- alike.
+    it "tells no canon from no remotes" $ do
+      repo <- aKey
+      at ["published"] (statusContract (plain repo) { stCanon = Nothing })
+        `shouldBe` Just Null
+      at ["published","remotes"] (statusContract (plain repo) { stPublished = Right [] })
+        `shouldBe` Just (Array mempty)
+
+    -- The absence the text report says out loud: a mailbox that would not read
+    -- is a null count beside an error, never a zero.
+    it "never reads a failed mailbox as nothing waiting" $ do
+      repo <- aKey ; mbox <- aKey
+      let failed = statusContract (plain repo) { stMailbox = Just mbox
+                                               , stWaiting = Left "peer silent" }
+          fine = statusContract (plain repo) { stMailbox = Just mbox, stWaiting = Right 4 }
+      at ["mailbox","waiting"] failed `shouldBe` Just Null
+      at ["mailbox","error"] failed `shouldBe` Just (String "peer silent")
+      at ["mailbox","waiting"] fine `shouldBe` Just (Number 4)
+      at ["mailbox","key"] fine `shouldBe` Just (str (b58 mbox))
+      at ["mailbox","key"] (statusContract (plain repo)) `shouldBe` Just Null
+
+    it "reads --json" $ do
+      repo <- aKey
+      statusArgs (argv ["--repo", b58 repo, "--json"])
+        `shouldBe` Just (StatusArgs repo Nothing True)
+
+-- A path into a document.
+at :: [Text.Text] -> Value -> Maybe Value
+at [] v = Just v
+at (k:ks) (Object o) = KM.lookup (Key.fromText k) o >>= at ks
+at _ _ = Nothing
+
+rows :: Value -> [Value]
+rows v = case at ["letters"] v of
+  Just (Array xs) -> toList xs
+  _ -> []
+
+str :: String -> Value
+str = String . Text.pack

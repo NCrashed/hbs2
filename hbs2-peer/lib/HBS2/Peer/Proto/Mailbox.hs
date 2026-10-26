@@ -211,6 +211,14 @@ class ForMailbox s => IsMailboxService s a where
                -> MailboxRefKey s
                -> m (Either MailboxServiceError ())
 
+  -- | What is in flight for a mailbox this peer holds; 'Nothing' when it does
+  -- not hold it. See 'MailboxPending' for what an idle answer does and does not
+  -- prove.
+  mailboxPending :: forall m . MonadIO m
+                 => a
+                 -> MailboxRefKey s
+                 -> m (Either MailboxServiceError (Maybe MailboxPending))
+
   -- | The least work a message must carry to leave this machine.
   --
   -- The maximum of this peer's own 'mailboxPoWFloor' and the largest floor its
@@ -244,6 +252,7 @@ instance ForMailbox s => IsMailboxService s (AnyMailboxService s) where
   mailboxGetStatus (AnyMailboxService a) = mailboxGetStatus @s a
   mailboxAcceptStatus (AnyMailboxService a) = mailboxAcceptStatus @s a
   mailboxFetch (AnyMailboxService a) = mailboxFetch @s a
+  mailboxPending (AnyMailboxService a) = mailboxPending @s a
   mailboxRelayFloor (AnyMailboxService a) = mailboxRelayFloor @s a
 
 instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where

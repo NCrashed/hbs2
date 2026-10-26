@@ -24,6 +24,8 @@ module HBS2.Hub.CLI.Status
   , Standing(..)
   , Publication(..)
   , statusDoc
+  , statusContract
+  , statusOrder
   , StatusArgs(..)
   , statusArgs
   ) where
@@ -38,6 +40,9 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagText,flagSwitch
                          ,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (overRpc,signerFor,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),SignerTrouble,resolveSignerIn
+                           ,signerEnvVar,signerDoc)
+import HBS2.Hub.Render (contractVersion,renderDocument,key58)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -49,10 +54,13 @@ import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
+import Data.Aeson (Value(..),object,(.=),toJSON)
+import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.Maybe (isJust)
 import Data.HashSet qualified as HS
 import Data.Text qualified as Text
+import System.Environment (lookupEnv)
 
 -- | Whether this clone's canon has reached one remote.
 --
@@ -74,7 +82,13 @@ data Publication =
 -- and the rendering must be assertable without any of them.
 data Standing = Standing
   { stRepo      :: RepoRef
-  , stCanSign   :: Bool          -- ^ this machine holds the repository's own key
+  , stCanSign   :: Bool          -- ^ this machine can sign as 'stSigner'
+    -- | The key a canon write without @--as@ would sign with, and where that
+    -- came from ("HBS2.Hub.CLI.Signer"). 'Left' is a default that does not
+    -- read, which every writer would refuse.
+  , stSigner    :: Either SignerTrouble Signer
+    -- | That key is the owner or a maintainer in canon here.
+  , stMaintains :: Bool
   , stCanon     :: Maybe Text    -- ^ the canon commit here
   , stThreads   :: Int
   , stEvents    :: Int
@@ -98,20 +112,35 @@ data Standing = Standing
   deriving stock (Eq,Show)
 
 statusUsage :: Doc ()
-statusUsage = "usage: hbs2-hub status --repo <key> [--remote <name>]"
+statusUsage = "usage: hbs2-hub status --repo <key> [--remote <name>] [--json]"
 
 -- | The report.
 statusDoc :: Standing -> [Doc ann]
 statusDoc st =
-  [ "repository" <+> keyDoc (stRepo st)
-  , "signing" <+> if stCanSign st
-                    then "yes: this machine holds the repository key"
-                    else "no: this machine cannot author owner events for it"
-  ]
+  [ "repository" <+> keyDoc (stRepo st) ]
+  <> signingLines
   <> canonLines
   <> publishedLines
   <> mailboxLines
   where
+    -- WHICH KEY, and not only whether. A delegate whose machine also holds
+    -- the repository key signed as the owner without --as, and this line
+    -- said "yes" about the repository key, which was true and was the wrong
+    -- question.
+    signingLines = case stSigner st of
+      Left e -> [ "signing  unknown:" <+> pretty e ]
+      Right s ->
+        [ "signing" <+> case (stCanSign st, sgSource s) of
+            (True, RepoKeyDefault)  -> "yes: this machine holds the repository key"
+            (True, _)               -> "yes, as" <+> signerDoc s
+            (False, RepoKeyDefault) -> "no: this machine cannot author owner events for it"
+            (False, _)              -> "no: this machine cannot sign as" <+> signerDoc s
+                                         <> line <> "         so it cannot author owner events"
+        ]
+        <> [ "         that key is not a maintainer in canon here, so its events"
+               <+> "would be refused"
+           | not (stMaintains st) ]
+
     canonLines = case stCanon st of
       Nothing -> [ "canon    none here yet" ]
       Just c ->
@@ -157,6 +186,77 @@ statusDoc st =
              Right n -> [ "        " <+> pretty n <+> "letter(s) waiting"
                             <+> parens "hbs2-hub inbox" ]
 
+-- | The standing as a document (@hub status --json@).
+--
+-- Not derived from canon alone: the publication and the mailbox are answers
+-- from a remote and a peer at one moment. Every fact has a key whatever the
+-- answer was, and an absence is a null beside an @error@ string rather than a
+-- key left out, for the reason the report says them out loud: a missing
+-- @waiting@ reads as nothing waiting.
+--
+-- @published@ is null when there is no canon here to have published, which is
+-- a different answer from an empty list of remotes.
+--
+-- @signing@ is whether this machine can sign as the key in @signer@, which is
+-- the key a canon write without @--as@ would use and where it came from
+-- (@env@, @git_config@ or @repo_key@, "HBS2.Hub.CLI.Signer"). A default that
+-- does not read leaves the key null and says why in @error@.
+statusContract :: Standing -> Value
+statusContract st = object
+  [ "contract" .= contractVersion
+  , "document" .= ("status" :: Text)
+  , "repo"     .= key58 (stRepo st)
+  , "signing"  .= stCanSign st
+  , "signer"   .= case stSigner st of
+      Left e  -> object [ "key" .= Null, "source" .= Null, "maintainer" .= Null
+                        , "error" .= Text.pack (show (pretty e)) ]
+      Right s -> object [ "key" .= key58 (sgKey s)
+                        , "source" .= sourceName (sgSource s)
+                        , "maintainer" .= stMaintains st
+                        , "error" .= Null ]
+  , "canon"    .= object
+      [ "commit"      .= stCanon st
+      , "threads"     .= stThreads st
+      , "events"      .= stEvents st
+      , "maintainers" .= stKeys st
+      ]
+  , "published" .= case (stCanon st, stPublished st) of
+      (Nothing, _) -> Null
+      (_, Left e)  -> object [ "error" .= e, "remotes" .= ([] :: [Value]) ]
+      (_, Right rs) -> object [ "error" .= Null
+                              , "remotes" .= [ remote r p | (r, p) <- rs ] ]
+  , "mailbox" .= object
+      [ "key"     .= fmap key58 (stMailbox st)
+      , "waiting" .= case (stMailbox st, stWaiting st) of
+          (Nothing, _)     -> Null
+          (_, Right n)     -> toJSON n
+          (_, Left _)      -> Null
+      , "error"   .= case (stMailbox st, stWaiting st) of
+          (Just _, Left e) -> Just e
+          _                -> Nothing
+      ]
+  ]
+  where
+    sourceName :: SignerSource -> Text
+    sourceName = \case
+      FromFlag       -> "flag"
+      FromEnv        -> "env"
+      FromGitConfig  -> "git_config"
+      RepoKeyDefault -> "repo_key"
+
+    remote r p = object $ ("name" .= r) : case p of
+      RemoteSilent e -> [ "state" .= ("silent" :: Text), "remote_canon" .= Null, "error" .= e ]
+      RemoteEmpty    -> [ "state" .= ("empty" :: Text),  "remote_canon" .= Null, "error" .= Null ]
+      Level          -> [ "state" .= ("level" :: Text),  "remote_canon" .= stCanon st, "error" .= Null ]
+      Diverged theirs -> [ "state" .= ("diverged" :: Text), "remote_canon" .= theirs, "error" .= Null ]
+
+statusOrder :: [Text]
+statusOrder =
+  [ "repo", "signing", "signer", "key", "source", "maintainer"
+  , "canon", "commit", "threads", "events", "maintainers"
+  , "published", "remotes", "name", "state", "remote_canon"
+  , "mailbox", "waiting", "error" ]
+
 statusEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
                               , HasStorage m
@@ -167,7 +267,8 @@ statusEntries :: forall c m . ( IsContext c
 statusEntries = do
 
   brief "say where this clone stands: canon, publication, mailbox"
-    $ args [ arg "string" "--repo repo-key", arg "string" "[--remote name]" ]
+    $ args [ arg "string" "--repo repo-key", arg "string" "[--remote name]"
+           , arg "string" "[--json]" ]
     $ desc ( "Read-only, and it pushes nothing: the publication check is a"
              <> line <> "probe of the remote, not a push that reports what it"
              <> line <> "would have done."
@@ -177,6 +278,11 @@ statusEntries = do
              <> line <> "can sign for it, what canon here holds, whether that"
              <> line <> "canon has reached the remote, which mailbox the"
              <> line <> "repository declares, and how many letters are in it."
+             <> line
+             <> line <> "The signing line names the key a canon write without --as"
+             <> line <> "would use, and where it came from: HBS2_HUB_AS, git config"
+             <> line <> "hbs2.hub.as, or the repository key. See `hbs2-hub help"
+             <> line <> "maintainer use`."
              <> line
              <> line <> "Every absence is said out loud. A mailbox that would"
              <> line <> "not read says so rather than being left off the report,"
@@ -189,7 +295,11 @@ statusEntries = do
              <> line <> "--remote only that one is probed. A probe is an"
              <> line <> "ls-remote, so it reads the remote's FETCH url: a remote"
              <> line <> "whose push urls go elsewhere as well is reported for"
-             <> line <> "where it fetches from." )
+             <> line <> "where it fetches from."
+             <> line
+             <> line <> "--json prints one `status` document (contract 1) with the"
+             <> line <> "same facts; an absence is a null or an error string there,"
+             <> line <> "never a missing key." )
     $ entry $ bindMatch "hub:status" $ nil_ \case
         (statusArgs -> Just sa) -> lift (status sa)
         other -> liftIO (badArgs statusUsage other)
@@ -201,8 +311,11 @@ statusEntries = do
 
       -- The keyring first, because it is the only question with no peer, no
       -- git and no remote in it: a report that says nothing else can still say
-      -- whether this machine is the owner.
-      canSign <- isJust <$> signerFor repo
+      -- whether this machine can sign. For the key a canon write WOULD use,
+      -- which is the repository key only when nothing names another.
+      envv <- liftIO (lookupEnv signerEnvVar)
+      signer <- resolveSignerIn Nothing envv repo Nothing
+      canSign <- either (const (pure False)) (fmap isJust . signerFor . sgKey) signer
 
       -- TreatAsEmpty, because "no canon here" is one of the answers this verb
       -- exists to give. Every other read verb refuses; this one reports.
@@ -252,32 +365,43 @@ statusEntries = do
             Left e  -> Left (Text.pack (show e))
             Right r -> Right (length (irLetters r) + irOmitted r + irDenied r)
 
-      liftIO $ mapM_ print $ statusDoc Standing
-        { stRepo = repo
-        , stCanSign = canSign
-        , stCanon = mine
-        , stThreads = HM.size (frThreads fr)
-        , stEvents = length (frLog fr)
-        , stKeys = HS.size (frMaintainers fr)
-        , stPublished = published
-        , stMailbox = mbox
-        , stWaiting = waiting
-        }
+      let st = Standing
+              { stRepo = repo
+              , stCanSign = canSign
+              , stSigner = signer
+              , stMaintains = either (const True)
+                                (\s -> sgKey s == repo || HS.member (sgKey s) (frMaintainers fr))
+                                signer
+              , stCanon = mine
+              , stThreads = HM.size (frThreads fr)
+              , stEvents = length (frLog fr)
+              , stKeys = HS.size (frMaintainers fr)
+              , stPublished = published
+              , stMailbox = mbox
+              , stWaiting = waiting
+              }
+
+      liftIO $ if saJson sa
+        then LBS.putStr (renderDocument statusOrder (statusContract st))
+        else mapM_ print (statusDoc st)
 
 -- | What one @hub status@ was asked about.
 data StatusArgs = StatusArgs
   { saRepo   :: RepoRef
     -- | The remote to probe. 'Nothing' probes every remote of the clone.
   , saRemote :: Maybe Text
+    -- | The standing as a document. See 'statusContract'.
+  , saJson   :: Bool
   }
   deriving stock (Eq,Show)
 
 -- | @--repo <key> [--remote <name>]@.
 statusArgs :: forall c . IsContext c => [Syntax c] -> Maybe StatusArgs
 statusArgs syn = do
-  kvs    <- flagsAndSwitches (repoFlags <> ["--remote"]) [] syn
+  kvs    <- flagsAndSwitches (repoFlags <> ["--remote"]) ["--json"] syn
   repo   <- flagRepo asKey kvs
   remote <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
-  pure (StatusArgs repo remote)
+  asJson <- flagSwitch kvs "--json"
+  pure (StatusArgs repo remote asJson)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

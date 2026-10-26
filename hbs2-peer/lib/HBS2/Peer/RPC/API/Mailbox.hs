@@ -25,6 +25,7 @@ data RpcMailboxSend
 data RpcMailboxDeleteMessages
 data RpcMailboxGet
 data RpcMailboxPoWFloor
+data RpcMailboxPending
 
 -- APPENDED, AND NEW ENTRIES GO AT THE END. A call is addressed by the method's
 -- INDEX in this list ('findMethodIndex'), so inserting one above renumbers
@@ -41,6 +42,7 @@ type MailboxAPI = '[ RpcMailboxPoke
                    , RpcMailboxDeleteMessages
                    , RpcMailboxGet
                    , RpcMailboxPoWFloor
+                   , RpcMailboxPending
                    ]
 
 -- Bumped when four methods stopped answering () for everything (see below). The
@@ -140,3 +142,17 @@ type instance Output RpcMailboxGet = (Maybe HashRef)
 type instance Input RpcMailboxPoWFloor = ()
 type instance Output RpcMailboxPoWFloor = PoWDifficulty
 
+
+-- | What the peer has in flight for a mailbox it holds; 'Nothing' inside the
+-- 'Right' when it does not hold it.
+--
+-- The question 'RpcMailboxGet' cannot answer: a mailbox with no ref is empty or
+-- still arriving, and only the peer knows whether anything for it is on the way.
+-- See 'MailboxPending'.
+--
+-- Appended, and the protocol id is NOT bumped, for the reason given for
+-- 'RpcMailboxPoWFloor' above: an older peer answers this with
+-- 'ErrorMethodNotFound', which a caller sees as 'Nothing' and treats as "the
+-- peer cannot say", which is exactly what that peer could say before.
+type instance Input RpcMailboxPending = (PubKey 'Sign HBS2Basic)
+type instance Output RpcMailboxPending = Either MailboxServiceError (Maybe MailboxPending)

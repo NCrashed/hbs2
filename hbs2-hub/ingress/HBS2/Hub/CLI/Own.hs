@@ -32,6 +32,11 @@ module HBS2.Hub.CLI.Own
   , openArgs
   , openUsage
   , redactArgs
+
+  , ReplyArgs(..)
+  , replyArgs
+  , replyUsage
+  , replyContent
   ) where
 
 import HBS2.Hub.Types
@@ -45,11 +50,12 @@ import HBS2.Hub.CLI.Argv (badArgs, flagsOf,flagsAndSwitches,flagOnce,flagEvery,f
                          ,flagOneOfMaybe,assigneeFlags)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop,signerFor,signingPair
+                           ,blessed,committing,oneStop,signingPair
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Compose (readBody,letterBody)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
+import HBS2.Hub.CLI.Signer (canonSigner,signingAs,signerPrecedenceHelp,signerDoc)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -58,7 +64,6 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (pattern HashLike)
 
 import Data.List qualified as List
-import Data.Maybe (fromMaybe,listToMaybe)
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import System.Exit (die)
@@ -135,9 +140,17 @@ ownEntries = do
     labelVerb (verb noun "label")
     assignVerb (verb noun "assign")
 
+    -- A MAINTAINER COULD NOT ANSWER IN A THREAD without writing to their own
+    -- mailbox: `issue comment` composes a Tier B letter, seals it to the
+    -- repository's sigil, and then the same person finds it with `inbox` and
+    -- folds it with `inbox accept`. 'ownerEvent' has always admitted a comment
+    -- (it falls to the thread-op branch, as a close does); nothing called it.
+    -- Both nouns, for the reason `comment` has both: the op carries no kind.
+    replyVerb (verb noun "reply")
+
   brief "hide an event's content in every clone that folds this canon"
     $ args [ arg "string" "--repo repo-key", arg "string" "--event event-id"
-           , arg "string" "[--dry-run]" ]
+           , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
     $ desc ( "DISPLAY-LEVEL, and PEP-19 says so: the event stays in canon and"
              <> line <> "every clone still holds the bytes. What changes is that"
              <> line <> "readers stop showing the body. It is the answer to a"
@@ -146,12 +159,17 @@ ownEntries = do
              <> line
              <> line <> "The event-id, not a number: a redact names one event, and"
              <> line <> "the thing worth hiding is as often a comment as an open."
+             <> asHelp
              <> dryRunHelp )
     $ entry $ bindMatch "hub:redact" $ nil_ \case
         (redactArgs -> Just rd) -> lift (redactIt rd)
         other -> liftIO (badArgs redactUsage other)
 
   where
+
+    asHelp = line
+      <> line <> "--as names the canon key to sign with, for a delegate (PEP-21)."
+      <> line <> signerPrecedenceHelp
 
     -- `hub:<noun>:<op>`, built rather than written twice.
     verb noun op = fromString ("hub:" <> noun <> ":" <> op)
@@ -182,6 +200,7 @@ ownEntries = do
                  <> line <> "verbs. --label applies labels, which an author may"
                  <> line <> "only request (PEP-19): here the owner is the author,"
                  <> line <> "so they are applied."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (openArgs -> Just op) -> lift (openIt kind op)
@@ -216,6 +235,7 @@ ownEntries = do
                  <> line <> "A LABEL AN AUTHOR ASKED FOR IS NOT A LABEL. A letter's"
                  <> line <> "labels are a request (PEP-18); this is the owner applying"
                  <> line <> "one, and it is the only thing a reader shows as a label."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             -- BOTH AT ONCE IS REFUSED, and it used not to be: this admitted the
@@ -249,6 +269,7 @@ ownEntries = do
                  <> line <> "--clear unassigns, and is spelled out for the reason it is"
                  <> line <> "on labels: a verb that unassigned because somebody forgot"
                  <> line <> "an argument would publish that into append-only canon."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor assigneeFlags ["--clear"] -> Just ow)
@@ -272,13 +293,61 @@ ownEntries = do
                  <> line <> "status change, in the owner's own words. A note a"
                  <> line <> "stranger phrased is not signed here: that is what"
                  <> line <> "honouring a request is for."
-                 <> line
-                 <> line <> "--as names a delegate's key (PEP-21); it defaults to"
-                 <> line <> "the repository key."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor ["--note"] [] -> Just ow) -> lift (statusIt mk ow)
             other -> liftIO (badArgs ownUsage other)
+
+    replyVerb name =
+      brief "comment in a thread that is in canon, as a maintainer, without a letter"
+        $ args [ arg "string" "--repo repo-key"
+               , arg "string" "--number n | --thread thread-id"
+               , arg "string" "--body text | -"
+               , arg "string" "[--reply-to event-id]"
+               , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
+        $ desc ( "Writes a comment signed by a maintainer straight onto canon,"
+                 <> line <> "the way issue open writes an open."
+                 <> line
+                 <> line <> "The path for everybody else is issue comment, which"
+                 <> line <> "sends a letter that a maintainer folds. A maintainer"
+                 <> line <> "is the one who would fold it, so the sigil, the"
+                 <> line <> "mailbox and the accept are ceremony around a"
+                 <> line <> "decision already made. What is written is an"
+                 <> line <> "ordinary comment and readers show it like any other,"
+                 <> line <> "with no origin, because no letter asked for it."
+                 <> line
+                 <> line <> "The signing key must be one that may bless canon:"
+                 <> line <> "the repository key or a delegate (hbs2-hub"
+                 <> line <> "maintainer list). Any other key is refused before"
+                 <> line <> "anything is signed."
+                 <> asHelp
+                 <> line
+                 <> line <> "--body - reads stdin. A comment with no body is"
+                 <> line <> "refused: it would spend a seq to say nothing."
+                 <> line <> "--reply-to names the event being answered. It is"
+                 <> line <> "advisory, as it is on a letter."
+                 <> dryRunHelp )
+        $ entry $ bindMatch name $ nil_ \case
+            (replyArgs -> Just rp) -> lift (replyIt rp)
+            other -> liftIO (badArgs replyUsage other)
+
+    replyIt rp = do
+      body <- liftIO (readBody (Just (rpBody rp)))
+      -- Before the key is loaded or canon is read: the caller's mistake, and
+      -- the cheapest place to say so.
+      text <- maybe (liftIO (refuse (show ( "a comment with no body says nothing,"
+                                              <+> "and canon is append-only"
+                                              <> line <> "  " <> replyUsage ))
+                                    1))
+                    pure
+                    (letterBody body)
+      (parent, fr) <- canonOf (rpRepo rp)
+      -- A thread-id is taken as given: 'ownerEvent' refuses one canon does not
+      -- hold (UnknownThread), which covers an id from another repository too.
+      thr <- either pure (threadOfNumber fr) (rpThread rp)
+      writeOwn (rpRepo rp) (rpAs rp) (rpDry rp) parent fr
+        (replyContent thr (rpReplyTo rp) text) "hub: comment"
 
     canonOf repo =
       -- Refuse: every verb here names a thread by number, and a repository with
@@ -320,16 +389,10 @@ ownEntries = do
     -- accept' uses, and for the same reason -- minting writes nothing, so a
     -- refusal anywhere above the commit leaves canon untouched.
     writeOwn repo mas dry parent fr mk message = do
-      let signer = fromMaybe repo mas
-
-      creds <- signerFor signer
-               >>= maybe (liftIO (refuse (show ( "cannot sign as"
-                                                   <+> pretty (AsBase58 signer)
-                                                   <> line
-                                                   <> "  no keyring here holds it as its own"
-                                                   <+> "signing key" ))
-                                         codeNoCanonKey))
-                         pure
+      -- --as, then HBS2_HUB_AS, then git config hbs2.hub.as, then the repo
+      -- key: see "HBS2.Hub.CLI.Signer".
+      signer <- canonSigner repo mas
+      creds <- signingAs codeNoCanonKey signer
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
@@ -354,6 +417,7 @@ ownEntries = do
        <> [ "number" <+> pretty n | Just n <- [acNumber acc] ]
        <> [ "seq" <+> pretty (acSeq acc)
           , "commit" <+> pretty commit
+          , "signed by" <+> signerDoc signer
           ] )
 
       liftIO (saying (notPublishedYet <> line))
@@ -478,3 +542,57 @@ openArgs syn = do
   pure (OpenArgs repo title body ls as (writingOf dry))
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+
+-- | What a maintainer's reply was asked to write.
+data ReplyArgs = ReplyArgs
+  { rpRepo    :: RepoRef
+    -- | The thread, by id or by the number a listing prints. Exactly one.
+  , rpThread  :: Either ThreadId Word64
+  , rpReplyTo :: Maybe EventId
+  , rpBody    :: String          -- ^ @-@ reads stdin
+  , rpAs      :: Maybe HubKey
+  , rpDry     :: Writing
+  }
+  deriving stock (Eq,Show)
+
+replyUsage :: Doc ()
+replyUsage =
+  "usage: hbs2-hub issue|pr reply --repo <key> --number <n> | --thread <thread-id>"
+    <> line <> "       --body <text>|- [--reply-to <event-id>] [--as <key>] [--dry-run]"
+
+-- | The comment the verb signs.
+--
+-- A function and not a line in the verb, so that the tests fold and render the
+-- content the verb publishes rather than their own copy of it. No attachment:
+-- the body is text from the command line, and its size is what the bridge
+-- checks before anything is signed.
+replyContent :: ThreadId -> Maybe EventId -> Text -> Word64 -> AuthorContent
+replyContent thr replyTo body now = AComment thr replyTo (Just body) Nothing now
+
+-- | @--repo K (--number N | --thread T) --body B [--reply-to E] [--as K] [--dry-run]@.
+--
+-- Every value behind a flag: the repository, a delegate, a thread-id and an
+-- event-id are all thirty-two bytes of base58, and a swap is a signed comment
+-- in somebody else's thread.
+replyArgs :: forall c . IsContext c => [Syntax c] -> Maybe ReplyArgs
+replyArgs syn = do
+  kvs     <- flagsAndSwitches (repoFlags <> ["--number","--thread","--reply-to","--body","--as"])
+                              ["--dry-run"] syn
+  repo    <- flagRepo asKey kvs
+  number  <- flagMaybe kvs "--number" flagWord
+  thread  <- flagMaybe kvs "--thread" asHash
+  -- EXACTLY ONE WAY OF NAMING THE THREAD. Both is a line somebody edited half
+  -- way, and neither is a comment with nothing to attach to.
+  thr     <- case (thread, number) of
+               (Just t, Nothing) -> Just (Left t)
+               (Nothing, Just n) -> Just (Right n)
+               _ -> Nothing
+  replyTo <- flagMaybe kvs "--reply-to" asHash
+  -- Through 'flagText', so `--body 2026` is a body and not a missing one.
+  body    <- flagOnce kvs "--body" >>= flagText
+  as      <- flagMaybe kvs "--as" asKey
+  dry     <- flagSwitch kvs "--dry-run"
+  pure (ReplyArgs repo thr replyTo body as (writingOf dry))
+  where
+    asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    asHash = \case { HashLike h -> Just h ; _ -> Nothing }

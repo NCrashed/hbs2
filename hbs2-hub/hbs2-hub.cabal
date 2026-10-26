@@ -120,6 +120,7 @@ library hub-ingress
     exposed-modules:
       HBS2.Hub.Deny
       HBS2.Hub.Ingress
+      HBS2.Hub.Mcp
       HBS2.Hub.Sent
       HBS2.Hub.Repo.Git
       HBS2.Hub.Repo.Manifest
@@ -138,6 +139,7 @@ library hub-ingress
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
       HBS2.Hub.CLI.Maintainer
+      HBS2.Hub.CLI.Mcp
       HBS2.Hub.CLI.Own
       HBS2.Hub.CLI.Policy
       HBS2.Hub.CLI.Pr
@@ -148,10 +150,14 @@ library hub-ingress
       HBS2.Hub.CLI.Status
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
+      HBS2.Hub.CLI.Signer
       HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
       HBS2.Hub.CLI.Whoami
+    -- For the version `hub mcp` reports to a client in its handshake.
+    other-modules:    Paths_hbs2_hub
+    autogen-modules:  Paths_hbs2_hub
 
 -- The CLI itself.
 --
@@ -187,6 +193,8 @@ test-suite spec
       -with-rtsopts=-N
   build-tool-depends:
       hspec-discover:hspec-discover
+      -- The binary `hub mcp` runs its verbs as; see HBS2.Hub.McpSpec.
+    , hbs2-hub:hbs2-hub
   build-depends:   base
                  , hbs2-hub
                  , hbs2-hub:hub-ingress
@@ -238,6 +246,7 @@ test-suite spec
       HBS2.Hub.CanonSpec
       HBS2.Hub.CodesSpec
       HBS2.Hub.MaintainerSpec
+      HBS2.Hub.McpSpec
       HBS2.Hub.OwnSpec
       HBS2.Hub.PolicySpec
       HBS2.Hub.PrSpec
@@ -251,6 +260,7 @@ test-suite spec
       HBS2.Hub.RepoSpec
       HBS2.Hub.SentSpec
       HBS2.Hub.ShowSpec
+      HBS2.Hub.SignerSpec
       HBS2.Hub.GitBundleSpec
       HBS2.Hub.GitRepoSpec
       HBS2.Hub.GitWriteSpec

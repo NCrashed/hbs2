@@ -79,10 +79,11 @@ import HBS2.Hub.CLI.Common (overRpc, refuse, saying, manifestCode
                            ,codeMailboxUnknown, codePeerSilent
                            ,withCanon, OnMissing(..)
                            ,blessed, committing, WriteStop(..)
-                           ,signerFor, signingPair
+                           ,signingPair
                            ,mailboxDoubt, doubtDoc, notInMailboxDoc, codeMailboxIncomplete
                            ,Writing, writingOf, dryRunHelp)
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
+import HBS2.Hub.CLI.Signer (canonSigner,signingAs,signerDoc,signerPrecedenceHelp,Signer(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.CLI.Drop (dropMessage)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagSwitch,repoFlags,flagRepo)
@@ -103,7 +104,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe,listToMaybe)
+import Data.Maybe (listToMaybe)
 import System.Exit (exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
 
@@ -360,8 +361,8 @@ acceptEntries = do
              <> line <> "mailbox permanently unacceptable-from."
              <> line
              <> line <> "--as names the canon key to sign with, for a delegate"
-             <> line <> "(PEP-21). It defaults to the repo key, which is the owner"
-             <> line <> "and the root of trust."
+             <> line <> "(PEP-21). The report's `signed by` line says which key did."
+             <> line <> signerPrecedenceHelp
              <> line
              <> line <> "The letter is dropped from the mailbox afterwards, which"
              <> line <> "writes a tombstone and frees no disk (see hub inbox"
@@ -376,7 +377,8 @@ acceptEntries = do
              <> line <> "honours no other kind). It is signed by the canon key,"
              <> line <> "which is what makes it checkable, and it is a courtesy:"
              <> line <> "canon is the authority, so an ack that does not go out"
-             <> line <> "costs a notification and nothing else."
+             <> line <> "costs a notification and nothing else. Sealing it needs"
+             <> line <> "an encryption key in the signing key's keyring."
              <> line
              <> line <> "This node's triage deny-list IS applied (see hub ban):"
              <> line <> "a letter whose INNER author is denied here is refused"
@@ -418,6 +420,8 @@ acceptEntries = do
              <> line <> "attribute is the requester's choice of both name and"
              <> line <> "value; those come back as NeedsReview, and the owner"
              <> line <> "writes their own with `hub issue close` and friends."
+             <> line
+             <> line <> "--as and its defaults work as for `hub inbox accept`."
              <> dryRunHelp )
     $ entry $ bindMatch "hub:inbox:honour" $ nil_ \case
         (acceptArgs -> Just a) -> lift (accept Honoured a)
@@ -428,7 +432,6 @@ acceptEntries = do
     accept folding a = do
       let repo = aaRepo a
           msg  = aaMessage a
-          canonKey = fromMaybe repo (aaAs a)
 
       -- The mailbox named, or the one this repository declares (PEP-18). The
       -- repository is required by this verb either way, so the lookup always
@@ -437,14 +440,12 @@ acceptEntries = do
                 >>= either (\e -> liftIO (refuse (show (pretty e)) (manifestCode e)))
                            pure
 
-      creds <- signerFor canonKey
-                 >>= maybe (liftIO (refuse (show ( "cannot sign as"
-                                                    <+> pretty (AsBase58 canonKey)
-                                                    <> line
-                                                    <> "  no keyring here holds it as its own"
-                                                    <+> "signing key" ))
-                                           codeNoCanonKey))
-                           pure
+      -- --as, then HBS2_HUB_AS, then git config hbs2.hub.as, then the repo
+      -- key: see "HBS2.Hub.CLI.Signer". A delegate who also holds the repo
+      -- key here used to bless as the owner without having asked to.
+      signer <- canonSigner repo (aaAs a)
+      creds <- signingAs codeNoCanonKey signer
+      let canonKey = sgKey signer
 
       -- Canon first, and from git rather than from anything remembered: the
       -- commit read here is the value the publish compares against, so reading
@@ -769,6 +770,7 @@ acceptEntries = do
             , "seq" <+> pretty (acSeq acc)
             , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
             , "commit" <+> pretty commit
+            , "signed by" <+> signerDoc signer
             , maybe mempty ("staged" <+>) (fmap pretty staged)
             , maybe ("dropped from the mailbox:" <+> pretty msg)
                     (\why -> "left in the mailbox:" <+> pretty msg

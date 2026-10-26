@@ -91,9 +91,24 @@ instance Pretty AckTrouble where
       "the reply sigil" <+> hashDoc h <+> "does not belong to"
         <+> keyDoc k <> line
         <> "  nothing was sent: that sigil addresses somebody else's mailbox"
+    -- WHAT TO DO, and which key. This used to be the first two lines alone,
+    -- which a delegate read after an accept that the REPOSITORY key had
+    -- signed: nothing on screen said that key was the signer, or that the
+    -- signer was a choice.
     AckNoEncKey k ->
-      "no encryption key for" <+> pretty (AsBase58 k) <> line
-        <> "  an ack is sealed to its reader, so the signer needs one too"
+      "the signer" <+> pretty (AsBase58 k) <+> "has no encryption key" <> line
+        <> "  an ack is sealed from the key that signed the event to the"
+        <+> "contributor's" <> line
+        <> "  sigil, so that key's keyring needs an encryption key too. The"
+        <+> "event" <> line
+        <> "  is in canon either way; only the notification did not go out."
+        <> line
+        <> "  To send acks, sign with a key whose keyring has one: --as <key>,"
+        <> line
+        <> "  HBS2_HUB_AS=<key>, or `hbs2-hub maintainer use` (git config"
+        <+> "hbs2.hub.as)," <> line
+        <> "  or add an encryption key to the keyring that holds"
+        <+> pretty (AsBase58 k) <> "."
     AckNotSent e -> "the acknowledgement was not sent:" <+> pretty (safeText e)
 
 -- | Where an ack goes, given a vetted channel and what reading its sigil said.

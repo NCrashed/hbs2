@@ -37,6 +37,8 @@ module HBS2.Hub.CLI.Read
   , listDoc
   , showDoc
   , logDoc
+  , logContract
+  , logOrder
   , statusOf
   , listArgs
   , showArgs
@@ -67,6 +69,7 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Data.Types.Refs (pattern HashLike, HashRef)
 
+import Data.Aeson (Value,object,(.=))
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
@@ -440,7 +443,7 @@ readEntries = do
   showVerb "hub:pr:show" HubPR
 
   brief "print the surviving events of this repository's canon"
-    $ args [arg "string" "repo-key"]
+    $ args [arg "string" "repo-key", arg "string" "[number]", arg "string" "[--json]"]
     $ desc ( "Read-only and peerless, like every other read verb: canon is a"
              <> line <> "git ref in this repository."
              <> line
@@ -448,9 +451,15 @@ readEntries = do
              <> line <> "set events (PEP-19), so this is what canon still holds and"
              <> line <> "not a history of everything that ever happened."
              <> line
-             <> line <> "Give a number to see one thread's events." )
+             <> line <> "Give a number to see one thread's events."
+             <> line
+             <> line <> "--json prints one `log` document (contract 1): the same"
+             <> line <> "events in seq order, each with its op, thread, number,"
+             <> line <> "author, the key that blessed it, its folded-at time and"
+             <> line <> "the letter it came from. No text: titles and bodies are"
+             <> line <> "`issue show --json`'s, which withholds the redacted ones." )
     $ entry $ bindMatch "hub:log" $ nil_ \case
-        (logArgs -> Just (repo, n)) -> lift $ withFold repo \fr -> do
+        (logArgs -> Just (repo, n, asJson)) -> lift $ withFold repo \fr -> do
           -- A NUMBER THAT NAMES NO THREAD IS A REFUSAL, like it is in `show`.
           -- Filtering an empty answer out of the log left this exiting 0 with
           -- nothing on stdout, which is what a thread with no events would look
@@ -467,9 +476,11 @@ readEntries = do
                                            <+> pretty want))
                                   codeNoSuchThread)
             ids -> pure (HS.fromList ids)
-          out (logDoc only fr)
-        other -> liftIO (badArgs ("usage: hub log <repo-key> [<number>]"
-                                    <> line <> "   or: hub log --repo <key> [--number <n>]")
+          if asJson
+            then emit (renderDocument logOrder (logContract repo n only fr))
+            else out (logDoc only fr)
+        other -> liftIO (badArgs ("usage: hub log <repo-key> [<number>] [--json]"
+                                    <> line <> "   or: hub log --repo <key> [--number <n>] [--json]")
                                  other)
 
   where
@@ -628,6 +639,12 @@ readEntries = do
       (\_ -> exitWith (ExitFailure 141))
       (mapM_ print ds)
 
+    -- A document, under the same guard: the whole of it or a 141.
+    emit bs = liftIO $ handleJust
+      (\e -> if isResourceVanishedError e then Just () else Nothing)
+      (\_ -> exitWith (ExitFailure 141))
+      (LBS.putStr bs)
+
 -- | The repository key, then the two flags, in any order.
 --
 -- Exported, like everything else here that decides something. It was not, and
@@ -708,23 +725,76 @@ showArgs syn = positional syn <|> flagged syn
                  _                  -> Nothing
       pure (repo, which, j)
 
--- | @<repo> [<n>]@, or the same behind flags.
-logArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Maybe Word64)
+-- | @<repo> [<n>] [--json]@, or the same behind flags.
+logArgs :: forall c . IsContext c => [Syntax c] -> Maybe (HubKey, Maybe Word64, Bool)
 logArgs syn = positional syn <|> flagged syn
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
 
-    positional = \case
-      [ SignPubKeyLike repo ] -> Just (repo, Nothing)
+    -- The switch last, in the positional form, the way 'showArgs' takes it.
+    positional s = case s of
+      [ SignPubKeyLike repo ] -> Just (repo, Nothing, False)
       -- Through 'flagWord', which guards BOTH ends. A bare fromIntegral on the
       -- Integer a LitIntVal carries guards neither: flagWord's own haddock is
       -- the report of that bug -- `--number 18446744073709551617` wrapped to 1
       -- and the verb answered about a thread nobody named.
-      [ SignPubKeyLike repo, (flagWord -> Just n) ] -> Just (repo, Just n)
+      [ SignPubKeyLike repo, (flagWord -> Just n) ] -> Just (repo, Just n, False)
+      [ SignPubKeyLike repo, StringLike "--json" ] -> Just (repo, Nothing, True)
+      [ SignPubKeyLike repo, (flagWord -> Just n), StringLike "--json" ] ->
+        Just (repo, Just n, True)
       _ -> Nothing
 
     flagged s = do
-      kvs <- flagsOf (repoFlags <> ["--number"]) s
+      kvs <- flagsAndSwitches (repoFlags <> ["--number"]) ["--json"] s
       repo <- flagRepo asKey kvs
       n <- flagMaybe kvs "--number" flagWord
-      pure (repo, n)
+      j <- flagSwitch kvs "--json"
+      pure (repo, n, j)
+
+-- | The surviving events as a document (@hub log --json@).
+--
+-- DERIVED FROM CANON, like the thread document and unlike the queue: two
+-- clones of one canon produce the same bytes, which is why the order is the
+-- fold's @seq@ and nothing else.
+--
+-- NO TEXT. A log entry's content holds a title and a body, and the thread
+-- document is where those are shown, because it is where a redaction withholds
+-- them. A second document carrying the same text would be a second place a
+-- redaction has to be honoured, and the one somebody forgets. What is here is
+-- the provenance: who, blessed by whom, when, about what, and from which
+-- letter.
+--
+-- @filter_number@ is the filter that was asked for. @number@ on an event is
+-- its thread's number, null for the repository-scope ops and for a thread
+-- canon numbered none.
+logContract :: RepoRef -> Maybe Word64 -> Maybe (HashSet ThreadId) -> FoldResult -> Value
+logContract repo n only fr = object
+  [ "contract" .= contractVersion
+  , "document" .= ("log" :: Text)
+  , "repo"     .= key58 repo
+  , "filter_number" .= n
+  , "events"   .= fmap one [ e | e <- frLog fr, wanted (lgThread e) ]
+  ]
+  where
+    wanted = case only of
+      Nothing  -> const True
+      Just ids -> maybe False (`HS.member` ids)
+
+    numberOf t = HM.lookup t (frThreads fr) >>= tsNumber
+
+    one e = object
+      [ "seq"       .= lgSeq e
+      , "event_id"  .= b58 (lgEvent e)
+      , "op"        .= opName (lgContent e)
+      , "thread_id" .= fmap b58 (lgThread e)
+      , "number"    .= (lgThread e >>= numberOf)
+      , "author"    .= key58 (lgAuthor e)
+      , "canon_by"  .= key58 (lgCanonBy e)
+      , "folded_at" .= lgFoldedTs e
+      , "origin"    .= fmap b58 (lgOrigin e)
+      ]
+
+logOrder :: [Text]
+logOrder =
+  [ "repo", "filter_number", "events", "seq", "event_id", "op", "thread_id", "number"
+  , "author", "canon_by", "folded_at", "origin" ]

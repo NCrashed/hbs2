@@ -20,6 +20,8 @@ module HBS2.Hub.CLI.Sent
     -- * The parts that decide something
   , sentDoc
   , sentNote
+  , sentContract
+  , sentOrder
   , SentArgs(..)
   , sentArgs
   ) where
@@ -27,6 +29,7 @@ module HBS2.Hub.CLI.Sent
 import HBS2.Hub.Types
 import HBS2.Hub.Sent (Sent(..),loadSent,codeNoSentLog)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,repoFlags,flagRepoMaybe)
+import HBS2.Hub.Render (contractVersion,renderDocument,b58,key58)
 import HBS2.Hub.CLI.Common (refuse,saying,utcOf)
 
 import HBS2.CLI.Prelude
@@ -34,6 +37,8 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 
+import Data.Aeson (Value,object,(.=))
+import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
 
 -- | What one @hub sent@ was asked to show.
@@ -44,11 +49,13 @@ data SentArgs = SentArgs
     -- The same switch `hub inbox` has, and for the same reason: a row is read
     -- by a person and piped by a script, and those want different widths.
   , snLong :: Bool
+    -- | The log as a document. See 'sentContract'.
+  , snJson :: Bool
   }
   deriving stock (Eq,Show)
 
 sentUsage :: Doc ()
-sentUsage = "usage: hbs2-hub sent [--repo <key>] [--long]"
+sentUsage = "usage: hbs2-hub sent [--repo <key>] [--long] [--json]"
 
 -- | One line per letter, newest last.
 --
@@ -91,6 +98,41 @@ sentNote n =
     <> line <> "  `hbs2-hub updates --repo <key> --mailbox <your-mailbox>`"
     <+> "is what came back."
 
+-- | The log as a document (@hub sent --json@).
+--
+-- NOT DERIVED FROM CANON and not even from a mailbox: it is what this node
+-- wrote down about its own actions, so it is evidence of nothing but that. A
+-- row is not a delivery, and the field easiest to misread is named for what it
+-- is: @handed_at@ is when the peer took the message, by this node's clock.
+--
+-- @filter_repo@ is the filter that was asked for, so a consumer can tell a
+-- whole log from a filtered one. @repo@ on a row is the repository the letter
+-- named, null for a comment, which names a thread; under the filter such a row
+-- is kept, as the text listing keeps it.
+sentContract :: Maybe RepoRef -> [Sent] -> Value
+sentContract filt xs = object
+  [ "contract" .= contractVersion
+  , "document" .= ("sent" :: Text)
+  , "filter_repo" .= fmap key58 filt
+  , "letters"  .= fmap one xs
+  ]
+  where
+    one s = object
+      [ "message"   .= b58 (seMessage s)
+      , "event"     .= b58 (seEvent s)
+      , "thread"    .= b58 (seThread s)
+      , "repo"      .= fmap key58 (seRepo s)
+      , "author"    .= key58 (seAuthor s)
+      , "handed_at" .= seAt s
+      , "what"      .= seWhat s
+      , "title"     .= seTitle s
+      ]
+
+sentOrder :: [Text]
+sentOrder =
+  [ "filter_repo", "letters", "message", "event", "thread", "repo", "author"
+  , "handed_at", "what", "title" ]
+
 sentEntries :: forall c m . ( IsContext c
                             , MonadUnliftIO m
                             , Exception (BadFormException c)
@@ -98,7 +140,8 @@ sentEntries :: forall c m . ( IsContext c
 sentEntries = do
 
   brief "list the letters this node has sent"
-    $ args [ arg "string" "[--repo repo-key]", arg "string" "[--long]" ]
+    $ args [ arg "string" "[--repo repo-key]", arg "string" "[--long]"
+           , arg "string" "[--json]" ]
     $ desc ( "Read-only and peerless: the log is a file this node wrote"
              <> line <> "about its own actions."
              <> line
@@ -115,7 +158,11 @@ sentEntries = do
              <> line <> "AN ENTRY IS NOT A DELIVERY. It is written when the peer"
              <> line <> "took the message off this node's hands, which is not"
              <> line <> "that any mailbox accepted it. `hub updates` is what"
-             <> line <> "came back." )
+             <> line <> "came back."
+             <> line
+             <> line <> "--json prints one `sent` document (contract 1): the same"
+             <> line <> "rows with whole identifiers and the time in milliseconds."
+             <> line <> "The note about delivery still goes to stderr." )
     $ entry $ bindMatch "hub:sent" $ nil_ \case
         (sentArgs -> Just sa) -> lift (listSent sa)
         other -> liftIO (badArgs sentUsage other)
@@ -134,15 +181,18 @@ sentEntries = do
                    Nothing -> xs
                    Just k  -> [ s | s <- xs, maybe True (== k) (seRepo s) ]
 
-      liftIO (mapM_ print (sentDoc (snLong sa) mine))
+      liftIO $ if snJson sa
+        then LBS.putStr (renderDocument sentOrder (sentContract (snRepo sa) mine))
+        else mapM_ print (sentDoc (snLong sa) mine)
       liftIO (saying (sentNote (length mine) <> line))
 
 -- | @[--repo <key>] [--long]@.
 sentArgs :: forall c . IsContext c => [Syntax c] -> Maybe SentArgs
 sentArgs syn = do
-  kvs  <- flagsAndSwitches repoFlags ["--long"] syn
+  kvs  <- flagsAndSwitches repoFlags ["--long","--json"] syn
   repo <- flagRepoMaybe asKey kvs
   long <- flagSwitch kvs "--long"
-  pure (SentArgs repo long)
+  asJson <- flagSwitch kvs "--json"
+  pure (SentArgs repo long asJson)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

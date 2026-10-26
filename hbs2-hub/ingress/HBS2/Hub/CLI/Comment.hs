@@ -163,7 +163,11 @@ commentEntries = do
                  <> line
                  <> line <> "Prints the message hash and the event-id this comment"
                  <> line <> "will have, which the sender can compute before any"
-                 <> line <> "maintainer has looked." )
+                 <> line <> "maintainer has looked."
+                 <> line
+                 <> line <> "A maintainer answering in their own repository wants"
+                 <> line <> "issue reply instead: it writes the comment onto canon"
+                 <> line <> "directly, with no letter to fold." )
         $ entry $ bindMatch name $ nil_ \case
             (commentArgs -> Just cm) -> lift (comment cm)
             other -> liftIO (badArgs commentUsage other)

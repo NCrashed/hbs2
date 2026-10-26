@@ -42,6 +42,18 @@ module HBS2.Hub.Render
     -- the derived Show that `hub log` printed as @HubIssue@. A word a reader
     -- filters on cannot be a word each renderer chooses for itself.
   , kindOf
+    -- * Shared with the documents outside this module
+    --
+    -- The read verbs that are not about a thread (@inbox show@, @log@, @sent@,
+    -- @status@, @updates@, @maintainer list@) emit documents under the same
+    -- counter. They spell a hash, a key, an op and an author's clock the way
+    -- this module does, from this module, so that a consumer reading two of
+    -- them never meets two spellings of one value.
+  , opName
+  , declaredAt
+  , b58
+  , key58
+  , renderDocument
   ) where
 
 import HBS2.Hub.Types
@@ -244,6 +256,15 @@ kindOf = \case
   HubIssue -> "issue"
   HubPR    -> "pr"
 
+-- | What an event or a letter asks for, in the one spelling every document
+-- uses. The words are the ones the terminal renderers print.
+opName :: AuthorContent -> Text
+opName = \case
+  AOpen{} -> "open"; AComment{} -> "comment"; ARevise{} -> "revise"
+  ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
+  AMerge{} -> "merge"; ARedact{} -> "redact"
+  ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
+
 b58 :: Pretty a => a -> Text
 b58 = Text.pack . show . pretty
 
@@ -282,6 +303,22 @@ renderContract = encodePretty' cfg
           , "coords_author", "coords_canon_by", "diff"
           , "format", "availability", "truncated", "text"
           ]
+      , confTrailingNewline = True
+      }
+
+-- | Any other document under the contract, pretty-printed the same way.
+--
+-- 'renderContract' fixes the key order of the THREAD document, and its list is
+-- that document's: putting another document's keys into it would move fields
+-- of a document whose bytes two clones are meant to agree on. So a document
+-- that is not a thread names its own order, after @contract@ and @document@.
+-- A key the list does not name sorts after the named ones, alphabetically.
+renderDocument :: [Text] -> Value -> ByteString
+renderDocument order = encodePretty' cfg
+  where
+    cfg = defConfig
+      { confIndent = Spaces 2
+      , confCompare = keyOrder ("contract" : "document" : order)
       , confTrailingNewline = True
       }
 

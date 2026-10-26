@@ -203,11 +203,24 @@ runMailboxCLI rpc s = do
                   st <- callRpcWaitMay @RpcMailboxGetStatus t api m
                           >>= orThrowUser "rpc call timeout"
                           >>= orThrowPassIO
-                  liftIO $ print $ case st of
-                    Nothing -> "no such mailbox on this peer:"
+                  -- And which of the two it is, when the peer can say. An
+                  -- older peer has no such method and answers Nothing here,
+                  -- which leaves the old sentence.
+                  pending <- callRpcWaitMay @RpcMailboxPending t api m
+                               <&> (>>= either (const Nothing) id)
+                  liftIO $ print $ case (st, pending) of
+                    (Nothing, _) -> "no such mailbox on this peer:"
                                  <+> pretty (AsBase58 m)
                                  <+> "(create it with `mailbox create --key ... hub`)"
-                    Just{}  -> "the peer holds this mailbox and has no ref for it yet:"
+                    (Just{}, Just p) | mailboxIdle p ->
+                                 "the peer holds this mailbox and nothing has been merged"
+                                 <+> "into it; nothing for it is in flight:"
+                                 <+> pretty (AsBase58 m)
+                    (Just{}, Just p) ->
+                                 "the peer holds this mailbox and has no ref for it yet"
+                                 <+> parens (pretty p) <> ":"
+                                 <+> pretty (AsBase58 m)
+                    (Just{}, Nothing) -> "the peer holds this mailbox and has no ref for it yet:"
                                  <+> pretty (AsBase58 m)
 
              _ -> throwIO $ BadFormException @C nil
@@ -229,6 +242,21 @@ runMailboxCLI rpc s = do
 
              _ -> throwIO $ BadFormException @C nil
 
+
+        brief "what the peer has in flight for a mailbox: idle, or downloading N copies and/or ingesting letters"
+          $ entry $ bindMatch "pending" $ nil_ $ \case
+             [ SignPubKeyLike m ] -> do
+
+              v <- callRpcWaitMay @RpcMailboxPending t api m
+                     >>= orThrowUser "rpc call timeout (an older peer does not answer this)"
+                     >>= orThrowPassIO
+
+              liftIO $ print $ case v of
+                Just p  -> pretty p
+                Nothing -> "no such mailbox on this peer:" <+> pretty (AsBase58 m)
+                             <+> "(create it with `mailbox create --key ... hub`)"
+
+             _ -> throwIO $ BadFormException @C nil
 
         brief "fetch mailbox"
           $ entry $ bindMatch "fetch" $ nil_ $ \case

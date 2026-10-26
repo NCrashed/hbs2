@@ -21,7 +21,12 @@ import HBS2.Prelude.Plated (Doc,pretty)
 
 import Data.Config.Suckless (Syntax,C)
 import Data.ByteString qualified as BS
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable (toList)
 import Data.HashSet qualified as HS
+import Data.Text qualified as Text
 import Data.List (isInfixOf)
 import Data.Maybe (fromMaybe)
 import Test.Hspec
@@ -143,9 +148,9 @@ spec = do
     it "reads both flags, in any order" $ do
       mbox <- aKey ; repo <- aKey
       updatesArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo])
-        `shouldBe` Just (UpdatesArgs mbox repo False)
+        `shouldBe` Just (UpdatesArgs mbox repo False False)
       updatesArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox])
-        `shouldBe` Just (UpdatesArgs mbox repo False)
+        `shouldBe` Just (UpdatesArgs mbox repo False False)
 
     -- --repo is optional on every other verb that takes one and required here:
     -- it is what an ack is checked against, and an unchecked ack is a sentence
@@ -232,3 +237,44 @@ spec = do
       repo <- aKey
       shown (updatesDoc False [Acked (mh "m") (ack repo)])
         `shouldSatisfy` isInfixOf (b58 repo)
+
+  describe "PEP-18 hub updates --json: the acks as a document" $ do
+
+    let acks v = case jat ["acks"] v of { Just (Aeson.Array xs) -> toList xs ; _ -> [] }
+
+    it "carries an ack whole, and counts what it did not show" $ do
+      repo <- aKey ; mbox <- aKey
+      let a = (ack repo) { akNote = Just "fixed in 1.2", akStatus = "closed" }
+          v = updatesContract False repo mbox
+                [Acked (mh "m") a, Refused, NotAnAckHere, NotAnAckHere, Unrelated (mh "u") (ack repo)]
+          [one] = acks v
+      jat ["document"] v `shouldBe` Just (Aeson.String "updates")
+      jat ["mailbox"] v `shouldBe` Just (Aeson.String (Text.pack (b58 mbox)))
+      jat ["number"] one `shouldBe` Just (Aeson.Number 7)
+      jat ["status"] one `shouldBe` Just (Aeson.String "closed")
+      jat ["note"] one `shouldBe` Just (Aeson.String "fixed in 1.2")
+      jat ["related"] one `shouldBe` Just (Aeson.Bool True)
+      jat ["repo"] one `shouldBe` Just (Aeson.String (Text.pack (b58 repo)))
+      jat ["refused"] v `shouldBe` Just (Aeson.Number 1)
+      jat ["letters"] v `shouldBe` Just (Aeson.Number 2)
+      jat ["unrelated"] v `shouldBe` Just (Aeson.Number 1)
+
+    -- The same rule as the text: an unrelated ack only under --all, and then
+    -- marked, so the two documents cannot be mistaken for each other.
+    it "shows an unrelated ack only under --all, and marks it" $ do
+      repo <- aKey ; mbox <- aKey
+      let us = [Unrelated (mh "u") (ack repo)]
+      acks (updatesContract False repo mbox us) `shouldBe` []
+      fmap (jat ["related"]) (acks (updatesContract True repo mbox us))
+        `shouldBe` [Just (Aeson.Bool False)]
+
+    it "reads --json" $ do
+      repo <- aKey ; mbox <- aKey
+      updatesArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo, "--json"])
+        `shouldBe` Just (UpdatesArgs mbox repo False True)
+
+-- A path into a document.
+jat :: [Text.Text] -> Aeson.Value -> Maybe Aeson.Value
+jat [] v = Just v
+jat (k:ks) (Aeson.Object o) = KM.lookup (Key.fromText k) o >>= jat ks
+jat _ _ = Nothing

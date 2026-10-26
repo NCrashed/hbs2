@@ -7,9 +7,10 @@
 module HBS2.Hub.ShowSpec (spec) where
 
 import HBS2.Hub.Types
-import HBS2.Hub.Letter (Disposition(..),maxMessageParts)
+import HBS2.Hub.Letter (Disposition(..),LetterError(..),maxMessageParts)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Show
+import HBS2.Hub.Render (renderDocument)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Base58 (AsBase58(..))
@@ -21,7 +22,14 @@ import HBS2.Prelude.Plated (Doc,pretty)
 import Data.Config.Suckless (Syntax,C)
 import Data.ByteString qualified as BS
 import Data.Foldable (for_)
+import Data.Aeson (Value(..),toJSON)
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Foldable (toList)
+import Data.HashMap.Strict qualified as HM
 import Data.List (isInfixOf)
+import Data.List qualified as List
 import Data.Text qualified as Text
 import Test.Hspec
 
@@ -48,9 +56,11 @@ letter author ac disp =
         []
         0
         Nothing
+        Nothing
+        mempty
 
 spec :: Spec
-spec = spec1 >> sanitised
+spec = spec1 >> sanitised >> asJson
 
 spec1 :: Spec
 spec1 = do
@@ -119,7 +129,7 @@ spec1 = do
 
     it "prints an unreadable letter as far as it got" $ do
       author <- aKey
-      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing []) [] 0 Nothing
+      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing []) [] 0 Nothing Nothing mempty
           out = shown (showDoc sw)
       -- The envelope key is the one thing a maintainer can act on (hub block),
       -- so it survives every failure path that knows it.
@@ -208,7 +218,7 @@ spec1 = do
     it "reads the flags in any order" $ do
       mbox <- aKey
       let h = mh "a message"
-          want = Just (ShowArgs mbox h Nothing)
+          want = Just (ShowArgs mbox h Nothing False)
       showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h)])
         `shouldBe` want
       showArgs (argv ["--message", show (pretty h), "--mailbox", b58 mbox])
@@ -219,7 +229,7 @@ spec1 = do
       let h = mh "a message"
       showArgs (argv [ "--mailbox", b58 mbox, "--message", show (pretty h)
                      , "--repo", b58 repo ])
-        `shouldBe` Just (ShowArgs mbox h (Just repo))
+        `shouldBe` Just (ShowArgs mbox h (Just repo) False)
 
     it "refuses a form with no mailbox or no message" $ do
       mbox <- aKey
@@ -293,3 +303,185 @@ sanitised =
       let ac = ASet (mh "thread") "attr" "real\ntriage: would fold" 1
           out = shown (showDoc (letter author ac FoldsToCanon))
       out `shouldSatisfy` (not . isInfixOf "\ntriage: would fold")
+
+-- | @hub inbox show --json@: the letter as a document a program decides on.
+--
+-- The point of the document is the verdict, so most of these are about which
+-- verdict a letter gets and that the reason travels with it as a code a
+-- program can branch on rather than a sentence it has to match.
+asJson :: Spec
+asJson = describe "PEP-22 hub inbox show --json: the letter as a document" $ do
+
+  let doc = letterContract
+      verdict sw = at ["triage","verdict"] (doc sw)
+      code sw = at ["triage","reason","code"] (doc sw)
+      -- Canon consulted, holding the given threads.
+      asked repo ths sw = sw { swRepo = Just repo, swFolded = Just False
+                             , swCanonThreads = HM.fromList ths }
+
+  it "says which document it is, and under which contract" $ do
+    repo <- aKey ; author <- aKey
+    let v = doc (letter author (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5) FoldsToCanon)
+    at ["contract"] v `shouldBe` Just (Number 1)
+    at ["document"] v `shouldBe` Just (String "letter")
+    at ["message"] v `shouldBe` Just (str (show (pretty (mh "m"))))
+    at ["envelope"] v `shouldBe` Just (str (b58 author))
+    at ["event"] v `shouldBe` Just (str (show (pretty (mh "e"))))
+
+  -- WHOLE AND UNESCAPED. The terminal report bounds a body by lines and
+  -- escapes it; a program deciding whether to accept has to see exactly what
+  -- it would accept, and JSON carries the escape as \u001b on its own.
+  it "carries the whole body, byte for byte" $ do
+    repo <- aKey ; author <- aKey
+    let body = Text.unlines (replicate (maxBodyLines + 50) "line\ESC[2K")
+        ac = AOpen repo HubIssue "it crashes" ["bug"] (Just body) Nothing Nothing 5
+        v = doc (letter author ac FoldsToCanon)
+    at ["body"] v `shouldBe` Just (String body)
+    at ["subject","title"] v `shouldBe` Just (String "it crashes")
+    at ["subject","kind"] v `shouldBe` Just (String "issue")
+    at ["subject","target"] v `shouldBe` Just (str (b58 repo))
+    at ["labels_requested"] v `shouldBe` Just (toJSON ["bug" :: Text.Text])
+    at ["op"] v `shouldBe` Just (String "open")
+    at ["author"] v `shouldBe` Just (str (b58 author))
+    LBS.unpack (renderBytes v) `shouldSatisfy` not . isInfixOf "\ESC"
+
+  -- Every key, whatever the op: a consumer tells "no body" from "a renderer
+  -- that forgot the body" by reading.
+  it "has the same keys whichever op the letter carries" $ do
+    repo <- aKey ; author <- aKey ; other <- aKey
+    let thr = mh "thread"
+        coords = PRCoords Nothing "r" "tip" "main" "base" Nothing
+        ops = [ AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1
+              , AComment thr Nothing (Just "b") Nothing 1
+              , ARevise thr coords 1, ASet thr "a" "v" 1
+              , AClose thr Nothing 1, AReopen thr Nothing 1
+              , AMerge thr "c" "i" 1, ARedact repo (mh "e") 1
+              , ADelegate repo other 1, ARevoke repo other 1 ]
+        keysOf v = case v of { Object o -> Just (List.sort (KM.keys o)) ; _ -> Nothing }
+        unreadable = keysOf (doc (Shown (LetterView (mh "m") Nothing (Left NotForUs) Nothing [])
+                                        [] 0 Nothing Nothing mempty))
+    for_ ops $ \ac ->
+      keysOf (doc (letter author ac FoldsToCanon)) `shouldBe` unreadable
+
+  it "names a comment's thread, and its number once canon is asked" $ do
+    repo <- aKey ; author <- aKey
+    let thr = mh "thread"
+        sw = letter author (AComment thr (Just (mh "r")) (Just "+1") Nothing 5) FoldsToCanon
+    at ["subject","thread"] (doc sw) `shouldBe` Just (str (show (pretty thr)))
+    at ["subject","number"] (doc sw) `shouldBe` Just Null
+    at ["subject","in_canon"] (doc sw) `shouldBe` Just Null
+    at ["reply_to"] (doc sw) `shouldBe` Just (str (show (pretty (mh "r"))))
+    let asked' = asked repo [(thr, Just 7)] sw
+    at ["subject","number"] (doc asked') `shouldBe` Just (Number 7)
+    at ["subject","in_canon"] (doc asked') `shouldBe` Just (Bool True)
+    verdict asked' `shouldBe` Just "would_fold"
+    at ["triage","reason"] (doc asked') `shouldBe` Just Null
+
+  -- The thread an open starts is its own event-id.
+  it "names the thread an open would start" $ do
+    repo <- aKey ; author <- aKey
+    let sw = letter author (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5) FoldsToCanon
+    at ["subject","thread"] (doc sw) `shouldBe` Just (str (show (pretty (mh "e"))))
+
+  describe "the verdict" $ do
+
+    it "would fold, with nothing asked, and says nothing was asked" $ do
+      repo <- aKey ; author <- aKey
+      let sw = letter author (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5) FoldsToCanon
+      verdict sw `shouldBe` Just "would_fold"
+      at ["triage","disposition"] (doc sw) `shouldBe` Just "folds"
+      at ["triage","deny_list_applied"] (doc sw) `shouldBe` Just (Bool False)
+      at ["triage","canon_consulted"] (doc sw) `shouldBe` Just (Bool False)
+      at ["folded"] (doc sw) `shouldBe` Just Null
+      at ["repo"] (doc sw) `shouldBe` Just Null
+
+    it "is already_folded when canon holds the letter" $ do
+      repo <- aKey ; author <- aKey
+      let sw = (asked repo [] (letter author (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5)
+                                              FoldsToCanon)) { swFolded = Just True }
+      verdict sw `shouldBe` Just "already_folded"
+      code sw `shouldBe` Just "already_in_canon"
+      at ["folded"] (doc sw) `shouldBe` Just (Bool True)
+
+    it "refuses a request and an owner-only op, with a code each" $ do
+      author <- aKey ; repo <- aKey
+      let thr = mh "thread"
+          req = letter author (AClose thr Nothing 5) RequestOnly
+          own = letter author (ARedact repo (mh "x") 5) OwnerNative
+      (verdict req, code req) `shouldBe` (Just "refused", Just "request_only")
+      (verdict own, code own) `shouldBe` (Just "refused", Just "owner_native")
+
+    it "refuses an open written for another repository, once one is named" $ do
+      repo <- aKey ; elsewhere <- aKey ; author <- aKey
+      let sw = letter author (AOpen elsewhere HubIssue "t" [] Nothing Nothing Nothing 5) FoldsToCanon
+      verdict sw `shouldBe` Just "would_fold"
+      code (asked repo [] sw) `shouldBe` Just "wrong_repo"
+
+    it "refuses a reply to a thread canon does not hold, once canon is asked" $ do
+      repo <- aKey ; author <- aKey
+      let sw = letter author (AComment (mh "nowhere") Nothing (Just "b") Nothing 5) FoldsToCanon
+      verdict sw `shouldBe` Just "would_fold"
+      code (asked repo [(mh "elsewhere", Just 1)] sw) `shouldBe` Just "unknown_thread"
+      at ["subject","in_canon"] (doc (asked repo [] sw)) `shouldBe` Just (Bool False)
+
+    it "is pending while an attachment is not here, and says which" $ do
+      repo <- aKey ; author <- aKey
+      let ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5
+          sw = (letter author ac FoldsToCanon)
+                 { swParts = [ (mh "a", Right (PartFacts 1024 True))
+                             , (mh "b", Right (PartFacts 7 False))
+                             , (mh "c", Left PartNotFetchedYet) ] }
+          Just (Array ps) = at ["attachments"] (doc sw)
+      verdict sw `shouldBe` Just "pending"
+      code sw `shouldBe` Just "part_not_fetched"
+      [ (at ["size"] p, at ["here"] p, at ["trouble","code"] p) | p <- toList ps ]
+        `shouldBe` [ (Just (Number 1024), Just (Bool True), Nothing)
+                   , (Just (Number 7), Just (Bool False), Nothing)
+                   , (Just Null, Just (Bool False), Just "not_fetched") ]
+
+    it "refuses a letter naming more parts than an accept walks" $ do
+      repo <- aKey ; author <- aKey
+      let ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing 5
+          sw = (letter author ac FoldsToCanon) { swPartsUnmeasured = 3 }
+      code sw `shouldBe` Just "too_many_parts"
+      at ["attachments_unmeasured"] (doc sw) `shouldBe` Just (Number 3)
+
+    it "is unreadable with the reason as a code, and keeps the envelope" $ do
+      author <- aKey
+      let sw = Shown (LetterView (mh "m") (Just author) (Left NotForUs) Nothing [])
+                     [] 0 Nothing Nothing mempty
+      verdict sw `shouldBe` Just "unreadable"
+      code sw `shouldBe` Just "not_for_us"
+      at ["unreadable","code"] (doc sw) `shouldBe` Just "not_for_us"
+      at ["envelope"] (doc sw) `shouldBe` Just (str (b58 author))
+      at ["author"] (doc sw) `shouldBe` Just Null
+      at ["triage","disposition"] (doc sw) `shouldBe` Just Null
+
+    -- A ban arrives as a letter that did not open, and is a refusal rather
+    -- than a fault: the letter is fine, its author is not welcome.
+    it "refuses a deny-listed author rather than calling the letter unreadable" $ do
+      author <- aKey
+      let sw = Shown (LetterView (mh "m") (Just author) (Left (BadLetterHere AuthorDenied))
+                                 Nothing []) [] 0 Nothing Nothing mempty
+      (verdict sw, code sw) `shouldBe` (Just "refused", Just "author_denied")
+
+  describe "arguments" $
+    it "reads --json" $ do
+      mbox <- aKey
+      let h = mh "a message"
+      showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h), "--json"])
+        `shouldBe` Just (ShowArgs mbox h Nothing True)
+      showArgs (argv ["--mailbox", b58 mbox, "--message", show (pretty h), "--json", "yes"])
+        `shouldBe` Nothing
+
+-- A path into a document.
+at :: [Text.Text] -> Value -> Maybe Value
+at [] v = Just v
+at (k:ks) (Object o) = KM.lookup (Key.fromText k) o >>= at ks
+at _ _ = Nothing
+
+str :: String -> Value
+str = String . Text.pack
+
+renderBytes :: Value -> LBS.ByteString
+renderBytes = renderDocument letterOrder

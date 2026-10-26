@@ -6,6 +6,8 @@ module HBS2.Peer.Proto.Mailbox.Types
   , MailboxType(..)
   , MailBoxStatusPayload(..)
   , MailboxServiceError(..)
+  , MailboxPending(..)
+  , mailboxIdle
   , Recipient
   , Sender
   , PolicyVersion
@@ -346,5 +348,46 @@ data MailboxServiceError =
 
 instance Serialise MailboxServiceError
 instance Exception MailboxServiceError
+
+-- | What this peer is doing about one mailbox it holds, right now.
+--
+-- WHY IT EXISTS. The peer writes a mailbox ref only when a merge lands, so a
+-- mailbox it holds and has no ref for is either empty or on its way, and the
+-- ref alone cannot say which: hbs2-hub's inbox waited twenty seconds on every
+-- mailbox nothing had been sent to and then had to say it could not tell. The
+-- peer CAN tell whether anything for the mailbox is in its own pipeline, and
+-- that is this answer. No ref and nothing in flight is an empty copy that
+-- nothing is filling.
+--
+-- What it does NOT know is whether another peer holds letters this one has not
+-- heard of: a fetch is a gossip whose answers arrive when they arrive, and only
+-- then does a download show up here. A reader that has just asked for a fetch
+-- has to give the answers a moment before believing an idle reply.
+--
+-- Local and never gossiped, so it is not part of the protocol between peers.
+data MailboxPending =
+  MailboxPending
+  { -- | Copies of the mailbox other peers announced that are being fetched or
+    -- walked, one per announced root.
+    mpDownloads :: Int
+    -- | Letters or delete entries for it somewhere between arrival and the
+    -- ref: in the input queue, in the batch the drain is processing, waiting in
+    -- the merge queue, or being merged.
+  , mpIngest    :: Bool
+  }
+  deriving stock (Eq,Show,Generic)
+
+instance Serialise MailboxPending
+
+-- | Nothing in flight for the mailbox at all.
+mailboxIdle :: MailboxPending -> Bool
+mailboxIdle MailboxPending{..} = mpDownloads == 0 && not mpIngest
+
+instance Pretty MailboxPending where
+  pretty p@MailboxPending{..}
+    | mailboxIdle p = "idle"
+    | otherwise = hsep $
+           [ "downloading" <+> pretty mpDownloads | mpDownloads > 0 ]
+        <> [ "ingesting" | mpIngest ]
 
 

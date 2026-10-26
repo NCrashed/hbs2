@@ -133,6 +133,16 @@ data Ingress m = Ingress
   , igFetch    :: HubKey -> m ()
     -- | The root of the peer's copy of the mailbox tree, right now.
   , igRoot     :: HubKey -> m (Maybe HashRef)
+    -- | Whether the peer has nothing in flight for the mailbox: no copy from
+    -- another peer being downloaded, no letter between arrival and the ref.
+    -- 'Nothing' when the peer cannot say, which is every peer built before it
+    -- could ('RpcMailboxPending' is new), and the reader then knows what it
+    -- knew before.
+    --
+    -- The one fact that tells "no root" apart: the peer writes a mailbox ref
+    -- only when a merge lands, so a mailbox with no ref is empty or on its way,
+    -- and only the peer knows which. See 'awaitMailbox'.
+  , igIdle     :: HubKey -> m (Maybe Bool)
     -- | Wait. An effect on the outside world like the others, and here for the
     -- same reason: with 'pause' written into the loop, the one test that proves
     -- the wait is bounded had to actually wait, which put twenty seconds into a
@@ -308,7 +318,8 @@ data InboxRead = InboxRead
     -- mailbox in the time allowed, and a mailbox with nothing in it and a
     -- mailbox still downloading look exactly alike from here (see
     -- 'awaitMailbox'). An empty inbox is therefore only believable when this is
-    -- 'True'.
+    -- 'True'. With no root, 'True' is the peer saying it has nothing in flight
+    -- for the mailbox ('igIdle'), so an empty mailbox gets there in a round.
   , irSettled :: Bool
     -- | How many live messages were left unopened because 'maxInboxLetters' was
     -- reached. Zero for every ordinary read.
@@ -500,8 +511,29 @@ awaitMailbox ig mbox = do
         -- The pause is BEFORE the next look and not after the last one: waiting
         -- on the final round buys an observation nobody makes, and it is 2.5 s
         -- of a wait a person is watching.
-        Nothing | n <= 1    -> pure (Nothing, False)
-                | otherwise -> igPause ig fetchRound >> go (n - 1) Nothing
+        --
+        -- EXCEPT WHEN THE PEER SAYS IT IS IDLE. Nothing local tells the two
+        -- apart from the ref, but the peer knows whether anything for this
+        -- mailbox is in its pipeline: a copy another peer announced and that is
+        -- downloading, a letter in its input queue or its merge. None of that
+        -- and no ref is a mailbox nothing was ever merged into and nothing is
+        -- filling, which is EMPTY, and is said as settled after one round
+        -- instead of twenty seconds of "cannot tell".
+        --
+        -- Not on the first look. That one is taken straight after the fetch,
+        -- and a copy held by another peer shows up here as a download only
+        -- once that peer has answered the fetch's gossip: idle at that moment
+        -- is the peer not having heard back yet. One round later it has had the
+        -- time every other settled answer here is given.
+        --
+        -- 'Nothing' from the peer (one built before it could say) keeps the old
+        -- wait and the old honest answer.
+        Nothing -> do
+          idle <- if n < maxFetchRounds then igIdle ig mbox else pure Nothing
+          case idle of
+            Just True        -> pure (Nothing, True)
+            _ | n <= 1       -> pure (Nothing, False)
+              | otherwise    -> igPause ig fetchRound >> go (n - 1) Nothing
         -- Unchanged across a round, and not the first look, since @seen@ starts
         -- as Nothing and this branch has a root: as settled as a local reader
         -- can establish.

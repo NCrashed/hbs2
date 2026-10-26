@@ -236,6 +236,22 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
                                      , Message s
                                      , MessageContent s )
   , inMessageMergeQueue   :: TVar (HashMap (MailboxRefKey s) (HashSet HashRef))
+    -- | The three below say which mailboxes have letters between arrival and
+    -- the ref, for 'mailboxPending'. Each stage marks the next one BEFORE it
+    -- lets go of its own mark, in one transaction where it can, so that a
+    -- letter is never in none of them on its way: a gap is an empty mailbox
+    -- reported while its first letter is half way in, which is the one answer
+    -- 'mailboxPending' exists to make impossible.
+    --
+    -- Recipients of what is in 'inMessageQueue'. Moved to the next set by the
+    -- transaction that flushes the queue.
+  , inMessageQueueFor     :: TVar (HashSet (MailboxRefKey s))
+    -- | Recipients of the batch the drain is processing, until it is done:
+    -- by then every accepted letter is in 'inMessageMergeQueue'.
+  , inMessageBatchFor     :: TVar (HashSet (MailboxRefKey s))
+    -- | Mailboxes the merge poll has taken entries for and not yet written
+    -- the ref of. Marked in the transaction that takes them.
+  , inMessageMerging      :: TVar (HashSet (MailboxRefKey s))
   , inPolicyDownloadQ     :: TVar (HashMap HashRef (PolicyDownload s))
   , inMailboxDownloadQ    :: TVar (HashMap HashRef (MailboxDownload s))
   , inMessageQueueInNum   :: TVar Int
@@ -412,6 +428,10 @@ instance (s ~ HBS2Basic, e ~ L4Proto, s ~ Encryption e) => IsMailboxProtoAdapter
               pure (Left why)
             Right () -> do
               writeTBQueue inMessageQueue (peer, origin, m, c)
+              -- In the same transaction as the write, so nothing can see the
+              -- letter queued and its mailbox not marked.
+              modifyTVar   inMessageQueueFor
+                             (HS.union (HS.fromList (fmap (MailboxRefKey @s) rcpts)))
               modifyTVar   inMessageQueueInNum succ
               writeTVar    inMessageQueueSeen
                              (HM.insertWith (<>) h mine inflight)
@@ -928,6 +948,32 @@ instance ( s ~ Encryption e, e ~ L4Proto
     atomically (modifyTVar mpwFetchQ (HS.insert ref))
     okay ()
 
+  -- One transaction over every stage, so that a letter moving from one to the
+  -- next is seen in one of them: each stage marks the next before it unmarks
+  -- itself (see 'inMessageQueueFor'), and a read split across two
+  -- transactions could fall between the two.
+  mailboxPending MailboxProtoWorker{..} ref = do
+
+    flip runContT pure do
+
+      mdbe <- readTVarIO mailboxDB
+
+      dbe <- ContT $ maybe1 mdbe (pure $ Left (MailboxOperationError "database not ready"))
+
+      t <- getMailboxType_ dbe ref
+
+      void $ ContT $ maybe1 t (pure $ Right Nothing)
+
+      atomically do
+        downs <- readTVar inMailboxDownloadQ
+                   <&> length . filter ((== ref) . mailboxRef) . HM.elems
+        merge <- readTVar inMessageMergeQueue
+                   <&> maybe False (not . HS.null) . HM.lookup ref
+        marks <- sequence [ readTVar inMessageQueueFor
+                          , readTVar inMessageBatchFor
+                          , readTVar inMessageMerging ]
+        pure $ Right $ Just $ MailboxPending downs (merge || any (HS.member ref) marks)
+
 startDownloadStuff :: forall s e m . (ForMailbox s, s ~ Encryption e, MyPeer e, MonadIO m)
               => MailboxProtoWorker s e
               -> HashRef
@@ -1077,6 +1123,9 @@ createMailboxProtoWorker pc pe sto = do
     -- a bound that drifts.
     <*> newTBQueueIO (fromIntegral inQueueDepth)
     <*> newTVarIO mempty            -- inMessageMergeQueue
+    <*> newTVarIO mempty            -- inMessageQueueFor
+    <*> newTVarIO mempty            -- inMessageBatchFor
+    <*> newTVarIO mempty            -- inMessageMerging
     <*> newTVarIO mempty            -- inPolicyDownloadQ
     <*> newTVarIO mempty            -- inMailboxDownloadQ
     <*> newTVarIO 0
@@ -1255,8 +1304,15 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
           -- counter that has already drifted, which is the property an
           -- increment can never have.
           writeTVar inMessageQueueInNum 0
+          -- The batch takes over the marks of the queue it was flushed from,
+          -- here and not a statement later: see 'inMessageQueueFor'.
+          readTVar inMessageQueueFor >>= writeTVar inMessageBatchFor
+          writeTVar inMessageQueueFor mempty
           pure xs
-        for_ mess $ \(peer, origin, m, s) -> handling m do
+        -- Cleared when the batch is done, by which time every letter in it
+        -- that was accepted is in the merge queue, which marks it from then on.
+        flip finally (atomically (writeTVar inMessageBatchFor mempty)) $
+         for_ mess $ \(peer, origin, m, s) -> handling m do
 
           -- TODO: process-with-policy
 
@@ -1419,7 +1475,12 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       let mboxes = readTVarIO inMessageMergeQueue
                     <&> fmap (,2) . HM.keys . HM.filter ( not . HS.null )
 
-      polling (Polling 2 5) mboxes $ \r -> void $ runMaybeT do
+      -- The mark is put on in the transaction that takes the entries and comes
+      -- off once the ref is written, or once this gives up: see
+      -- 'inMessageMerging'.
+      polling (Polling 2 5) mboxes $ \r ->
+       flip finally (atomically (modifyTVar inMessageMerging (HS.delete r))) $
+        void $ runMaybeT do
         debug $ yellow "mailbox: merge-poll" <+> pretty r
 
         -- NOTE: reliability
@@ -1433,6 +1494,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                    n <- readTVar inMessageMergeQueue
                             <&>  fromMaybe mempty . HM.lookup r
                    modifyTVar inMessageMergeQueue  (HM.delete r)
+                   modifyTVar inMessageMerging (HS.insert r)
                    pure n
 
         wipTx <- newTVarIO HS.empty

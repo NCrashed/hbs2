@@ -518,6 +518,16 @@ queueJson =
       out `shouldSatisfy` isInfixOf "\"unreadable\":\"not fetched yet\""
       out `shouldSatisfy` (not . isInfixOf "\"op\"")
 
+    -- The author's own clock, which nothing bounds, clamped at the ceiling
+    -- the thread document clamps it at: past 2^53 a reader holding doubles
+    -- gets a different number back.
+    it "clamps the author's clock the way the thread document does" $ do
+      repo <- aKey ; author <- aKey
+      let ac = AOpen repo HubIssue "t" [] Nothing Nothing Nothing maxBound
+          out = render empty' { irLetters =
+                  [ view (mh "m") (Just repo) (Right (author, ac, FoldsToCanon)) ] }
+      out `shouldSatisfy` isInfixOf ("\"declared_at\":" <> show maxFoldedTs)
+
 -- | @hub inbox --follow@: what a follower prints, read after read.
 following :: Spec
 following = do

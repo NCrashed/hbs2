@@ -21,6 +21,7 @@ import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
+import HBS2.Hub.CLI.Mcp
 import HBS2.Hub.CLI.Own
 import HBS2.Hub.CLI.Policy
 import HBS2.Hub.CLI.Pr
@@ -58,6 +59,7 @@ hubEntries :: forall c m . ( IsContext c
                            , Exception (BadFormException c)
                            ) => MakeDictM c m ()
 hubEntries = do
+  mcpEntries
   inboxEntries
   acceptEntries
   commentEntries

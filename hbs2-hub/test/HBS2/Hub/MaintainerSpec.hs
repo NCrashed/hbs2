@@ -16,7 +16,13 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 
 import Data.Config.Suckless
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable (toList)
 import Data.HashSet qualified as HS
+import Data.List qualified as List
+import Data.Text qualified as Text
 import Data.List (isInfixOf)
 import Data.Word (Word64)
 import Prettyprinter (Doc,pretty)
@@ -207,3 +213,33 @@ spec = do
       bob   <- fst <$> kp
       pointless Delegate owner bob (HS.fromList [owner]) `shouldBe` Nothing
       pointless Revoke owner bob (HS.fromList [owner, bob]) `shouldBe` Nothing
+
+  describe "PEP-21 maintainers: list --json" $ do
+
+    it "is a document of the same set, the owner marked" $ do
+      owner <- kp
+      bob   <- kp
+      let repo = fst owner
+          fr = foldEvents repo [ mkEvent owner owner (ADelegate repo (fst bob) 1000)
+                                   (canonOf repo 1) ]
+          v = maintainersContract repo fr
+          ms = case jat ["maintainers"] v of { Just (Aeson.Array xs) -> toList xs ; _ -> [] }
+          pairs' = [ (jat ["key"] m, jat ["owner"] m) | m <- ms ]
+          s k = Aeson.String (Text.pack (b58 k))
+      jat ["document"] v `shouldBe` Just (Aeson.String "maintainers")
+      jat ["repo"] v `shouldBe` Just (s repo)
+      List.sort pairs' `shouldBe` List.sort [ (Just (s repo), Just (Aeson.Bool True))
+                                            , (Just (s (fst bob)), Just (Aeson.Bool False)) ]
+      -- The order the text list prints, which is the base58 order.
+      fmap fst pairs' `shouldBe` List.sort (fmap fst pairs')
+
+    it "reads --json" $ do
+      owner <- fst <$> kp
+      maintainerListArgs (argv ["--repo", b58 owner]) `shouldBe` Just (owner, False)
+      maintainerListArgs (argv ["--repo", b58 owner, "--json"]) `shouldBe` Just (owner, True)
+
+-- A path into a document.
+jat :: [Text.Text] -> Aeson.Value -> Maybe Aeson.Value
+jat [] v = Just v
+jat (k:ks) (Aeson.Object o) = KM.lookup (Key.fromText k) o >>= jat ks
+jat _ _ = Nothing

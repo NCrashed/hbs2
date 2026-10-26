@@ -240,8 +240,17 @@ hbs2-hub inbox --mailbox <mailbox-key> --repo <repo-key>
 
 Read-only. It waits for your peer's copy of the mailbox to settle, opens
 every message you hold a key for, and reports what each asks for.
-Nothing is folded, minted or deleted. Expect it to take a few seconds:
-an empty answer is only believable after the wait.
+Nothing is folded, minted or deleted. Expect it to take a few seconds.
+
+A mailbox nothing has been sent to yet answers in one round (about 2.5
+s) with an empty list: your peer has merged nothing into it and has
+nothing for it in flight, and says so. While a copy is still downloading
+from another peer, or a letter is between arrival and the mailbox, the
+wait runs longer, and an empty answer at its end says on stderr that it
+could not tell empty from still arriving. A peer older than this hub
+cannot say whether it is busy, so with one every empty mailbox gets the
+long wait and that note. `hbs2-peer mailbox pending <mailbox-key>` shows
+what the peer has in flight.
 
 One row per letter: the message, the envelope key, the author, what the
 letter asks for, and the subject when it opens something. The
@@ -279,6 +288,10 @@ One letter in full, body included:
 hbs2-hub inbox show --mailbox <mailbox-key> --message <message-hash>
 ```
 
+A program reading letters in a loop adds `--json` and gets the body, the
+attachments and a verdict as one object; see "For a program rather than
+a person" below.
+
 Folding it into canon is the step that turns a request into the record,
 and it cannot be taken back: an event in canon is in every clone that
 ever fetches it.
@@ -287,6 +300,10 @@ ever fetches it.
 hbs2-hub inbox accept --mailbox <mailbox-key> --repo <repo-key> \
                       --message <message-hash>
 ```
+
+The repository key signs it unless you name another with `--as` or a
+default; a delegate should read
+[Signing as a delegate](#signing-as-a-delegate) first.
 
 A letter that ASKS for something -- close this, reopen that, set a
 label -- cannot be folded as the sender's own event: those are
@@ -328,8 +345,21 @@ hbs2-hub issue open   --repo <repo-key> --title "the tests hang on aarch64"
 hbs2-hub issue close  --repo <repo-key> --number 7 --note "fixed in 1.2"
 hbs2-hub issue label  --repo <repo-key> --number 7 --label bug --label aarch64
 hbs2-hub issue assign --repo <repo-key> --number 7 --to <key>
+hbs2-hub issue reply  --repo <repo-key> --number 7 --body "can you try 1.2?"
 hbs2-hub redact       --repo <repo-key> --event <event-id>
 ```
+
+`issue reply` (and `pr reply`, the same verb) is how a maintainer
+answers in a thread. `issue comment` is the contributor's path: it sends
+a letter to the repository's mailbox, and a maintainer using it would
+then have to find that letter in `inbox` and accept it. `reply` writes
+the comment onto canon at once, signed by the repository key or by a
+delegate from `hbs2-hub maintainer list`, chosen by `--as` or its default
+(see [Signing as a delegate](#signing-as-a-delegate)). Any other key is
+refused before anything is signed. The thread is named by `--number` or
+by `--thread <thread-id>`, `--body -` reads stdin, and `--reply-to
+<event-id>` says which event it answers. Readers show it like any other
+comment. It has no origin, since no letter asked for it.
 
 `redact` is display-level and PEP-19 says so: the bytes stay in every
 clone, readers stop showing the body. It answers a mistake or abuse, not
@@ -367,7 +397,8 @@ hbs2-hub status --repo <repo-key> [--remote <name>]
 ```
 
 Six facts, none of which needs a decision from you: the repository,
-whether this machine can sign for it, what canon here holds, whether
+which key a canon write would sign with and whether this machine can
+(see [Signing as a delegate](#signing-as-a-delegate)), what canon here holds, whether
 that canon has reached each remote, which mailbox the repository
 declares and how many letters are in it. It pushes nothing; the
 publication check asks the remote and does not write to it.
@@ -437,6 +468,48 @@ key that is already a maintainer, revoking one that is not, and revoking
 the owner are all refused: each mints a well-formed event the fold
 admits, and the maintainer set afterwards is the one you started with,
 so the usual reason to run one of these is a key typed wrong.
+
+### Signing as a delegate
+
+Every verb that writes canon (`inbox accept`, `inbox honour`,
+`inbox reject` for its acknowledgement, `issue open|close|reopen|label|assign`,
+the same for `pr`, `pr merge`, `redact`) takes `--as <key>` to name the
+key that signs. Without it the key is chosen in this order:
+
+1. `--as <key>` on the command line;
+2. the environment variable `HBS2_HUB_AS`;
+3. `git config hbs2.hub.as` in the repository you are standing in, as git
+   resolves it (the clone's own config over the global one);
+4. the repository key.
+
+An empty value counts as unset. A value that is not a key is refused,
+not skipped: skipping it would sign with the repository key, which is
+the mistake the setting is there to prevent. An explicit `--as` does not
+read the other two, so a broken default never stands in its way.
+
+A delegate whose machine also holds the repository key wants step 3,
+set once per clone:
+
+```
+hbs2-hub maintainer use --repo <repo-key> --maintainer-key <your-key>
+```
+
+It checks that the key is the owner or a maintainer in canon here and
+that this machine can sign as it, then writes
+`git config --local hbs2.hub.as <your-key>`. `--clear` removes it. When
+a default picks the signer, the verb says so on stderr, and the report
+of a write ends with a `signed by` line naming the key and where it came
+from. `hbs2-hub status --repo <repo-key>` and
+`hbs2-hub whoami --repo <repo-key>` show which key would sign before you
+write anything, and `status` warns when that key is not a maintainer in
+canon here.
+
+An acknowledgement is sealed from the key that signed the event, so that
+key's keyring needs an encryption key as well as a signing key. When it
+has none, `inbox accept` folds the letter, says
+`no acknowledgement: the signer <key> has no encryption key`, and names
+the ways to sign as a key that has one. The event is in canon either
+way.
 
 ## Keeping the noise out
 
@@ -558,9 +631,225 @@ renderer needs no git. `diff.availability` is `available`, or
 `reconstructable` when the objects are gone but the bundle attachment
 that would rebuild them is still named by canon, or `unavailable`.
 
+The read verbs a triage loop uses take `--json` too, and print one
+document each under the same counter, told apart by `document`:
+
+```
+hbs2-hub inbox show --mailbox <mailbox-key> --message <hash> [--repo <key>] --json
+hbs2-hub inbox      --mailbox <mailbox-key> [--repo <key>] --json
+hbs2-hub log        <repo-key> [<number>] --json
+hbs2-hub maintainer list --repo <repo-key> --json
+hbs2-hub status     --repo <repo-key> --json
+hbs2-hub sent       [--repo <repo-key>] --json
+hbs2-hub updates    --mailbox <your-mailbox> --repo <repo-key> --json
+```
+
+| verb | `document` | from |
+|---|---|---|
+| `issue show`, `pr show` | `thread` | canon |
+| `log` | `log` | canon |
+| `maintainer list` | `maintainers` | canon |
+| `inbox` | `queue` | a mailbox read |
+| `inbox show` | `letter` | a mailbox read |
+| `updates` | `updates` | a mailbox read |
+| `status` | `status` | canon, the remotes, the peer |
+| `sent` | `sent` | this node's own log |
+
+Only the canon ones are the same bytes in every clone. The others are
+one node's view at one moment, with its keys and its deny-list, and two
+maintainers may get different answers without either being wrong. Notes
+still go to stderr, so stdout is one document; the exit codes are the
+same as without `--json`. Every key is always present, `null` when it
+does not apply. Times are milliseconds since the epoch. The
+mailbox-side documents spell an event and a thread `event` and
+`thread`, as the queue does; the canon-side ones say `event_id` and
+`thread_id`, as the thread document does.
+
+`status --json` answers the signing question the way the text report
+does: `signing` is whether this machine can sign as the key in `signer`,
+and `signer` names that key (the one a canon write without `--as` would
+use), its `source` (`env` for `HBS2_HUB_AS`, `git_config` for
+`hbs2.hub.as`, or `repo_key`), and whether it is a `maintainer` in canon
+here. A default that does not read leaves `key` null and says why in
+`error`; every write would refuse it.
+
+`inbox show --json` is the one to decide on. It carries the whole body,
+untruncated and unescaped (JSON escapes control characters itself), the
+attachments measured, and a verdict:
+
+```json
+{
+  "contract": 1,
+  "document": "letter",
+  "message": "5MTAgKgs...",
+  "envelope": "Gy3S18nJ...",
+  "event": "32of39gf...",
+  "repo": "7VM1rtxr...",
+  "unreadable": null,
+  "triage": {
+    "verdict": "already_folded",
+    "reason": { "code": "already_in_canon", "detail": "..." },
+    "disposition": "folds",
+    "deny_list_applied": true,
+    "canon_consulted": true
+  },
+  "folded": true,
+  "author": "Gy3S18nJ...",
+  "op": "comment",
+  "declared_at": 1793004741230,
+  "subject": { "thread": "7QcNZqwS...", "number": 1, "in_canon": true,
+               "target": null, "kind": null, "title": null },
+  "body": "the whole body",
+  "body_part": null,
+  "labels_requested": [],
+  "reply_to": null,
+  "pr": null,
+  "attr": null, "value": null, "merge_commit": null, "merged_into": null,
+  "redacts": null, "key": null,
+  "attachments": [],
+  "attachments_unmeasured": 0
+}
+```
+
+`triage.verdict` is one of:
+
+- `would_fold`: nothing this read can see stops an accept. `reason` is
+  null.
+- `pending`: an attachment is not here yet (`part_not_fetched`). Ask
+  again later.
+- `already_folded`: canon holds this letter (`already_in_canon`).
+- `refused`: an accept would refuse it. `reason.code` is
+  `request_only` (use `inbox honour`), `owner_native`, `author_denied`,
+  `wrong_repo`, `unknown_thread` or `too_many_parts`.
+- `unreadable`: the letter did not open. The code says why:
+  `not_fetched` is a wait, the rest (`not_for_us`, `bad_envelope_sig`,
+  `bad_inner_sig`, `unsupported_version` and so on) are not.
+
+The verdict is a preview. `inbox accept` runs the bridge's full check,
+which needs the signing key and asks more than a read can: whether the
+signer may bless, whether a revise comes from the thread's author,
+whether the fold would drop the payload. `wrong_repo`, `unknown_thread`
+and `already_folded` are only given when `--repo` was named, which is
+also what `deny_list_applied` and `canon_consulted` say.
+
 What is NOT there: an index document for list views and an activity
 document for a timeline. PEP-22 leaves both schemas open, so pinning them
 here would be inventing a contract rather than implementing one.
+
+## For an AI agent: the MCP server
+
+```
+hbs2-hub mcp --repo <repo-key>
+```
+
+is a [Model Context Protocol](https://modelcontextprotocol.io) server:
+JSON-RPC 2.0 on stdin and stdout, one message per line. An agent such as
+Claude Code starts it itself and gets the forge as typed tools with JSON
+schemas, so it does not have to compose command lines. You do not run it
+by hand.
+
+Registering it with Claude Code, from the clone the agent will work in:
+
+```
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key>
+```
+
+`--scope project` writes it into the project's `.mcp.json` instead, for
+everyone who works in that repository, and `-e HBS2_HUB_REPO=<repo-key>`
+passes a default through the environment rather than the command line.
+A maintainer who triages adds the mailbox and, for a delegate, the canon
+key; a contributor who comments adds the author key and sender sigil:
+
+```
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key> \
+    --mailbox <mailbox-key> --as <canon-key>
+claude mcp add hbs2-hub -- hbs2-hub mcp --repo <repo-key> \
+    --author <your-sign-key> --sender <your-sigil>
+claude mcp add hbs2-hub-ro -- hbs2-hub mcp --repo <repo-key> --read-only
+```
+
+Each of these is a default that a tool call may override, so a call names
+what differs and not the repository it has named every time. Each also
+reads from the environment (`HBS2_HUB_REPO`, `HBS2_HUB_MAILBOX`,
+`HBS2_HUB_AUTHOR`, `HBS2_HUB_SENDER`, `HBS2_HUB_REMOTE`, `HBS2_HUB_DIR`);
+a flag wins over the environment. A value that does not read as a key is
+refused at startup rather than ignored.
+
+The canon key is the exception. The server passes `--as` to a verb only
+when the call names one or the server was started with `--as`; otherwise
+the verb picks the signer as it does on a command line, from
+`HBS2_HUB_AS`, then `git config hbs2.hub.as` in `--dir`, then the
+repository key (see [Signing as a delegate](#signing-as-a-delegate)). A
+delegate can run `hbs2-hub maintainer use` once in the clone instead of
+passing `--as` to the server, and the agent and the command line then
+sign with the same key. The `status` tool says which key that is
+(`signer.key`, `signer.source`).
+
+The verbs run in `--dir`, by default the directory the client started
+the server in, which for Claude Code is the project. That has to be a
+clone with canon in it: see the `sync` tool.
+
+The tools:
+
+| Tool | Verb | |
+|---|---|---|
+| `status` | `status --json` | where this clone stands, and which key would sign |
+| `whoami` | `whoami` | which keys this machine has (text) |
+| `issue_list`, `pr_list` | `issue list`, `pr list` | filters: `status`, `label` (text) |
+| `issue_show`, `pr_show` | `issue show --json`, `pr show --json` | the render contract, as structured content |
+| `log` | `log --json` | provenance per event, no text |
+| `verify` | `verify` | a finding is a result, not a tool error |
+| `inbox_list` | `inbox --json` | the queue document; `after`, `limit` |
+| `inbox_show` | `inbox show --json` | one letter, body included, with a triage verdict |
+| `inbox_wait` | `inbox --follow --json` | blocks until a letter arrives |
+| `inbox_accept` | `inbox accept` | writes canon |
+| `inbox_honour` | `inbox honour` | writes canon |
+| `inbox_reject` | `inbox reject` | writes the mailbox |
+| `issue_open`, `issue_close`, `issue_label` | `issue open`, `close`, `label` | write canon; `kind: pr` for a pull request |
+| `issue_reply` | `issue reply` | writes a maintainer's comment onto canon; `kind: pr` for a pull request |
+| `issue_comment` | `issue comment` | sends a letter |
+| `publish` | `publish` | pushes canon to a remote |
+| `sync` | `sync` | fetches into this clone |
+
+Each tool runs one verb of the same `hbs2-hub` binary, as a child
+process, and returns what it printed, its exit code and what the code
+means (the table `--codes` prints). The tool layer decides nothing the
+verb does not: the checks a call relies on are the verb's own, and so is
+the refusal of an argument the tool does not take.
+
+`status`, `log`, `issue_show`, `pr_show`, `inbox_list` and `inbox_show`
+run their verb with `--json` and return the document (see [For a program
+rather than a person](#for-a-program-rather-than-a-person)) as structured
+content as well as text. `whoami`, `issue_list` and `pr_list` return
+text: those verbs print no document yet.
+
+**Writes.** Every tool that writes takes `dry_run`, and its description
+says that canon is public and permanent once published. `inbox_accept`,
+`inbox_honour`, `issue_open`, `issue_close`, `issue_label` and
+`issue_reply` pass it to the verb's own `--dry-run`, which runs every
+check and prints the event without signing anything. `inbox_reject`,
+`issue_comment`, `publish` and `sync` have no dry run of their own; for
+them `dry_run` shows the command that would run and runs a read-only
+look instead (`inbox show`, `whoami`, `status`). `--read-only` offers
+none of the writing tools at all.
+
+**Waiting for letters.** `inbox_wait` runs the follower described under
+[Triage](#triage) and returns at the first read that holds a letter the
+caller has not seen, or at `timeout_seconds` (300 by default, at most an
+hour). Pass `known`, the message hashes you have already seen: a letter
+not among them is returned at once, so nothing that arrived between two
+calls is missed. Each answer carries `seen` for the next call. A client
+that sends a progress token gets a progress notification every fifteen
+seconds while it waits. It is a tool and not a server notification
+because a client shows a tool's result to the model and, today, does not
+show it a notification; and because the follower already knows when the
+mailbox moved.
+
+A read can be cancelled, and the verb under it is stopped; a write runs
+to its end, since half an accept is worse than either outcome. Every
+verb is stopped after `--timeout` seconds (600 by default). When the
+client goes away, reads in flight are stopped and writes are left to
+finish.
 
 ## Scripting
 
