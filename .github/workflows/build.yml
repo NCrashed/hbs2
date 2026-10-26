@@ -16,6 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The image ships Command Line Tools 27 next to Xcode 26.6, and the link
+      # step ended up with the CLT's SDK and Xcode's ld, which cannot read the
+      # SDK's .tbd stubs ("unknown architecture arm64e.x1"). Pin both halves to
+      # the default Xcode, before ghcup configures GHC against them.
+      - name: Pin the macOS toolchain to one Xcode
+        if: runner.os == 'macOS'
+        run: |
+          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+          xcrun ld -v 2>&1 | head -1
+
       - name: Set up Haskell toolchain
         uses: haskell-actions/setup@v2
         id: setup
