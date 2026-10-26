@@ -61,6 +61,9 @@ stub = Ingress
   , igStatus  = const (pure (Just ()))
   , igFetch   = const (pure ())
   , igRoot    = const (pure Nothing)
+    -- A peer that cannot say whether it is busy, which is every peer built
+    -- before it could: the tests below that are about the old wait keep it.
+  , igIdle    = const (pure Nothing)
   , igPause   = const (pure ())
   , igAllowed = const True
   , igSecret  = ReadMessageServices (const (pure Nothing))
@@ -158,6 +161,74 @@ spec1 = do
       settled `shouldBe` False
       -- and it waited the full bound before saying so, rather than one round
       readIORef calls `shouldReturn` maxFetchRounds
+
+    it "calls a mailbox empty in one round when the peer has nothing in flight for it" $ do
+      k <- aKey
+      -- The case from real use: an owner creates the mailbox, nothing was ever
+      -- sent, and every read waited twenty seconds to say it could not tell.
+      -- The peer can: no ref and nothing in its pipeline is a mailbox nothing
+      -- was merged into and nothing is filling.
+      roots <- newIORef (0 :: Int)
+      pauses <- newIORef (0 :: Int)
+      let ig = stub { igRoot  = const (liftIO (modifyIORef' roots succ >> pure Nothing))
+                    , igIdle  = const (pure (Just True))
+                    , igPause = const (modifyIORef' pauses succ) }
+      (root, settled) <- awaitMailbox ig k
+      root `shouldBe` Nothing
+      settled `shouldBe` True
+      -- one pause and two looks, the cost of a mailbox that is here
+      readIORef roots `shouldReturn` 2
+      readIORef pauses `shouldReturn` 1
+      -- and the read built on it is the empty, settled queue
+      r <- readInbox ig k
+      irLetters r `shouldBe` []
+      irSettled r `shouldBe` True
+
+    it "does not believe an idle peer on the look taken straight after the fetch" $ do
+      k <- aKey
+      -- A copy held by another peer shows up as a download only once that peer
+      -- has answered the fetch's gossip, so idle at that moment is the peer not
+      -- having heard back yet. The first look must not even ask.
+      asked <- newIORef (0 :: Int)
+      let ig = stub { igIdle = const (liftIO (modifyIORef' asked succ >> pure (Just True))) }
+      (_, settled) <- awaitMailbox ig k
+      settled `shouldBe` True
+      readIORef asked `shouldReturn` 1
+
+    it "keeps the honest wait while the peer is still fetching a copy" $ do
+      k <- aKey
+      -- The other half, and the reason the answer exists: a mailbox whose first
+      -- copy is downloading has no ref either. It must not come out empty.
+      calls <- newIORef (0 :: Int)
+      let ig = stub { igRoot = const (liftIO (modifyIORef' calls succ >> pure Nothing))
+                    , igIdle = const (pure (Just False)) }
+      (root, settled) <- awaitMailbox ig k
+      root `shouldBe` Nothing
+      settled `shouldBe` False
+      readIORef calls `shouldReturn` maxFetchRounds
+
+    it "settles as soon as a busy peer goes idle, and reads the root it left" $ do
+      k <- aKey
+      -- Busy, then idle with nothing merged: empty. Busy, then a root: the root
+      -- settles the ordinary way. The idle answer is only asked about while
+      -- there is no root at all.
+      idles <- newIORef [Just False, Just False, Just True]
+      let nextIdle = liftIO $ atomicModifyIORef' idles $ \case
+                       (x:xs) -> (xs, x)
+                       []     -> ([], Just True)
+      (root, settled) <- awaitMailbox stub { igIdle = const nextIdle } k
+      root `shouldBe` Nothing
+      settled `shouldBe` True
+      readIORef idles `shouldReturn` []
+
+      roots <- newIORef [Nothing, Nothing, Just (mh "r"), Just (mh "r")]
+      let nextRoot = liftIO $ atomicModifyIORef' roots $ \case
+                       (x:xs) -> (xs, x)
+                       []     -> ([], Just (mh "r"))
+      (root', settled') <- awaitMailbox stub { igRoot = const nextRoot
+                                             , igIdle = const (pure (Just False)) } k
+      root' `shouldBe` Just (mh "r")
+      settled' `shouldBe` True
 
     it "settles on a root that stops changing, on the second look" $ do
       k <- aKey

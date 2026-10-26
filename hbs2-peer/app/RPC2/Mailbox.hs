@@ -122,3 +122,10 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxGet where
              <&> fmap HashRef
 
 
+
+instance (ForMailboxRPC m) => HandleMethod m RpcMailboxPending where
+
+  handleMethod puk = do
+    AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
+    debug $ "rpc.RpcMailboxPending" <+> pretty (AsBase58 puk)
+    mailboxPending @HBS2Basic mbs (MailboxRefKey puk)

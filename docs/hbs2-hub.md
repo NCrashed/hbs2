@@ -237,8 +237,17 @@ hbs2-hub inbox --mailbox <mailbox-key> --repo <repo-key>
 
 Read-only. It waits for your peer's copy of the mailbox to settle, opens
 every message you hold a key for, and reports what each asks for.
-Nothing is folded, minted or deleted. Expect it to take a few seconds:
-an empty answer is only believable after the wait.
+Nothing is folded, minted or deleted. Expect it to take a few seconds.
+
+A mailbox nothing has been sent to yet answers in one round (about 2.5
+s) with an empty list: your peer has merged nothing into it and has
+nothing for it in flight, and says so. While a copy is still downloading
+from another peer, or a letter is between arrival and the mailbox, the
+wait runs longer, and an empty answer at its end says on stderr that it
+could not tell empty from still arriving. A peer older than this hub
+cannot say whether it is busy, so with one every empty mailbox gets the
+long wait and that note. `hbs2-peer mailbox pending <mailbox-key>` shows
+what the peer has in flight.
 
 One row per letter: the message, the envelope key, the author, what the
 letter asks for, and the subject when it opens something. The

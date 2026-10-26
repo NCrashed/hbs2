@@ -110,10 +110,14 @@ inboxEntries = do
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
              <> line
              <> line <> "The wait costs one round (about 2.5s) when the peer already"
-             <> line <> "has the mailbox, and up to seven more when it does not:"
-             <> line <> "the peer writes a mailbox ref only once a merge lands, so"
-             <> line <> "'no ref yet' and 'nothing in it' cannot be told apart from"
-             <> line <> "here, and an empty answer is only believable after the wait."
+             <> line <> "has the mailbox, and also when nothing was ever merged into"
+             <> line <> "it and the peer has nothing for it in flight: that mailbox"
+             <> line <> "is empty and the list is empty. The peer writes a mailbox"
+             <> line <> "ref only once a merge lands, so it is the peer that tells"
+             <> line <> "'empty' from 'still arriving'. While a copy is still"
+             <> line <> "downloading, and with a peer too old to say, the wait is up"
+             <> line <> "to seven more rounds and an empty answer then says it could"
+             <> line <> "not tell."
              <> line
              <> line <> "The peer must already hold this mailbox: it only asks the"
              <> line <> "network about mailboxes it has locally, so an arbitrary key"
@@ -472,11 +476,16 @@ inboxNotes listed r =
       -- from here, and the wait loop called the second look settled 2.5 seconds
       -- in. "Nothing is waiting" and "nothing arrived in twenty seconds" are
       -- different answers and only one of them is about the mailbox.
+      --
+      -- Rarer since the peer can say it is idle, which settles an empty
+      -- mailbox in one round: what is left is a peer that was still fetching
+      -- something for the mailbox, or one too old to say.
       | List.null (irLetters r) =
           [ "hub: the peer produced no copy of this mailbox within"
-              <+> pretty maxFetchRounds <+> "rounds. That is NOT the same as an"
-              <+> "empty mailbox: a mailbox with nothing in it and one still"
-              <+> "downloading look alike from here. Try again in a moment." ]
+              <+> pretty maxFetchRounds <+> "rounds, and it was still fetching"
+              <+> "one or is too old to say whether it was. That is NOT the same"
+              <+> "as an empty mailbox: an empty one answers in a round."
+              <+> "Try again in a moment." ]
       | otherwise =
           [ "hub: the peer's copy of this mailbox was still changing after"
               <+> pretty maxFetchRounds <+> "rounds, so more letters may follow."

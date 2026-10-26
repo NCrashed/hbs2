@@ -268,6 +268,32 @@
 
 ## Changed
 
+  - **`hbs2-hub inbox` on a mailbox nothing was ever sent to answers in a
+    round, and says it is empty.** An owner who created the hub mailbox, set
+    its policy and declared it in the repository got twenty seconds of waiting
+    and "the peer produced no copy of this mailbox within 8 rounds. That is NOT
+    the same as an empty mailbox". It was the honest answer from where the hub
+    stood: the peer writes a mailbox ref only when a merge lands, so no ref is
+    an empty mailbox or one whose first copy is still downloading, and the ref
+    cannot say which.
+
+    The peer can. A new RPC method, `RpcMailboxPending`, reports what it has in
+    flight for a mailbox it holds: copies other peers announced that are still
+    downloading, and letters anywhere between its input queue and the ref. The
+    stages hand a letter on by marking the next stage before unmarking their
+    own, so a letter on its way is never reported as nothing. No ref and an
+    idle peer is empty, and `hub inbox` settles on that one round after the
+    fetch (the round gives other peers time to answer it), with exit 0 and an
+    empty list; `--json` says `"settled": true`, and `--follow` prints its
+    first read at once. While something is in flight the old wait and the old
+    answer stand.
+
+    Appended to the mailbox API without a protocol bump: an older peer answers
+    "no such method" at once, and the hub then waits the way it did. `hbs2-peer
+    mailbox get` uses the same answer to tell the two kinds of "no ref" apart,
+    and `hbs2-peer mailbox pending KEY` prints it (`idle`, `downloading N`,
+    `ingesting`).
+
   - **`hbs2-peer mailbox create --key KEY hub` works as documented.** The
     `mailbox` subcommand hands its arguments to the mailbox command line, and
     optparse read `--key` as an option of `hbs2-peer` itself: "Invalid option

@@ -267,6 +267,17 @@ overRpc sto api = Ingress
   , igRoot   = \k ->
       callRpcWaitMay @RpcMailboxGet rpcTimeout api k
         >>= silent "the mailbox service"
+    -- NOT through 'silent', and that is the point of the field: 'Nothing' is
+    -- an answer here. A peer built before 'RpcMailboxPending' answers
+    -- ErrorMethodNotFound, which comes back as Nothing at once, and the reader
+    -- then waits the way it always did. A peer that has stopped answering is
+    -- caught by the 'igRoot' that comes next, which does go through 'silent'.
+    -- A mailbox the peer no longer holds is the status call's business, not
+    -- this one's, so it is not an answer either.
+  , igIdle   = \k ->
+      callRpcWaitMay @RpcMailboxPending rpcTimeout api k <&> \case
+        Just (Right (Just p)) -> Just (mailboxIdle p)
+        _                     -> Nothing
   , igPause  = pause
     -- No deny-list: PEP-21 policy lives in the repo manifest and this verb
     -- takes a mailbox key rather than a repo. Allowing everything is honest
