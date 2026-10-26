@@ -105,7 +105,7 @@ data McpConfig = McpConfig
   , mcDir      :: Maybe FilePath  -- ^ the clone the verbs run in; the server's own when Nothing
   , mcRepo     :: Maybe Text      -- ^ @--repo@
   , mcMailbox  :: Maybe Text      -- ^ @--mailbox@
-  , mcAs       :: Maybe Text      -- ^ @--as@, the canon key a maintainer signs with
+  , mcAs       :: Maybe Text      -- ^ @--as@, the canon key a maintainer signs with; only from the server's own --as
   , mcAuthor   :: Maybe Text      -- ^ @--author@, for letters
   , mcSender   :: Maybe Text      -- ^ @--sender@, the sigil letters go out under
   , mcRemote   :: Maybe Text      -- ^ @--remote@ for publish, sync and status
@@ -185,7 +185,7 @@ tools =
   , tAccept "inbox_accept" ["inbox","accept"] acceptDesc
   , tAccept "inbox_honour" ["inbox","honour"] honourDesc
   , tReject
-  , tIssueOpen, tIssueClose, tIssueLabel, tIssueComment
+  , tIssueOpen, tIssueClose, tIssueLabel, tIssueReply, tIssueComment
   , tPublish, tSync
   ]
 
@@ -244,7 +244,10 @@ propList n d = (n, object [ "type" .= ("array" :: Text)
 pRepo, pMailbox, pAs, pDry, pNumber, pThread, pKind, pMessage, pRemote :: (Text, Value)
 pRepo    = prop "repo" "Repository key (base58). Defaults to the server's --repo."
 pMailbox = prop "mailbox" "Ingress mailbox key (base58). Defaults to the server's --mailbox."
-pAs      = prop "as" "Canon key to sign with, for a delegate maintainer (base58). Defaults to the server's --as, then to the verb's own default."
+pAs      = prop "as" ("Canon key to sign with, for a delegate maintainer (base58). Defaults to the "
+                      <> "server's --as. Without either, the verb picks as it does on a command "
+                      <> "line: HBS2_HUB_AS, then git config hbs2.hub.as in the clone, then the "
+                      <> "repository key. The status tool says which key that is.")
 pDry     = propBool "dry_run" "Rehearse: run every check and show what would be written, without signing, writing or sending anything."
 pNumber  = propInt "number" "Thread number."
 pThread  = prop "thread" "Thread id (base58 hash), instead of number."
@@ -354,7 +357,12 @@ threadFlags as = do
     (Nothing, Nothing) -> Left "name the thread: number or thread"
     _                  -> Left "number and thread both given; pass one"
 
--- | The canon key, explicit or the server's. When neither, the verb picks.
+-- | The canon key, explicit or the server's. When neither, NO @--as@ at all:
+-- the verb then reads HBS2_HUB_AS and @git config hbs2.hub.as@ itself
+-- ("HBS2.Hub.CLI.Signer"), in the clone it runs in, and says which one picked
+-- the signer. Passing a default as @--as@ would hide that, and a server that
+-- read git config itself would read it in its own directory rather than the
+-- verb's.
 asFlag :: McpConfig -> Args -> Either Text [String]
 asFlag cfg as = flagM "as" <$> keyOr "as" (mcAs cfg) as
 
@@ -366,17 +374,20 @@ native dry r = RunVerb r { runArgv = runArgv r <> switch "dry-run" dry }
 tStatus :: Tool
 tStatus = Tool
   { toolName = "status", toolTitle = "Where this clone stands"
-  , toolDesc = "Six facts about the repository: whether this machine can sign for it, "
-      <> "what canon holds here, whether canon has reached each remote, which mailbox the "
-      <> "repository declares and how many letters wait in it. Read-only; pushes nothing."
-      <> defaultsNote
+  , toolDesc = "Where the repository stands, as the status JSON document: which key a canon "
+      <> "write without 'as' would sign with and where that came from (signer.key, "
+      <> "signer.source: env, git_config or repo_key), whether this machine can sign as it "
+      <> "(signing) and whether it is a maintainer, what canon holds here, whether canon has "
+      <> "reached each remote, which mailbox the repository declares and how many letters "
+      <> "wait in it. Read-only; pushes nothing." <> defaultsNote
   , toolProps = [pRepo, pRemote], toolRequired = []
   , toolAccess = Reads, toolOpenWorld = True, toolVerb = ["status"]
   , toolPlan = \cfg as -> do
       r <- repoOf cfg as
       rm <- optText "remote" as
-      pure $ RunVerb (Run (["status", flag "repo" r] <> flagM "remote" (rm `orElse` mcRemote cfg))
-                          Nothing AsText)
+      pure $ RunVerb (Run (["status", flag "repo" r] <> flagM "remote" (rm `orElse` mcRemote cfg)
+                             <> ["--json"])
+                          Nothing AsJson)
   }
 
 tWhoami :: Tool
@@ -384,7 +395,9 @@ tWhoami = Tool
   { toolName = "whoami", toolTitle = "Which keys this machine has"
   , toolDesc = "The signing keys this machine holds. With author and sender, checks that "
       <> "the sender sigil names the author key (a letter from a mismatched pair can never "
-      <> "be answered). With repo, says where a letter to that repository would go. "
+      <> "be answered). With repo, says where a letter to that repository would go, and "
+      <> "which key a canon write there without 'as' would sign with and where that came "
+      <> "from (HBS2_HUB_AS, git config hbs2.hub.as, or the repository key). "
       <> "Read-only; creates nothing." <> defaultsNote
   , toolProps = [ prop "author" "Author sign key (base58). Defaults to the server's --author."
                 , prop "sender" "Sender sigil hash (base58). Defaults to the server's --sender."
@@ -442,16 +455,19 @@ tShow noun = Tool
 tLog :: Tool
 tLog = Tool
   { toolName = "log", toolTitle = "Canon event log"
-  , toolDesc = "The surviving events of canon in order: seq, op, event id, author. With "
-      <> "number, one thread's events. Read-only and peerless." <> defaultsNote
+  , toolDesc = "The surviving events of canon in order, as the log JSON document: per event "
+      <> "seq, event_id, op, thread_id, number, author, canon_by, folded_at and origin. "
+      <> "Provenance only, no titles or bodies (issue_show has those). With number, one "
+      <> "thread's events. Read-only and peerless." <> defaultsNote
   , toolProps = [pRepo, propInt "number" "Only this thread's events."]
   , toolRequired = []
   , toolAccess = Reads, toolOpenWorld = False, toolVerb = ["log"]
   , toolPlan = \cfg as -> do
       r <- repoOf cfg as
       n <- optNat "number" as
-      pure $ RunVerb (Run (["log", flag "repo" r] <> flagM "number" (Text.pack . show <$> n))
-                          Nothing AsText)
+      pure $ RunVerb (Run (["log", flag "repo" r] <> flagM "number" (Text.pack . show <$> n)
+                             <> ["--json"])
+                          Nothing AsJson)
   }
 
 tVerify :: Tool
@@ -502,9 +518,12 @@ queueFlags cfg as = do
 tInboxShow :: Tool
 tInboxShow = Tool
   { toolName = "inbox_show", toolTitle = "One letter, whole"
-  , toolDesc = "Open one letter from the ingress mailbox and print what it asks for, title "
-      <> "and body included, and its attachments' sizes. With a repo, also whether the "
-      <> "deny-list allows it and whether canon already holds it. Read-only." <> defaultsNote
+  , toolDesc = "Open one letter from the ingress mailbox, as the letter JSON document: what "
+      <> "it asks for (op, subject), the whole body untruncated, its attachments measured, "
+      <> "and triage.verdict (would_fold, pending, already_folded, refused, unreadable) "
+      <> "with triage.reason.code. The verdict is a preview; inbox_accept still runs the "
+      <> "full check. With a repo, the deny-list and canon are consulted as well. "
+      <> "Read-only." <> defaultsNote
   , toolProps = [pMessage, pMailbox, pRepo], toolRequired = ["message"]
   , toolAccess = Reads, toolOpenWorld = True, toolVerb = ["inbox","show"]
   , toolPlan = \cfg as -> do
@@ -516,8 +535,9 @@ showRun cfg as = do
   h <- hashOr "message" Nothing as >>= needed "message" ""
   m <- mailboxOf cfg as
   r <- keyOr "repo" (mcRepo cfg) as
-  pure (Run (["inbox","show", flag "mailbox" m, flag "message" h] <> flagM "repo" r)
-            Nothing AsText)
+  pure (Run (["inbox","show", flag "mailbox" m, flag "message" h] <> flagM "repo" r
+               <> ["--json"])
+            Nothing AsJson)
 
 tInboxWait :: Tool
 tInboxWait = Tool
@@ -695,12 +715,41 @@ tIssueLabel = Tool
             Nothing AsText
   }
 
+tIssueReply :: Tool
+tIssueReply = Tool
+  { toolName = "issue_reply", toolTitle = "Reply in a thread, onto canon"
+  , toolDesc = "Comment in an issue (or, with kind: pr, a pull request) that is in canon, as "
+      <> "the repository owner or a maintainer, straight onto canon: no letter, no mailbox, "
+      <> "no inbox_accept. The signing key must be one that may bless canon; any other is "
+      <> "refused before anything is signed. The comment carries no origin. A contributor "
+      <> "who is not a maintainer uses issue_comment instead." <> canonIsForever <> defaultsNote
+  , toolProps = [ prop "body" "Comment text (Markdown)."
+                , pNumber, pThread, pKind, pRepo
+                , prop "reply_to" "Event id being answered (advisory)."
+                , pAs, pDry ]
+  , toolRequired = ["body"]
+  , toolAccess = Writes, toolOpenWorld = False, toolVerb = ["issue","reply"]
+  , toolPlan = \cfg as -> do
+      k <- kindOf as
+      body <- optText "body" as >>= needed "body" ""
+      when (Text.all isSpace body) $ Left "body is empty"
+      w <- threadFlags as
+      r <- repoOf cfg as
+      rt <- hashOr "reply_to" Nothing as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $
+        Run ([k, "reply", flag "repo" r] <> w <> ["--body=-"] <> flagM "reply-to" rt <> a)
+            (Just body) AsText
+  }
+
 tIssueComment :: Tool
 tIssueComment = Tool
   { toolName = "issue_comment", toolTitle = "Comment on a thread (letter)"
   , toolDesc = "Reply in a thread by composing a letter: signed by author, sealed to the "
       <> "repository's ingress mailbox and sent over the hbs2 network. It is a request until "
-      <> "a maintainer folds it (inbox_accept), and nothing is in canon before that. SENDS: "
+      <> "a maintainer folds it (inbox_accept), and nothing is in canon before that. A "
+      <> "maintainer answering in a thread uses issue_reply, which writes canon directly. SENDS: "
       <> "a sent letter cannot be recalled, and once folded it is PUBLIC and PERMANENT "
       <> "canon. The author key is in canon verbatim. The verb has no dry run of its own: "
       <> "dry_run: true checks that the sender sigil names the author key and where the "

@@ -13,6 +13,7 @@ import HBS2.Hub.Repo
 import HBS2.Hub.Repo.GitWrite
 import HBS2.Hub.CLI.Argv (verbOf)
 import HBS2.Hub.CLI.Dict (hubEntries,ours)
+import HBS2.Hub.CLI.Mcp (McpArgs(..),configFrom)
 
 import HBS2.CLI.Prelude (pretty)
 import HBS2.CLI.Run (makeDict,internalEntries)
@@ -30,7 +31,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
-import Data.List (isInfixOf,nub)
+import Data.List (isInfixOf,isPrefixOf,nub)
 import Data.Maybe (fromMaybe,isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -149,6 +150,65 @@ tooling = describe "hub mcp: the tools" $ do
   it "says what an exit code means" $ do
     exitMeaning 26 `shouldSatisfy` ("no thread" `Text.isInfixOf`)
     exitMeaning 2 `shouldSatisfy` ("found" `Text.isInfixOf`)
+
+  -- The read verbs that print a document are asked for it, and the document
+  -- comes back as structured content.
+  it "asks status, log and inbox show for their JSON documents" $ do
+    let shaped = \case
+          Right (RunVerb r) -> Just (runShape r, last (runArgv r))
+          _ -> Nothing
+    shaped (plan cfg0 "status" []) `shouldBe` Just (AsJson, "--json")
+    shaped (plan cfg0 "log" [("number", Number 2)]) `shouldBe` Just (AsJson, "--json")
+    argvOf (plan cfg0 "log" [("number", Number 2)])
+      `shouldBe` Just ["log","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9","--number=2","--json"]
+    shaped (plan cfg0 { mcMailbox = Just "E6gFsJYdCf5SHvFgw6A683MgqerMsppgYWKGpP4D1umd" }
+                 "inbox_show" [("message", "6emnPfjcUddSbasux8EEe1bR2nuuHfd1tWJzpUJxLUAr")])
+      `shouldBe` Just (AsJson, "--json")
+
+  -- Without a configured key the verb chooses the signer itself, from
+  -- HBS2_HUB_AS and git config in the clone it runs in. An --as here would
+  -- override both and be reported as an explicit flag.
+  it "passes --as only when the server or the call names one" $ do
+    let deleg = "E6gFsJYdCf5SHvFgw6A683MgqerMsppgYWKGpP4D1umd"
+        other = "6emnPfjcUddSbasux8EEe1bR2nuuHfd1tWJzpUJxLUAr"
+        asOf r = [ a | a <- fromMaybe [] (argvOf r), "--as" `isPrefixOf` a ]
+    asOf (plan cfg0 "issue_close" [("number", Number 3)]) `shouldBe` []
+    asOf (plan cfg0 { mcAs = Just deleg } "issue_close" [("number", Number 3)])
+      `shouldBe` ["--as=" <> Text.unpack deleg]
+    asOf (plan cfg0 { mcAs = Just deleg } "issue_close" [("number", Number 3), ("as", String other)])
+      `shouldBe` ["--as=" <> Text.unpack other]
+
+  it "does not turn HBS2_HUB_AS into a server default" $ do
+    let deleg = "E6gFsJYdCf5SHvFgw6A683MgqerMsppgYWKGpP4D1umd"
+        none = McpArgs Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing False
+    old <- Env.lookupEnv "HBS2_HUB_AS"
+    Env.setEnv "HBS2_HUB_AS" (Text.unpack deleg)
+    fromEnv <- configFrom "hbs2-hub" none
+    fromFlag <- configFrom "hbs2-hub" none { maAs = Just deleg }
+    -- A value that is not a key is the verb's to refuse, not the server's.
+    Env.setEnv "HBS2_HUB_AS" "not-a-key"
+    broken <- configFrom "hbs2-hub" none
+    maybe (Env.unsetEnv "HBS2_HUB_AS") (Env.setEnv "HBS2_HUB_AS") old
+    mcAs fromEnv `shouldBe` Nothing
+    mcAs fromFlag `shouldBe` Just deleg
+    mcAs broken `shouldBe` Nothing
+
+  it "replies onto canon through issue reply, the body on stdin" $ do
+    case plan cfg0 "issue_reply" [("number", Number 7), ("body", "can you try 1.2?")] of
+      Right (RunVerb r) -> do
+        runArgv r `shouldBe` [ "issue","reply","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9"
+                             , "--number=7","--body=-" ]
+        runStdin r `shouldBe` Just "can you try 1.2?"
+      other -> expectationFailure (show other)
+    argvOf (plan cfg0 "issue_reply" [ ("number", Number 7), ("body", "x"), ("kind", "pr")
+                                    , ("dry_run", Bool True) ])
+      `shouldSatisfy` maybe False (\a -> take 2 a == ["pr","reply"] && "--dry-run" `elem` a)
+    plan cfg0 "issue_reply" [("number", Number 7), ("body", "  \n")]
+      `shouldSatisfy` either (const True) (const False)
+    plan cfg0 "issue_reply" [("body", "x")]
+      `shouldSatisfy` either (const True) (const False)
+    [ toolName t | t <- toolsFor cfg0 { mcReadOnly = True }, toolName t == "issue_reply" ]
+      `shouldBe` []
 
 ------------------------------------------------------------------------------
 
@@ -271,6 +331,19 @@ server = do
                   ["name" .= ("issue_show" :: Text), "arguments" .= object ["number" .= (9 :: Int)]])
           field "isError" no `shouldBe` Just (Bool True)
           textOf no `shouldSatisfy` ("exited 26" `isInfixOf`)
+
+          -- The log as its document: provenance, the open that is in canon.
+          lg <- resultOf <$> call c 6 "tools/call" (object
+                  ["name" .= ("log" :: Text), "arguments" .= object []])
+          field "isError" lg `shouldBe` Just (Bool False)
+          case field "structuredContent" lg of
+            Just (Object d) -> do
+              field "document" d `shouldBe` Just "log"
+              case field "events" d of
+                Just (Array es) -> [ field "op" e | Object e <- foldr (:) [] es ]
+                                     `shouldBe` [Just "open"]
+                other -> expectationFailure ("no events: " <> show other)
+            other -> expectationFailure ("no structured content: " <> show other)
 
     it "answers protocol errors as protocol errors" $ guarded $ \h ->
       withServer (defaultMcpConfig h) $ \c -> do

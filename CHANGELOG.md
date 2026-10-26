@@ -40,22 +40,27 @@
     client gets typed tools with JSON schemas instead of a shell and a
     manual: status, whoami, issue and pr list and show, log, verify, the
     inbox (list, show, wait), accept, honour, reject, issue open, close,
-    label and comment, publish and sync.
+    label, reply and comment, publish and sync.
 
     Each tool runs one verb of the same binary as a child process and hands
     back its output, its exit code and what the code means. The verbs leave
     the process to refuse and print their answers on stdout, which is the
     protocol channel, so in-process they would have needed a captured file
     descriptor and a caught exit in every call; as children they can also be
-    timed out and cancelled. `issue_show`, `pr_show` and `inbox_list` return
-    the JSON documents as structured content.
+    timed out and cancelled. `status`, `log`, `issue_show`, `pr_show`,
+    `inbox_list` and `inbox_show` return the JSON documents as structured
+    content.
 
     Every write takes `dry_run`, through the verb's own `--dry-run` where it
     has one, and says in its description that canon is public and permanent
-    once published. `inbox_wait` blocks until a letter arrives, by running
-    `inbox --follow --json`. The repository, mailbox, canon key, author,
-    sender and remote can be server defaults (flags or `HBS2_HUB_*`), and
-    `--read-only` offers no tool that writes.
+    once published. `issue_reply` is `issue reply`, a maintainer's comment
+    straight onto canon; `issue_comment` stays the contributor's letter.
+    `inbox_wait` blocks until a letter arrives, by running `inbox --follow
+    --json`. The repository, mailbox, author, sender and remote can be
+    server defaults (flags or `HBS2_HUB_*`), and `--read-only` offers no
+    tool that writes. The canon key is passed as `--as` only when the
+    server or the call names one, so `HBS2_HUB_AS` and `git config
+    hbs2.hub.as` choose it as they do on a command line.
 
   - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
     they arrive.** Watching a queue meant running `hub inbox` every minute,

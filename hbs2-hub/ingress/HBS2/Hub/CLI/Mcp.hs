@@ -88,13 +88,21 @@ mcpArgs syn = do
 --
 -- An environment value is read by the same rules as a flag, and one that does
 -- not read is a refusal at startup rather than a default nobody notices was
--- dropped: a server that quietly ignored HBS2_HUB_AS would sign with the
--- repository key.
+-- dropped.
+--
+-- EXCEPT HBS2_HUB_AS, which is not read here. Only --as on the server's own
+-- command line becomes an @--as@ for the verbs. Without it the verbs inherit
+-- the environment and choose the signer themselves, in the clone they run in:
+-- HBS2_HUB_AS, then @git config hbs2.hub.as@, then the repository key
+-- ("HBS2.Hub.CLI.Signer"). Read here and passed on as @--as@, the variable
+-- would sign with the same key, but every verb would report it as an explicit
+-- --as, and a bad value would have stopped the server rather than the writes,
+-- which refuse it with the remedy.
 configFrom :: FilePath -> McpArgs -> IO McpConfig
 configFrom self ma = do
   repo <- pick maRepo    "HBS2_HUB_REPO" signKey
   mbox <- pick maMailbox "HBS2_HUB_MAILBOX" signKey
-  as   <- pick maAs      "HBS2_HUB_AS" signKey
+  let as = maAs ma
   au   <- pick maAuthor  "HBS2_HUB_AUTHOR" signKey
   se   <- pick maSender  "HBS2_HUB_SENDER"  hash
   rm   <- pick maRemote  "HBS2_HUB_REMOTE"  Just
@@ -135,13 +143,19 @@ mcpEntries =
              <> line
              <> line <> "Each tool runs one verb of this binary, in --dir (default:"
              <> line <> "where the server was started), and returns its output, its"
-             <> line <> "exit code and what the code means. issue_show, pr_show and"
-             <> line <> "inbox_list return the JSON documents as structured content."
+             <> line <> "exit code and what the code means. status, log, issue_show,"
+             <> line <> "pr_show, inbox_list and inbox_show return the JSON documents"
+             <> line <> "as structured content."
              <> line
              <> line <> "The flags are DEFAULTS a call may override, so that a call"
              <> line <> "names what differs. Each also reads from the environment:"
-             <> line <> "HBS2_HUB_REPO, HBS2_HUB_MAILBOX, HBS2_HUB_AS, HBS2_HUB_AUTHOR,"
+             <> line <> "HBS2_HUB_REPO, HBS2_HUB_MAILBOX, HBS2_HUB_AUTHOR,"
              <> line <> "HBS2_HUB_SENDER, HBS2_HUB_REMOTE, HBS2_HUB_DIR. A flag wins."
+             <> line
+             <> line <> "--as is passed to the verbs only when it is given here or in"
+             <> line <> "a call. Otherwise the verbs choose the signer as on a command"
+             <> line <> "line: HBS2_HUB_AS, then git config hbs2.hub.as in --dir,"
+             <> line <> "then the repository key (`hbs2-hub help maintainer use`)."
              <> line
              <> line <> "Tools that write canon take dry_run and say in their"
              <> line <> "description that canon is public and permanent once"

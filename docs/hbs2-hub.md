@@ -768,9 +768,19 @@ claude mcp add hbs2-hub-ro -- hbs2-hub mcp --repo <repo-key> --read-only
 Each of these is a default that a tool call may override, so a call names
 what differs and not the repository it has named every time. Each also
 reads from the environment (`HBS2_HUB_REPO`, `HBS2_HUB_MAILBOX`,
-`HBS2_HUB_AS`, `HBS2_HUB_AUTHOR`, `HBS2_HUB_SENDER`, `HBS2_HUB_REMOTE`,
-`HBS2_HUB_DIR`); a flag wins over the environment. A value that does not
-read as a key is refused at startup rather than ignored.
+`HBS2_HUB_AUTHOR`, `HBS2_HUB_SENDER`, `HBS2_HUB_REMOTE`, `HBS2_HUB_DIR`);
+a flag wins over the environment. A value that does not read as a key is
+refused at startup rather than ignored.
+
+The canon key is the exception. The server passes `--as` to a verb only
+when the call names one or the server was started with `--as`; otherwise
+the verb picks the signer as it does on a command line, from
+`HBS2_HUB_AS`, then `git config hbs2.hub.as` in `--dir`, then the
+repository key (see [Signing as a delegate](#signing-as-a-delegate)). A
+delegate can run `hbs2-hub maintainer use` once in the clone instead of
+passing `--as` to the server, and the agent and the command line then
+sign with the same key. The `status` tool says which key that is
+(`signer.key`, `signer.source`).
 
 The verbs run in `--dir`, by default the directory the client started
 the server in, which for Claude Code is the project. That has to be a
@@ -780,19 +790,20 @@ The tools:
 
 | Tool | Verb | |
 |---|---|---|
-| `status` | `status` | where this clone stands |
-| `whoami` | `whoami` | which keys this machine has |
-| `issue_list`, `pr_list` | `issue list`, `pr list` | filters: `status`, `label` |
+| `status` | `status --json` | where this clone stands, and which key would sign |
+| `whoami` | `whoami` | which keys this machine has (text) |
+| `issue_list`, `pr_list` | `issue list`, `pr list` | filters: `status`, `label` (text) |
 | `issue_show`, `pr_show` | `issue show --json`, `pr show --json` | the render contract, as structured content |
-| `log` | `log` | |
+| `log` | `log --json` | provenance per event, no text |
 | `verify` | `verify` | a finding is a result, not a tool error |
 | `inbox_list` | `inbox --json` | the queue document; `after`, `limit` |
-| `inbox_show` | `inbox show` | one letter, body included |
+| `inbox_show` | `inbox show --json` | one letter, body included, with a triage verdict |
 | `inbox_wait` | `inbox --follow --json` | blocks until a letter arrives |
 | `inbox_accept` | `inbox accept` | writes canon |
 | `inbox_honour` | `inbox honour` | writes canon |
 | `inbox_reject` | `inbox reject` | writes the mailbox |
 | `issue_open`, `issue_close`, `issue_label` | `issue open`, `close`, `label` | write canon; `kind: pr` for a pull request |
+| `issue_reply` | `issue reply` | writes a maintainer's comment onto canon; `kind: pr` for a pull request |
 | `issue_comment` | `issue comment` | sends a letter |
 | `publish` | `publish` | pushes canon to a remote |
 | `sync` | `sync` | fetches into this clone |
@@ -803,14 +814,21 @@ means (the table `--codes` prints). The tool layer decides nothing the
 verb does not: the checks a call relies on are the verb's own, and so is
 the refusal of an argument the tool does not take.
 
+`status`, `log`, `issue_show`, `pr_show`, `inbox_list` and `inbox_show`
+run their verb with `--json` and return the document (see [For a program
+rather than a person](#for-a-program-rather-than-a-person)) as structured
+content as well as text. `whoami`, `issue_list` and `pr_list` return
+text: those verbs print no document yet.
+
 **Writes.** Every tool that writes takes `dry_run`, and its description
 says that canon is public and permanent once published. `inbox_accept`,
-`inbox_honour`, `issue_open`, `issue_close` and `issue_label` pass it to
-the verb's own `--dry-run`, which runs every check and prints the event
-without signing anything. `inbox_reject`, `issue_comment`, `publish` and
-`sync` have no dry run of their own; for them `dry_run` shows the command
-that would run and runs a read-only look instead (`inbox show`, `whoami`,
-`status`). `--read-only` offers none of the writing tools at all.
+`inbox_honour`, `issue_open`, `issue_close`, `issue_label` and
+`issue_reply` pass it to the verb's own `--dry-run`, which runs every
+check and prints the event without signing anything. `inbox_reject`,
+`issue_comment`, `publish` and `sync` have no dry run of their own; for
+them `dry_run` shows the command that would run and runs a read-only
+look instead (`inbox show`, `whoami`, `status`). `--read-only` offers
+none of the writing tools at all.
 
 **Waiting for letters.** `inbox_wait` runs the follower described under
 [Triage](#triage) and returns at the first read that holds a letter the
