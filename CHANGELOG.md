@@ -2,6 +2,18 @@
 
 ## Added
 
+  - **`hbs2-hub issue reply` / `pr reply`: a maintainer comments straight
+    onto canon.** Answering in a thread meant `issue comment` with a sender
+    sigil and an author key, which sealed a Tier B letter to the repository's
+    own mailbox, and then the same maintainer finding it with `inbox` and
+    folding it with `inbox accept`: three commands and a round trip to say
+    something they had already decided to say. `reply` takes `--repo`,
+    `--number` or `--thread`, `--body` (`-` reads stdin), optional
+    `--reply-to`, `--as` and `--dry-run`, and writes an ordinary comment event
+    through the same owner path `issue open` uses. The bridge refuses a key
+    that may not bless canon before anything is signed, and readers and
+    `hub verify` treat the comment like any other. It carries no origin.
+
   - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
     they arrive.** Watching a queue meant running `hub inbox` every minute,
     paying the settle wait and a keyman lookup per letter each time, and

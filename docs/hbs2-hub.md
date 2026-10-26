@@ -329,8 +329,21 @@ hbs2-hub issue open   --repo <repo-key> --title "the tests hang on aarch64"
 hbs2-hub issue close  --repo <repo-key> --number 7 --note "fixed in 1.2"
 hbs2-hub issue label  --repo <repo-key> --number 7 --label bug --label aarch64
 hbs2-hub issue assign --repo <repo-key> --number 7 --to <key>
+hbs2-hub issue reply  --repo <repo-key> --number 7 --body "can you try 1.2?"
 hbs2-hub redact       --repo <repo-key> --event <event-id>
 ```
+
+`issue reply` (and `pr reply`, the same verb) is how a maintainer
+answers in a thread. `issue comment` is the contributor's path: it sends
+a letter to the repository's mailbox, and a maintainer using it would
+then have to find that letter in `inbox` and accept it. `reply` writes
+the comment onto canon at once, signed by the repository key or by a
+delegate from `hbs2-hub maintainer list`, chosen by `--as` or its default
+(see [Signing as a delegate](#signing-as-a-delegate)). Any other key is
+refused before anything is signed. The thread is named by `--number` or
+by `--thread <thread-id>`, `--body -` reads stdin, and `--reply-to
+<event-id>` says which event it answers. Readers show it like any other
+comment. It has no origin, since no letter asked for it.
 
 `redact` is display-level and PEP-19 says so: the bytes stay in every
 clone, readers stop showing the body. It answers a mistake or abuse, not

@@ -462,6 +462,12 @@ hub issue assign --repo <key> --number <n> --to <key> | --clear
                                    ; owner-signed set on the assignee attribute: a
                                    ;   KEY, since a person here is a key, and not a
                                    ;   grant of anything (PEP-21 delegation grants)
+hub issue|pr reply --repo <key> --number <n> | --thread <id> --body <text>|-
+                   [--reply-to <event-id>] [--as <key>]
+                                   ; maintainer-signed comment straight onto canon,
+                                   ;   no letter: the same comment op the letter
+                                   ;   path carries, with no origin. A key that may
+                                   ;   not bless canon is refused before signing
 hub redact --repo <key> --event <event-id>
                                    ; display-level hide (PEP-19): canon keeps the bytes
 hub pr   merge <n> [--strategy ...]           ; verify, integrate, merge event (PEP-20)
