@@ -231,6 +231,7 @@ test-suite test
                   , TestFrameBound
                   , TestBlockSizeBound
                   , TestTCPRedial
+                  , TestPutBlockAsked
 
     -- other-extensions:
 

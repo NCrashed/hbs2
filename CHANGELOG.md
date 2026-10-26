@@ -211,6 +211,24 @@
 
 ## Security
 
+  - **A peer could delete any block this node held, if it knew the block's
+    bytes.** A download that received the wrong bytes stored them, compared the
+    hash, and on a mismatch deleted the block under the hash it had just
+    stored. The store deduplicates, so when those bytes were a block this node
+    already had, the put changed nothing and the delete removed this node's own
+    copy. Any handshaked peer could answer a request for one block with the
+    bytes of another (a public one is enough) and delete it, one block per
+    request. Bytes are now hashed before they are stored and written only if
+    they are the block that was asked for (`HBS2.Storage.putBlockAsked`).
+
+  - **A peer's answer to "how big is this block" was believed.** The requester
+    builds a chunk list from it before any data moves, so an answer of 2^40
+    cost about a billion list elements. Sizes above `defMaxBlockSize` (16 MiB)
+    are treated as "no block", so the requester tries the next peer without
+    waiting for a timeout. `hbs2:peer:storage:block:put`, which stores its
+    input as one block, refuses the same sizes: no other peer would fetch
+    such a block.
+
   - **A stranger could silence a refchan or an LWWRef packet by planting one
     block.** Three protocols decided "have I already relayed this?" by asking
     whether the block store held `hashObject (serialise packet)` --

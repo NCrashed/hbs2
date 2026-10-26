@@ -542,22 +542,14 @@ downloadFromPeer bu cache env h peer = liftIO $ withPeerM env do
       blk <- readTVarIO _sBlockChunks2
       let rs = LBS.concat $ IntMap.elems blk
 
-      -- ha <- putBlock sto rs
-      ha <- putBlock sto rs
-
-      -- let ha = Just $ hashObject @HbSync rs
-
       lift $ expire @e key
 
-      case ha of
-        Nothing -> pure $ Left StorageError
-
-        Just h1 | h1 == h -> do
-          pure $ Right rs
-
-        Just h1 -> do
-          delBlock sto h1
-          pure $ Left (PeerBlockHashMismatch peer)
+      -- Never put-then-delete here: see 'putBlockAsked' for the block of ours
+      -- that order let a peer remove.
+      putBlockAsked sto h rs <&> \case
+        PutAskedStored   -> Right rs
+        PutAskedMismatch -> Left (PeerBlockHashMismatch peer)
+        PutAskedFailed   -> Left StorageError
 
   where
 

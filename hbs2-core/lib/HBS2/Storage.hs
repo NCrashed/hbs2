@@ -119,5 +119,32 @@ calcChunks s1 s2
     (n,rest) = s1 `divMod` s2
     chu = [ (x*s2,s2) | x <- [0..n-1] ] <> [(n * s2, rest) | rest > 0]
 
+-- | What became of bytes offered as a block somebody asked for.
+data PutAsked =
+    PutAskedStored    -- ^ they were that block, and it is stored
+  | PutAskedMismatch  -- ^ they were some other block, and nothing was written
+  | PutAskedFailed    -- ^ they were that block, and the store refused it
+  deriving stock (Eq,Show)
+
+-- | Store bytes as the block that was asked for, or not at all.
+--
+-- HASHED BEFORE IT IS STORED, and the order is the whole point. A download used
+-- to put the bytes, compare the hash the store answered with, and on a mismatch
+-- delete THAT hash. But the store is content-addressed and deduplicates: if the
+-- bytes a peer sent are a block this node already held, the put is a no-op and
+-- the delete removes this node's own copy. Any handshaked peer that knew one
+-- block of ours -- a public one is enough -- could answer a request for
+-- anything with its bytes and delete it here, one block per request.
+--
+-- Bytes that are not what was asked for are never written, so there is nothing
+-- to take back and no moment in which they are readable.
+putBlockAsked :: Storage s HbSync ByteString m
+              => s -> Hash HbSync -> ByteString -> m PutAsked
+putBlockAsked sto h bs
+  | hashObject @HbSync bs /= h = pure PutAskedMismatch
+  | otherwise = putBlock sto bs <&> \case
+      Just h1 | h1 == h -> PutAskedStored
+      _                 -> PutAskedFailed
+
 
 

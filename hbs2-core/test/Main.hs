@@ -12,6 +12,7 @@ import TestEncryptedTree
 import TestFrameBound
 import TestBlockSizeBound
 import TestTCPRedial
+import TestPutBlockAsked
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -51,6 +52,14 @@ main =
               testBlockSizeCeilingIsAboveAnythingWritten
           , testCase "and keeps the work a declared size buys finite"
               testBlockSizeCeilingBoundsTheWork
+          ]
+      , testGroup "a block is stored only if it is the one that was asked for"
+          [ testCase "keeps a block it held when a peer sends it instead"
+              testPutAskedKeepsWhatWasAlreadyHeld
+          , testCase "writes nothing it was not asked for"
+              testPutAskedWritesNothingItWasNotAskedFor
+          , testCase "stores the block that was asked for"
+              testPutAskedStoresWhatWasAskedFor
           ]
       , testGroup "an encrypted flow belongs to the peer, not to the flow key"
           [ testCase "is not taken over by a stranger who names the nonce first"
