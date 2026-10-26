@@ -13,6 +13,26 @@
     through the same owner path `issue open` uses. The bridge refuses a key
     that may not bless canon before anything is signed, and readers and
     `hub verify` treat the comment like any other. It carries no origin.
+  - **`hbs2-hub inbox show --json`: a letter a program can decide on.** An
+    agent triaging a mailbox read each letter as the human report (fields,
+    then the body quoted line by line with `  | `) and scraped it to decide
+    between accept and reject. The `letter` document carries the identity,
+    the subject (thread, number once canon holds it, title of an open), the
+    whole body unescaped and untruncated, the attachments measured, and
+    `triage.verdict`: `would_fold`, `pending`, `already_folded`, `refused` or
+    `unreadable`, with `triage.reason.code` for all but the first. The
+    verdict is a preview from what a read can see; `inbox accept` still runs
+    the full check. With `--repo` it also says whether the letter is aimed at
+    that repository and at a thread its canon holds.
+
+  - **`--json` on `hbs2-hub log`, `maintainer list`, `status`, `sent` and
+    `updates`.** The other read verbs of a triage loop, each a document under
+    the same contract counter (`log`, `maintainers`, `status`, `sent`,
+    `updates`), with every key present and `null` where nothing applies. `log`
+    carries provenance and no text, so a redaction has one place to be
+    honoured. `status` names the key a write without `--as` would sign
+    with and where it came from (`signer.key`, `signer.source`), as the
+    text report does. Notes stay on stderr and the exit codes do not change.
 
   - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
     they arrive.** Watching a queue meant running `hub inbox` every minute,
@@ -293,6 +313,11 @@
     mailbox get` uses the same answer to tell the two kinds of "no ref" apart,
     and `hbs2-peer mailbox pending KEY` prints it (`idle`, `downloading N`,
     `ingesting`).
+  - **`hbs2-hub inbox --json` clamps `declared_at` like the thread document
+    does.** It is the author's own clock, which nothing bounds, and the queue
+    passed it through raw while the thread contract and the terminal both cap
+    it at the ceiling canon admits. A sender could put a number there that a
+    JSON reader holding doubles gets back changed.
 
   - **`hbs2-peer mailbox create --key KEY hub` works as documented.** The
     `mailbox` subcommand hands its arguments to the mailbox command line, and

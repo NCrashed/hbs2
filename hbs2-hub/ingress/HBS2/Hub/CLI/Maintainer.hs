@@ -28,6 +28,8 @@ module HBS2.Hub.CLI.Maintainer
   , MaintainerUse(..)
   , Maintainer(..)
   , maintainerDoc
+  , maintainersContract
+  , maintainersOrder
   , Delegating(..)
   , Pointless(..)
   , pointless
@@ -43,7 +45,8 @@ import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair
                            ,Writing,writingOf,dryRunHelp)
-import HBS2.Hub.CLI.Argv (badArgs,flagsOf,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
+import HBS2.Hub.Render (contractVersion,renderDocument,key58)
+import HBS2.Hub.CLI.Argv (badArgs,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
                          ,flagOneOf,flagOneOfMaybe,flagRepoMaybe,maintainerKeyFlags)
 import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),signingAs,defaultFrom
                            ,signerEnvVar,signerGitKey,writeSignerConfig,clearSignerConfig)
@@ -54,6 +57,8 @@ import HBS2.CLI.Run.Internal
 
 import HBS2.Base58 (AsBase58(..))
 
+import Data.Aeson (Value,object,(.=))
+import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
@@ -140,7 +145,7 @@ data Maintainer = Maintainer
 maintainerUsage :: Doc ()
 maintainerUsage =
   "usage: hbs2-hub maintainer add|remove --repo <key> --maintainer-key <key> [--dry-run]"
-    <> line <> "       hbs2-hub maintainer list --repo <key>"
+    <> line <> "       hbs2-hub maintainer list --repo <key> [--json]"
     <> line <> "       hbs2-hub maintainer use --repo <key> --maintainer-key <key> | --clear"
 
 -- | What @hub maintainer use@ was asked to do.
@@ -175,6 +180,23 @@ maintainerDoc owner fr =
   [ pretty (AsBase58 k) <+> (if k == owner then "(owner)" else mempty)
   | k <- sortOn (show . pretty . AsBase58) (HS.toList (frMaintainers fr)) ]
 
+-- | The same set as a document (@hub maintainer list --json@).
+--
+-- Derived from canon, so two clones agree on it byte for byte, and in the order
+-- 'maintainerDoc' prints. The owner is marked for the reason it is marked
+-- there: it is in the set with no event behind it.
+maintainersContract :: RepoRef -> FoldResult -> Value
+maintainersContract owner fr = object
+  [ "contract"    .= contractVersion
+  , "document"    .= ("maintainers" :: Text)
+  , "repo"        .= key58 owner
+  , "maintainers" .= [ object [ "key" .= key58 k, "owner" .= (k == owner) ]
+                     | k <- sortOn key58 (HS.toList (frMaintainers fr)) ]
+  ]
+
+maintainersOrder :: [Text]
+maintainersOrder = [ "repo", "maintainers", "key", "owner" ]
+
 maintainerEntries :: forall c m . ( IsContext c
                                   , MonadUnliftIO m
                                   , Exception (BadFormException c)
@@ -185,14 +207,17 @@ maintainerEntries = do
   writeVerb "hub:maintainer:remove" "stop a key blessing canon events" Revoke
 
   brief "list the keys that may bless this repository's canon"
-    $ args [arg "string" "--repo repo-key"]
+    $ args [arg "string" "--repo repo-key", arg "string" "[--json]"]
     $ desc ( "Read-only and peerless, like the other read verbs."
              <> line
              <> line <> "The set is a function of the log: every key in it was"
              <> line <> "delegated and not since revoked, and the owner is in it"
-             <> line <> "by definition rather than by any event." )
+             <> line <> "by definition rather than by any event."
+             <> line
+             <> line <> "--json prints one `maintainers` document (contract 1):"
+             <> line <> "the keys in the same order, each marked owner or not." )
     $ entry $ bindMatch "hub:maintainer:list" $ nil_ \case
-        (maintainerListArgs -> Just repo) -> lift do
+        (maintainerListArgs -> Just (repo, asJson)) -> lift do
           -- REFUSE, like every other read verb, and unlike the two write verbs
           -- above it. This shared 'canonOf' with them, so a repository whose
           -- canon has not been fetched answered with the owner key and nothing
@@ -204,7 +229,9 @@ maintainerEntries = do
           -- to HOLD something refuses, a verb that may CREATE it does not, and
           -- listing is the first kind.
           fr <- snd <$> withCanon Refuse repo withGitCanon
-          liftIO (mapM_ print (maintainerDoc repo fr))
+          liftIO $ if asJson
+            then LBS.putStr (renderDocument maintainersOrder (maintainersContract repo fr))
+            else mapM_ print (maintainerDoc repo fr)
         other -> liftIO (badArgs maintainerUsage other)
 
   brief "sign this clone's canon writes as a maintainer key, without --as"
@@ -389,8 +416,12 @@ maintainerArgs syn = do
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
 
--- | @--repo <key>@, and nothing else. See 'HBS2.Hub.CLI.Ban.banListArgs'.
-maintainerListArgs :: forall c . IsContext c => [Syntax c] -> Maybe RepoRef
-maintainerListArgs syn = flagsOf repoFlags syn >>= flagRepo asKey
+-- | @--repo <key> [--json]@, and nothing else. See 'HBS2.Hub.CLI.Ban.banListArgs'.
+maintainerListArgs :: forall c . IsContext c => [Syntax c] -> Maybe (RepoRef, Bool)
+maintainerListArgs syn = do
+  kvs  <- flagsAndSwitches repoFlags ["--json"] syn
+  repo <- flagRepo asKey kvs
+  j    <- flagSwitch kvs "--json"
+  pure (repo, j)
   where
     asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }

@@ -27,6 +27,7 @@ module HBS2.Hub.CLI.Inbox
   , render
   , inboxDoc
   , queueContract
+  , dispositionName
   , inboxNotes
   , inboxArgs
   , freshRows
@@ -47,7 +48,7 @@ module HBS2.Hub.CLI.Inbox
 
 import HBS2.Hub.Types
 import HBS2.Hub.Letter
-import HBS2.Hub.Render (contractVersion,renderContract)
+import HBS2.Hub.Render (contractVersion,renderContract,opName,declaredAt,b58,key58)
 import HBS2.Hub.Ingress
 import HBS2.Hub.Deny (denyingFor,denyUnreadable,codeNoBanList)
 import HBS2.Hub.Repo.Manifest (mailboxFor,ManifestGone(..),codeNoManifest)
@@ -724,12 +725,6 @@ queueContract r = object
   , "letters"  .= fmap letter (irLetters r)
   ]
   where
-    b58 :: Pretty a => a -> Text
-    b58 = Text.pack . show . pretty
-
-    key58 :: HubKey -> Text
-    key58 = Text.pack . show . pretty . AsBase58
-
     letter lv = object $
       [ "message"  .= b58 (lvMessage lv)
       , "envelope" .= fmap key58 (lvEnvelope lv)
@@ -746,18 +741,17 @@ queueContract r = object
              , "author"      .= key58 author
              , "op"          .= opName content
              , "thread"      .= fmap b58 (authorThread content)
-             , "declared_at" .= authorTs content
-             , "disposition" .= dispName disp
+               -- Clamped like the thread contract clamps it ('declaredAt'): the
+               -- author's own clock, which nothing bounds, on its way to a
+               -- reader whose JSON numbers may be doubles.
+             , "declared_at" .= declaredAt (authorTs content)
+             , "disposition" .= dispositionName disp
              ]
              <> [ "title" .= t | AOpen _ _ t _ _ _ _ _ <- [content] ]
 
-    opName = \case
-      AOpen{} -> "open" :: Text; AComment{} -> "comment"; ARevise{} -> "revise"
-      ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
-      AMerge{} -> "merge"; ARedact{} -> "redact"
-      ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
-
-    dispName = \case
-      FoldsToCanon -> "folds" :: Text
-      RequestOnly  -> "request"
-      OwnerNative  -> "owner-native"
+-- | A disposition, in the spelling the queue and the letter documents share.
+dispositionName :: Disposition -> Text
+dispositionName = \case
+  FoldsToCanon -> "folds"
+  RequestOnly  -> "request"
+  OwnerNative  -> "owner-native"

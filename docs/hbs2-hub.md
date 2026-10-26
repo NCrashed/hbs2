@@ -285,6 +285,10 @@ One letter in full, body included:
 hbs2-hub inbox show --mailbox <mailbox-key> --message <message-hash>
 ```
 
+A program reading letters in a loop adds `--json` and gets the body, the
+attachments and a verdict as one object; see "For a program rather than
+a person" below.
+
 Folding it into canon is the step that turns a request into the record,
 and it cannot be taken back: an event in canon is in every clone that
 ever fetches it.
@@ -623,6 +627,107 @@ For a pull request the diff is precomputed from `base..tip`, so a static
 renderer needs no git. `diff.availability` is `available`, or
 `reconstructable` when the objects are gone but the bundle attachment
 that would rebuild them is still named by canon, or `unavailable`.
+
+The read verbs a triage loop uses take `--json` too, and print one
+document each under the same counter, told apart by `document`:
+
+```
+hbs2-hub inbox show --mailbox <mailbox-key> --message <hash> [--repo <key>] --json
+hbs2-hub inbox      --mailbox <mailbox-key> [--repo <key>] --json
+hbs2-hub log        <repo-key> [<number>] --json
+hbs2-hub maintainer list --repo <repo-key> --json
+hbs2-hub status     --repo <repo-key> --json
+hbs2-hub sent       [--repo <repo-key>] --json
+hbs2-hub updates    --mailbox <your-mailbox> --repo <repo-key> --json
+```
+
+| verb | `document` | from |
+|---|---|---|
+| `issue show`, `pr show` | `thread` | canon |
+| `log` | `log` | canon |
+| `maintainer list` | `maintainers` | canon |
+| `inbox` | `queue` | a mailbox read |
+| `inbox show` | `letter` | a mailbox read |
+| `updates` | `updates` | a mailbox read |
+| `status` | `status` | canon, the remotes, the peer |
+| `sent` | `sent` | this node's own log |
+
+Only the canon ones are the same bytes in every clone. The others are
+one node's view at one moment, with its keys and its deny-list, and two
+maintainers may get different answers without either being wrong. Notes
+still go to stderr, so stdout is one document; the exit codes are the
+same as without `--json`. Every key is always present, `null` when it
+does not apply. Times are milliseconds since the epoch. The
+mailbox-side documents spell an event and a thread `event` and
+`thread`, as the queue does; the canon-side ones say `event_id` and
+`thread_id`, as the thread document does.
+
+`status --json` answers the signing question the way the text report
+does: `signing` is whether this machine can sign as the key in `signer`,
+and `signer` names that key (the one a canon write without `--as` would
+use), its `source` (`env` for `HBS2_HUB_AS`, `git_config` for
+`hbs2.hub.as`, or `repo_key`), and whether it is a `maintainer` in canon
+here. A default that does not read leaves `key` null and says why in
+`error`; every write would refuse it.
+
+`inbox show --json` is the one to decide on. It carries the whole body,
+untruncated and unescaped (JSON escapes control characters itself), the
+attachments measured, and a verdict:
+
+```json
+{
+  "contract": 1,
+  "document": "letter",
+  "message": "5MTAgKgs...",
+  "envelope": "Gy3S18nJ...",
+  "event": "32of39gf...",
+  "repo": "7VM1rtxr...",
+  "unreadable": null,
+  "triage": {
+    "verdict": "already_folded",
+    "reason": { "code": "already_in_canon", "detail": "..." },
+    "disposition": "folds",
+    "deny_list_applied": true,
+    "canon_consulted": true
+  },
+  "folded": true,
+  "author": "Gy3S18nJ...",
+  "op": "comment",
+  "declared_at": 1793004741230,
+  "subject": { "thread": "7QcNZqwS...", "number": 1, "in_canon": true,
+               "target": null, "kind": null, "title": null },
+  "body": "the whole body",
+  "body_part": null,
+  "labels_requested": [],
+  "reply_to": null,
+  "pr": null,
+  "attr": null, "value": null, "merge_commit": null, "merged_into": null,
+  "redacts": null, "key": null,
+  "attachments": [],
+  "attachments_unmeasured": 0
+}
+```
+
+`triage.verdict` is one of:
+
+- `would_fold`: nothing this read can see stops an accept. `reason` is
+  null.
+- `pending`: an attachment is not here yet (`part_not_fetched`). Ask
+  again later.
+- `already_folded`: canon holds this letter (`already_in_canon`).
+- `refused`: an accept would refuse it. `reason.code` is
+  `request_only` (use `inbox honour`), `owner_native`, `author_denied`,
+  `wrong_repo`, `unknown_thread` or `too_many_parts`.
+- `unreadable`: the letter did not open. The code says why:
+  `not_fetched` is a wait, the rest (`not_for_us`, `bad_envelope_sig`,
+  `bad_inner_sig`, `unsupported_version` and so on) are not.
+
+The verdict is a preview. `inbox accept` runs the bridge's full check,
+which needs the signing key and asks more than a read can: whether the
+signer may bless, whether a revise comes from the thread's author,
+whether the fold would drop the payload. `wrong_repo`, `unknown_thread`
+and `already_folded` are only given when `--repo` was named, which is
+also what `deny_list_applied` and `canon_consulted` say.
 
 What is NOT there: an index document for list views and an activity
 document for a timeline. PEP-22 leaves both schemas open, so pinning them

@@ -33,6 +33,8 @@ module HBS2.Hub.CLI.Updates
   , updateOf
   , updatesDoc
   , updatesNotes
+  , updatesContract
+  , updatesOrder
   , UpdatesArgs(..)
   , updatesArgs
   ) where
@@ -47,6 +49,7 @@ import HBS2.Hub.Sent (loadSent,submittedBy,codeNoSentLog)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagSwitch,repoFlags,flagRepo,flagRepoMaybe)
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,codeMailboxUnknown,codePeerSilent,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Verify (codeOf)
+import HBS2.Hub.Render (contractVersion,renderDocument,b58,key58)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -57,6 +60,8 @@ import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
+import Data.Aeson (Value,object,(.=))
+import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
 import System.Exit (die,exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
@@ -83,7 +88,7 @@ data Update =
 
 updatesUsage :: Doc ()
 updatesUsage =
-  "usage: hbs2-hub updates --mailbox <own-key> --repo <repo-key> [--all]"
+  "usage: hbs2-hub updates --mailbox <own-key> --repo <repo-key> [--all] [--json]"
 
 updatesEntries :: forall c m . ( IsContext c
                                , MonadUnliftIO m
@@ -98,7 +103,7 @@ updatesEntries = do
            , arg "string" "--repo repo-key"
            -- Absent from the synopsis, and it is the flag that changes what the
            -- verb answers.
-           , arg "string" "[--all]" ]
+           , arg "string" "[--all]", arg "string" "[--json]" ]
     $ desc ( "Read-only. Opens your own mailbox and prints the"
              <> line <> "acknowledgements in it: the number a thread got, its"
              <> line <> "status, and the maintainer's note when there was one."
@@ -121,7 +126,11 @@ updatesEntries = do
              <> line <> "can sign a true one about somebody else's submission. The"
              <> line <> "record is the log the compose verbs write. --all shows"
              <> line <> "those too, which is what you want after losing the log or"
-             <> line <> "when reading this mailbox from another machine." )
+             <> line <> "when reading this mailbox from another machine."
+             <> line
+             <> line <> "--json prints one `updates` document (contract 1): the"
+             <> line <> "acks shown, each with related true or false, and the"
+             <> line <> "counts of what was not shown. Notes still go to stderr." )
     $ entry $ bindMatch "hub:updates" $ nil_ \case
         (updatesArgs -> Just ua) -> lift (updates ua)
         other -> liftIO (badArgs updatesUsage other)
@@ -176,7 +185,10 @@ updatesEntries = do
       liftIO $ handleJust
         (\e -> if isResourceVanishedError e then Just () else Nothing)
         (\_ -> exitWith (ExitFailure 141))
-        (mapM_ print (updatesDoc (uaAll ua) us))
+        (if uaJson ua
+           then LBS.putStr (renderDocument updatesOrder
+                              (updatesContract (uaAll ua) (uaRepo ua) (uaMailbox ua) us))
+           else mapM_ print (updatesDoc (uaAll ua) us))
 
       liftIO $ for_ (updatesNotes (uaAll ua) (HS.null maint) us) (saying . (<> line))
 
@@ -250,6 +262,45 @@ updatesDoc showAll us =
         <> mark
         <> maybe mempty (\n -> line <> "  note:" <+> pretty (safeText n)) (akNote a)
 
+-- | The acks as a document (@hub updates --json@).
+--
+-- The same selection 'updatesDoc' makes, and the same reason for it: an ack
+-- about a thread this node never sent is shown only under @--all@, and then
+-- with @related: false@ on it, so a document read with the flag and one read
+-- without cannot be mistaken for each other. What was NOT shown is counted, so
+-- an empty @acks@ is never the only thing a consumer has to go on.
+--
+-- Not derived from canon: an ack is a courtesy, checked against the
+-- maintainer set this clone's canon gives, and canon is the record.
+updatesContract :: Bool -> RepoRef -> HubKey -> [Update] -> Value
+updatesContract showAll repo mbox us = object
+  [ "contract" .= contractVersion
+  , "document" .= ("updates" :: Text)
+  , "repo"     .= key58 repo
+  , "mailbox"  .= key58 mbox
+  , "acks"     .= ( [ one True m a | Acked m a <- us ]
+                 <> [ one False m a | showAll, Unrelated m a <- us ] )
+  , "unrelated" .= length [ () | Unrelated{} <- us ]
+  , "refused"   .= length [ () | Refused <- us ]
+  , "letters"   .= length [ () | NotAnAckHere <- us ]
+  ]
+  where
+    one related m a = object
+      [ "message"      .= b58 m
+      , "repo"         .= key58 (akTarget a)
+      , "thread"       .= b58 (akThread a)
+      , "number"       .= akNumber a
+      , "status"       .= akStatus a
+      , "merge_commit" .= akMergeCommit a
+      , "note"         .= akNote a
+      , "related"      .= (related :: Bool)
+      ]
+
+updatesOrder :: [Text]
+updatesOrder =
+  [ "message", "repo", "mailbox", "acks", "thread", "number", "status"
+  , "merge_commit", "note", "related", "unrelated", "refused", "letters" ]
+
 -- | What is true about that list, for stderr.
 updatesNotes :: Bool -> Bool -> [Update] -> [Doc ann]
 updatesNotes showAll noMaintainers us =
@@ -318,17 +369,20 @@ data UpdatesArgs = UpdatesArgs
   , uaRepo    :: RepoRef   -- ^ whose maintainer set to check acks against
     -- | Show acks about threads this node has no record of sending.
   , uaAll     :: Bool
+    -- | The acks as a document. See 'updatesContract'.
+  , uaJson    :: Bool
   }
   deriving stock (Eq,Show)
 
 updatesArgs :: forall c . IsContext c => [Syntax c] -> Maybe UpdatesArgs
 updatesArgs syn = do
-  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox"]) ["--all"] syn
+  kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox"]) ["--all","--json"] syn
   mbox <- flagOnce kvs "--mailbox" >>= asKey
   -- Required, unlike everywhere else this flag appears: it is what an ack is
   -- checked against, and an unchecked ack is not worth printing.
   repo <- flagRepo asKey kvs
   showAll <- flagSwitch kvs "--all"
-  pure (UpdatesArgs mbox repo showAll)
+  asJson <- flagSwitch kvs "--json"
+  pure (UpdatesArgs mbox repo showAll asJson)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

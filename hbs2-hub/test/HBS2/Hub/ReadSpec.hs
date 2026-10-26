@@ -20,6 +20,10 @@ import HBS2.Hash (hashObject)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 
 import Data.Config.Suckless (C,Syntax)
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable (toList)
 import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
 import Data.List qualified as List
@@ -428,6 +432,35 @@ spec = repoFlagForms >> emptyListings >> do
         `shouldBe` ["1     ", "2     ", "3     ", "4     "]
       shown (Just mempty) `shouldBe` []
 
+    -- `hub log --json`: the provenance as a document, and no text, because
+    -- the thread document is where a redaction withholds text.
+    it "prints the log as a document, in seq order and without text" $ do
+      owner <- kp
+      let repo = fst owner
+          e1 = mkEvent owner owner (anIssue repo "a secret title") (canonOf repo 1 (Just 1))
+          c1 = mkEvent owner owner (AComment (eventId e1) Nothing (Just "a secret body") Nothing 2000)
+                 (canonOf repo 2 Nothing)
+          dl = mkEvent owner owner (ADelegate repo (fst owner) 2002) (canonOf repo 3 Nothing)
+          fr = foldEvents repo [c1, dl, e1]
+          v = logContract repo Nothing Nothing fr
+          bytes = LBS.unpack (Aeson.encode v)
+          evs = case jat ["events"] v of { Just (Aeson.Array xs) -> toList xs ; _ -> [] }
+          col k = fmap (jat [k]) evs
+      jat ["document"] v `shouldBe` Just (Aeson.String "log")
+      jat ["contract"] v `shouldBe` Just (Aeson.Number 1)
+      jat ["filter_number"] v `shouldBe` Just Aeson.Null
+      col "seq" `shouldBe` fmap (Just . Aeson.Number) [1, 2, 3]
+      col "op" `shouldBe` fmap (Just . Aeson.String) ["open", "comment", "delegate"]
+      col "number" `shouldBe` [Just (Aeson.Number 1), Just (Aeson.Number 1), Just Aeson.Null]
+      col "thread_id" !! 2 `shouldBe` Just Aeson.Null
+      col "event_id" !! 0 `shouldBe` Just (Aeson.String (fromString (show (pretty (eventId e1)))))
+      bytes `shouldSatisfy` (not . isInfixOf "secret")
+      -- Filtered the way the text log is, and says by what.
+      let only = logContract repo (Just 1) (Just (HS.fromList (threadsNumbered 1 fr))) fr
+      jat ["filter_number"] only `shouldBe` Just (Aeson.Number 1)
+      length (case jat ["events"] only of { Just (Aeson.Array xs) -> toList xs ; _ -> [] })
+        `shouldBe` 2
+
     -- A filter that silently does not run is worse than one that refuses: the
     -- caller reads the output as filtered. Both of these came back as
     -- `Filter Nothing Nothing`, which is every issue in the tracker with a zero
@@ -546,10 +579,13 @@ repoFlagForms =
 
     it "reads the log's optional number in both forms" $ do
       k <- aKey
-      logArgs (argv [b58 k]) `shouldBe` Just (k, Nothing)
-      logArgs (argv [b58 k, "3"]) `shouldBe` Just (k, Just 3)
-      logArgs (argv ["--repo", b58 k]) `shouldBe` Just (k, Nothing)
-      logArgs (argv ["--repo", b58 k, "--number", "3"]) `shouldBe` Just (k, Just 3)
+      logArgs (argv [b58 k]) `shouldBe` Just (k, Nothing, False)
+      logArgs (argv [b58 k, "3"]) `shouldBe` Just (k, Just 3, False)
+      logArgs (argv ["--repo", b58 k]) `shouldBe` Just (k, Nothing, False)
+      logArgs (argv ["--repo", b58 k, "--number", "3"]) `shouldBe` Just (k, Just 3, False)
+      logArgs (argv [b58 k, "--json"]) `shouldBe` Just (k, Nothing, True)
+      logArgs (argv [b58 k, "3", "--json"]) `shouldBe` Just (k, Just 3, True)
+      logArgs (argv ["--json", "--repo", b58 k]) `shouldBe` Just (k, Nothing, True)
       -- A number that does not fit is refused at both ends, not wrapped.
       logArgs (argv ["--repo", b58 k, "--number", "18446744073709551617"])
         `shouldBe` Nothing
@@ -607,3 +643,9 @@ emptyListings =
       let fr = foldOf owner []
           said = show (emptyListing HubIssue (Filter (Just "\ESC[2K") Nothing) fr)
       said `shouldSatisfy` (not . isInfixOf "\ESC")
+
+-- A path into a document.
+jat :: [Text] -> Aeson.Value -> Maybe Aeson.Value
+jat [] v = Just v
+jat (k:ks) (Aeson.Object o) = KM.lookup (Key.fromText k) o >>= jat ks
+jat _ _ = Nothing

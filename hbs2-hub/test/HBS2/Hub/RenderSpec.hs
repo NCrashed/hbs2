@@ -14,7 +14,7 @@ module HBS2.Hub.RenderSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold (ThreadState(..),Comment(..),PRState(..))
-import HBS2.Hub.Render
+import HBS2.Hub.Render hiding (b58)
 
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
