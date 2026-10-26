@@ -41,6 +41,7 @@ module HBS2.Hub.Repo.GitBundle
   , SyncedCanon(..)
   , publishTo
   , remoteCanon
+  , remoteNames
   , Published(..)
   , PublishedCanon(..)
   , PublishedPulls(..)
@@ -986,6 +987,21 @@ remoteCanon cwd remote = runExceptT do
   probe <- ExceptT $ callKeeping [] gitListing cwd fetchSeconds "ls-remote"
              ["ls-remote", Text.unpack remote, "refs/hbs2/meta"]
   pure (firstField probe)
+
+-- | The remotes this clone has, in the order @git remote@ lists them.
+--
+-- For `hub status`, which probes every one of them unless asked about one:
+-- `hub publish --remote X` followed by a status that probed origin alone said
+-- "the remote holds no canon at all" about a remote nobody had published to,
+-- and did not say which. A name that would not pass 'validRefName' is dropped
+-- rather than handed to ls-remote; 'remoteCanon' would refuse it anyway.
+remoteNames :: MonadUnliftIO m => Maybe FilePath -> m (Either BundleError [Text])
+remoteNames cwd = runExceptT do
+  out <- ExceptT $ call cwd smallSeconds "remote" ["remote"]
+  pure [ r | l <- Text.lines (Text.decodeUtf8Lenient out)
+           , let r = Text.strip l
+           , not (Text.null r)
+           , validRefName r ]
 
 -- The sha at the head of an ls-remote line, which is tab-separated.
 firstField :: BS.ByteString -> Maybe Text

@@ -209,6 +209,14 @@
     BadFormException (create)`. It now says which verb, prints that verb's
     help, and exits 2.
 
+  - **`hbs2-hub status` asks every remote, and names each.** It probed
+    `origin` unless told otherwise and printed "published NO: the remote holds
+    no canon at all" without naming it, so right after `hbs2-hub publish
+    --remote practice-forum` succeeded, status said canon was not published.
+    Without `--remote` it now probes every remote of the clone and prints one
+    `published <remote>:` line each; with `--remote` it probes that one. The
+    advice names the remote too (`hbs2-hub publish --remote origin`).
+
   - **`hbs2-hub`: the canon versions are reset to 1.** `hub-meta`, `hub-min`
     and `hub-event` had reached 3, 3 and 2 during development. Every one of
     those bumps was free, because a version number costs something only once a

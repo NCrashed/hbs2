@@ -32,7 +32,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold (FoldResult(..),frMaintainers)
 import HBS2.Hub.Repo (readCanon,stCommit,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitBundle (remoteCanon,refTip)
+import HBS2.Hub.Repo.GitBundle (remoteCanon,remoteNames,refTip)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagText,flagSwitch
@@ -50,20 +50,18 @@ import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
 
 import Data.HashMap.Strict qualified as HM
-import Data.Maybe (isJust,fromMaybe)
+import Data.Maybe (isJust)
 import Data.HashSet qualified as HS
 import Data.Text qualified as Text
 
--- | Whether this clone's canon has reached the remote.
+-- | Whether this clone's canon has reached one remote.
 --
--- FOUR ANSWERS AND NOT TWO, because "not published" covers three states a
--- maintainer would act on differently: nothing folded here yet, the remote is
--- level, this clone is ahead, and the remote holds something this clone does
+-- FOUR ANSWERS AND NOT TWO, because "not published" covers states a
+-- maintainer would act on differently: the remote would not say, it holds
+-- nothing, the two are level, and the remote holds something this clone does
 -- not (which is a second maintainer's work and the case `hub sync` is for).
 data Publication =
-    NothingHere         -- ^ no canon in this repository
-  | NotAsked            -- ^ no remote was named, so nothing was probed
-  | RemoteSilent Text   -- ^ the remote would not answer, and what it said
+    RemoteSilent Text   -- ^ the remote would not answer, and what it said
   | RemoteEmpty         -- ^ the remote holds no canon
   | Level               -- ^ the two agree
   | Diverged Text       -- ^ the remote holds something else, and what
@@ -81,7 +79,15 @@ data Standing = Standing
   , stThreads   :: Int
   , stEvents    :: Int
   , stKeys      :: Int           -- ^ how many keys may bless canon
-  , stPublished :: Publication
+    -- | Each remote that was probed, by name, and what it answered.
+    --
+    -- PER REMOTE, because one answer without a name was wrong in the way that
+    -- costs most: `hub publish --remote practice-forum` succeeded, and the
+    -- status after it probed origin, said "the remote holds no canon at all"
+    -- and did not say which remote. Ignored when there is no canon here, since
+    -- there is nothing to have published. 'Left' is `git remote` failing,
+    -- with what it said; an empty list is a clone with no remotes.
+  , stPublished :: Either Text [(Text, Publication)]
     -- | The declared mailbox, and what reading it answered.
     --
     -- 'Nothing' for the mailbox means the repository declares none, which
@@ -103,7 +109,7 @@ statusDoc st =
                     else "no: this machine cannot author owner events for it"
   ]
   <> canonLines
-  <> [ "published" <+> publishedLine ]
+  <> publishedLines
   <> mailboxLines
   where
     canonLines = case stCanon st of
@@ -115,22 +121,31 @@ statusDoc st =
             <+> pretty (stKeys st) <+> "key(s) may bless it"
         ]
 
-    publishedLine = case stPublished st of
-      NothingHere    -> "nothing to publish"
-      NotAsked       -> "not asked: name a remote with --remote"
+    publishedLines = case (stCanon st, stPublished st) of
+      (Nothing, _)  -> [ "published nothing to publish" ]
+      (_, Left e)   -> [ "published unknown: could not list this clone's remotes"
+                           <> line <> "  " <> pretty (safeText e) ]
+      (_, Right []) -> [ "published not asked: this clone has no git remote" ]
+      (_, Right rs) -> [ "published" <+> name r <> ":" <+> publishedLine r p
+                       | (r, p) <- rs ]
+
+    name = pretty . safeText
+
+    publishedLine r = \case
       RemoteSilent e -> "unknown: the remote would not answer" <> line
                           <> "  " <> pretty (safeText e)
-      RemoteEmpty    -> "NO: the remote holds no canon at all."
-                          <+> "`hbs2-hub publish` sends it"
-      Level          -> "yes: the remote holds this canon"
+      RemoteEmpty    -> "NO: this remote holds no canon at all."
+                          <+> "`hbs2-hub publish --remote" <+> name r <> "` sends it"
+      Level          -> "yes: this remote holds this canon"
       -- NOT "behind": this clone may be ahead, behind, or forked, and the
       -- three are told apart by folding both -- which is `hub sync`'s job and
       -- not a status verb's. Saying which without doing that work would be a
       -- guess printed as a fact.
       Diverged theirs ->
-        "NO: the remote holds canon this clone does not have"
+        "NO: this remote holds canon this clone does not have"
           <> line <> "  remote:" <+> pretty (safeText theirs)
-          <> line <> "  `hbs2-hub sync --repo <key>` folds both."
+          <> line <> "  `hbs2-hub sync --remote" <+> name r
+                  <+> "--repo <key>` folds both."
 
     mailboxLines = case stMailbox st of
       Nothing -> [ "mailbox  none declared: nobody outside can file anything here" ]
@@ -168,9 +183,13 @@ statusEntries = do
              <> line <> "because a missing line reads as 'nothing waiting' and"
              <> line <> "that is the answer somebody acts on by going away."
              <> line
-             <> line <> "--remote defaults to origin. Without a remote of that"
-             <> line <> "name the publication line says it was not asked, which"
-             <> line <> "is the honest answer and not a failure." )
+             <> line <> "Without --remote every remote of this clone is probed"
+             <> line <> "and each gets its own `published <remote>:` line, so a"
+             <> line <> "`hbs2-hub publish --remote X` shows up under X. With"
+             <> line <> "--remote only that one is probed. A probe is an"
+             <> line <> "ls-remote, so it reads the remote's FETCH url: a remote"
+             <> line <> "whose push urls go elsewhere as well is reported for"
+             <> line <> "where it fetches from." )
     $ entry $ bindMatch "hub:status" $ nil_ \case
         (statusArgs -> Just sa) -> lift (status sa)
         other -> liftIO (badArgs statusUsage other)
@@ -192,17 +211,26 @@ statusEntries = do
       -- answers this verb exists to give.
       (mine, fr) <- withCanon TreatAsEmpty repo withGitCanon
 
+      -- Every remote unless one was named. Not origin alone, which is what
+      -- this did: `hub publish --remote X` succeeded and the status after it
+      -- said "NO" about origin without naming it.
+      let remotes = case saRemote sa of
+            Just r  -> pure (Right [r])
+            Nothing -> remoteNames Nothing
+                         <&> either (Left . Text.pack . show . pretty) Right
+
+      let probe c r = remoteCanon Nothing r <&> \case
+            -- A remote that is not configured answers here, and it is not a
+            -- failure of this verb: it is a fact about that remote.
+            Left e -> RemoteSilent (Text.pack (show (pretty e)))
+            Right Nothing -> RemoteEmpty
+            Right (Just theirs)
+              | theirs == c    -> Level
+              | otherwise      -> Diverged theirs
+
       published <- case mine of
-        Nothing -> pure NothingHere
-        Just c -> remoteCanon Nothing (saRemote sa) >>= \case
-          -- A remote that is not configured answers here, and it is not a
-          -- failure of this verb: a clone with no remote is a clone nobody has
-          -- published from yet.
-          Left e -> pure (RemoteSilent (Text.pack (show (pretty e))))
-          Right Nothing -> pure RemoteEmpty
-          Right (Just theirs)
-            | theirs == c    -> pure Level
-            | otherwise      -> pure (Diverged theirs)
+        Nothing -> pure (Right [])
+        Just c  -> remotes >>= traverse (traverse (\r -> (r,) <$> probe c r))
 
       -- The mailbox the repository declares, and then the queue in it. Both
       -- can fail on their own and each failure is its own sentence: a
@@ -239,8 +267,8 @@ statusEntries = do
 -- | What one @hub status@ was asked about.
 data StatusArgs = StatusArgs
   { saRepo   :: RepoRef
-    -- | The remote to probe. Defaults to @origin@, which is what a clone has.
-  , saRemote :: Text
+    -- | The remote to probe. 'Nothing' probes every remote of the clone.
+  , saRemote :: Maybe Text
   }
   deriving stock (Eq,Show)
 
@@ -250,6 +278,6 @@ statusArgs syn = do
   kvs    <- flagsAndSwitches (repoFlags <> ["--remote"]) [] syn
   repo   <- flagRepo asKey kvs
   remote <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
-  pure (StatusArgs repo (fromMaybe "origin" remote))
+  pure (StatusArgs repo remote)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

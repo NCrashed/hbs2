@@ -336,18 +336,26 @@ address is live and that somebody read it.
 ## Where you stand
 
 ```
-hbs2-hub status --repo <repo-key>
+hbs2-hub status --repo <repo-key> [--remote <name>]
 ```
 
 Six facts, none of which needs a decision from you: the repository,
 whether this machine can sign for it, what canon here holds, whether
-that canon has reached the remote, which mailbox the repository declares
-and how many letters are in it. It pushes nothing; the publication check
-asks the remote and does not write to it.
+that canon has reached each remote, which mailbox the repository
+declares and how many letters are in it. It pushes nothing; the
+publication check asks the remote and does not write to it.
 
-It says NOT published four ways, because they are four different next
-steps: nothing folded here, the remote holds none, the two agree, and
-the remote holds canon this clone does not have. It will not say "ahead"
+Without `--remote` every remote of the clone is asked, one
+`published <remote>:` line each, so canon sent with
+`hbs2-hub publish --remote practice-forum` shows up on the
+`practice-forum` line even when `origin` has none. With `--remote` only
+that remote is asked. The check is an `ls-remote`, which reads a
+remote's fetch URL: a remote that fetches from one place and also pushes
+to another is reported for the place it fetches from.
+
+The publication line has four answers, because they are four different
+next steps: the remote would not answer, the remote holds none, the two
+agree, and the remote holds canon this clone does not have. It will not say "ahead"
 or "behind" -- telling those apart means folding both, which is what
 `hbs2-hub sync` does.
 

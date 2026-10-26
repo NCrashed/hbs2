@@ -43,7 +43,7 @@ plain :: RepoRef -> Standing
 plain repo = Standing
   { stRepo = repo, stCanSign = True, stCanon = Just "cafe1234"
   , stThreads = 3, stEvents = 9, stKeys = 2
-  , stPublished = Level, stMailbox = Nothing, stWaiting = Right 0
+  , stPublished = Right [("origin", Level)], stMailbox = Nothing, stWaiting = Right 0
   }
 
 spec :: Spec
@@ -62,16 +62,37 @@ spec = do
     -- published" covers cases a maintainer would act on differently.
     it "tells the four ways canon can stand against a remote apart" $ do
       repo <- aKey
-      let says p = said (statusDoc (plain repo) { stPublished = p })
+      let says p = said (statusDoc (plain repo) { stPublished = Right [("origin", p)] })
       says Level        `shouldSatisfy` isInfixOf "yes:"
       says RemoteEmpty  `shouldSatisfy` isInfixOf "publish"
       says (Diverged "beef") `shouldSatisfy` isInfixOf "beef"
       says (Diverged "beef") `shouldSatisfy` isInfixOf "sync"
       says (RemoteSilent "no such remote") `shouldSatisfy` isInfixOf "no such remote"
 
+    -- THE BUG THIS SHAPE FIXES. `hub publish --remote practice-forum`
+    -- succeeded, and status probed origin alone and said "the remote holds no
+    -- canon at all" without saying which remote.
+    it "names the remote each publication line is about" $ do
+      repo <- aKey
+      let s = said (statusDoc (plain repo)
+                      { stPublished = Right [ ("origin", RemoteEmpty)
+                                            , ("practice-forum", Level) ] })
+      s `shouldSatisfy` isInfixOf "published origin: NO"
+      s `shouldSatisfy` isInfixOf "publish --remote origin"
+      s `shouldSatisfy` isInfixOf "published practice-forum: yes"
+      said (statusDoc (plain repo) { stPublished = Right [("up", Diverged "beef")] })
+        `shouldSatisfy` isInfixOf "sync --remote up"
+
+    it "says a clone with no remotes has nowhere it was published" $ do
+      repo <- aKey
+      said (statusDoc (plain repo) { stPublished = Right [] })
+        `shouldSatisfy` isInfixOf "no git remote"
+      said (statusDoc (plain repo) { stPublished = Left "not a git repository" })
+        `shouldSatisfy` isInfixOf "not a git repository"
+
     it "says there is nothing to publish when nothing was folded here" $ do
       repo <- aKey
-      said (statusDoc (plain repo) { stCanon = Nothing, stPublished = NothingHere })
+      said (statusDoc (plain repo) { stCanon = Nothing, stPublished = Right [] })
         `shouldSatisfy` isInfixOf "none here yet"
 
     -- THE ABSENCE THAT MATTERS. A report that left the line out when the peer
@@ -94,17 +115,17 @@ spec = do
     -- of them.
     it "escapes what a remote said" $ do
       repo <- aKey
-      said (statusDoc (plain repo) { stPublished = RemoteSilent "\ESC[2Kgone" })
+      said (statusDoc (plain repo) { stPublished = Right [("origin", RemoteSilent "\ESC[2Kgone")] })
         `shouldSatisfy` (not . isInfixOf "\ESC")
 
   describe "PEP-22 hub status: arguments" $ do
 
-    it "takes the repository, and defaults the remote to origin" $ do
+    it "takes the repository, and probes every remote unless one is named" $ do
       repo <- aKey
       statusArgs (argv ["--repo", b58 repo])
-        `shouldBe` Just (StatusArgs repo "origin")
+        `shouldBe` Just (StatusArgs repo Nothing)
       statusArgs (argv ["--repo", b58 repo, "--remote", "upstream"])
-        `shouldBe` Just (StatusArgs repo "upstream")
+        `shouldBe` Just (StatusArgs repo (Just "upstream"))
 
     it "refuses a call with no repository, and a flag it does not know" $ do
       repo <- aKey
