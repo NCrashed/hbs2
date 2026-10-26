@@ -1,3 +1,24 @@
+# Unreleased
+
+## Added
+
+  - **`hbs2-hub native-host`: the forge for a browser extension (PEP-24).**
+    The `hub mcp` tools over the browsers' native messaging, so the
+    [hbs2-hub browser extension](https://github.com/NCrashed/hbs2-hub-browser)
+    can show and, later, write a repository's issues and pull requests on
+    its GitHub pages. Each tool runs a verb of this binary, as `hub mcp`
+    does. A call for a repository runs in the clone named by
+    `git config --global hbs2-hub.<repo-key>.clone <path>`, or, for a read,
+    in a cache clone under `~/.cache/hbs2-hub/repos`; a write never runs in
+    the cache. `--install` writes a launcher and the host manifest for
+    Firefox, Chrome and Chromium, allowing only the extension to start it;
+    `--uninstall` removes them; `--read-only` offers no tool that writes.
+
+  - **`hbs2-hub issue list --json` and `pr list --json`** print the `index`
+    document (PEP-24): per thread its number, kind, id, title, status,
+    applied labels, author, comment count and folded times. The
+    `issue_list` and `pr_list` MCP tools return it as structured content.
+
 # 0.26.0.0  2026-10-26
 
 The forge release. `hbs2-hub` is new: issues and pull requests that live

@@ -58,6 +58,12 @@ module HBS2.Hub.Mcp
   , protocolVersions
   , exitMeaning
   , argvShown
+    -- * Running, for another transport (PEP-24 native host)
+  , Outcome(..)
+  , runVerb
+  , rehearsed
+  , waitInbox
+  , toolJson
   ) where
 
 import HBS2.Hub.CLI.Argv (argvAtom)
@@ -428,9 +434,10 @@ tList noun = Tool
       r <- repoOf cfg as
       st <- optText "status" as
       lb <- optText "label" as
-      -- Text until the list verbs print JSON; then AsJson and "--json" here.
-      pure $ RunVerb (Run ([noun, "list", flag "repo" r] <> flagM "status" st <> flagM "label" lb)
-                          Nothing AsText)
+      -- The `index` document (PEP-24), so a client gets data and not a table.
+      pure $ RunVerb (Run ([noun, "list", flag "repo" r] <> flagM "status" st <> flagM "label" lb
+                           <> ["--json"])
+                          Nothing AsJson)
   }
   where what = if noun == "pr" then "pull requests" else "issues"
 

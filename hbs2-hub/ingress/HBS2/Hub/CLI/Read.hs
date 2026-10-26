@@ -41,6 +41,8 @@ module HBS2.Hub.CLI.Read
   , logOrder
   , statusOf
   , listArgs
+  , listJsonArgs
+  , indexContract
   , showArgs
   , logArgs
   , Which(..)
@@ -487,7 +489,7 @@ readEntries = do
 
     listVerb name kind what =
       brief (fromString ("list this repository's folded " <> what))
-        $ args [arg "string" "[--repo] repo-key"]
+        $ args [arg "string" "[--repo] repo-key", arg "string" "[--json]"]
         $ desc ( "Read-only and peerless: canon is a git ref in this"
                  <> line <> "repository, so this needs neither a peer nor a key."
                  <> line
@@ -501,20 +503,28 @@ readEntries = do
                  <> line <> "for on open is shown by 'show' and never counted as a"
                  <> line <> "label: applying one is an owner-signed event (PEP-19), so"
                  <> line <> "merging the two would let a stranger label their own"
-                 <> line <> "issue." )
+                 <> line <> "issue."
+                 <> line
+                 <> line <> "--json prints one `index` document (contract 1, PEP-24):"
+                 <> line <> "per thread its number, kind, id, title, status, applied"
+                 <> line <> "labels, author, comment count and folded times. A redacted"
+                 <> line <> "thread keeps its row with a null title." )
         $ entry $ bindMatch name $ nil_ \case
-            (listArgs -> Just (repo, f)) ->
+            (listJsonArgs -> Just ((repo, f), asJson)) ->
               lift $ withFold repo \fr -> do
                 let ts = threadsOf kind f fr
-                out (listDoc ts)
-                -- On stderr and exit 0: an empty answer to a well-formed
-                -- question is an answer, and this is advice about it.
-                when (List.null ts) $
-                  liftIO (saying (emptyListing kind f fr <> line))
+                if asJson
+                  then emit (renderDocument indexOrder (indexContract repo kind f ts))
+                  else do
+                    out (listDoc ts)
+                    -- On stderr and exit 0: an empty answer to a well-formed
+                    -- question is an answer, and this is advice about it.
+                    when (List.null ts) $
+                      liftIO (saying (emptyListing kind f fr <> line))
             other -> liftIO (badArgs ( "usage: hub " <> pretty (spelled name)
-                                         <> " <repo-key> [--status S] [--label L]"
+                                         <> " <repo-key> [--status S] [--label L] [--json]"
                                          <> line <> "   or: hub " <> pretty (spelled name)
-                                         <> " --repo <key> [--status S] [--label L]" )
+                                         <> " --repo <key> [--status S] [--label L] [--json]" )
                                      other)
 
     showVerb name kind =
@@ -798,3 +808,58 @@ logOrder :: [Text]
 logOrder =
   [ "repo", "filter_number", "events", "seq", "event_id", "op", "thread_id", "number"
   , "author", "canon_by", "folded_at", "origin" ]
+
+-- | 'listArgs', and whether @--json@ was asked for.
+--
+-- The switch is taken out before the rest is read rather than added to
+-- 'listArgs', so the filter and the repository keep the one reading they have
+-- and its tests; a list verb has no flag whose value could be @--json@.
+listJsonArgs :: forall c . IsContext c => [Syntax c] -> Maybe ((HubKey, Filter), Bool)
+listJsonArgs syn = (, asJson) <$> listArgs rest
+  where
+    isJson = \case { StringLike "--json" -> True ; _ -> False }
+    asJson = any isJson syn
+    rest = List.filter (not . isJson) syn
+
+-- | The @index@ document (PEP-24): a list view's worth of each thread.
+--
+-- What `issue list` prints, as data: enough to draw a row and to decide which
+-- thread to fetch with `show`, and nothing that needs the thread's text beyond
+-- its title. Same rules as the thread document: derived from canon only, folded
+-- times in milliseconds, and a redacted thread keeps its row with a null title,
+-- for the reason 'listDoc' keeps it.
+indexContract :: RepoRef -> HubKind -> Filter -> [ThreadState] -> Value
+indexContract repo kind f ts = object
+  [ "contract" .= contractVersion
+  , "document" .= ("index" :: Text)
+  , "repo"     .= key58 repo
+  , "kind"     .= kindOf kind
+  , "filter"   .= object [ "status" .= fStatus f, "label" .= fLabel f ]
+  , "threads"  .= fmap one ts
+    -- No paging yet: a whole list is one document. The field is here from the
+    -- start so a reader that pages later need not treat it as optional.
+  , "cursor"   .= (Nothing :: Maybe Text)
+  ]
+  where
+    one t = object
+      [ "number"     .= tsNumber t
+      , "kind"       .= kindOf (tsKind t)
+      , "thread_id"  .= b58 (tsId t)
+      , "title"      .= (if tsRedacted t then Nothing else Just (tsTitle t))
+      , "status"     .= statusOf t
+      , "labels"     .= labelsOf t
+      , "author"     .= key58 (tsAuthor t)
+      , "comments"   .= length (tsComments t)
+      , "created_at" .= tsCreated t
+      , "updated_at" .= tsUpdated t
+      , "redacted"   .= tsRedacted t
+      ]
+
+indexOrder :: [Text]
+indexOrder =
+  -- One order for every level, so a key that occurs at two levels sits where it
+  -- reads best in both: a thread's number before its kind, and the document's
+  -- kind before its filter.
+  [ "repo", "number", "kind", "filter", "threads", "cursor"
+  , "thread_id", "title", "status", "label", "labels", "author", "comments"
+  , "created_at", "updated_at", "redacted" ]

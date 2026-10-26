@@ -189,7 +189,8 @@ Every read verb folds a git ref in a clone, so the host needs one.
     kept current with `hub sync`. Enough for reading, and for a contributor's
     letters, which write nothing locally.
   - A WORKING CLONE, named in the extension settings or in
-    `git config --global hbs2.hub.clone.<key> <path>`, for anything that writes
+    `git config --global hbs2-hub.<key>.clone <path>` (a subsection, since a
+    base58 key may start with a digit), for anything that writes
     canon or needs the user's branches: accept, reply, close, merge, publish,
     and a pull request from a local branch. Writes never go to the cache
     clone, because canon written there would be published from a clone the

@@ -21,6 +21,7 @@ import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
 import HBS2.Hub.CLI.Identity
 import HBS2.Hub.CLI.Project
+import HBS2.Hub.CLI.NativeHost
 import HBS2.Hub.CLI.Inbox
 import HBS2.Hub.CLI.Maintainer
 import HBS2.Hub.CLI.Mcp
@@ -86,6 +87,7 @@ hubEntries = do
   banEntries
   identityEntries
   projectEntries
+  nativeHostEntries
 
 -- | AN ALLOWLIST, and it is the whole of what this tool answers to.
 --

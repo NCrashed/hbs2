@@ -283,6 +283,31 @@ spec = repoFlagForms >> emptyListings >> do
       ids `shouldBe` List.sort ids
       fmap snd (numberIndexOf fr) `shouldBe` ids
 
+  describe "PEP-24 the index document" $ do
+
+    it "has a row per thread with what a list view draws" $ do
+      owner <- kp
+      let repo = fst owner
+          fr = foldOf owner [(1, Just 1, anIssue repo "first"), (2, Just 2, anIssue repo "second")]
+          doc = indexContract repo HubIssue noFilter (threadsOf HubIssue noFilter fr)
+          Aeson.Object o = doc
+          Just (Aeson.Array rows) = KM.lookup "threads" o
+          titles = [ t | Aeson.Object r <- toList rows, Just (Aeson.String t) <- [KM.lookup "title" r] ]
+      KM.lookup "document" o `shouldBe` Just (Aeson.String "index")
+      titles `shouldBe` ["first", "second"]
+      [ KM.lookup "status" r | Aeson.Object r <- toList rows ]
+        `shouldBe` replicate 2 (Just (Aeson.String "open"))
+
+    it "reads --json in both spellings and leaves the filter alone" $ do
+      k <- fst <$> kp
+      let key = fromString (show (pretty (AsBase58 k)))
+      fmap snd (listJsonArgs @C (fmap argvAtom [key, "--json"])) `shouldBe` Just True
+      fmap snd (listJsonArgs @C (fmap argvAtom ["--repo", key, "--status", "open", "--json"]))
+        `shouldBe` Just True
+      fmap (fst . fst) (listJsonArgs @C (fmap argvAtom [key, "--label", "bug", "--json"]))
+        `shouldBe` Just k
+      fmap snd (listJsonArgs @C (fmap argvAtom [key])) `shouldBe` Just False
+
   describe "PEP-22 read: what is printed" $ do
 
     -- A title arrives in a letter anybody may send and is printed to a

@@ -106,7 +106,7 @@ tooling = describe "hub mcp: the tools" $ do
 
   it "fills the repository from the server's default" $
     argvOf (plan cfg0 "issue_list" [("status", "open")])
-      `shouldBe` Just ["issue","list","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9","--status=open"]
+      `shouldBe` Just ["issue","list","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9","--status=open","--json"]
 
   it "asks for the JSON contract on show" $
     argvOf (plan cfg0 "issue_show" [("number", Number 7)])
