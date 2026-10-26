@@ -211,7 +211,12 @@ instance Pretty BundleError where
                     , "that commit is already in this repository, and the"
                         <+> "bundle brought nothing:"
                     , "the proposal is somebody else's work, or your own"
-                        <+> "unpublished commits. Do not stage it." ]
+                        <+> "unpublished commits. Do not stage it."
+                    , "If you sent it yourself, from this clone, accept it from a"
+                        <+> "clone that has not got the branch:"
+                    , "  git clone hbs23://<repo-key> review && cd review"
+                    , "  hbs2-hub sync && hbs2-hub maintainer use"
+                    , "  hbs2-hub inbox accept --message <id> && hbs2-hub publish" ]
     BundleNotOneRef n ->
       nest 2 $ vsep [ "the bundle records" <+> pretty n <+> "refs, and a"
                         <+> "proposal is one"

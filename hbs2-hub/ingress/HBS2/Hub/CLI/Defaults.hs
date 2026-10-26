@@ -17,7 +17,11 @@
 --   * for @pr new@ and @pr revise@: @--onto@ is the branch the remote's HEAD
 --     names and @--from@ the branch checked out;
 --   * for @updates@: @--mailbox@ is the author key, which is what a
---     contributor's own mailbox is (PEP-18).
+--     contributor's own mailbox is (PEP-18);
+--   * for @publish@ and @sync@: @--remote@ is the hbs23:// remote the key
+--     comes from. A clone kept on GitHub has @origin@ there and its hbs23
+--     remote under another name, and defaulting to @origin@ pushed canon to
+--     GitHub and fetched it back from there.
 --
 -- The same names the MCP server reads, so one configuration serves both.
 --
@@ -62,6 +66,7 @@ data Want
   | WFrom         -- ^ @--from <branch>@
   | WOwnMailbox   -- ^ @--mailbox <author-key>@
   | WSelf         -- ^ @--maintainer-key <author-key>@, unless @--clear@
+  | WRemote       -- ^ @--remote <name>@ of the hbs23:// remote
   deriving stock (Eq,Show)
 
 -- | What the surroundings say, each value already as the word a flag takes.
@@ -71,11 +76,12 @@ data Surroundings = Surroundings
   , cxSender :: Maybe String
   , cxOnto   :: Maybe String
   , cxFrom   :: Maybe String
+  , cxRemote :: Maybe String
   }
   deriving stock (Eq,Show)
 
 nothingKnown :: Surroundings
-nothingKnown = Surroundings Nothing Nothing Nothing Nothing Nothing
+nothingKnown = Surroundings Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Which defaults a verb takes, by its dictionary name.
 --
@@ -88,6 +94,8 @@ wantsOf v
   | v `elem` proposing       = [WRepo, WAuthor, WSender, WOnto, WFrom]
   | v == "hub:updates"       = [WRepo, WOwnMailbox]
   | v == "hub:maintainer:use" = [WRepo, WSelf]
+  | v == "hub:sync"          = [WRepo, WRemote]
+  | v == "hub:publish"       = [WRemote]
   | v `elem` byRepo          = [WRepo]
   | otherwise                = []
   where
@@ -105,7 +113,7 @@ wantsOf v
       , "hub:pr:assign", "hub:pr:checkout", "hub:pr:close", "hub:pr:label"
       , "hub:pr:merge", "hub:pr:reopen", "hub:pr:reply"
       , "hub:maintainer:add", "hub:maintainer:list", "hub:maintainer:remove"
-      , "hub:redact", "hub:status", "hub:sync"
+      , "hub:redact", "hub:status"
       , "hub:project:open"
       ]
 
@@ -115,9 +123,14 @@ fillArgv cx ws args0 = List.foldl' step args0 ws
   where
     step args = \case
       WRepo       -> flag ["--repo","--target"] "--repo" (cxRepo cx) args
+      -- In front of a positional line (`show 7`), behind a flag on a flagged
+      -- one: `show --number 7` with the key in front is neither form, and the
+      -- verb refused the line it had just been helped with. Every read verb
+      -- takes --repo.
       WRepoFirst  -> case cxRepo cx of
         Just k | not (given ["--repo","--target"] args)
-               , not (startsWithKey args) -> k : args
+               , not (startsWithKey args) ->
+                   if startsWithFlag args then args <> ["--repo", k] else k : args
         _ -> args
       WAuthor     -> flag ["--author"] "--author" (cxAuthor cx) args
       WSender     -> flag ["--sender"] "--sender" (cxSender cx) args
@@ -134,6 +147,7 @@ fillArgv cx ws args0 = List.foldl' step args0 ws
       WSelf
         | given ["--clear"] args -> args
         | otherwise -> flag ["--maintainer-key","--key"] "--maintainer-key" (cxAuthor cx) args
+      WRemote     -> flag ["--remote"] "--remote" (cxRemote cx) args
 
     flag names name val args
       | given names args = args
@@ -144,6 +158,10 @@ fillArgv cx ws args0 = List.foldl' step args0 ws
 
     startsWithKey = \case
       (a:_) -> keyShaped a
+      _     -> False
+
+    startsWithFlag = \case
+      (a:_) -> "--" `List.isPrefixOf` a
       _     -> False
 
     ontoGiven args fallback = case dropWhile (/= "--onto") args of
@@ -180,7 +198,8 @@ gatherSurroundings ws
       sender <- if needs WSender then firstOf [env senderEnvVar, conf senderGitKey] else pure Nothing
       onto   <- if needs WOnto then remoteHeadBranch else pure Nothing
       from   <- if needs WFrom then currentBranch else pure Nothing
-      pure (Surroundings repo author sender onto from)
+      remote <- if needs WRemote then hbs23Remote <&> fmap fst else pure Nothing
+      pure (Surroundings repo author sender onto from remote)
   where
     firstOf = \case
       []     -> pure Nothing

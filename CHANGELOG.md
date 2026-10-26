@@ -19,6 +19,24 @@
     applied labels, author, comment count and folded times. The
     `issue_list` and `pr_list` MCP tools return it as structured content.
 
+## Fixed
+
+  - **`hbs2-hub publish` and `sync` use the clone's hbs23:// remote**, the
+    one `--repo` is read from, instead of the remote named `origin`. In a
+    clone kept on GitHub, with `origin` pointing there, `publish` pushed
+    canon to GitHub and `sync` fetched it back from there. `--remote`
+    still wins; with no hbs23 remote the default is `origin`, as before.
+
+  - **`hbs2-hub pr show --number <n>` in a clone** (and the other read verbs
+    in their flag form) no longer fails with "no flag claimed": the
+    repository filled in from the clone goes in as `--repo` when the line
+    is in flag form, and in front only when it is positional.
+
+  - **`inbox accept` of a pull request you sent yourself**, from the clone
+    its branch is in, still refuses (the bundle brings no commits this
+    clone lacks), and now says how to accept it: from a fresh clone
+    without the branch.
+
 # 0.26.0.0  2026-10-26
 
 The forge release. `hbs2-hub` is new: issues and pull requests that live

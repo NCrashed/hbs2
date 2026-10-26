@@ -12,7 +12,7 @@ author = "234cz3gCazVh6qJyiKPHJvfLd22sue2odXXFRGY3cadh"
 sender = "CMRhLSEWrPqhY7ca1CZjWKXuM4HTLnd6AdsPr65Gm2oH"
 
 known :: Surroundings
-known = Surroundings (Just repo) (Just author) (Just sender) (Just "master") (Just "fix-typo")
+known = Surroundings (Just repo) (Just author) (Just sender) (Just "master") (Just "fix-typo") (Just "hbs2")
 
 fill :: String -> [String] -> [String]
 fill v = fillArgv known (wantsOf (Text.pack v))
@@ -39,7 +39,14 @@ spec = describe "hub defaults from the clone" $ do
   it "gives a read verb its repository as the first word" $ do
     fill "hub:issue:list" [] `shouldBe` [repo]
     fill "hub:issue:show" ["7"] `shouldBe` [repo, "7"]
-    fill "hub:log" ["--json"] `shouldBe` [repo, "--json"]
+    fill "hub:issue:show" ["--thread", "H", "--json"] `shouldBe` ["--thread", "H", "--json", "--repo", repo]
+
+  -- Finding 18: `pr show --number 1 --json` got the key in front, which is
+  -- neither the positional form nor the flagged one.
+  it "gives a flagged read line its repository behind --repo" $ do
+    fill "hub:pr:show" ["--number", "1", "--json"] `shouldBe` ["--number", "1", "--json", "--repo", repo]
+    fill "hub:log" ["--json"] `shouldBe` ["--json", "--repo", repo]
+    fill "hub:issue:list" ["--status", "open"] `shouldBe` ["--status", "open", "--repo", repo]
 
   it "leaves a read verb alone when it already starts with a key" $
     fill "hub:issue:show" [repo, "7"] `shouldBe` [repo, "7"]
@@ -50,6 +57,14 @@ spec = describe "hub defaults from the clone" $ do
       `shouldNotContain` ["--from"]
     fill "hub:pr:new" ["--title", "t", "--onto", "fix-typo"]
       `shouldNotContain` ["--from"]
+
+  -- Finding 17: in a clone kept on GitHub, origin is GitHub and the hbs23
+  -- remote is another one; publish pushed canon to GitHub.
+  it "publishes to and syncs from the hbs23 remote, not origin" $ do
+    fill "hub:publish" [] `shouldBe` ["--remote", "hbs2"]
+    fill "hub:sync" [] `shouldBe` ["--repo", repo, "--remote", "hbs2"]
+    fill "hub:publish" ["--remote", "origin"] `shouldBe` ["--remote", "origin"]
+    fillArgv nothingKnown (wantsOf "hub:publish") [] `shouldBe` []
 
   it "reads a contributor's own mailbox as their author key" $
     fill "hub:updates" [] `shouldBe` ["--repo", repo, "--mailbox", author]

@@ -91,7 +91,9 @@ syncEntries = do
              <> line <> "happens; a divergence is reported and left alone, in"
              <> line <> "both directions."
              <> line
-             <> line <> "--remote defaults to origin." )
+             <> line <> "--remote defaults, in a clone, to its hbs23:// remote"
+             <> line <> "(origin when that is one, else the only one), and to"
+             <> line <> "origin when there is none." )
     $ entry $ bindMatch "hub:sync" $ nil_ \case
         (syncArgs -> Just sa) -> lift (sync sa)
         other -> liftIO (badArgs syncUsage other)

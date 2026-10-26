@@ -51,6 +51,8 @@ clone:
 - `--author` and `--sender` from your identity;
 - for `pr new`, `--onto` is the branch the remote's HEAD names and
   `--from` is the branch you are on.
+- for `publish` and `sync`, `--remote` is that same hbs23:// remote, so
+  a clone whose `origin` is GitHub publishes to hbs2 and not to GitHub.
 
 It says what it filled in on stderr (`hbs2-hub: using --repo ...`). A
 flag you type always wins. To override a default for a session, set

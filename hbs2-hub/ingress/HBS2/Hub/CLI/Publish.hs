@@ -116,7 +116,12 @@ publishEntries = do
              <> line <> "publishing is who may push, which is git's question. A"
              <> line <> "delegate can bless events into canon and cannot publish"
              <> line <> "them (PEP-21: signing is not publishing); the remote is"
-             <> line <> "where they find that out." )
+             <> line <> "where they find that out."
+             <> line
+             <> line <> "--remote defaults, in a clone, to its hbs23:// remote"
+             <> line <> "(origin when that is one, else the only one), and to"
+             <> line <> "origin when there is none. A clone kept on GitHub has"
+             <> line <> "origin there, and canon does not belong on it." )
     $ entry $ bindMatch "hub:publish" $ nil_ \case
         (publishArgs -> Just pa) -> lift (publish pa)
         other -> liftIO (badArgs publishUsage other)
