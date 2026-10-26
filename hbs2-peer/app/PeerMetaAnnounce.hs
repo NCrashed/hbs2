@@ -83,9 +83,10 @@ mkPeerMeta (PeerConfig syn) recipientClasses = do
     -- price, not a location, and a peer that will not carry cheap traffic has no
     -- reason to keep that a secret from anybody it would refuse.
     --
-    -- Omitted at zero rather than published as "0". Zero is the default and is
-    -- what an absent key already means to a reader, so writing it would put a
-    -- key in every peer's meta to say nothing.
+    -- Omitted at zero rather than published as "0". Zero is what an absent key
+    -- already means to a reader, so writing it would put a key in a peer's
+    -- meta to say nothing. Since 'defRelayFloor' a peer with no setting
+    -- publishes eighteen, which is the point: its neighbours learn the price.
     let mPoWMin :: Maybe Word8
         mPoWMin = case poWFloorFrom syn of
                     0 -> Nothing

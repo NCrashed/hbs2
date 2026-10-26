@@ -11,6 +11,7 @@ module PeerMetaSpec (peerMetaTests) where
 import HBS2.Merkle (AnnMetaData(..))
 import HBS2.Net.Proto.Types (NetworkClass(..))
 import HBS2.Peer.Proto.PeerMeta
+import HBS2.Peer.Proto.Mailbox.PoW (defRelayFloor)
 
 import PeerConfig
 import PeerMetaAnnounce
@@ -43,8 +44,12 @@ peerMetaTests = testGroup "the relay floor a peer publishes"
   [ testCase "a peer that charges nothing says nothing about a floor" do
       -- Absent already means zero to a reader, so publishing "0" would put a
       -- key in every peer's meta to say what its absence says.
-      floorSaid "" @?= Nothing
       floorSaid "(hbs2:mailbox:pow-min 0)" @?= Nothing
+
+  , testCase "a peer that sets nothing publishes the default it enforces" do
+      -- The flag day of 0.26.0.0: no setting is no longer no floor, and a
+      -- neighbour that is not told the default cannot pay it.
+      floorSaid "" @?= Just defRelayFloor
 
   , testCase "the floor a config sets is the floor a neighbour reads" do
       -- The whole of step C in one line: this number was previously in nobody's
@@ -59,7 +64,7 @@ peerMetaTests = testGroup "the relay floor a peer publishes"
       -- tempted to get right independently: the last clause wins, and a value
       -- out of range is ignored rather than clamped.
       floorSaid "(hbs2:mailbox:pow-min 4)\n(hbs2:mailbox:pow-min 20)" @?= Just 20
-      floorSaid "(hbs2:mailbox:pow-min 4096)" @?= Nothing
+      floorSaid "(hbs2:mailbox:pow-min 4096)" @?= Just defRelayFloor
       floorSaid "(hbs2:mailbox:pow-min 7)\n(hbs2:mailbox:pow-min 4096)" @?= Just 7
 
   , testCase "every neighbour is told, whatever it can reach" do

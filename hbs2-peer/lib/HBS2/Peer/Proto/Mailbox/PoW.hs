@@ -31,6 +31,7 @@
 module HBS2.Peer.Proto.Mailbox.PoW
   ( PoWDifficulty
   , maxPayableFloor
+  , defRelayFloor
   , powBudget
   , payableFloor
   , cheapestFloor
@@ -91,6 +92,26 @@ import Data.Word
 -- way of talking to nobody.
 maxPayableFloor :: PoWDifficulty
 maxPayableFloor = 20
+
+-- | The relay floor a peer enforces when its config names none.
+--
+-- EIGHTEEN, and it was zero until 0.26.0.0. At zero every stamp below was
+-- opt-in and nothing priced a flood unless an operator said so, which on a
+-- network where nobody said so is a flood priced at nothing. Raising it is a
+-- flag day: a sender older than these builds pays zero, and a peer with a
+-- floor does not carry what it sends.
+--
+-- MEASURED, not guessed. One core of an i7-12700H does about 1.2 million
+-- attempts a second, so eighteen bits is about 0.2 s for a sender there and a
+-- second or two on a machine ten times slower. The solver uses one core. A
+-- flooder pays the same 0.2 s per distinct message per core, which turns
+-- "free" into "costs a machine".
+--
+-- Two bits under 'maxPayableFloor' on purpose: an operator who wants more can
+-- raise their own floor to twenty and still be a floor clients will pay.
+-- @(hbs2:mailbox:pow-min 0)@ still turns it off.
+defRelayFloor :: PoWDifficulty
+defRelayFloor = 18
 
 -- | How long a client will grind before it calls a difficulty impossible.
 --
@@ -273,11 +294,12 @@ forwardable d named bits = named && bits >= fromIntegral d
 -- THE WORK IS IN IT, and that is what stops the marker being used as a weapon.
 -- With the bits left out, anybody who saw a message could mint
 -- @MessageStamp1 mbox 0@ -- free, and accepted for gossip wherever the peer's
--- floor is zero, which is the default -- and race it ahead of the honest copy.
--- Both have the same marker, so the honest twenty-bit copy is @seen@ and dies
--- at its sender's first hop, while the attacker's junk copy is refused for want
--- of work at the host. The letter is nowhere, the sender paid twenty bits for
--- it, and PEP-21 admits there is no rejection signal to notice with.
+-- floor is zero, which an operator can still choose -- and race it ahead of the
+-- honest copy. Both have the same marker, so the honest twenty-bit copy is
+-- @seen@ and dies at its sender's first hop, while the attacker's junk copy is
+-- refused for want of work at the host. The letter is nowhere, the sender paid
+-- twenty bits for it, and PEP-21 admits there is no rejection signal to notice
+-- with.
 --
 -- With the bits in it, a restamp at the SAME difficulty is still one message to
 -- gossip (the marker does not move with the nonce), and suppressing a copy
@@ -321,12 +343,13 @@ stampWitness h st@MessageStamp1{..} = (bits, marker)
 -- either.
 --
 -- WHAT THAT LEAVES, said as plainly as 'stampMarker' says it and not softer. At
--- a floor of zero -- the default -- stripping the stamp buys an attacker a
--- second full flood for one signature, and a re-stamp at k bits buys another
--- flood for each reachable k, which for small k is free. What the construction
--- buys is that suppression is priced rather than free, and that the amplifica-
--- tion is bounded and exponential in k rather than unbounded; the floor is what
--- cuts the cheap end of it off, and until somebody sets one it does not.
+-- a floor of zero -- configured, no longer the default -- stripping the stamp
+-- buys an attacker a second full flood for one signature, and a re-stamp at k
+-- bits buys another flood for each reachable k, which for small k is free. What
+-- the construction buys is that suppression is priced rather than free, and
+-- that the amplification is bounded and exponential in k rather than
+-- unbounded; the floor is what cuts the cheap end of it off, which is why it is
+-- no longer zero by default ('defRelayFloor').
 deleteMarker :: forall s . ForMailbox s
              => MessageStamp s -> SignedBox (DeleteMessagesPayload s) s -> HashRef
 deleteMarker st box = snd (stampWitness @s (deleteKey @s box) st)

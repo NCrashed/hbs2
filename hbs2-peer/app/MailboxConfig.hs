@@ -17,6 +17,7 @@ module MailboxConfig
 import HBS2.Prelude.Plated
 import HBS2.Net.Auth.Credentials
 import HBS2.Peer.Proto.Mailbox.Types
+import HBS2.Peer.Proto.Mailbox.PoW (defRelayFloor)
 
 import Data.Config.Suckless
 
@@ -32,7 +33,8 @@ import Safe (lastMay)
 -- them. What a mailbox charges for STORAGE is @(pow D)@ in its own signed
 -- policy, which is a different number in a different place.
 --
--- Absent means zero, and zero is the default: this peer carries a stamped
+-- Absent means 'defRelayFloor', eighteen bits. It meant zero until 0.26.0.0,
+-- and @(hbs2:mailbox:pow-min 0)@ still says that: this peer carries a stamped
 -- packet on the same terms as a plain one.
 --
 -- WHAT A NON-ZERO VALUE COSTS SOMEBODY ELSE, said here because the operator who
@@ -45,23 +47,23 @@ import Safe (lastMay)
 -- report ('mpwPoWNotForwarded'). A relay further out is still silence.
 --
 -- The rest of the reasoning -- why both floodable packets have a stamped form,
--- what a client will and will not pay for this number, and why the default has
--- not moved -- is in "HBS2.Peer.Proto.Mailbox.PoW".
+-- what a client will and will not pay for this number, and how the default was
+-- chosen -- is in "HBS2.Peer.Proto.Mailbox.PoW".
 hbs2MailboxPoWMinOpt :: String
 hbs2MailboxPoWMinOpt = "hbs2:mailbox:pow-min"
 
--- | The floor as the config states it, or zero if it does not.
+-- | The floor as the config states it, or 'defRelayFloor' if it does not.
 --
 -- The last clause wins, which is how the other options here read; a value that
 -- does not fit is ignored rather than clamped, because a clamped 4096 would
 -- silently become a floor nobody asked for.
 poWFloorFrom :: [Syntax C] -> PoWDifficulty
 poWFloorFrom conf =
-  fromMaybe 0 $ lastMay [ fromIntegral d
-                        | ListVal [StringLike o, LitIntVal d] <- conf
-                        , o == hbs2MailboxPoWMinOpt
-                        , d >= 0 && d <= 255
-                        ]
+  fromMaybe defRelayFloor $ lastMay [ fromIntegral d
+                                    | ListVal [StringLike o, LitIntVal d] <- conf
+                                    , o == hbs2MailboxPoWMinOpt
+                                    , d >= 0 && d <= 255
+                                    ]
 
 -- | Peers whose replication of a CHARGING mailbox this peer will take.
 --

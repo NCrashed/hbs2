@@ -67,9 +67,10 @@ What makes it safe to allow here and nowhere else:
   - A peer that meets an unknown constructor fails to decode the packet
     and drops it silently (`runProto`), exactly as it does for an unknown
     ProtocolId. It does not relay it and does not act on it.
-  - Both additions so far are proof-of-work witnesses, which are opt-in:
-    nothing sends one unless a peer's `hbs2:mailbox:pow-min` is non-zero,
-    and that is zero by default.
+  - Both additions so far are proof-of-work witnesses. Nothing sends one
+    unless a peer's `hbs2:mailbox:pow-min` is non-zero. It was zero by
+    default until 0.26.0.0 and is 18 since (`defRelayFloor`), so from that
+    release a peer that sets nothing sends stamped packets.
 
 The consequence a re-implementer must plan for: a stamped packet travels
 only over a path of peers that understand it, and an older peer in the

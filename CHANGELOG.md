@@ -256,6 +256,21 @@
 
 ## Changed
 
+  - **Flag day: a peer now asks 18 bits of work to relay mailbox packets
+    unless told otherwise.** `hbs2:mailbox:pow-min` used to default to zero,
+    so the proof of work added for letters and deletes priced nothing unless
+    an operator set it, and nobody had. The default is now 18 bits
+    (`defRelayFloor`): about 0.2 s of one core on a recent laptop, a second
+    or two on a slow machine. A peer with no setting publishes 18 in its peer
+    meta, and clients solve for it before sending.
+
+    **Upgrade every peer.** A sender older than this release sends unstamped
+    packets, and an upgraded peer does not carry them on. An older relay
+    cannot decode a stamped packet and drops it. Mail between old and new
+    peers stops at the first hop of the other kind. A mailbox host still
+    TAKES unstamped mail addressed to it; only relaying is gated.
+    `(hbs2:mailbox:pow-min 0)` restores the old behaviour on one peer.
+
   - **`hbs2-peer mailbox create --key KEY hub` works as documented.** The
     `mailbox` subcommand hands its arguments to the mailbox command line, and
     optparse read `--key` as an option of `hbs2-peer` itself: "Invalid option

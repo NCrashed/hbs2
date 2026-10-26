@@ -174,10 +174,9 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
 
         -- AN UNSTAMPED PACKET PAYS ZERO, which is what the two branches that
         -- carry no stamp -- a plain message and a plain delete -- rely on: at
-        -- the default floor of zero they are carried exactly as they always
-        -- were, and any floor an operator set means what they said. Both now
-        -- have a stamped sibling, so a floor prices them
-        -- rather than stopping them.
+        -- a floor of zero they are carried exactly as they always were, and
+        -- any floor an operator set means what they said. Both now have a
+        -- stamped sibling, so a floor prices them rather than stopping them.
         assertBool "an unstamped packet goes at floor zero" (forwardable 0 True 0)
         assertBool "and stops at any floor above it" (not (forwardable 1 True 0))
 
@@ -219,7 +218,7 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
         -- AND A CHEAP STAMP DOES NOT SPEAK FOR AN EXPENSIVE ONE, which is what
         -- leaving the work out of the marker allowed. Anybody who saw a message
         -- could mint MessageStamp1 mbox 0 -- free, and forwarded wherever the
-        -- peer's floor is zero, which is the default -- and race it ahead of the
+        -- peer's floor is zero, which it was by default -- and race it ahead of the
         -- honest copy. Same marker, so the honest twenty-bit copy was `seen` and
         -- died at its sender's first hop, while the junk copy was refused for
         -- want of work at the host: the letter nowhere, twenty bits paid for it,
@@ -379,19 +378,21 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
 -- an open inbox and a status tree somebody invented.
 mailboxConfigTests :: TestTree
 mailboxConfigTests = testGroup "PEP-21: the mailbox options a peer reads"
-  [ testCase "no floor is a floor of zero, which forwards everything" $ do
-      poWFloorFrom (conf "") @?= 0
+  [ testCase "no floor is the default floor, and zero is still sayable" $ do
+      -- The flag day of 0.26.0.0: absent used to mean zero.
+      poWFloorFrom (conf "") @?= defRelayFloor
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 0)") @?= 0
       poWFloorFrom (conf "(hbs2:mailbox:pow-min 12)") @?= 12
 
   , testCase "the last clause wins, and one out of range is not a clamp" $ do
       poWFloorFrom (conf "(hbs2:mailbox:pow-min 4)\n(hbs2:mailbox:pow-min 20)") @?= 20
       -- 4096 clamped would be a floor nobody asked for, so it is ignored...
-      poWFloorFrom (conf "(hbs2:mailbox:pow-min 4096)") @?= 0
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min 4096)") @?= defRelayFloor
       -- ...and ignoring it leaves whatever a readable clause said, which is
       -- worth pinning because "the last clause wins" and "this clause is not a
       -- clause" have to compose in exactly this order.
       poWFloorFrom (conf "(hbs2:mailbox:pow-min 7)\n(hbs2:mailbox:pow-min 4096)") @?= 7
-      poWFloorFrom (conf "(hbs2:mailbox:pow-min -1)") @?= 0
+      poWFloorFrom (conf "(hbs2:mailbox:pow-min -1)") @?= defRelayFloor
 
   , testCase "no replication peers is nobody, not everybody" $
       -- The default that closes the hole: a mailbox charging work takes no
