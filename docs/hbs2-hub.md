@@ -246,6 +246,30 @@ identifiers are shown by their first eight characters, which is enough
 to tell two rows apart and not enough to pass to anything: every verb
 that takes one takes the whole value, and `--long` prints them.
 
+To watch the queue instead of asking it again every minute:
+
+```
+hbs2-hub inbox --repo <repo-key> --follow
+```
+
+It prints the queue as above and keeps running. Every five seconds it
+asks your peer for the mailbox root, which is one local call, and once a
+minute it asks the peer to fetch the mailbox from the network. Only when
+the root moves does it read the queue again, and then it prints the rows
+it has not printed yet. A row comes again when what it says changed: a
+letter seen before its block arrived opens on a later read, or another
+copy of it turns up. A letter rejected or accepted elsewhere leaves the
+queue and prints nothing.
+
+Each line is flushed as it is written, so a program reading the output
+line by line sees a letter when it is printed. With `--json` each read
+is one `queue` document on one line, holding only the new letters. It is
+as read-only as `inbox`. Notes on stderr come when they start to apply,
+not on every read, and there is no exit code `2` for a short page: the
+next read may be whole. SIGINT and SIGTERM stop it with `0`. A peer that
+stops answering (`18`) or no longer holds the mailbox (`17`) stops it
+too, so a supervisor that restarts it sees why.
+
 One letter in full, body included:
 
 ```

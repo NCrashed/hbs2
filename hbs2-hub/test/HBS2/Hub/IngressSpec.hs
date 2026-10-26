@@ -34,6 +34,7 @@ import Data.List (isInfixOf,sort)
 import Data.Text qualified as Text
 import Crypto.Saltine.Core.SecretBox qualified as SK
 import Crypto.Saltine.Class qualified as Saltine
+import Control.Exception (try)
 import Data.IORef
 import System.Timeout (timeout)
 import Test.Hspec
@@ -90,7 +91,7 @@ served :: Message 'HBS2Basic -> Ingress IO -> Ingress IO
 served msg ig = ig { igBlock = const (pure (Just (serialise msg))) }
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> partSeam >> weighing >> holes >> readingOn
+spec = spec1 >> spec2 >> spec3 >> partSeam >> weighing >> holes >> readingOn >> following
 
 spec1 :: Spec
 spec1 = do
@@ -1003,3 +1004,62 @@ readingOn =
       -- and the message is still LIVE: a ban bounds what is folded, not what
       -- the mailbox holds
       HS.size (irLive r) `shouldBe` 1
+
+-- | @hub inbox --follow@: what wakes the follower up.
+--
+-- The follower reads the queue again only when this returns, so the two ways
+-- it can be wrong are the two below: returning on a mailbox that did not move
+-- (a read every poll, which is the cron job it replaces, only faster), and not
+-- returning on one that did.
+following :: Spec
+following =
+  describe "PEP-22 hub inbox --follow: waiting for the mailbox to move" $ do
+
+    it "returns the new root, and only once it differs from the one given" $ do
+      k <- aKey
+      looks <- newIORef (0 :: Int)
+      roots <- newIORef [Just (mh "r1"), Just (mh "r1"), Just (mh "r2")]
+      let next = liftIO $ do
+            modifyIORef' looks succ
+            atomicModifyIORef' roots $ \case
+              (x:xs) -> (xs, x)
+              []     -> ([], Nothing)
+      root <- awaitRootChange stub { igRoot = const next } k (Just (mh "r1"))
+      root `shouldBe` Just (mh "r2")
+      readIORef looks `shouldReturn` 3
+
+    -- A mailbox the peer has no ref for yet is the one a fresh follower starts
+    -- on, and its first letter is the change.
+    it "treats the first root of a mailbox that had none as a change" $ do
+      k <- aKey
+      root <- awaitRootChange stub { igRoot = const (pure (Just (mh "r1"))) } k Nothing
+      root `shouldBe` Just (mh "r1")
+
+    -- Pauses before every look: a follower that looked without one would be a
+    -- busy loop against the peer's socket.
+    it "pauses before each look, and asks the peer to fetch once a minute" $ do
+      k <- aKey
+      pauses  <- newIORef (0 :: Int)
+      fetches <- newIORef (0 :: Int)
+      n <- newIORef (0 :: Int)
+      let next = liftIO $ do
+            i <- atomicModifyIORef' n (\x -> (x + 1, x + 1))
+            pure (if i < 2 * followFetchEvery then Just (mh "same") else Just (mh "moved"))
+          ig = stub { igRoot  = const next
+                    , igPause = const (modifyIORef' pauses succ)
+                    , igFetch = const (modifyIORef' fetches succ) }
+      _ <- awaitRootChange ig k (Just (mh "same"))
+      readIORef pauses  `shouldReturn` 2 * followFetchEvery
+      readIORef fetches `shouldReturn` 2
+
+    -- A mailbox deleted under a follower would otherwise read as one nothing
+    -- ever arrives in.
+    it "refuses on a mailbox the peer stopped holding, at the next fetch" $ do
+      k <- aKey
+      let ig = stub { igRoot = const (pure (Just (mh "same")))
+                    , igStatus = const (pure Nothing) }
+      r <- timeout 5000000 (try (awaitRootChange ig k (Just (mh "same"))))
+      case r of
+        Just (Left (MailboxUnknown k')) -> k' `shouldBe` k
+        Just (Right _) -> expectationFailure "returned on a root that did not move"
+        Nothing -> expectationFailure "kept waiting on a mailbox the peer does not hold"

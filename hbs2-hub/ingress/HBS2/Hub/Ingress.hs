@@ -37,6 +37,9 @@ module HBS2.Hub.Ingress
   , copyOf
   , copiesOf
   , awaitMailbox
+  , awaitRootChange
+  , followPoll
+  , followFetchEvery
   , maxFetchRounds
   , maxInboxLetters
   , maxMailboxBlocks
@@ -505,6 +508,58 @@ awaitMailbox ig mbox = do
         Just _ | root == seen -> pure (root, True)
                | n <= 1       -> pure (root, False)
                | otherwise    -> igPause ig fetchRound >> go (n - 1) root
+
+-- | How long a follower (@hub inbox --follow@) waits between two looks at the
+-- mailbox root.
+--
+-- The look is 'igRoot', one local RPC that reads a ref the peer already holds,
+-- so it is cheap enough to ask often. Not faster than this, because nothing a
+-- second earlier would change what is printed: a letter that arrives still has
+-- to be downloaded before it opens, and the peer's own download poll is two
+-- seconds.
+followPoll :: Timeout 'Seconds
+followPoll = 5
+
+-- | Every how many looks a follower also asks the peer to fetch.
+--
+-- A letter sent through this peer lands in the root without anybody asking, so
+-- the look above sees it. One that went to another peer arrives when somebody
+-- asks for the mailbox, and left to itself the peer asks every ten minutes
+-- (@mailboxCheckQ@). Twelve looks is a minute, which is what a caller running
+-- @hub inbox@ from cron got, since every read asks once.
+followFetchEvery :: Int
+followFetchEvery = 12
+
+-- | Wait until the peer's copy of a mailbox is not the one given, and return
+-- the root it has now.
+--
+-- WHY THE ROOT AND NOT THE LETTERS. The peer rewrites the mailbox ref on every
+-- merge that changes the tree, so an unchanged root is an unchanged mailbox: a
+-- new letter, a rejected one and an accepted one all move it. Comparing roots
+-- costs one call; comparing letters costs a walk of the whole tree and a keyman
+-- lookup per letter, which the caller then pays once, and only when this
+-- returns.
+--
+-- Polled, because the peer offers nothing to subscribe to here: its notify
+-- sources are refchans and reflogs, not mailboxes.
+--
+-- Each fetch round also asks whether the peer still holds the mailbox. One
+-- deleted under a follower would otherwise read as a mailbox nothing ever
+-- arrives in, which is the confusion 'MailboxUnknown' exists to end.
+--
+-- Writes nothing. The fetch is a question the peer gossips, the same one every
+-- 'awaitMailbox' asks.
+awaitRootChange :: MonadUnliftIO m => Ingress m -> HubKey -> Maybe HashRef -> m (Maybe HashRef)
+awaitRootChange ig mbox seen = go (1 :: Int)
+  where
+    go n = do
+      igPause ig followPoll
+      when (n `mod` followFetchEvery == 0) do
+        igStatus ig mbox >>= \case
+          Nothing -> throwIO (MailboxUnknown mbox)
+          Just () -> igFetch ig mbox
+      root <- igRoot ig mbox
+      if root /= seen then pure root else go (n + 1)
 
 -- | Fetch, walk and read a mailbox: every live message, opened as far as it
 -- will open.

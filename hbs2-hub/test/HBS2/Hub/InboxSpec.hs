@@ -17,6 +17,7 @@ import HBS2.Clock (Timeout(..),TimeoutKind(..),pause)
 
 import Data.Aeson qualified as Aeson
 import Data.HashSet qualified as HS
+import Data.HashMap.Strict qualified as HM
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Codec.Serialise (serialise)
 import Codec.Serialise qualified as CBOR
@@ -64,7 +65,7 @@ view :: HashRef -> Maybe HubKey -> Either OpenError (HubKey, AuthorContent, Disp
 view m env letter = LetterView m env letter Nothing []
 
 spec :: Spec
-spec = spec1 >> spec2 >> paging >> queueJson
+spec = spec1 >> spec2 >> paging >> queueJson >> following
 
 spec1 :: Spec
 spec1 = do
@@ -382,20 +383,20 @@ spec2 =
     it "reads either flag, or both, in any order" $ do
       mbox <- aKey ; repo <- aKey
       inboxArgs (argv ["--mailbox", b58 mbox])
-        `shouldBe` Just (InboxArgs (Just mbox) Nothing Nothing Nothing Short False)
+        `shouldBe` Just (InboxArgs (Just mbox) Nothing Nothing Nothing Short False False)
       inboxArgs (argv ["--repo", b58 repo])
-        `shouldBe` Just (InboxArgs Nothing (Just repo) Nothing Nothing Short False)
+        `shouldBe` Just (InboxArgs Nothing (Just repo) Nothing Nothing Short False False)
       inboxArgs (argv ["--mailbox", b58 mbox, "--repo", b58 repo])
-        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False False)
       inboxArgs (argv ["--repo", b58 repo, "--mailbox", b58 mbox])
-        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False)
+        `shouldBe` Just (InboxArgs (Just mbox) (Just repo) Nothing Nothing Short False False)
 
     -- BOTH are optional to the reader and not to the verb: a repository alone
     -- resolves its mailbox from the manifest (PEP-18), and neither is a queue
     -- nobody named. The reader cannot tell those apart, so it parses and the
     -- verb refuses.
     it "parses a line naming neither, which the verb then refuses" $ do
-      inboxArgs (argv []) `shouldBe` Just (InboxArgs Nothing Nothing Nothing Nothing Short False)
+      inboxArgs (argv []) `shouldBe` Just (InboxArgs Nothing Nothing Nothing Nothing Short False False)
 
     it "refuses a positional key, an unknown flag and a repeat" $ do
       mbox <- aKey ; other <- aKey
@@ -516,3 +517,66 @@ queueJson =
                   [ view (mh "m") Nothing (Left NotFetched) ] }
       out `shouldSatisfy` isInfixOf "\"unreadable\":\"not fetched yet\""
       out `shouldSatisfy` (not . isInfixOf "\"op\"")
+
+-- | @hub inbox --follow@: what a follower prints, read after read.
+following :: Spec
+following = do
+
+  describe "PEP-22 hub inbox --follow: arguments" $ do
+
+    it "reads --follow and -f as the same switch, and refuses a repeat" $ do
+      mbox <- aKey
+      let base = ["--mailbox", b58 mbox]
+      fmap iaFollow (inboxArgs (argv base)) `shouldBe` Just False
+      fmap iaFollow (inboxArgs (argv (base <> ["--follow"]))) `shouldBe` Just True
+      fmap iaFollow (inboxArgs (argv ("-f" : base))) `shouldBe` Just True
+      fmap iaFollow (inboxArgs (argv (base <> ["-f", "--json"]))) `shouldBe` Just True
+      inboxArgs (argv (base <> ["--follow", "--follow"])) `shouldBe` Nothing
+
+  describe "PEP-22 hub inbox --follow: which rows are new" $ do
+
+    let page lvs = InboxRead lvs [] False True 0 0 Nothing
+                     (HS.fromList (concat [ lvMessage lv : lvCopies lv | lv <- lvs ]))
+        msgs = fmap lvMessage
+
+    it "prints every row on the first read, and none of them again" $ do
+      let r = page [ view (mh "a") Nothing (Left NotFetched)
+                   , view (mh "b") Nothing (Left NotForUs) ]
+          (first, seen) = freshRows mempty r
+          (again, _)    = freshRows seen r
+      msgs first `shouldBe` [mh "a", mh "b"]
+      again `shouldBe` []
+
+    it "prints a letter that arrived, and only that one" $ do
+      let a = view (mh "a") Nothing (Left NotForUs)
+          c = view (mh "c") Nothing (Left NotForUs)
+          (_, seen) = freshRows mempty (page [a])
+      msgs (fst (freshRows seen (page [a, c]))) `shouldBe` [mh "c"]
+
+    -- The first read that sees a letter often sees it before its block has
+    -- downloaded. Printing it once would leave "not fetched" as the last word.
+    it "prints a row again when what it says changed" $ do
+      let before = view (mh "a") Nothing (Left NotFetched)
+          after  = view (mh "a") Nothing (Left NotForUs)
+          (_, seen) = freshRows mempty (page [before])
+      msgs (fst (freshRows seen (page [after]))) `shouldBe` [mh "a"]
+
+    -- A rewrap that sorts first leads the group from then on. It is the same
+    -- letter, and the row says so with its copy count; the count is the news.
+    it "knows a letter by its copies as well as by the message leading it" $ do
+      let one = view (mh "b") Nothing (Left NotForUs)
+          two = (view (mh "a") Nothing (Left NotForUs)) { lvCopies = [mh "b"] }
+          (_, seen)  = freshRows mempty (page [one])
+          (fresh, seen') = freshRows seen (page [two])
+      msgs fresh `shouldBe` [mh "a"]
+      fst (freshRows seen' (page [two])) `shouldBe` []
+
+    -- Deletion wins in a mailbox, so a message that left cannot come back, and
+    -- remembering it would grow the follower with the run instead of the mailbox.
+    it "forgets what left the mailbox, unless the read was only part of it" $ do
+      let a = view (mh "a") Nothing (Left NotForUs)
+          (_, seen) = freshRows mempty (page [a])
+          gone = page []
+      HM.size (snd (freshRows seen gone)) `shouldBe` 0
+      HM.size (snd (freshRows seen gone { irTruncated = True })) `shouldBe` 1
+      HM.size (snd (freshRows seen gone { irMissing = [mh "hole"] })) `shouldBe` 1

@@ -2,6 +2,16 @@
 
 ## Added
 
+  - **`hbs2-hub inbox --follow` (`-f`): one process that prints letters as
+    they arrive.** Watching a queue meant running `hub inbox` every minute,
+    paying the settle wait and a keyman lookup per letter each time, and
+    diffing the output. The follower asks the peer for the mailbox root every
+    five seconds, asks it to fetch once a minute, reads the queue again only
+    when the root moved, and prints only the rows it has not printed in this
+    run, flushed line by line. With `--json` each read is one line. Still
+    read-only. The peer has no mailbox notification to subscribe to, so this
+    polls the ref, which is one local call.
+
   - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
     Every thread in canon began as a letter, so opening one meant composing a
     Tier B letter to your own mailbox, waiting for the peer to settle it, and

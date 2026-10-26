@@ -29,6 +29,8 @@ module HBS2.Hub.CLI.Inbox
   , queueContract
   , inboxNotes
   , inboxArgs
+  , freshRows
+  , FollowStopped(..)
   , InboxArgs(..)
   , Width(..)
   , utcOf
@@ -79,8 +81,14 @@ import Data.Maybe (isJust,fromMaybe)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Time.Format (defaultTimeLocale,formatTime)
 import Data.Word (Word64)
-import System.Exit (die,exitWith,ExitCode(..))
+import System.Exit (die,exitWith,exitSuccess,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
+import System.Posix.Signals (installHandler,Handler(..),sigINT,sigTERM)
+import Control.Concurrent (myThreadId)
+import Control.Exception qualified as E
+import Data.Aeson qualified as Aeson
+import Data.HashMap.Strict qualified as HM
+import Data.HashSet qualified as HS
 
 -- | @hub inbox@ and friends.
 inboxEntries :: forall c m . ( IsContext c
@@ -95,7 +103,8 @@ inboxEntries = do
   brief "list the letters waiting in a hub's ingress mailbox"
     $ args [ arg "string" "[--mailbox] mailbox-key", arg "string" "--repo repo-key"
            , arg "string" "[--after message-hash]", arg "string" "[--limit n]"
-           , arg "string" "[--long]", arg "string" "[--json]" ]
+           , arg "string" "[--long]", arg "string" "[--json]"
+           , arg "string" "[-f|--follow]" ]
     $ desc ( "Read-only. Waits for the peer's copy of the mailbox to settle,"
              <> line <> "opens every message this node holds a key for, and reports"
              <> line <> "what each one asks for. Nothing is folded, minted or deleted."
@@ -128,13 +137,27 @@ inboxEntries = do
              <> line <> "since grinding hashes below the honest ones is cheap. When"
              <> line <> "the page runs out the report prints the --after value that"
              <> line <> "continues it. --limit lowers how many are opened and cannot"
-             <> line <> "raise it past what one read will take." )
+             <> line <> "raise it past what one read will take."
+             <> line
+             <> line <> "--follow (-f) prints the queue and keeps running. It asks"
+             <> line <> "the peer for the mailbox root every few seconds, asks it to"
+             <> line <> "fetch once a minute, and reads the queue again only when"
+             <> line <> "the root moved. Each read prints the rows not printed"
+             <> line <> "before in this run, and a row again when what it says"
+             <> line <> "changed: a letter that had not downloaded opens, or another"
+             <> line <> "copy of it turns up. A letter that leaves the queue prints"
+             <> line <> "nothing. Every line is flushed as it is written, and with"
+             <> line <> "--json each read is one document on one line, holding only"
+             <> line <> "those letters. Still read-only. A note on stderr is said"
+             <> line <> "when it first applies, not on every read. SIGINT and"
+             <> line <> "SIGTERM end it with 0; a peer that stops answering or a"
+             <> line <> "mailbox it no longer holds end it with their own codes." )
     -- Both spellings, because PEP-22 specifies the flag: the bare key is what
     -- the spec calls `--mailbox <key>`, and a form the spec names has to be
     -- accepted under that name or the divergence has merely moved.
     $ entry $ bindMatch "hub:inbox" $ nil_ \case
         [ SignPubKeyLike mbox ] ->
-          lift (listInbox (InboxArgs (Just mbox) Nothing Nothing Nothing Short False))
+          lift (listInbox (InboxArgs (Just mbox) Nothing Nothing Nothing Short False False))
         (inboxArgs -> Just ia)
           -- One of the two, and the reader cannot say which: a queue with
           -- neither a mailbox nor a repository is a queue nobody named.
@@ -173,54 +196,109 @@ inboxEntries = do
       -- The same refusal `hub inbox accept` makes: a deny-list that reads as
       -- empty when it is damaged stops working silently, which is the failure
       -- this layer exists to prevent.
-      allowed <- denyingFor mrepo
-                   >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
-                              pure
-
-      -- Each with its own exit code. PEP-22 gives 1 to "a bad argument, an
-      -- unknown verb", and neither of these is one: the key was well formed both
-      -- times, and the fix is a command in one case and an investigation in the
-      -- other. While both left with 1, a hook could not tell either from a typo.
       --
-      -- Chained, so the second handler covers the first as well as the body.
-      -- That is harmless here: 'refuse' leaves through 'exitWith', whose
-      -- exception is an ExitCode and is caught by neither.
-      r <- readInboxFrom ((overRpc sto api) { igAllowed = allowed }) mbox
-                         (iaAfter ia) (fromMaybe maxInboxLetters (iaLimit ia))
-             `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
-             `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
+      -- The deny-list is read again on every read, so that a `hub ban` made
+      -- while a follower runs applies from its next read on: a follower that
+      -- kept the list it started with would go on showing the letters the ban
+      -- was made to take out of the queue.
+      let readOnce = do
+            allowed <- denyingFor mrepo
+                         >>= either (\e -> liftIO (refuse (show (denyUnreadable e)) codeNoBanList))
+                                    pure
 
-      liftIO $ handleJust
-        (\e -> if isResourceVanishedError e then Just () else Nothing)
-        -- 128 plus SIGPIPE, what a shell reports for a program a pipe killed.
-        -- `hub inbox <key> | head` used to report SUCCESS on a truncated queue,
-        -- which is the one answer a caller must not get from a queue it only saw
-        -- part of. Scoped to the printing, like the same handler in Verify: over
-        -- the whole verb it would turn a documented refusal whose stderr had
-        -- been closed into a silent 141.
-        (\_ -> exitWith (ExitFailure 141))
-        (if iaJson ia
-           -- The whole document or nothing: a JSON consumer that got half a
-           -- document because a pipe closed would parse it as a shorter
-           -- mailbox, which is the one failure the counts in it exist to make
-           -- impossible.
-           then LBS.putStr (renderContract (queueContract r))
-           else mapM_ print (inboxDoc (iaWidth ia) r))
+            -- Each with its own exit code. PEP-22 gives 1 to "a bad argument, an
+            -- unknown verb", and neither of these is one: the key was well formed
+            -- both times, and the fix is a command in one case and an
+            -- investigation in the other. While both left with 1, a hook could not
+            -- tell either from a typo.
+            --
+            -- Chained, so the second handler covers the first as well as the
+            -- body. That is harmless here: 'refuse' leaves through 'exitWith',
+            -- whose exception is an ExitCode and is caught by neither.
+            readInboxFrom ((overRpc sto api) { igAllowed = allowed }) mbox
+                          (iaAfter ia) (fromMaybe maxInboxLetters (iaLimit ia))
+              `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
+              `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
 
-      -- What can be said ABOUT the list, said once at the end rather than once
-      -- per line: the counts are what matter, and a page of identical warnings
-      -- buries the letters.
-      --
-      -- Through 'saying', so that a stderr nobody is reading cannot cost the
-      -- exit code below. `hub inbox K 2>&1 | head` closes both, and an
-      -- unguarded write then leaves through the RTS with 1 -- the code PEP-22
-      -- gives to usage errors, which is exactly the confusion 17 and 18 were
-      -- added to end.
-      liftIO $ for_ (inboxNotes (isJust mrepo) r) (saying . (<> line))
+          -- 128 plus SIGPIPE, what a shell reports for a program a pipe killed.
+          -- `hub inbox <key> | head` used to report SUCCESS on a truncated
+          -- queue, which is the one answer a caller must not get from a queue it
+          -- only saw part of. Scoped to the printing, like the same handler in
+          -- Verify: over the whole verb it would turn a documented refusal whose
+          -- stderr had been closed into a silent 141.
+          printing = liftIO . handleJust
+            (\e -> if isResourceVanishedError e then Just () else Nothing)
+            (\_ -> exitWith (ExitFailure 141))
 
-      liftIO $ case inboxCode r of
-        0 -> pure ()
-        n -> exitWith (ExitFailure n)
+      if iaFollow ia then followInbox (overRpc sto api) mbox readOnce printing else do
+
+        r <- readOnce
+
+        printing
+          (if iaJson ia
+             -- The whole document or nothing: a JSON consumer that got half a
+             -- document because a pipe closed would parse it as a shorter
+             -- mailbox, which is the one failure the counts in it exist to make
+             -- impossible.
+             then LBS.putStr (renderContract (queueContract r))
+             else mapM_ print (inboxDoc (iaWidth ia) r))
+
+        -- What can be said ABOUT the list, said once at the end rather than once
+        -- per line: the counts are what matter, and a page of identical warnings
+        -- buries the letters.
+        --
+        -- Through 'saying', so that a stderr nobody is reading cannot cost the
+        -- exit code below. `hub inbox K 2>&1 | head` closes both, and an
+        -- unguarded write then leaves through the RTS with 1 -- the code PEP-22
+        -- gives to usage errors, which is exactly the confusion 17 and 18 were
+        -- added to end.
+        liftIO $ for_ (inboxNotes (isJust mrepo) r) (saying . (<> line))
+
+        liftIO $ case inboxCode r of
+          0 -> pure ()
+          n -> exitWith (ExitFailure n)
+
+      where
+        -- THE FOLLOWER. The same read as above, done again whenever the peer's
+        -- root moves, printing only what this run has not printed yet.
+        --
+        -- No exit code from 'inboxCode' here, because there is no end of the
+        -- queue to attach one to: a page that was incomplete on one read can be
+        -- whole on the next. The notes still say it, each time it starts to
+        -- apply.
+        followInbox ig mb readOnce printing = do
+          me <- liftIO myThreadId
+          liftIO $ for_ [sigINT, sigTERM] $ \s ->
+            installHandler s (Catch (throwTo me FollowStopped)) Nothing
+
+          let root = igRoot ig mb
+                       `catch` (\(e :: PeerSilent) -> liftIO (refuse (show e) codePeerSilent))
+              change seen = awaitRootChange ig mb seen
+                       `catch` (\(e :: MailboxUnknown) -> liftIO (refuse (show e) codeMailboxUnknown))
+                       `catch` (\(e :: PeerSilent)     -> liftIO (refuse (show e) codePeerSilent))
+
+              -- The root is taken BEFORE the read and not after it. Taken after,
+              -- a letter landing between the two would move a root this loop
+              -- then calls seen, and the letter would wait for the next one. The
+              -- other order costs at most a read that finds nothing new.
+              go first seen shown said = do
+                r <- readOnce
+                let (fresh, shown') = freshRows shown r
+                printing $ do
+                  if iaJson ia
+                    then when (first || not (List.null fresh)) $
+                           LBS.putStr (Aeson.encode (queueContract r { irLetters = fresh }) <> "\n")
+                    else for_ fresh $ \lv -> print (render (iaWidth ia) lv) >> hFlush stdout
+                  hFlush stdout
+                let notes = fmap show (inboxNotes (isJust (iaRepo ia)) r :: [Doc ()])
+                liftIO $ for_ [ n | n <- notes, n `notElem` said ] $ \n ->
+                  saying (pretty n <> line)
+                seen' <- change seen
+                go False seen' shown' notes
+
+          withRunInIO $ \unlift ->
+            E.handle (\FollowStopped -> E.handle (\(_ :: IOException) -> pure ()) (hFlush stdout) >> exitSuccess)
+                   (unlift (root >>= \s -> go True s mempty []))
 
 -- | What this verb takes, in the words somebody typing it would use.
 inboxUsage :: Doc ann
@@ -233,6 +311,51 @@ inboxUsage = "usage: hub inbox [--mailbox <key>] [--repo <key>]" <> line
 -- | The queue itself: one line per letter, on stdout.
 inboxDoc :: Width -> InboxRead -> [Doc ann]
 inboxDoc w = fmap (render w) . irLetters
+
+-- | Which rows of a read a follower has not printed yet, and what it has printed
+-- once it prints them.
+--
+-- KEYED BY WHAT THE ROW SAYS, and not only by which message it is. A follower
+-- that printed a message once and never again would leave the first thing it
+-- said about a letter as the last: a letter whose block had not downloaded yet
+-- reads "unreadable: not fetched" on the read that first sees it and opens on
+-- the next, and the opened row is the one a maintainer needs. A rewrap moves
+-- the row too, by its copy count or by which copy sorts first and so leads the
+-- row, and the count is the fact 'render' prints it for.
+--
+-- Every name the row covers is remembered, the copies as well as the message
+-- that leads it, so a new copy that sorts first is a changed row and not a new
+-- letter. The whole row is compared ('Long', whatever the caller asked to see),
+-- because a shortened one could stay the same while what it shortens changed.
+--
+-- Forgotten when the message leaves the mailbox, which keeps this the size of
+-- the mailbox and not of the run: a deleted message cannot come back (deletion
+-- wins, see 'liveMessages'). Not when the walk was cut short or had holes,
+-- since 'irLive' is then a part of the mailbox and forgetting by it would print
+-- rows again that nothing changed.
+freshRows :: HashMap HashRef String -> InboxRead -> ([LetterView], HashMap HashRef String)
+freshRows shown r = (fresh, kept)
+  where
+    rows   = [ (lv, show (render Long lv :: Doc ())) | lv <- irLetters r ]
+    names lv = lvMessage lv : lvCopies lv
+    said lv = [ s | n <- names lv, Just s <- [HM.lookup n shown] ]
+    fresh  = [ lv | (lv, row) <- rows, row `notElem` said lv ]
+    shown' = HM.union (HM.fromList [ (n, row) | (lv, row) <- rows, n <- names lv ]) shown
+    kept | irTruncated r || not (List.null (irMissing r)) = shown'
+         | otherwise = HM.filterWithKey (\k _ -> HS.member k (irLive r)) shown'
+
+-- | How a follower is told to stop: SIGINT or SIGTERM, delivered to the thread
+-- that runs it.
+--
+-- Asynchronous, so that nothing between the signal and the handler at the top
+-- of the follower mistakes it for a failure of its own and carries on: a
+-- @catchAny@ in a reader would otherwise swallow the request to stop.
+data FollowStopped = FollowStopped
+  deriving stock (Show)
+
+instance Exception FollowStopped where
+  toException   = E.asyncExceptionToException
+  fromException = E.asyncExceptionFromException
 
 -- | Whether a row carries whole identifiers or the front of them.
 --
@@ -531,13 +654,15 @@ data InboxArgs = InboxArgs
   , iaWidth   :: Width
     -- | The queue as a document rather than as rows. See 'queueContract'.
   , iaJson    :: Bool
+    -- | Keep running and print what arrives. See 'freshRows'.
+  , iaFollow  :: Bool
   }
   deriving stock (Eq,Show)
 
 inboxArgs :: forall c . IsContext c => [Syntax c] -> Maybe InboxArgs
 inboxArgs syn = do
   kvs  <- flagsAndSwitches (repoFlags <> ["--mailbox","--after","--limit"])
-                           ["--long","--json"] syn
+                           ["--long","--json","--follow","-f"] syn
   -- BOTH optional here and not in the verb: a queue named by repository alone
   -- resolves its mailbox from the manifest, and one named by neither is a
   -- usage error the verb reports with its own words.
@@ -547,7 +672,8 @@ inboxArgs syn = do
   lim  <- fmap (fmap fromIntegral) (flagMaybe kvs "--limit" flagWord)
   long <- flagSwitch kvs "--long"
   asJson <- flagSwitch kvs "--json"
-  pure (InboxArgs mbox repo aft lim (if long then Long else Short) asJson)
+  follow <- (||) <$> flagSwitch kvs "--follow" <*> flagSwitch kvs "-f"
+  pure (InboxArgs mbox repo aft lim (if long then Long else Short) asJson follow)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
