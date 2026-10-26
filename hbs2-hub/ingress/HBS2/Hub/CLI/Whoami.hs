@@ -35,6 +35,7 @@ import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf,sigilOf)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagMaybe,repoFlags,flagRepoMaybe)
 import HBS2.Hub.CLI.Common (refuse,saying,signerFor,askingKeyman)
 import HBS2.Hub.CLI.Compose (codeWrongSigil)
+import HBS2.Hub.CLI.Signer (Signer(..),resolveSignerIn,signerEnvVar,signerDoc)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -50,7 +51,8 @@ import HBS2.Storage
 import HBS2.KeyMan.Keys.Direct (runKeymanClientRO,listCredentials)
 
 import Data.List qualified as List
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing,isJust)
+import System.Environment (lookupEnv)
 import System.Exit (die)
 
 -- | What the caller asked about. Every field optional, and an empty call is
@@ -155,7 +157,9 @@ whoamiEntries = do
              <> line <> "the ingress mailbox it declares and the sigil to seal"
              <> line <> "to (PEP-18). A repository that declares neither is one"
              <> line <> "whose owner has not published the clause, or one that"
-             <> line <> "is not a forge." )
+             <> line <> "is not a forge. It also names the key a canon write here"
+             <> line <> "would sign with when no --as is given (HBS2_HUB_AS, then"
+             <> line <> "git config hbs2.hub.as, then the repository key)." )
     $ entry $ bindMatch "hub:whoami" $ nil_ \case
         (whoamiArgs -> Just w) -> lift (whoami w)
         other -> liftIO (badArgs whoamiUsage other)
@@ -216,6 +220,17 @@ whoamiEntries = do
         _ -> pure ()
 
       for_ whoRepo $ \repo -> do
+        -- Who would sign canon here without --as: the question a delegate
+        -- needs answered before an accept, not after one.
+        envv <- liftIO (lookupEnv signerEnvVar)
+        resolveSignerIn Nothing envv repo Nothing >>= \case
+          Left e -> liftIO $ saying ("canon signer unknown:" <+> pretty e <> line)
+          Right s -> do
+            can <- isJust <$> signerFor (sgKey s)
+            liftIO $ print $ "canon signer" <+> signerDoc s
+              <> line <> "  " <> if can then "this machine can sign as it"
+                                         else "NO SIGNING KEY HERE for it"
+
         mf <- readManifest repo
         liftIO $ case mf of
           Left e -> saying ("this node cannot read that repository:" <+> pretty e <> line)

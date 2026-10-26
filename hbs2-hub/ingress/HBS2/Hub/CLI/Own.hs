@@ -44,12 +44,13 @@ import HBS2.Hub.CLI.Argv (badArgs, flagsOf,flagsAndSwitches,flagOnce,flagEvery,f
                          , flagSwitch,flagText,flagWord 
                          ,flagOneOfMaybe,assigneeFlags)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
-import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
-                           ,blessed,committing,oneStop,signerFor,signingPair
+import HBS2.Hub.CLI.Common (saying,withCanon,OnMissing(..)
+                           ,blessed,committing,oneStop,signingPair
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.CLI.Read (codeNoSuchThread,oneNumbered)
 import HBS2.Hub.CLI.Compose (readBody,letterBody)
 import HBS2.Hub.CLI.Accept (codeNoCanonKey,codeTriageRefused,codeCanonUnwritable)
+import HBS2.Hub.CLI.Signer (canonSigner,signingAs,signerPrecedenceHelp,signerDoc)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -58,7 +59,6 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (pattern HashLike)
 
 import Data.List qualified as List
-import Data.Maybe (fromMaybe,listToMaybe)
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import System.Exit (die)
@@ -137,7 +137,7 @@ ownEntries = do
 
   brief "hide an event's content in every clone that folds this canon"
     $ args [ arg "string" "--repo repo-key", arg "string" "--event event-id"
-           , arg "string" "[--dry-run]" ]
+           , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
     $ desc ( "DISPLAY-LEVEL, and PEP-19 says so: the event stays in canon and"
              <> line <> "every clone still holds the bytes. What changes is that"
              <> line <> "readers stop showing the body. It is the answer to a"
@@ -146,12 +146,17 @@ ownEntries = do
              <> line
              <> line <> "The event-id, not a number: a redact names one event, and"
              <> line <> "the thing worth hiding is as often a comment as an open."
+             <> asHelp
              <> dryRunHelp )
     $ entry $ bindMatch "hub:redact" $ nil_ \case
         (redactArgs -> Just rd) -> lift (redactIt rd)
         other -> liftIO (badArgs redactUsage other)
 
   where
+
+    asHelp = line
+      <> line <> "--as names the canon key to sign with, for a delegate (PEP-21)."
+      <> line <> signerPrecedenceHelp
 
     -- `hub:<noun>:<op>`, built rather than written twice.
     verb noun op = fromString ("hub:" <> noun <> ":" <> op)
@@ -182,6 +187,7 @@ ownEntries = do
                  <> line <> "verbs. --label applies labels, which an author may"
                  <> line <> "only request (PEP-19): here the owner is the author,"
                  <> line <> "so they are applied."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (openArgs -> Just op) -> lift (openIt kind op)
@@ -216,6 +222,7 @@ ownEntries = do
                  <> line <> "A LABEL AN AUTHOR ASKED FOR IS NOT A LABEL. A letter's"
                  <> line <> "labels are a request (PEP-18); this is the owner applying"
                  <> line <> "one, and it is the only thing a reader shows as a label."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             -- BOTH AT ONCE IS REFUSED, and it used not to be: this admitted the
@@ -249,6 +256,7 @@ ownEntries = do
                  <> line <> "--clear unassigns, and is spelled out for the reason it is"
                  <> line <> "on labels: a verb that unassigned because somebody forgot"
                  <> line <> "an argument would publish that into append-only canon."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor assigneeFlags ["--clear"] -> Just ow)
@@ -272,9 +280,7 @@ ownEntries = do
                  <> line <> "status change, in the owner's own words. A note a"
                  <> line <> "stranger phrased is not signed here: that is what"
                  <> line <> "honouring a request is for."
-                 <> line
-                 <> line <> "--as names a delegate's key (PEP-21); it defaults to"
-                 <> line <> "the repository key."
+                 <> asHelp
                  <> dryRunHelp )
         $ entry $ bindMatch name $ nil_ \case
             (ownArgsFor ["--note"] [] -> Just ow) -> lift (statusIt mk ow)
@@ -320,16 +326,10 @@ ownEntries = do
     -- accept' uses, and for the same reason -- minting writes nothing, so a
     -- refusal anywhere above the commit leaves canon untouched.
     writeOwn repo mas dry parent fr mk message = do
-      let signer = fromMaybe repo mas
-
-      creds <- signerFor signer
-               >>= maybe (liftIO (refuse (show ( "cannot sign as"
-                                                   <+> pretty (AsBase58 signer)
-                                                   <> line
-                                                   <> "  no keyring here holds it as its own"
-                                                   <+> "signing key" ))
-                                         codeNoCanonKey))
-                         pure
+      -- --as, then HBS2_HUB_AS, then git config hbs2.hub.as, then the repo
+      -- key: see "HBS2.Hub.CLI.Signer".
+      signer <- canonSigner repo mas
+      creds <- signingAs codeNoCanonKey signer
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
@@ -354,6 +354,7 @@ ownEntries = do
        <> [ "number" <+> pretty n | Just n <- [acNumber acc] ]
        <> [ "seq" <+> pretty (acSeq acc)
           , "commit" <+> pretty commit
+          , "signed by" <+> signerDoc signer
           ] )
 
       liftIO (saying (notPublishedYet <> line))

@@ -148,6 +148,7 @@ library hub-ingress
       HBS2.Hub.CLI.Status
       HBS2.Hub.CLI.Reject
       HBS2.Hub.CLI.Show
+      HBS2.Hub.CLI.Signer
       HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
@@ -251,6 +252,7 @@ test-suite spec
       HBS2.Hub.RepoSpec
       HBS2.Hub.SentSpec
       HBS2.Hub.ShowSpec
+      HBS2.Hub.SignerSpec
       HBS2.Hub.GitBundleSpec
       HBS2.Hub.GitRepoSpec
       HBS2.Hub.GitWriteSpec

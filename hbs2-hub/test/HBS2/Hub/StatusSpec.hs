@@ -9,6 +9,7 @@ module HBS2.Hub.StatusSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Sent (Sent(..))
 import HBS2.Hub.CLI.Status
+import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..))
 import HBS2.Hub.CLI.Sent (sentDoc,sentNote,SentArgs(..),sentArgs)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
@@ -42,6 +43,7 @@ said = unlines . fmap show
 plain :: RepoRef -> Standing
 plain repo = Standing
   { stRepo = repo, stCanSign = True, stCanon = Just "cafe1234"
+  , stSigner = Right (Signer repo RepoKeyDefault), stMaintains = True
   , stThreads = 3, stEvents = 9, stKeys = 2
   , stPublished = Right [("origin", Level)], stMailbox = Nothing, stWaiting = Right 0
   }

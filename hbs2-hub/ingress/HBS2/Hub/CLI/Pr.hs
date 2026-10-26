@@ -53,6 +53,7 @@ import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord,r
                          ,flagsAndSwitches,flagSwitch)
 import HBS2.Hub.CLI.Publish (notPublishedYet)
 import HBS2.Hub.CLI.Read (oneNumbered)
+import HBS2.Hub.CLI.Signer (canonSigner,signingAs,signerDoc,signerPrecedenceHelp)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
                            ,signerFor,signingPair
                            ,blessed,committing,oneStop
@@ -221,7 +222,7 @@ prEntries = do
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
            , arg "string" "--commit sha", arg "string" "--into ref"
-           , arg "string" "[--dry-run]" ]
+           , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
     $ desc ( "RECORDS a merge; it does not perform one. PEP-20 leaves the"
              <> line <> "integration to whatever policy the repository uses --"
              <> line <> "merge, rebase, squash, fast-forward -- so do that with"
@@ -243,6 +244,9 @@ prEntries = do
              <> line <> "(PEP-19). No second 'set' is written and none should be:"
              <> line <> "canon would claim a merged pull request was open until it"
              <> line <> "arrived."
+             <> line
+             <> line <> "--as names the canon key to sign with, for a delegate (PEP-21)."
+             <> line <> signerPrecedenceHelp
              <> dryRunHelp )
     $ entry $ bindMatch "hub:pr:merge" $ nil_ \case
         (prMergeArgs -> Just pm) -> lift (prMerge pm)
@@ -344,7 +348,8 @@ prEntries = do
             Left e -> liftIO (refuse (show (pretty e)) codeBundleFailed)
 
     prMerge pm = do
-      creds <- signingKey (pmAs pm)
+      signer <- canonSigner (pmRepo pm) (pmAs pm)
+      creds <- signingAs codeNoKey signer
 
       (parent, fr) <- withCanon Refuse (pmRepo pm) withGitCanon
 
@@ -399,6 +404,7 @@ prEntries = do
         [ "merged #" <> pretty (pmNumber pm) <+> "into" <+> pretty (pmInto pm)
         , "event" <+> pretty (eventId (acEvent acc))
         , "commit" <+> pretty commit
+        , "signed by" <+> signerDoc signer
         , "status is now merged; PEP-19 has the merge event set it, so no"
             <+> "second event was written"
         ]
@@ -727,7 +733,7 @@ data PrMerge = PrMerge
   , pmNumber :: Word64
   , pmCommit :: Text        -- ^ the merge commit, in this repository
   , pmInto   :: Text        -- ^ the branch it landed on
-  , pmAs     :: HubKey      -- ^ the canon key; defaults to the repo key
+  , pmAs     :: Maybe HubKey  -- ^ @--as@; see "HBS2.Hub.CLI.Signer" for the default
   , pmDry    :: Writing
   }
   deriving stock (Eq,Show)
@@ -760,7 +766,7 @@ prMergeArgs syn = do
   into <- flagOnce kvs "--into"   >>= asText
   as   <- flagMaybe kvs "--as" asKey
   dry  <- flagSwitch kvs "--dry-run"
-  pure (PrMerge repo n sha into (fromMaybe repo as) (writingOf dry))
+  pure (PrMerge repo n sha into as (writingOf dry))
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     -- Through 'flagText': an abbreviated sha can be all digits, and one in

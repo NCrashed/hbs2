@@ -42,6 +42,24 @@
     `hbs2-git3/test/e2e/reinit.sh` walks through all of it on one throwaway
     peer on 127.0.0.1 in a temporary HOME: push, wipe the storage, the push
     that now fails, re-init from a clone with stale state, push again, clone.
+  - **A default for `--as`: `HBS2_HUB_AS`, `git config hbs2.hub.as`, and
+    `hbs2-hub maintainer use`.** Every verb that writes canon signed with the
+    repository key unless told otherwise, so a delegate whose machine also held
+    that key ran `inbox accept` without `--as` and blessed the event as the
+    owner. The order is now `--as`, then `HBS2_HUB_AS`, then
+    `git config hbs2.hub.as`, then the repository key; a value that is not a
+    key is refused rather than skipped. `maintainer use --repo R
+    --maintainer-key K` checks that K is a maintainer here and can sign, and
+    sets the config; `--clear` removes it. `status` and `whoami --repo` name
+    the key that would sign and where it came from, writes print a
+    `signed by` line, and a default that chose the signer is said on stderr.
+    `pr merge` parses `--as` as optional now (`pmAs :: Maybe HubKey`).
+
+    The acknowledgement that failed after such an accept said only "no
+    encryption key for <key>". It now says that key is the signer, that an
+    ack is sealed from the signer and so needs an encryption key in its
+    keyring, that the event is in canon anyway, and how to sign as another
+    key.
 
   - **`hbs2-hub issue open`: the owner can file a bug on their own project.**
     Every thread in canon began as a letter, so opening one meant composing a

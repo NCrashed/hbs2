@@ -35,6 +35,7 @@ import HBS2.Hub.Ingress (PeerSilent(..),copiesOf,openMessage,LetterView(..)
                         ,rawMessage,LetterRaw(..),rpcTimeout)
 import HBS2.Hub.Letter (AckRecord(..),openLetterAs,EnvelopeSigner(..))
 import HBS2.Hub.CLI.Ack (sendAck,AckTrouble(..))
+import HBS2.Hub.CLI.Signer (resolveSignerIn,signerEnvVar,signerPrecedenceHelp,Signer(..))
 import HBS2.Hub.CLI.Compose (Outbound(..))
 import HBS2.Hub.Bridge (originFits,viewOf)
 import HBS2.Hub.CLI.Common (overRpc,refuse,saying,signerFor,codePeerSilent
@@ -59,6 +60,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
 import Data.List qualified as List
 import System.Exit (die)
+import System.Environment (lookupEnv)
 
 -- | The letter is already in canon, so "rejected" is not what happened to it.
 --
@@ -153,7 +155,8 @@ rejectEntries = do
              <> line <> "often for: an ack confirms the address is live and that"
              <> line <> "somebody read it, and a flood is looking for exactly"
              <> line <> "that. --as names the canon key that signs it (PEP-21);"
-             <> line <> "the MAILBOX key still signs the delete." )
+             <> line <> "the MAILBOX key still signs the delete."
+             <> line <> signerPrecedenceHelp )
     $ entry $ bindMatch "hub:inbox:reject" $ nil_ \case
         (rejectArgs -> Just rj) -> lift (reject rj)
         other -> liftIO (badArgs rejectUsage other)
@@ -261,16 +264,24 @@ rejectEntries = do
       sto <- getStorage
       api <- getClientAPI @MailboxAPI @UNIX
       let ig = overRpc sto api
-          canonKey = fromMaybe (rjRepo rj) (rjAs rj)
 
-      creds <- signerFor canonKey
+      -- --as, then HBS2_HUB_AS, then git config hbs2.hub.as, then the repo
+      -- key ("HBS2.Hub.CLI.Signer"). A default that does not read is a
+      -- notification that did not go out, not a refusal: the delete above
+      -- has already happened.
+      envv <- liftIO (lookupEnv signerEnvVar)
+      chosen <- resolveSignerIn Nothing envv (rjRepo rj) (rjAs rj)
+      let canonKey = either (const (rjRepo rj)) sgKey chosen
+
+      creds <- either (const (pure Nothing)) (const (signerFor canonKey)) chosen
       raw <- rawMessage ig (rjMessage rj)
 
-      case (creds, raw) of
-        (Nothing, _) -> pure (Left (AckNotSent ("no signing key here for "
+      case (chosen, creds, raw) of
+        (Left e, _, _) -> pure (Left (AckNotSent (tshow (pretty e))))
+        (_, Nothing, _) -> pure (Left (AckNotSent ("no signing key here for "
                                                   <> tshow (pretty (AsBase58 canonKey)))))
-        (_, Left e)  -> pure (Left (AckNotSent (tshow (pretty e))))
-        (Just c, Right lr) ->
+        (_, _, Left e)  -> pure (Left (AckNotSent (tshow (pretty e))))
+        (_, Just c, Right lr) ->
           case openLetterAs (const True) (EnvelopeSigner (lrEnvelope lr)) (lrData lr) of
             Left e -> pure (Left (AckNotSent (tshow (pretty e))))
             Right (box, _author, content, reply) -> do

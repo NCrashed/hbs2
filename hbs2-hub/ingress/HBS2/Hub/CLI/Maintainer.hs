@@ -1,4 +1,4 @@
--- | @hub maintainer add|remove|list@ (PEP-21 "Delegation", PEP-22 "Moderate").
+-- | @hub maintainer add|remove|list|use@ (PEP-21 "Delegation", PEP-22 "Moderate").
 --
 -- The verbs over delegation, which the fold and the bridge already decide: a
 -- @delegate@ adds a key to the set that may bless canon events, a @revoke@
@@ -24,6 +24,8 @@ module HBS2.Hub.CLI.Maintainer
   , maintainerUsage
   , maintainerArgs
   , maintainerListArgs
+  , maintainerUseArgs
+  , MaintainerUse(..)
   , Maintainer(..)
   , maintainerDoc
   , Delegating(..)
@@ -42,7 +44,10 @@ import HBS2.Hub.CLI.Common (refuse,saying,withCanon,OnMissing(..)
                            ,blessed,committing,oneStop,signerFor,signingPair
                            ,Writing,writingOf,dryRunHelp)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,repoFlags,flagRepo,flagsAndSwitches,flagSwitch
-                         ,flagOneOf,maintainerKeyFlags)
+                         ,flagOneOf,flagOneOfMaybe,flagRepoMaybe,maintainerKeyFlags)
+import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),signingAs,defaultFrom
+                           ,signerEnvVar,signerGitKey,writeSignerConfig,clearSignerConfig)
+import HBS2.Hub.CLI.Accept (codeNoCanonKey)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -53,6 +58,8 @@ import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.List (sortOn)
 import System.Exit (die)
+import System.Environment (lookupEnv)
+import Data.Text qualified as Text
 
 -- | The event was not written, and canon is unchanged.
 codeNotDelegated :: Int
@@ -134,6 +141,28 @@ maintainerUsage :: Doc ()
 maintainerUsage =
   "usage: hbs2-hub maintainer add|remove --repo <key> --maintainer-key <key> [--dry-run]"
     <> line <> "       hbs2-hub maintainer list --repo <key>"
+    <> line <> "       hbs2-hub maintainer use --repo <key> --maintainer-key <key> | --clear"
+
+-- | What @hub maintainer use@ was asked to do.
+data MaintainerUse =
+    UseKey RepoRef HubKey  -- ^ make this key the clone's default signer
+  | UseClear               -- ^ go back to the repository key
+  deriving stock (Eq,Show)
+
+-- | @--repo R --maintainer-key K@, or @--clear@ with nothing else but an
+-- optional @--repo@. Both at once is refused: one of them was a mistake.
+maintainerUseArgs :: forall c . IsContext c => [Syntax c] -> Maybe MaintainerUse
+maintainerUseArgs syn = do
+  kvs   <- flagsAndSwitches (repoFlags <> maintainerKeyFlags) ["--clear"] syn
+  repo  <- flagRepoMaybe asKey kvs
+  k     <- flagOneOfMaybe asKey maintainerKeyFlags kvs
+  clear <- flagSwitch kvs "--clear"
+  case (repo, k, clear) of
+    (Just r, Just v, False) -> Just (UseKey r v)
+    (_, Nothing, True)      -> Just UseClear
+    _                       -> Nothing
+  where
+    asKey = \case { SignPubKeyLike v -> Just v ; _ -> Nothing }
 
 -- | Who may bless canon, in a fixed order.
 --
@@ -178,7 +207,85 @@ maintainerEntries = do
           liftIO (mapM_ print (maintainerDoc repo fr))
         other -> liftIO (badArgs maintainerUsage other)
 
+  brief "sign this clone's canon writes as a maintainer key, without --as"
+    $ args [ arg "string" "--repo repo-key"
+           , arg "string" "--maintainer-key key | --clear" ]
+    $ desc ( "For a delegate. Every verb that writes canon takes --as, and"
+             <> line <> "without it signs with the repository key when this machine"
+             <> line <> "holds that key. A delegate who also holds it signed as the"
+             <> line <> "owner without meaning to."
+             <> line
+             <> line <> "This checks that the key is the owner or a maintainer in"
+             <> line <> "canon here and that this machine can sign as it, then sets"
+             <> line <> "`git config --local hbs2.hub.as <key>` in this clone."
+             <> line <> "--clear unsets it, and needs no --repo. Nothing is signed"
+             <> line <> "or published."
+             <> line
+             <> line <> "THE ORDER, for every verb that takes --as:"
+             <> line <> "  1. --as <key> on the command line"
+             <> line <> "  2. the HBS2_HUB_AS environment variable"
+             <> line <> "  3. git config hbs2.hub.as (local over global)"
+             <> line <> "  4. the repository key"
+             <> line <> "An empty value counts as unset. A value that is not a key"
+             <> line <> "is refused rather than skipped, since skipping it would"
+             <> line <> "sign with the repository key. `hbs2-hub status` and"
+             <> line <> "`hbs2-hub whoami --repo` say which key would sign." )
+    $ entry $ bindMatch "hub:maintainer:use" $ nil_ \case
+        (maintainerUseArgs -> Just mu) -> lift (useIt mu)
+        other -> liftIO (badArgs maintainerUsage other)
+
   where
+
+    useIt = \case
+      UseClear -> do
+        clearSignerConfig >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
+        liftIO $ print $ vcat
+          [ "unset git config" <+> pretty signerGitKey
+          , "canon writes in this clone sign as the repository key again, unless"
+              <+> "--as or" <+> pretty signerEnvVar <+> "names another"
+          ]
+
+      UseKey repo k -> do
+        -- TreatAsEmpty: an empty canon is one where only the owner may bless,
+        -- which the check below says with the remedy, rather than a refusal
+        -- about canon that names none.
+        (_, fr) <- canonOf repo
+        unless (k == repo || HS.member k (frMaintainers fr)) $
+          liftIO $ refuse (show ( pretty (AsBase58 k)
+                                    <+> "is not a maintainer of this repository"
+                                    <+> "in canon here" <> line
+                                    <> "  nothing was set. The owner adds one with"
+                                    <+> "`hbs2-hub maintainer add`; if that"
+                                    <> line <> "  happened in another clone,"
+                                    <+> "`hbs2-hub sync --repo"
+                                    <+> pretty (AsBase58 repo) <> "` brings it here." ))
+                          codeNotDelegated
+
+        void $ signingAs codeNoCanonKey (Signer k FromFlag)
+
+        writeSignerConfig k >>= either (\e -> liftIO (refuse (show (gitSaid e)) 1)) pure
+
+        liftIO $ print $ vcat
+          [ "set git config" <+> pretty signerGitKey <+> pretty (AsBase58 k)
+          , "canon writes in this clone now sign as"
+              <+> (if k == repo then "the repository key" else "that maintainer key")
+              <+> "when --as is not given"
+          ]
+
+        -- The one override this cannot see from inside the clone.
+        envv <- liftIO (lookupEnv signerEnvVar)
+        case defaultFrom FromEnv (Text.pack <$> envv) of
+          Right (Just other) | other /= k -> liftIO $ saying
+            ( "hbs2-hub:" <+> pretty signerEnvVar <+> "is set to"
+                <+> pretty (AsBase58 other) <+> "in this environment,"
+                <> line <> "  and it wins over git config: unset it for this to apply."
+                <> line )
+          Left e -> liftIO $ saying ("hbs2-hub:" <+> pretty e <> line)
+          _ -> pure ()
+
+    gitSaid e = "git config would not write" <+> pretty signerGitKey <> ":"
+                  <+> pretty e
+                  <> line <> "  run this inside the repository's git clone"
 
     writeVerb name what kind =
       brief what

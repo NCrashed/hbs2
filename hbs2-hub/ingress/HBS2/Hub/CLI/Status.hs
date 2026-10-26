@@ -38,6 +38,8 @@ import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagText,flagSwitch
                          ,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (overRpc,signerFor,withCanon,OnMissing(..))
+import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),SignerTrouble,resolveSignerIn
+                           ,signerEnvVar,signerDoc)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -53,6 +55,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.Maybe (isJust)
 import Data.HashSet qualified as HS
 import Data.Text qualified as Text
+import System.Environment (lookupEnv)
 
 -- | Whether this clone's canon has reached one remote.
 --
@@ -74,7 +77,13 @@ data Publication =
 -- and the rendering must be assertable without any of them.
 data Standing = Standing
   { stRepo      :: RepoRef
-  , stCanSign   :: Bool          -- ^ this machine holds the repository's own key
+  , stCanSign   :: Bool          -- ^ this machine can sign as 'stSigner'
+    -- | The key a canon write without @--as@ would sign with, and where that
+    -- came from ("HBS2.Hub.CLI.Signer"). 'Left' is a default that does not
+    -- read, which every writer would refuse.
+  , stSigner    :: Either SignerTrouble Signer
+    -- | That key is the owner or a maintainer in canon here.
+  , stMaintains :: Bool
   , stCanon     :: Maybe Text    -- ^ the canon commit here
   , stThreads   :: Int
   , stEvents    :: Int
@@ -103,15 +112,30 @@ statusUsage = "usage: hbs2-hub status --repo <key> [--remote <name>]"
 -- | The report.
 statusDoc :: Standing -> [Doc ann]
 statusDoc st =
-  [ "repository" <+> keyDoc (stRepo st)
-  , "signing" <+> if stCanSign st
-                    then "yes: this machine holds the repository key"
-                    else "no: this machine cannot author owner events for it"
-  ]
+  [ "repository" <+> keyDoc (stRepo st) ]
+  <> signingLines
   <> canonLines
   <> publishedLines
   <> mailboxLines
   where
+    -- WHICH KEY, and not only whether. A delegate whose machine also holds
+    -- the repository key signed as the owner without --as, and this line
+    -- said "yes" about the repository key, which was true and was the wrong
+    -- question.
+    signingLines = case stSigner st of
+      Left e -> [ "signing  unknown:" <+> pretty e ]
+      Right s ->
+        [ "signing" <+> case (stCanSign st, sgSource s) of
+            (True, RepoKeyDefault)  -> "yes: this machine holds the repository key"
+            (True, _)               -> "yes, as" <+> signerDoc s
+            (False, RepoKeyDefault) -> "no: this machine cannot author owner events for it"
+            (False, _)              -> "no: this machine cannot sign as" <+> signerDoc s
+                                         <> line <> "         so it cannot author owner events"
+        ]
+        <> [ "         that key is not a maintainer in canon here, so its events"
+               <+> "would be refused"
+           | not (stMaintains st) ]
+
     canonLines = case stCanon st of
       Nothing -> [ "canon    none here yet" ]
       Just c ->
@@ -178,6 +202,11 @@ statusEntries = do
              <> line <> "canon has reached the remote, which mailbox the"
              <> line <> "repository declares, and how many letters are in it."
              <> line
+             <> line <> "The signing line names the key a canon write without --as"
+             <> line <> "would use, and where it came from: HBS2_HUB_AS, git config"
+             <> line <> "hbs2.hub.as, or the repository key. See `hbs2-hub help"
+             <> line <> "maintainer use`."
+             <> line
              <> line <> "Every absence is said out loud. A mailbox that would"
              <> line <> "not read says so rather than being left off the report,"
              <> line <> "because a missing line reads as 'nothing waiting' and"
@@ -201,8 +230,11 @@ statusEntries = do
 
       -- The keyring first, because it is the only question with no peer, no
       -- git and no remote in it: a report that says nothing else can still say
-      -- whether this machine is the owner.
-      canSign <- isJust <$> signerFor repo
+      -- whether this machine can sign. For the key a canon write WOULD use,
+      -- which is the repository key only when nothing names another.
+      envv <- liftIO (lookupEnv signerEnvVar)
+      signer <- resolveSignerIn Nothing envv repo Nothing
+      canSign <- either (const (pure False)) (fmap isJust . signerFor . sgKey) signer
 
       -- TreatAsEmpty, because "no canon here" is one of the answers this verb
       -- exists to give. Every other read verb refuses; this one reports.
@@ -255,6 +287,10 @@ statusEntries = do
       liftIO $ mapM_ print $ statusDoc Standing
         { stRepo = repo
         , stCanSign = canSign
+        , stSigner = signer
+        , stMaintains = either (const True)
+                          (\s -> sgKey s == repo || HS.member (sgKey s) (frMaintainers fr))
+                          signer
         , stCanon = mine
         , stThreads = HM.size (frThreads fr)
         , stEvents = length (frLog fr)

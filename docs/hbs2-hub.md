@@ -285,6 +285,10 @@ hbs2-hub inbox accept --mailbox <mailbox-key> --repo <repo-key> \
                       --message <message-hash>
 ```
 
+The repository key signs it unless you name another with `--as` or a
+default; a delegate should read
+[Signing as a delegate](#signing-as-a-delegate) first.
+
 A letter that ASKS for something -- close this, reopen that, set a
 label -- cannot be folded as the sender's own event: those are
 owner-authored, so canon would refuse it. Agreeing means authoring the
@@ -364,7 +368,8 @@ hbs2-hub status --repo <repo-key> [--remote <name>]
 ```
 
 Six facts, none of which needs a decision from you: the repository,
-whether this machine can sign for it, what canon here holds, whether
+which key a canon write would sign with and whether this machine can
+(see [Signing as a delegate](#signing-as-a-delegate)), what canon here holds, whether
 that canon has reached each remote, which mailbox the repository
 declares and how many letters are in it. It pushes nothing; the
 publication check asks the remote and does not write to it.
@@ -434,6 +439,48 @@ key that is already a maintainer, revoking one that is not, and revoking
 the owner are all refused: each mints a well-formed event the fold
 admits, and the maintainer set afterwards is the one you started with,
 so the usual reason to run one of these is a key typed wrong.
+
+### Signing as a delegate
+
+Every verb that writes canon (`inbox accept`, `inbox honour`,
+`inbox reject` for its acknowledgement, `issue open|close|reopen|label|assign`,
+the same for `pr`, `pr merge`, `redact`) takes `--as <key>` to name the
+key that signs. Without it the key is chosen in this order:
+
+1. `--as <key>` on the command line;
+2. the environment variable `HBS2_HUB_AS`;
+3. `git config hbs2.hub.as` in the repository you are standing in, as git
+   resolves it (the clone's own config over the global one);
+4. the repository key.
+
+An empty value counts as unset. A value that is not a key is refused,
+not skipped: skipping it would sign with the repository key, which is
+the mistake the setting is there to prevent. An explicit `--as` does not
+read the other two, so a broken default never stands in its way.
+
+A delegate whose machine also holds the repository key wants step 3,
+set once per clone:
+
+```
+hbs2-hub maintainer use --repo <repo-key> --maintainer-key <your-key>
+```
+
+It checks that the key is the owner or a maintainer in canon here and
+that this machine can sign as it, then writes
+`git config --local hbs2.hub.as <your-key>`. `--clear` removes it. When
+a default picks the signer, the verb says so on stderr, and the report
+of a write ends with a `signed by` line naming the key and where it came
+from. `hbs2-hub status --repo <repo-key>` and
+`hbs2-hub whoami --repo <repo-key>` show which key would sign before you
+write anything, and `status` warns when that key is not a maintainer in
+canon here.
+
+An acknowledgement is sealed from the key that signed the event, so that
+key's keyring needs an encryption key as well as a signing key. When it
+has none, `inbox accept` folds the letter, says
+`no acknowledgement: the signer <key> has no encryption key`, and names
+the ways to sign as a key that has one. The event is in canon either
+way.
 
 ## Keeping the noise out
 
