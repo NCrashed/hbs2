@@ -162,8 +162,18 @@ writeRepoHead keepOld repo manifest gkRefs' = do
   blk <- makeMerkle 0 (toPTree (MaxSize defHashListChunk) (MaxNum defTreeChildNum) refs)
          (\(_,_,bs) -> void $ putBlock sto bs)
 
+  -- STRICTLY AFTER THE VALUE IT REPLACES, and not merely "now". The seq was the
+  -- time in seconds, so two writes in one second carried the same seq, the
+  -- lwwref kept one of them by hash, and the other was lost while its command
+  -- had already reported success. `hub project open` runs `repo:mailbox:set`
+  -- and `repo:mailbox:sigil` back to back and lost the sigil about half the
+  -- time; a replacement over a value written by a clock that runs ahead was
+  -- refused for the same reason.
   now <- liftIO getPOSIXTime <&> round
-  let box = makeSignedBox wpk wsk (LWWRef now (coerce blk) Nothing)
+  current <- callRpcWaitMay @RpcLWWRefGet (TimeoutSec 1) lwwAPI (LWWRefKey repo)
+               <&> join
+  let sq = maybe now (\r -> max now (succ (lwwSeq r))) current
+  let box = makeSignedBox wpk wsk (LWWRef sq (coerce blk) Nothing)
 
   callRpcWaitMay @RpcLWWRefUpdate (TimeoutSec 1) lwwAPI box
     >>= orThrow RpcTimeout

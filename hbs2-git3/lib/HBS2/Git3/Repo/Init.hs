@@ -16,6 +16,8 @@ import HBS2.Git3.Prelude
 import HBS2.Git3.State
 import HBS2.Git3.Repo.Types
 import HBS2.Git3.Repo.Tools
+import HBS2.Git.Local.CLI (gitRunCommand)
+import Data.ByteString.Lazy.Char8 qualified as LBS8
 import HBS2.Git3.Export
 
 import HBS2.System.Dir
@@ -307,7 +309,16 @@ initRepo syn = do
           pure (show (pretty r))
 
         Nothing -> do
-          remoteName <- newRemoteName pk <&> show . pretty
+          -- `origin` when the clone has none, which is the case for a new
+          -- repository and is what every git tutorial and script assumes. A
+          -- made-up name only when origin is taken by something else.
+          -- Every remote, not only the hbs23 ones listRemotes returns: an origin
+          -- that points at GitHub is still taken.
+          taken <- gitRunCommand "git remote"
+                     <&> either (const []) (fmap LBS8.unpack . LBS8.lines)
+          remoteName <- if "origin" `notElem` taken
+                          then pure "origin"
+                          else newRemoteName pk <&> show . pretty
           let remoteVal  = Text.unpack $ remoteRepoURL pk
           _ <- callProc "git" ["remote", "add", remoteName, remoteVal] mempty
           liftIO $ print $ pretty "added git remote" <+> pretty remoteName <+> pretty remoteVal
