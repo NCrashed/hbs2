@@ -139,6 +139,17 @@ jobs:
             echo "::warning::No CHANGELOG section found for ${TAG}; release body will be empty"
             echo "Release ${TAG}." > release-body.md
           fi
+          # GitHub refuses a release body over 125000 characters, and the
+          # 0.26.0.0 section alone is twice that. Past the limit, publish
+          # the summary and the Upgrading notes (everything before the
+          # first other `## ` heading) and link the whole section.
+          if [ "$(wc -c < release-body.md)" -gt 120000 ]; then
+            echo "::notice::Release notes too long for GitHub; publishing the summary"
+            awk '/^## / && $0 != "## Upgrading" { exit } { print }' release-body.md > release-summary.md
+            printf '\nThe full list of changes is in [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
+              "${GITHUB_REPOSITORY}" "${TAG}" >> release-summary.md
+            mv release-summary.md release-body.md
+          fi
           echo "--- release-body.md ---"
           cat release-body.md
           echo "--- end ---"

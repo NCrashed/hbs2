@@ -1,6 +1,93 @@
-# Unreleased
+# 0.26.0.0  2026-10-26
+
+The forge release. `hbs2-hub` is new: issues and pull requests that live
+inside the git repository they are about, with contributions arriving
+as encrypted letters to the project's mailbox, and no server. Alongside
+it, the mailbox protocol gained proof-of-work on every packet a peer
+floods, and the peer, the storage and `hbs2-git3` went through a long
+round of hardening: several ways a stranger could make a peer allocate,
+forget, forward or delete what it should not are closed.
+
+Getting started is short: `hbs2-hub identity init` once, then in a
+clone `hbs2-hub issue new --title ...` or `hbs2-hub pr new --title
+...`; an owner opens a repository with `hbs2-hub project open`. Start
+with [`docs/hub-quickstart.md`](docs/hub-quickstart.md) for the forge,
+and the demo at <https://github.com/NCrashed/hbs2-demo> to see it run
+end to end on one machine.
+
+## Upgrading
+
+Three changes behave differently after an upgrade. Read these before
+updating a peer other people depend on.
+
+  - **Upgrade every peer: mailbox relaying now costs 18 bits of work.**
+    `hbs2:mailbox:pow-min` defaults to 18 instead of 0. An upgraded peer
+    does not relay unstamped mailbox packets, which is what an older
+    sender sends, and an older relay cannot decode a stamped one. Mail
+    between old and new peers stops at the first hop of the other kind.
+    `(hbs2:mailbox:pow-min 0)` restores the old behaviour on one peer.
+    Details under Changed.
+
+  - **The peer's HTTP API is loopback-only and read-only.** It binds
+    `127.0.0.1` unless `http-listen` says otherwise, and the endpoints
+    that wrote reflog transactions and blocks are gone; both go through
+    the RPC socket. A peer reached over HTTP from another machine needs
+    `http-listen "0.0.0.0"` in its config (`httpAddress` in the NixOS
+    module). Details under Security.
+
+  - **A mailbox policy must name the mailbox that signs it.**
+    `mailbox set-policy` refuses a policy whose payload names a different
+    mailbox than its signer, and the RPC checks the key it is given
+    against the box. Details under Security.
 
 ## Added
+
+  - **`hbs2-hub identity init`: who you are on a forge, in one command.**
+    A letter needs a signing key, a sigil naming its encryption key and a
+    mailbox for the answers, and making them was seven commands across
+    three tools. This makes the key in `hbs2-keyman` (or reuses the one
+    it made before, or `--author`), stores the sigil, creates the mailbox
+    with a policy that accepts replies, and saves the key and the sigil
+    as `git config --global hbs2.hub.author` / `hbs2.hub.sender`. Safe to
+    run again.
+
+  - **`hbs2-hub project open`: a repository opened to contributions in
+    one command.** In the owner's clone it makes or reuses the project's
+    mailbox, writes its policy (anyone may write, any peer may sync;
+    `--pow N` charges work), stores its sigil, and declares both in the
+    manifest through `hbs2-git3`. With an identity set up it also makes
+    that identity a maintainer and the clone's default signer: the
+    repository key made by `repo:init` cannot encrypt, so until now no
+    contributor of a project opened the documented way ever got an
+    acknowledgement. Steps already done are kept.
+
+  - **Defaults from the clone, for every verb.** The command line is
+    completed before any verb reads it: `--repo` from `HBS2_HUB_REPO`,
+    `git config hbs2.hub.repo`, or the clone's `hbs23://` remote;
+    `--author` and `--sender` from `HBS2_HUB_AUTHOR` / `HBS2_HUB_SENDER`
+    or the git config `identity init` writes; `--onto` and `--from` for
+    `pr new` and `pr revise` from the remote's HEAD and the branch
+    checked out; `--mailbox` for `updates` and `--maintainer-key` for
+    `maintainer use` from the author key. A newcomer who clones a
+    project files an issue with `--title` alone and opens a pull request
+    with `hbs2-hub pr new --title ...`. A verb that signs or sends says
+    on stderr what it filled in; a flag given by hand is never changed.
+    The names are the ones `hub mcp` already reads.
+
+  - **`hbs2-hub maintainer add --author-of <n>`.** The person an owner
+    wants as a maintainer is usually the one sending the pull requests,
+    known by a thread number rather than by a key. The key that opened
+    thread `n` is named, and said, before anything is signed.
+
+  - **The project's sigil is fetched when a letter needs it.** A
+    contributor's peer has never seen it, so the first `issue new`,
+    `pr new` or `comment` anybody sent to a project refused with "this
+    node does not hold the sigil" and a command to type. The same for the
+    contributor's sigil when a hub sends an acknowledgement: the first ack
+    to anybody failed.
+
+  - **`hbs2-hub inbox show` and `inbox reject` take the mailbox from the
+    repository**, like `inbox` and `inbox accept` already did.
 
   - **`hbs2-hub issue reply` / `pr reply`: a maintainer comments straight
     onto canon.** Answering in a thread meant `issue comment` with a sender
@@ -287,50 +374,379 @@
     A drift on either side is a refusal, or a failing test -- the literal
     text is pinned from both packages.
 
-## Security
+  - **`hbs2-hub publish`, and the line every canon-writing verb was missing.**
+    `refs/hbs2/meta` is an ordinary git ref in the repository the operator is
+    standing in. Every verb that writes canon -- accept, merge, close, label,
+    assign, redact, maintainer add, compact -- wrote it locally, printed the
+    commit, and exited zero, and nothing in the tool ever said the word push.
+    So a maintainer could triage a queue, fold six letters, close two issues
+    and record a merge, have every command succeed, and have the contributor's
+    `hub updates` still show nothing a week later, with `hub verify` and
+    `hub log` locally confirming, correctly, that everything was fine.
 
-  - **A peer could delete any block this node held, if it knew the block's
-    bytes.** A download that received the wrong bytes stored them, compared the
-    hash, and on a mismatch deleted the block under the hash it had just
-    stored. The store deduplicates, so when those bytes were a block this node
-    already had, the put changed nothing and the delete removed this node's own
-    copy. Any handshaked peer could answer a request for one block with the
-    bytes of another (a public one is enough) and delete it, one block per
-    request. Bytes are now hashed before they are stored and written only if
-    they are the block that was asked for (`HBS2.Storage.putBlockAsked`).
+    `hub publish` is the other half of `hub sync` and carries the same two
+    things: canon, and the staged proposals under `refs/hbs2/pulls/*` that
+    `hub pr checkout` reads. Without the second, a reviewer's clone has nothing
+    to check out.
 
-  - **A peer's answer to "how big is this block" was believed.** The requester
-    builds a chunk list from it before any data moves, so an answer of 2^40
-    cost about a billion list elements. Sizes above `defMaxBlockSize` (16 MiB)
-    are treated as "no block", so the requester tries the next peer without
-    waiting for a timeout. `hbs2:peer:storage:block:put`, which stores its
-    input as one block, refuses the same sizes: no other peer would fetch
-    such a block.
+    CANON IS NOT FORCED, mirroring the fetch side. A remote holding canon this
+    clone does not contain is what a second maintainer's folds look like, and a
+    forced push would take them out of the ref every reader follows while their
+    events sat unreferenced in the object store. The push is refused, nothing
+    is written, and the report names the remedy (`hub sync --repo <key>`, which
+    folds both lineages and takes a rewrite when it is one). Exit code 45.
 
-  - **A stranger could silence a refchan or an LWWRef packet by planting one
-    block.** Three protocols decided "have I already relayed this?" by asking
-    whether the block store held `hashObject (serialise packet)` --
-    `refChanNotifyProto`, `refChanUpdateProto` and `lwwRefProto`. The hash is
-    over a packet a stranger sends, so they can compute it before sending, put
-    the block themselves, and have the gate answer "already seen" for a packet
-    nobody has handled. Planted on the peers between a sender and its
-    destination, a chosen notify, refchan update or ref announcement stops being
-    forwarded, permanently and with nothing said. The block was never deleted
-    either, which is one block per distinct packet, forever.
+    THE PROPOSAL REFS ARE FORCED, and the asymmetry is deliberate: a revised
+    pull request moves its head, which is a rewrite by construction, and
+    `hub sync` already fetches them with a plus. They are derived from canon
+    rather than authored, and PEP-21's A1 has one publisher, so there is no
+    second author to race with.
 
-    The mailbox had the same defect and was fixed first; its relay memory --
-    process-local, keyed by the packet, bounded by count over two generations --
-    is now `HBS2.Peer.Proto.Relayed` and all four protocols use it. The general
-    rule, stated there: the presence of a block in a GLOBAL content-addressed
-    store cannot carry a LOCAL decision.
+    It signs nothing and checks no key: what gates publishing is who may push.
+    A delegate can bless events into canon and cannot publish them, and this
+    verb is where that stops being an abstraction.
 
-    Two `hasBlock` calls in the same protocols are not this shape and stay:
-    waiting for a Propose to arrive, and asking a block's size to announce it.
-    Both are questions about the network, which is what the store can answer.
+    Every canon-writing verb now ends with a note on stderr saying the commit
+    has not left the machine and naming the verb that sends it.
 
-    Repaired along the way: `hbs2-peer lwwref` over RPC re-publishing a value
-    the peer already held announced nothing, because the store said it had the
-    bytes. An explicit publish now publishes.
+  - **`hbs2-hub`: canon can be written, and one letter can be accepted
+    into it.** Everything around this existed already and had nowhere to
+    put its result: the fold decided what canon means, the bridge minted
+    an event from a stranger's letter, the file format rendered one, and
+    the reader folded a tree back. Nothing committed a tree. The vertical
+    slice PEP-17 is for, a stranger files an issue and a maintainer takes
+    it, was open at exactly that step.
+
+    `planCanon` turns accepted events into the files PEP-19's layout puts
+    them in: the `version` file, one immutable file per event under
+    `threads/<id>/` or `repo/`, and a regenerated `index/number.sexp`.
+    Every file is READ BACK with this build's own reader before it is
+    accepted, because being able to write what cannot be read is the
+    failure that costs most here, and the reader has three bounds a size
+    check would not cover. A number the index cannot hold is reported
+    rather than dropped in silence.
+
+    `CanonSink` is the mirror of `CanonSource`, and `withGitSink` is its
+    git half: `hash-object`, `read-tree`, `update-index --index-info`,
+    `write-tree`, `commit-tree`, `update-ref`. Paths only ever travel on
+    stdin, never argv, for the reason the reader already documents at
+    length. The index it builds is its own, named by `GIT_INDEX_FILE`, so
+    accepting an issue does not stage the operator's working tree. The
+    ref move is a compare-and-swap against the canon that was folded, so
+    two accepts racing leave one refusal instead of one silent loss, and
+    the commit's dates come from the caller's stamp, which makes the
+    commit id a function of canon rather than of when the writer ran.
+
+    `hub inbox accept --mailbox K --repo R --message H` is the verb. It
+    re-reads canon from git, requires the letter to actually be in that
+    mailbox rather than merely present in local storage, asks the bridge,
+    and commits. Every value is behind a flag, including the message,
+    because a sign key and a hash are both thirty-two bytes of base58: a
+    positional message parsed `--repo <hash> <key>` happily with the two
+    swapped, and the first thing to notice was the bridge.
+
+    Two things PEP-22 puts in this verb are deliberately absent, and the
+    verb says so on success rather than leaving them to be discovered:
+    the letter is not deleted (fold-then-delete is PEP-21 retention) and
+    no acknowledgement is sent (the record type exists, the sending does
+    not). Neither loses anything, since re-accepting the same letter is
+    refused as `AlreadyInCanon`. No deny-list is applied either: PEP-21
+    policy lives in the repo manifest and there is no manifest reader.
+
+  - **`hbs2-hub`: the tracker can be read.** Accepting an issue into
+    canon and then having no verb that shows it was a strange place to
+    stop: `hub verify` prints an audit, which is counts and problems,
+    and never a title or a status. `hub issue list`, `hub issue show`,
+    `hub pr list`, `hub pr show` and `hub log` are the read side, and
+    like `hub verify` they need no peer and no key, because canon is a
+    git ref and the fold over it is all they print.
+
+    A title, a label and a body arrive in a letter anybody may send, so
+    every one of them is printed through `safeText`: a title carrying a
+    newline would otherwise forge a second row of the listing, and one
+    carrying an erase-line sequence would rewrite the row above it. Both
+    are tested by trying it. Order is imposed rather than taken from a
+    container: `frThreads` iterates in hash order, which is stable for a
+    build and is not a promise, so threads sort by number and events by
+    seq.
+
+    `--status` and `--label` narrow a listing. They are exact matches
+    and not the query DSL PEP-22 inherits from fixme-new, which compiles
+    to SQL over a materialized cache this build does not have; the help
+    says so rather than leaving the difference to be discovered. A label
+    is one an owner applied: what an author asked for on open is shown
+    separately and never counted, since applying one is an owner-signed
+    event (PEP-19) and merging the two would let a stranger label their
+    own issue.
+
+  - **`hbs2-hub`: the git side of a pull request.** PEP-20's delta path
+    as far as git is concerned: build a bundle of `base..source-ref` and
+    report the tip it recorded, take a stranger's bundle in, answer the
+    ancestor question, and stage a proposed tip under
+    `refs/hbs2/pulls/<n>/head`. What is still missing above it is the
+    letter that carries the bundle, the triage that runs this, and the
+    merge event.
+
+    A ref name and a sha arrive inside a contributor's signed box, which
+    says who wrote them and nothing about what they are, and both reach
+    a git command line. git reads a leading dash as an option, so a
+    `source-ref` of `--upload-pack=...` would be a signed letter that
+    runs a program. Every value is checked against a shape first, and
+    the shape is narrower than what git would accept. `fsck` is turned
+    on explicitly for the fetch, twice, because git leaves it off and
+    these are a stranger's objects.
+
+    The signed tip is an argument to the fetch rather than something the
+    caller compares afterwards. It is the step the whole delta path
+    rests on, git's own hashing binds the content to it, and a check the
+    caller performs is a check the caller can omit; the one who omits it
+    stages unsigned objects under a number. Staging is a
+    compare-and-swap for the same reason canon's ref move is: a pull ref
+    that moved means somebody else used that number.
+
+    An empty range gets its own answer instead of git's prose. It is the
+    ordinary mistake (nothing committed yet, or the base named as the
+    branch itself), not a failure.
+
+    One git runner now serves the canon writer and this, in
+    `Repo/Git.hs` beside `gitIn`. It decides only the two answers that
+    are not about the command, so each caller reads a non-zero exit in
+    its own vocabulary; for one of them an exit of 1 is not a failure at
+    all. The audit reader deliberately keeps its own, which has bounds
+    this does not.
+
+  - **`hbs2-peer`: a sender can name its own attachment in the payload it
+    signs.** `createMessage` built a message's parts itself, from
+    producers, and returned when they were already inside a signed box.
+    A part is named by the hash of its encrypted tree, so a sender that
+    wanted to REFERENCE one learned the name after the signature was
+    over bytes that did not mention it. PEP-18's letters need exactly
+    that (`body-part`, `bundle-part`), and it was not expressible.
+
+    It is now two functions: `createAttachments` stores the parts and
+    says what they are called, `createMessageWith` builds the message
+    around parts that already exist. `createMessage` keeps its signature
+    and is the two of them in a row, so every existing caller is
+    unaffected and the wire format is untouched.
+
+    The separation the split had to preserve is that the parts carry a
+    group key of their own, never the message's. PEP-18 turns on it:
+    folding an attachment into public canon publishes the key to it, and
+    the message key also opens the back-channel that a contributor's
+    personal mailbox address rides in.
+
+  - **`hbs2-hub`: `hub pr new` proposes a change as a bundle.** The
+    contributor's end of PEP-20's delta path: build a git bundle of
+    `base..--from` in this repository, ship it as an encrypted
+    attachment, and sign coordinates that name it. The bundle's size is
+    the delta, so proposing a change to a large repository does not
+    transfer the repository.
+
+    The order is the whole difficulty, and it is why `sendLetter` split
+    the way `createMessage` did: a part is named by the hash of its
+    encrypted tree and PEP-18 puts that hash inside the signed box, so
+    the bundle exists before the box that names it. `attachToLetter`
+    stores the parts, `sendLetterWith` seals a letter around parts that
+    already exist, and `sendLetter` is the no-attachment case.
+
+    `--base` defaults to the merge-base of `--onto` and `--from`, which
+    is what a contributor almost always means; naming it is for the case
+    where git's answer is wrong, such as a rebase onto something the
+    maintainer does not have. The tip comes from the bundle rather than
+    from a second lookup: it is the tip of the ref the bundle recorded,
+    which is what the maintainer's fetch will produce, and asking git
+    again would answer a different question.
+
+    Not done yet, and needed before a maintainer can act on one of
+    these: the read side has to fetch and decrypt the attachment, and
+    triage has to run the verification and stage the tip.
+
+  - **`hbs2-hub`: an accepted letter's attachment reaches public canon.**
+    `hub inbox accept` handed the bridge `noMessageParts`, so a folded
+    event referencing an attachment carried no part-secret and a public
+    clone could see the reference and not the bytes (PEP-18
+    "Attachments in public canon"). It now measures each part the
+    message carries, opens the ones it can, and hands over real
+    evidence, so the owner publishes the secret the fold is supposed to.
+
+    The size comes from walking the part's tree rather than from a
+    declaration. PEP-18's gate refuses an oversized attachment before
+    anything is paid for it, and its note assumed a size in the tree's
+    root block; nothing in this project writes one, so the alternative
+    would have been a number the sender chose. The walk reads the tree's
+    nodes and asks each leaf's size without fetching it, which also
+    answers whether the part is fully downloaded, and that is the
+    difference between a wait and a refusal. An oversized part is
+    reported at its size and never opened, since decrypting one the gate
+    is about to refuse is the spend the gate exists to prevent.
+
+  - **`hbs2-hub`: accepting a pull request verifies it and stages the
+    tip.** `hub inbox accept` now does the two steps PEP-20 puts either
+    side of the fold. It takes the bundle in with fsck on, checks that
+    what arrives is the commit the contributor signed for, and checks
+    that the signed base really is an ancestor of it; then, after the
+    canon commit, it stages the tip under `refs/hbs2/pulls/<n>/head`.
+
+    The order is the one the dependencies force and the one the spec
+    gives. Verification sits between the mint and the commit, because
+    minting writes nothing and the commit is the only step that
+    publishes, so a bundle that does not match leaves canon untouched
+    and no seq spent. Staging follows the commit, because the pull ref
+    needs the number and the number is not public until canon holds it.
+    A staging failure is reported and does not undo the fold: the
+    coordinates are in canon and the objects are already here, so it is
+    a step to repeat rather than something lost.
+
+    An issue and a fork-pointer pull request both have nothing here to
+    verify, and they mean it for different reasons, so the decision is
+    its own exported function rather than a branch inside the verb.
+
+  - **`hbs2-hub`: `hub pr merge` records a merge, and refuses to record
+    one that did not happen.** It records rather than performs:
+    PEP-20 leaves the integration to whatever policy the repository uses
+    (merge, rebase, squash, fast-forward), so the maintainer does that
+    with git and then tells canon.
+
+    What it checks is the sentence it is about to publish. A merge event
+    says a proposal was integrated, and if the commit it names does not
+    contain the tip the contributor signed for, that is false in every
+    clone forever. git answers the question exactly, so it is asked
+    before anything is written and nothing is written when the answer is
+    no.
+
+    The merge event sets the status to merged by itself, which is what
+    PEP-19 specifies: no second `set` is written, because canon would
+    otherwise claim a merged pull request was open until it arrived.
+
+    That completes PEP-20's delta path: propose, verify, stage, merge.
+
+  - **`hbs2-hub`: `hub maintainer add|remove|list`.** The verbs over
+    PEP-21 delegation, which the fold and the bridge already decided:
+    who may bless a canon event is a function of the log, and adding or
+    withdrawing a key is an ordinary owner-signed event.
+
+    Only the repository's own key may write one, so there is no `--as`.
+    PEP-19 rule 5 requires both signatures on a delegation to be the
+    owner's exactly, because a delegate that could delegate could grow
+    the maintainer set; offering a flag that can only be wrong would
+    mint an event the fold then drops with the seq already spent.
+
+    The help says the thing a person adding a maintainer will assume
+    otherwise: signing is not publishing. A delegate may sign events
+    every clone will admit and cannot push `refs/hbs2/meta` to put them
+    there, which needs the reflog key. How their events reach canon is a
+    deployment question, and PEP-21 answers it three ways.
+
+    `list` marks the owner, because the owner is in the set by
+    definition rather than by any event, and a reader comparing the list
+    against the log would otherwise find one entry with nothing behind
+    it.
+
+  - **`hbs2-hub`: `hub inbox reject`, and the rule it is the first to
+    obey.** A letter can be dropped from the triage queue without being
+    folded. It writes a tombstone, which is what "delete" means here:
+    the queue stops showing the letter and no disk is freed, because
+    nothing in this build walks a mailbox and deletes blocks.
+
+    The mailbox key signs it. The peer takes the signer of the payload
+    as the mailbox being deleted from, so a repo key or a delegate's
+    canon key produces a delete against a mailbox nobody has.
+
+    `--repo` is optional and its absence is a real difference rather
+    than a default: without a canon to consult, the check that refuses a
+    letter already folded cannot run, and the verb says which of the two
+    happened instead of implying it looked.
+
+    That check is PEP-21 retention's canon-awareness, now settled in the
+    drafts: the protected set is derived from canon and not recorded
+    anywhere, and a hub may not drop an attachment canon references.
+    Neither half is urgent, because what they guard against does not
+    exist yet -- `delBlock` is in the storage class and nothing walks a
+    mailbox to call it -- but they are the obligation a purge inherits.
+
+  - **`hbs2-hub`: `hub policy show`, `hub block` and `hub unblock`.**
+    PEP-21's peer layer over the existing BasicPolicy: read a mailbox's
+    accept policy, add a sender-deny clause, take one out. The help says
+    which of the two layers this is, because the difference decides
+    whether the operator is finished. A deny here matches the ENVELOPE
+    key before anything is decrypted, so it bounds what the peer stores
+    and relays; anyone holding a decrypted letter can re-send it under a
+    fresh envelope, and keeping an author out of canon is the triage
+    layer, which this build does not have.
+
+    The file it writes is sorted. `getAsSyntax` renders a policy from
+    two hash maps, so its clause order is hash order, and this text is
+    hashed and versioned: without an imposed order, reading a policy and
+    writing it back unchanged would produce different bytes. For the
+    same reason a block that changes nothing writes nothing, since a
+    version bump republishes the file to every peer holding the mailbox.
+
+    Unblocking removes the clause rather than setting it to allow: an
+    allow beside a default of allow says nothing and never goes away,
+    and against a default of deny it would grant something the operator
+    did not ask this verb for.
+
+  - **`hbs2-hub`: `hub ban`, and the first predicate that is not `const
+    True`.** PEP-21's triage layer, which denies an INNER author: the
+    key inside the signed box, which a rewrapper cannot change, and
+    therefore the only deny that is authoritative for canon. `hub inbox
+    accept` now applies it, so a banned author's letter is refused
+    before anything is minted.
+
+    Local state and unsigned, which is PEP-21's own decision rather than
+    an omission: publishing a ban into canon needs a new author-content
+    op and an admission rule, and the spec defers that to `hub-meta 2`.
+    So the list does not travel, two hubs serving one repository may
+    disagree, and the verb says so. It lives outside the working tree
+    for the same reason: a file under the repository looks like
+    something that travels and is eventually committed by accident.
+
+    A file it cannot read stops an accept rather than reading as empty.
+    A deny-list that silently returns nothing when it is damaged is one
+    an attacker shortens by writing something odd into it, and the
+    accept it silently permits is the thing the list existed to stop.
+
+  - **`hbs2-peer`, `hbs2-hub`: a mailbox can charge proof-of-work for a
+    letter.** PEP-21's peer layer for the open inbox, which is the one
+    tier where `(sender allow all)` means anybody may grow the tree.
+    `(pow D)` in a mailbox's signed policy asks for D leading zero bits
+    over `(mailbox key, message hash, nonce)`, and `hub` reads that
+    policy before sending and solves what it finds. Absent or zero is
+    every mailbox that exists today, unchanged and needing no stamp.
+
+    The work binds to the hash of the message AS STORED and to one
+    mailbox key. To the stored bytes, so it is paid for exactly what will
+    occupy disk, and because that hash is fixed before the search starts
+    the grind is hashing and nothing else -- the letter is signed once,
+    before the stamp exists. To one mailbox, so a solution cannot be
+    moved to another inbox; a letter to two mailboxes that both charge is
+    solved and sent twice, with the same bytes each time.
+
+    Checked in two places, because the flood and the disk are different
+    surfaces. `(hbs2:mailbox:pow-min D)` in the peer's config is a floor
+    checked before the message is forwarded, where the peer does not yet
+    know which mailbox it is for; the mailbox's own `(pow D)` is checked
+    where the message is stored, which is the only place its policy has
+    been read. Replication between a mailbox's own hosts pays nothing: a
+    stamp is not kept in the tree, so a co-host has none to offer, and
+    what bounds that path is `(peer allow|deny)` as before.
+
+    THE COST IS A WIRE BREAK, taken deliberately. A stamped letter
+    travels as a new protocol constructor, relaying re-encodes what it
+    decoded, and a peer that cannot parse it forwards nothing -- so a
+    stamped letter only crosses upgraded peers, and an old one in the
+    path is silence. Nothing else changes: an unstamped letter is the
+    message it always was, and the constructor is appended last so every
+    existing encoding is untouched. A sender gets no rejection signal
+    either, and reading the policy first only works for a mailbox the
+    local peer holds. Both are written up in PEP-21 rather than papered
+    over.
+
+    `MailboxAPIProto` is bumped again, and this time the REQUEST changed:
+    `RpcMailboxSend` carries the stamp beside the message. An old client
+    calling a new peer would send bytes it cannot decode, and a new
+    client calling an old peer would have its letter sent without the
+    work the mailbox asked for. The id makes both refuse to connect.
 
 ## Changed
 
@@ -787,8 +1203,6 @@
     a number out of the presentation table, whose own comment says the numbers
     are a contract about stability and not a set of constructors.
 
-## Changed
-
   - **`hbs2-hub`: every integer in the render contract survives its own stated
     reader.** PEP-22 names a web layer as the consumer and the contract promises
     that what is in it is what canon holds; `JSON.parse` returns a double, and
@@ -895,7 +1309,105 @@
     `hubMsgReadable` are the same number today and change no behaviour; what
     they change is that v2 edits one line.
 
+  - **`hbs2-hub`: the shared CLI plumbing is no longer part of the `hub inbox`
+    verb.** `refuse`, `saying`, the peer wiring and the exit codes lived in
+    `HBS2.Hub.CLI.Inbox`, and twelve other verb modules imported them from
+    there -- so `hub compact` depended on the queue verb in order to know how
+    to refuse, and `HBS2.Hub.Deny` carried a note about routing around the
+    near-cycle that caused. They are in `HBS2.Hub.CLI.Common` now, which is a
+    module and not a verb. No behaviour changes; what changes is that the exit
+    codes, which PEP-22 makes a contract, are in one file.
+
+  - **`hbs2-hub`: `pr` is a whole noun.** `close`, `reopen`, `label` and
+    `assign` were bound under `issue` only, so closing a pull request was
+    spelled `hub issue close --number <pr number>`. That WORKS -- the number
+    index does not filter on kind -- and nobody guesses it. All four are bound
+    under both nouns now, which is what `pr comment` had been doing since it
+    was written, for the same reason: a thread is an issue or a pull request
+    and these ops care about neither. `AClose` carries no kind.
+
+  - **`hbs2-hub`: `issue|pr comment` takes `--number`.** Every other thread
+    verb resolves a number against the local fold; this one required
+    `--thread` and 44 characters of base58 that no listing prints -- `hub issue
+    list` shows `#3` and `hub issue show` had to be read to find the id. It now
+    takes either, and refuses both at once, a number with no `--repo` to
+    resolve it against, and a comment naming no thread at all. The letter is
+    unchanged: it still carries a thread-id and no repository, which is what
+    PEP-18 says a comment names.
+
+  - **`hbs2-hub`: the repository key is spelled `--repo` everywhere.** It was
+    one value under two names, one noun apart: `hub pr new --target K` beside
+    `hub pr merge --repo K`. Both are thirty-two bytes of base58, so neither
+    reader could tell it had been handed its sibling's spelling -- what it
+    produced was a usage message about a flag the caller had just supplied.
+    `--target` also collided with a second meaning: `target` is a field inside
+    the signed author box (PEP-19), which is a different thing from the flag
+    that used to fill it.
+
+    `--target` STILL WORKS on every verb and is printed by none. It is a hidden
+    alias for one release, so a script written against the old spelling keeps
+    running; the comment on `repoFlags` is the reminder to take it out.
+
+    Giving both spellings at once is refused rather than resolved, even when
+    they agree: two spellings of one value on one line is a line somebody
+    edited half way, and picking one is the guess `flagOnce` exists to refuse.
+
+    Both readers are one function now (`flagRepo`, `flagRepoMaybe`), used by
+    every verb that takes a repository, rather than a `flagOnce kvs "--repo"`
+    per verb.
+
+  - **`hbs2-hub`: `hub issue new`'s usage no longer denies reading the
+    manifest it reads.** The text said `--recipient` could not be resolved from
+    `--target` because "this verb does not read" the repository's manifest,
+    while the verb has read it -- that is what makes `--recipient` optional and
+    what saves a contributor from finding a 44-character sigil hash before they
+    can file anything. The paragraph now says which flag is optional and what
+    happens when both are given.
+
 ## Security
+
+  - **A peer could delete any block this node held, if it knew the block's
+    bytes.** A download that received the wrong bytes stored them, compared the
+    hash, and on a mismatch deleted the block under the hash it had just
+    stored. The store deduplicates, so when those bytes were a block this node
+    already had, the put changed nothing and the delete removed this node's own
+    copy. Any handshaked peer could answer a request for one block with the
+    bytes of another (a public one is enough) and delete it, one block per
+    request. Bytes are now hashed before they are stored and written only if
+    they are the block that was asked for (`HBS2.Storage.putBlockAsked`).
+
+  - **A peer's answer to "how big is this block" was believed.** The requester
+    builds a chunk list from it before any data moves, so an answer of 2^40
+    cost about a billion list elements. Sizes above `defMaxBlockSize` (16 MiB)
+    are treated as "no block", so the requester tries the next peer without
+    waiting for a timeout. `hbs2:peer:storage:block:put`, which stores its
+    input as one block, refuses the same sizes: no other peer would fetch
+    such a block.
+
+  - **A stranger could silence a refchan or an LWWRef packet by planting one
+    block.** Three protocols decided "have I already relayed this?" by asking
+    whether the block store held `hashObject (serialise packet)` --
+    `refChanNotifyProto`, `refChanUpdateProto` and `lwwRefProto`. The hash is
+    over a packet a stranger sends, so they can compute it before sending, put
+    the block themselves, and have the gate answer "already seen" for a packet
+    nobody has handled. Planted on the peers between a sender and its
+    destination, a chosen notify, refchan update or ref announcement stops being
+    forwarded, permanently and with nothing said. The block was never deleted
+    either, which is one block per distinct packet, forever.
+
+    The mailbox had the same defect and was fixed first; its relay memory --
+    process-local, keyed by the packet, bounded by count over two generations --
+    is now `HBS2.Peer.Proto.Relayed` and all four protocols use it. The general
+    rule, stated there: the presence of a block in a GLOBAL content-addressed
+    store cannot carry a LOCAL decision.
+
+    Two `hasBlock` calls in the same protocols are not this shape and stay:
+    waiting for a Propose to arrive, and asking a block's size to announce it.
+    Both are questions about the network, which is what the store can answer.
+
+    Repaired along the way: `hbs2-peer lwwref` over RPC re-publishing a value
+    the peer already held announced nothing, because the store said it had the
+    bytes. An explicit publish now publishes.
 
   - **`hbs2-hub`: an object name is the case git writes it in.** `isHexDigit`
     admits `A-F`, which is what git accepts when a person types an id; nothing
@@ -1343,762 +1855,6 @@
     across 0.25.x, and the network this is reviving has no co-hosting to
     preserve.
 
-## Fixed
-
-  - **`hbs2-hub inbox --follow` survives a peer restart.** The follower
-    called through the RPC client every verb is handed, which is built once
-    and retries in the background forever. When the local peer restarted it
-    never picked the new one up, and its stderr turned into a stream of
-    `MessagingUnix. runClient failed, probably server is gone` and `failed to
-    connect` lines, one pair a second, which a watcher merging stderr read as
-    events. The follower now opens its own connection, notices when it drops,
-    and reconnects to the same socket after 1, 2, 4 and 8 seconds and then
-    every 15. It prints `the peer is gone; waiting for it to come back` once
-    and `the peer is back; following again` once, both on stderr, and the RPC
-    layer's warnings are off while it runs. What it has printed is kept
-    across the reconnect and the first read on the new connection is a whole
-    one, so a letter that arrived during the outage is printed and none is
-    printed twice. `--json` stdout carries only queue documents as before;
-    exit codes do not change. `hub mcp`'s `inbox_wait` runs this follower and
-    waits a restart out the same way.
-
-  - **`git push` to a repository whose lwwref has no value hung forever and
-    printed nothing.** Every wait for a repository -- push, fetch, clone and
-    the `repo:` commands -- polled for the lwwref, then the manifest, then the
-    reflog, with no deadline at all (`waitRepo Nothing`; `waitRepo (Just t)`
-    bounded only the reflog). An lwwref nobody holds and one that has not
-    arrived yet look the same to a peer, so a lost repository was a command
-    that never returned. Each stage now gives up after `HBS2_GIT_REPO_WAIT`
-    seconds (60 by default; `repo:wait:timeout` sets it from the CLI or
-    `.hbs2-git3/config`) and says which stage, for example:
-
-        repository <key> not found: its lwwref has no value on this peer or
-        its neighbours (waited 60s). If you own its key, run
-        `hbs2-git3 repo:init <key>` to publish it again.
-
-    A reflog that is still arriving is not cut off: that limit counts from the
-    last time the number of missing blocks went down.
-
-    The remote helper also printed nothing when it failed before reading its
-    first command, which is where a repository that cannot be found fails: the
-    status pump erases each line it prints when the next one comes. Those
-    errors now go to the original stderr, as the command loop's already did.
-
-  - **An lwwref update was read back before the peer had taken it.** The peer
-    answers the update RPC before it stores the value, so a manifest edit
-    followed by a read could see the value it replaced, or none. Writing the
-    repository head now waits until it reads back.
-
-  - **`hbs2-peer` refused every ping and was left with no peers.** The
-    handshake signs only a nonce of `pingNonceSize` bytes, which closed a
-    signing oracle. The size was written as 32, taken from the `BS.take 32` in
-    the `HasNonces` instance, but that instance takes from a crypto_box nonce,
-    which is 24 bytes, and every released peer sends 24. A node with the check
-    answered no ping at all: older peers and nodes of its own build never got a
-    pong, never listed it as known, and their TCP connections to it closed after
-    67 seconds without a frame. The log showed `refused to sign a ping nonce of
-    length 24`. The size is 24 now, the wire is unchanged, so this node and
-    0.25.4/0.25.5 peers talk again, and a test asks the real instance what it
-    produces instead of a comment saying it.
-
-  - **A TCP neighbour that was down for a moment was not dialled again
-    until a queue aged out.**
-    A send asks for a connection only when it finds no out-queue for the peer,
-    and creates the queue as it asks. The queue was removed only when a
-    connection that had come up went down, so a connect that failed outright,
-    say during the neighbour's restart, left a queue with no connection under
-    it. Every later send went into it and asked for nothing, and the ping loop,
-    sending every thirty seconds, kept the sweep from collecting it. A dial
-    that fails before the cookie exchange now removes its queue, and the next
-    send dials again. Older releases have the same defect: after a restart a
-    node waited for its neighbours' queues to age out, a quarter of an hour on
-    our bootstrap node, before anybody dialled it again.
-
-  - **The deny-list and the sent log were read whole, and reading them is
-    quadratic.** The S-expression parser is superlinear in the number of forms
-    handed to it at once: the deny-list measured 42 ms at 1024 bans, 1.97 s at
-    8192 and 8.86 s at 16384. It is read on every `hbs2-hub inbox accept`, and
-    the sent log grows by one record per letter sent with nothing trimming it.
-    Both are read a line at a time now, which is what they are written as, and
-    the cost is linear: 0.41 s for the 16384 bans that took 8.86 s.
-
-    Not bounded, which would have been the other way to fix it: both files are
-    the operator's own and both grow by the tool working normally, so a ceiling
-    on the file would eventually refuse an accept over a list nobody did
-    anything wrong with. What is bounded is the line.
-
-  - **A rewrite could drop a delegation and the revoke that undid it, and still
-    look like the same canon.** The check that decides whether somebody else's
-    rewritten canon is a compaction or a fork compared the maintainer set as of
-    the END of the log, where a `delegate` and its `revoke` cancel out. So a
-    lineage with the pair removed matched on every field, while what was erased
-    is the record that a key was ever authorized -- which is what says whether
-    the events it signed were admissible when they were signed. The two
-    unconditionally-retained ops are compared directly now.
-
-    The two counters the check omitted are compared as well: the highest number
-    and the last folded-ts, on the argument already written for the highest seq.
-    A publisher mints the next value from each, and a rewrite that lowers one
-    hands the next publisher a value that has already been spent.
-
-  - **git could answer with as much as it liked.** The runner kept stdout with
-    no ceiling at all, under a sentence that is true of exactly one caller:
-    stdout of `git bundle create -` IS the bundle, so a bound there truncates an
-    artifact. Every other caller is asked about bytes somebody else published.
-    `git bundle verify` on a header-only bundle of 20000 refs -- a small text
-    file, attached to a letter -- answers with 1.1 MB at exit zero, and every
-    one of those bytes was then decoded, escaped, split into a line apiece and
-    rendered before anything was printed. `git diff` for the JSON contract was
-    bounded by nothing but its timeout, and then truncated to 256 KiB after the
-    whole of it had been held.
-
-    The ceiling is a parameter now, and the reader says whether it cut: a prefix
-    of a message needs no announcement, a prefix of an ANSWER is a wrong answer
-    that looks like a right one, so over the bound the call fails instead of
-    returning half a listing. `bundle create` passes the size a letter may
-    carry, which also closes the other half of this: a bundle too large to send
-    is refused as it is produced rather than built whole and held.
-
-  - **A repository's manifest and a mailbox's policy were fetched whole before
-    anything asked how big they were.** Both carried a byte bound and both
-    bounds were arguments to the PARSER: by the time the parser saw the file,
-    the tree had been concatenated into memory and copied strict. So the bound
-    said what would be parsed and nothing said what would be fetched, against a
-    tree whose size is chosen by whoever published it. A manifest is read by
-    `issue new`, `pr new`, `comment` and `whoami --repo` from a key the caller
-    typed; a policy is read once per recipient on every send.
-
-    Both are weighed first now: one walk, a byte budget and a block budget, leaf
-    sizes taken from the block index and no leaf content read at all -- a tree
-    naming a hundred gigabytes is refused having moved none of them. The block
-    budget is the half a byte budget misses, since a leaf naming ten thousand
-    empty blocks weighs nothing and costs ten thousand lookups.
-
-    The manifest's LOG was read whole to take its first entry, and now stops
-    after that entry. It also no longer throws: the ref can be fetched while
-    the log under it is not, which is what a peer that has just seen a
-    repository looks like, and `hbs2-hub issue new --repo <key>` against one
-    died with a raw `MerkleHashNotFound` rather than saying which block it was
-    waiting for.
-
-  - **The canon writer checked that the planned file landed, not that the
-    inherited one survived.** `update-index --index-info` adds an entry with
-    `OK_TO_REPLACE`, so writing `threads/<id>/1.event` into an index that holds
-    a FILE at `threads/<id>` removes that file: exit zero, nothing on stderr,
-    and the planned path lands -- so the check that was there was satisfied and
-    the commit was published with a file of canon silently gone. Reproduced on
-    git 2.46 before it was fixed.
-
-    One more `ls-tree -r`, on the parent, and its own refusal beside the
-    existing one: a planned file that did not land and a file canon already had
-    are different facts. Only where there is a parent to keep, so `hub compact`
-    is untouched -- it commits an orphan root from an empty index and drops
-    files on purpose. The writer's own haddock had been claiming this direction
-    came free from `read-tree`, which is what made the half-check look whole.
-
-  - **`hbs2-hub log <repo> <n>` walked every thread once per line.** The
-    resolution from a number to the threads carrying it sat inside the
-    comprehension's guard, so it ran per LOG ENTRY, over a canon bounded at
-    200000 files in each direction and published by somebody else. It is
-    resolved once now, and by the same function every other resolver in the
-    package uses: the renderer takes the threads rather than the number, which
-    makes the quadratic version unwritable instead of merely absent. The
-    refusal for a number canon does not hold used to ask the same question a
-    second way, a few lines above, and now shares the one answer. `hub log <n>`
-    had no test; nothing asked what the filter answered, so nothing noticed
-    what answering it cost.
-
-  - **`hbs2-hub inbox`: the mailbox walk has a ceiling.** Entering each node
-    once bounded the SHAPE of a stranger's tree; nothing bounded its SIZE. A
-    mailbox is public, how many entries its tree lists is chosen by whoever
-    writes to it, and that walk runs in full on `inbox`, on `inbox show` and on
-    `inbox accept`, every time -- one call per node and one per entry, at the
-    tree's count. Bounding the letters OPENED bounded the keyman lookups and the
-    secretbox opens and left the walk itself.
-
-    One budget over blocks, spent by both halves, because charging entries alone
-    leaves a million empty leaves free and charging nodes alone leaves one leaf
-    naming a million entries free. It is charged when a leaf is entered, so a
-    list longer than the budget is refused before its entries are fetched.
-
-    A walk that stops is a WRONG answer and not a short one, the way a hole in
-    the tree is: the part not read may hold `Exists` entries, which hides
-    letters, or `Deleted` entries, which brings back letters that were settled.
-    So it goes through the gate holes already go through -- `hub inbox` exits 2
-    and says so, `hub inbox accept` refuses until `--incomplete` -- with its own
-    words, because no fetch fixes this one and telling somebody a block could
-    not be read sends them looking for a peer that is still downloading.
-
-    What keeps a mailbox under the line is retention, and PEP-21 defers it:
-    nothing here prunes a mailbox and triage GROWS one, since rejecting a letter
-    writes a tombstone beside the entry it settles. The bound does not fix that.
-    It makes a mailbox past the line loud instead of slow.
-
-  - **`hbs2-hub --codes`: the exit codes are a table the tool prints.** PEP-22
-    calls them a contract and the manual repeats it; they were defined in
-    fifteen modules, four of them documented nowhere, and the next number was
-    chosen by grepping for the last one -- which is how two would eventually be
-    chosen at once. There is one list now, and it is not copied into the manual:
-    a table in two places disagrees with itself, so this one is generated from
-    the constants the verbs actually exit with and the manual points at it. The
-    constants stay where they are used, since each carries a paragraph about why
-    that refusal is worth its own number, and the list is an enum the two
-    functions over it are total on -- an entry without a number or a sentence
-    does not compile. Six tests, the first of which is that no two share a
-    number.
-
-  - **`hbs2-hub issue new`: the positional form is gone.** It took five values,
-    four of them base58 blobs, and two PAIRS of those are interchangeable at the
-    pattern level -- the repository key and the author key are both signing
-    keys, the two sigils are both hashes. So a swap within either pair sent a
-    correctly signed, delivered letter authored by the repository key, with no
-    error and a zero exit, and an authorship claim lives inside a signed box
-    where nothing afterwards can take it back. The verb's own documentation
-    said as much and kept the form because the tests drove it, which is a reason
-    to keep a form and not a reason it is safe. Every value is behind a flag
-    now; a name cannot be swapped silently. Before a release rather than after,
-    because afterwards removing it is a break.
-
-  - **`hbs2-hub`: `--key` meant four different kinds of key.** An inner author
-    at `ban`, an envelope key at `block`, a canon signer at `maintainer add`, a
-    person at `assign --to` -- all thirty-two bytes of base58, so every swap
-    between them was well-typed and silent, and each of the four help pages
-    spent a paragraph explaining which layer its own verb was about. The verbs
-    keep their names, which say what they do; the flag says which layer, which
-    is the half that was missing: `--author-key`, `--envelope-key`,
-    `--maintainer-key`, `--assignee`. A reader who has the flag right cannot
-    have the layer wrong.
-
-    The old spellings still work and are no longer printed, on the same terms as
-    `--target`: one release for the scripts that have them. And the same change
-    puts `ban` and `unban` on the shared repository flags, so `--target` works
-    on the verb and not only on `ban list`, which is where it worked before.
-
-  - **`hbs2-hub`: the six read verbs refused the flag every writing verb
-    takes.** `issue list`, `pr list`, `issue show`, `pr show`, `log` and
-    `verify` took the repository positionally and only positionally, so
-    `--repo` -- which every verb that writes takes, and which a user therefore
-    learns from the other half of the tool -- was a usage error on the half that
-    reads. All six take it now, through one reader so they cannot drift apart,
-    and `show` grew `--number`/`--thread` to go with it. The positional form
-    still works: accepting the flag is additive today, and removing the
-    positional form after a release would not be, so whichever way this settles
-    the flag had to exist first.
-
-  - **`hbs2-hub rm <file>` deleted the file.** The dictionary inherited about
-    154 verbs nothing here documents -- `rm`, `mv`, `cp`, `cd`, `setenv` and the
-    whole `run:proc:*` family -- so a typo landed in them: `hbs2-hub rm
-    victim.txt` removed it and exited 0, and `help rm` answered for it while
-    `--help`, which lists the forge verbs, did not.
-
-    The surface is stated positively now: the dictionary is filtered to the
-    `hub:` verbs plus `help`, `--help`, `--version` and `--run`. Not by dropping
-    a module -- those primitives live next to the evaluator, not in the
-    file-operations module their names suggest, so the obvious removal takes
-    something else and leaves `rm` bound -- and not by a blocklist, which the
-    upstream set would outgrow. `--run` evaluates in the same dictionary, so a
-    script gets the forge verbs in sequence and nothing that touches the
-    filesystem or spawns a process; anything that has to move a file has a
-    shell, and `hbs2-cli` still ships the full set.
-
-  - **`hbs2-hub compact`: it erased the only record a tree keeps of two rule
-    sets.** `(hub-event N)` is per file and has no consumer yet; every retained
-    file goes back through the renderer on a compaction, and the version came
-    from this build's constant -- so a file that said 1 came back saying 2, and
-    a reader could no longer tell an old event from a new one, in a tree that no
-    longer held the evidence. The one verb that rewrites files was the one that
-    destroyed what it had to preserve. The declared version survives now, keyed
-    by the path the file is written back under, which is the path it was read
-    at. A clause nothing reads yet is exactly the one that must survive until
-    something does: it cannot be recovered afterwards.
-
-  - **`hbs2-hub`: two frozen things nothing was watching.** The part-proof
-    preimage is `(part, secret, author)` in that order, and the order is as
-    frozen as the domain tag beside it, which was carefully labelled while this
-    was not: swapping two fields compiles, passes every distinctness property
-    the suite asserts, and turns every event that names an attachment into a
-    `PartNotProven` drop -- canon that still looks well formed and is quietly
-    shorter, with no signature to have failed. And domain separation was an
-    argument rather than a check: `Domained` protects the two records this
-    package signs, and nothing stopped a record in another package -- a git3
-    LWWRef, a sigil -- from acquiring the shape of one, which would make a
-    signature made for that record a signed event. Both are pinned by tests now,
-    the second with a positive control, since a negative that cannot pass is a
-    test that asserts nothing.
-
-  - **`hbs2-hub`: canon bytes depended on the compiler's Unicode tables.** What
-    is escaped in a projection is decided by `generalCategory`, which is GHC's
-    table and not a constant, so a code point that moves into `Cf` in a later
-    Unicode revision is escaped by one build and not another -- the same event
-    rendering to different bytes, and canon's bytes are a commit id. Two clones
-    would hold canons that say the same thing and compare as diverged. The
-    predicate is pinned by a checksum over every code point: that does not make
-    the classification portable, and nothing short of an explicit table would,
-    but a compiler whose tables differ now fails the build instead of forking
-    canon in silence.
-
-  - **`hbs2-peer`: three unbounded stores behind the mailbox worker, and a
-    batch that took the whole worker down with it.**
-
-    The merge queue took every `Deleted` entry of a downloaded tree with no
-    validation, and put an entry back whenever its proof block was absent, for
-    as long as it stayed absent. So a tree a stranger uploaded -- about ten
-    megabytes for a hundred thousand entries naming proofs that do not exist --
-    bought a hundred thousand permanent queue entries, and behind each of them a
-    `wip` entry the downloader sweeps only on completion and a row in the brains
-    database that survives a restart, plus a storage read per entry per poll.
-    Bounded per mailbox now, in `enqueueMerge`, which is the one function all
-    three call sites go through. Nothing is lost over the cap: an entry that
-    does not fit is still in the tree it came from, and the next status walks
-    that tree again.
-
-    An accepted message's attachments went to the downloader one by one with no
-    cap, on a different path from the one `maxMailboxDownloads` guards, so a
-    single message could commit an unbounded number of downloads. The reader's
-    own bound fires much later and cannot help: hbs2-hub walks at most sixteen
-    parts, at triage, by which time the peer has paid for all of them.
-
-    And the drain took a whole batch out of the queue before processing it, with
-    no handler: any throw -- a busy sqlite, a storage error -- unwound out of
-    the worker, which was then torn down and restarted, and the rest of the
-    batch went with it, already out of the queue and in nobody's. Only messages
-    a co-host will send again ever came back. Confined to the message that
-    raised it, with `tryAny` rather than `try` so that cancelling the worker
-    still stops it.
-
-  - **`hbs2-peer`: a relay's proof-of-work floor was invisible to everyone.** A
-    sender solves for what the MAILBOX charges, which is in its signed policy; a
-    peer's `pow-min` is that peer's own number and is in nobody's policy, so a
-    relay set to 16 does not carry a message that honestly paid the 12 its
-    destination asked for. The only trace was a debug line. It is counted into
-    the periodic report now -- a warning per message would fire hardest exactly
-    when a flood is arriving, which is what the floor is for -- and the option's
-    own documentation says what a non-zero value costs somebody else. The sender
-    still cannot observe the floor it failed; that needs a refusal on the wire.
-
-  - **`hbs2-hub`: one event could put a chosen letter beyond folding, forever
-    and in silence.** An event's `origin` says "I was folded from the message
-    with this hash", and nothing bound the claim to a message that exists -- the
-    fold records it for any admitted event and cannot do better, having no
-    mailbox. So an authorized key could mint one ordinary event carrying the
-    hash of a letter it wanted kept out, and that letter was refused as already
-    folded from then on: the origin set never shrinks, so revoking the key did
-    not free it, and `DupOrigin` fires only on a SECOND event with that origin,
-    so `hub verify` reported nothing.
-
-    The other end of the claim was already in canon. Folding a letter produces
-    an event whose id is the hash of the author's inner box, and honouring its
-    request records that same box id, so the gate now fires only when canon also
-    holds one of the two. A claim that fits neither is ignored rather than
-    reported: the gate exists so a triage loop re-reading a mailbox after a
-    restart does not fold one letter twice, and in that case canon does hold the
-    letter's own event. Where it does not, the letter folds and canon ends up
-    with two events claiming one origin -- which is what `DupOrigin` is for, so
-    the attack turns itself into a reported anomaly instead of a silent block.
-    `inbox reject` asks the same question, or the two verbs would disagree about
-    one letter.
-
-  - **`hbs2-hub inbox`: the queue could be pushed off its own first page, and
-    a ban did not take a letter out of it.** Two ways the only screen a
-    maintainer triages from was a stranger's to fill.
-
-    The page is the first N of the live set in hash order, and a mailbox is
-    public, so which N those are is chosen by whoever writes to it: grinding
-    message hashes below the honest ones is a few thousand signatures and
-    displaces every real letter, permanently, since nothing raised the bound
-    and the only remedy was rejecting junk one hash at a time. `--after` walks
-    past it and the truncation note prints the value to continue with; `--limit`
-    lowers how many are opened and is clamped, so it cannot raise the cost past
-    what one read will take. By hash and not by offset, because the set grows
-    underneath and an offset would skip a page.
-
-    And `igAllowed` has always said the queue applies the deny-list "because
-    triage is a queue a human reads and a banned author's letter should not be
-    in it". It was in it, as one more unreadable line. Such letters are left out
-    and COUNTED -- dropping them silently would leave a queue that says nothing
-    about how much of itself a stranger is producing, and no sign at all to a
-    maintainer who banned a key by mistake. The slot is not given back and
-    cannot be: the ban is on the inner author, so the letter is decrypted before
-    anybody knows whose it is.
-
-  - **`hbs2-hub inbox accept`: it folded over a mailbox tree it had not read
-    whole.** `hub inbox` has said for a long time that a chunk which would not
-    read makes its list wrong in BOTH directions -- a missing chunk of `Exists`
-    entries hides letters, one of `Deleted` entries brings back letters that
-    were already settled -- and exits 2 for it. The two verbs that ask a
-    MEMBERSHIP question over the same walk read only the live set, so the
-    reasoning stopped at the verb that lists and never reached the one that
-    publishes to every clone forever.
-
-    `accept` refuses now, rather than warning: the act is irreversible, and a
-    warning before an irreversible act that proceeds anyway is a warning nobody
-    reads twice. `--incomplete` is the way past it, and it exists because a
-    mailbox tree is a stranger's -- without it one block nobody can serve would
-    make a mailbox permanently unacceptable-from, which is a denial anybody
-    could arrange. `inbox show` writes nothing, so it says so instead of
-    refusing, and both verbs qualify their "is not in mailbox" refusal, which
-    is the direction in which it can be a lie.
-
-  - **`hbs2-hub`: a repository could send every contribution to the wrong
-    mailbox, silently.** The manifest carries two clauses written by hand and
-    only one of them decides anything: `resolveKeys` on the peer takes the
-    recipient's sign key out of the SIGIL's own signed box, so
-    `(mailbox-sigil K H)` where `H` names some other key delivered every letter
-    to that other key's mailbox. The owner read `K`, saw an empty queue, and had
-    no reason to doubt it; the contributor was told `queued` and exited 0; no
-    layer between them was wrong about anything. `sigilNames` is exactly the
-    predicate for this and was applied on the reply side only.
-
-    The sigil is checked against the mailbox it was published for, and the
-    refusal names both keys, because the fix is to change one of the two and the
-    owner has to see which. One block read, and the sigil is about to be read
-    anyway to seal the message. A sigil named by hand with `--recipient` is not
-    checked -- that is the documented way to mean a mailbox other than the
-    declared one -- and one this node cannot read proceeds rather than accuses.
-
-  - **`hbs2-hub`: the reply channel claimed a privacy it does not have.** Its
-    comment said a contributor's mailbox key must not end up in every clone,
-    which is why it sits outside the inner box. It does end up there: the
-    channel key has to equal the inner author (or a hub could be made to send
-    maintainer-signed acks to somebody who asked for none), and the author key
-    is what canon publishes verbatim, forever. Corrected in the code and in the
-    manual, which now has a section saying it plainly: a reader of canon can
-    NAME your mailbox and watch its tree, and cannot put anything in it --
-    sealing needs the encryption key, which is in your sigil, which canon does
-    not carry. Nothing about identity changes either way, since the author key
-    already correlates a person across everything they have written in.
-
-  - **`hbs2-hub inbox`: one letter under many envelopes cost one decision
-    each.** Re-signing a captured message under a fresh key needs no key and no
-    plaintext: a signed box keeps its payload as opaque bytes and the message
-    carries no sender field, so anyone who saw the ciphertext go past can put
-    their own signature on it. PEP-18 reads as though this is available to a
-    recipient; it is available to a bystander.
-
-    Canon was never at risk -- an event is named by the hash of the author's
-    inner box, so a second copy is refused as already folded -- but everything a
-    PERSON does was one-shot: a queue line, a decision and a tombstone per copy,
-    for a letter read once.
-
-    The queue groups copies onto one line with a count, and `inbox reject` drops
-    the group. The grouping key is the hash of the ciphertext, which a re-wrap
-    cannot change (producing a different valid ciphertext of one plaintext needs
-    the plaintext) and which this node computes before any keyman lookup, so a
-    letter now costs one decrypt however many envelopes it arrives under. A copy
-    made distinct by padding the ciphertext no longer opens, so it is a line
-    rather than a decision.
-
-    WHAT THIS DOES NOT FIX, now said in `hub ban`'s own help and in the manual:
-    every copy carries the same inner author, so the only ban that stops a flood
-    names the person whose letter was captured. `hub block` names the envelope
-    key and a re-wrapper mints a fresh one per copy. An open inbox has no
-    re-wrap resistance of its own; what prices the flood is `hub policy pow`,
-    which charges nothing until it is set.
-
-  - **`hbs2-hub inbox accept`: it decrypted every attachment a message carried,
-    and published a key to all of them.** Two halves of one gap between what a
-    message carries and what its letter names, and nothing compared the two
-    sets.
-
-    The walk took the message's whole part set while the gate that reads its
-    result only ever looks up what the content references, so a letter naming
-    nothing could still have this node fetch, measure and decrypt sixteen
-    attachments of 64 MiB, all of it live at once, for an event that would point
-    at none of them. It reads the inner box first now -- a signature check over
-    bytes already in memory -- and walks only what the letter names.
-
-    And the secret the owner signs into canon is ONE KEY FOR THE WHOLE MESSAGE.
-    PEP-18 argues that publishing it is safe because it opens what the event
-    points at, which is only true when the two sets agree; a letter naming one
-    part in a message carrying sixteen had the owner publish the key to all
-    sixteen, in public append-only canon, forever. A message carrying an
-    attachment its letter never names is refused, which is what makes the
-    argument true. The refusal is decided from what the message DECLARES, so it
-    needs nothing opened.
-
-  - **`hbs2-hub`: a banned sender could park a letter in the queue forever.**
-    `openLetterAs` has a branch that applies the deny-list to the envelope key
-    when a letter's schema is one this build cannot read -- the one case where
-    there is no inner author to ask about -- and it was dead code: the version
-    is checked a layer earlier, so such a letter never reached the function that
-    would ban its sender. The tests reached it by building the value by hand, so
-    they were green over a path production does not take. Since an
-    unreadable-version letter is a wait rather than a discard (rightly: a newer
-    build folds it), every pass opened it again. The check now runs where the
-    version is actually decided.
-
-  - **`hbs2-hub compact`: every compaction commit was dated 1970.** The stamp
-    is deliberately taken from canon rather than from a clock, so that two
-    maintainers compacting one canon produce one commit -- but the field taken
-    was `frMaxSeq`, a position, where `cnWhen` is documented as epoch
-    milliseconds and the writer divides it by 1000. So a canon holding forty
-    events was published at the epoch while every other canon writer passed a
-    real clock, and a canon whose highest seq passed 2^63-1 could not be
-    compacted at all, git refusing that date. `frLastFolded` is the same
-    determinism and is the value the field asks for; it is bounded by
-    `maxFoldedTs`, which is an admission rule, so no admitted event can carry a
-    date git will not take.
-
-  - **`hbs2-hub pr merge`: the ordinary way of naming a commit was refused.**
-    `--commit` went to a check written for the shape CANON holds -- 40 or 64
-    hex -- so the seven characters `git log --oneline` prints came back as the
-    refusal written for a forged letter ("a signed letter says who wrote a
-    name, not what it is"), at an exit code documented as belonging to
-    `hub pr new`. An abbreviation is resolved through git now, and the whole
-    object name is what canon records: an abbreviation is unambiguous only in
-    the repository it was read in and only while that repository stays this
-    size, and a merge event is permanent. Still hex only, not a branch or tag
-    name, for the same reason.
-
-  - **`hbs2-hub`: one canon file could end a repository, and `hub-meta` is 3.**
-    A key whose delegation was current spent its stamp outright, so a single
-    canon box at `seq = maxBound - 1` put the cursor at the top of its range,
-    and every entry point in the bridge is gated on that cursor -- including the
-    `revoke` the owner would answer it with. PEP-19 promised a recovery
-    (compaction re-stamping the retained events) that was never implemented, and
-    promised that `hub verify` would notice beforehand, which it did not.
-
-    A window existed and applied only to a key whose delegation had ALREADY been
-    withdrawn: it bounded the case where the owner has noticed and left the one
-    where they have not. It applies to every authorized key now. A bound that
-    only takes effect after the harm is visible is not a bound.
-
-    THE TWO COUNTERS TAKE DIFFERENT WINDOWS, because their honest gaps differ.
-    Numbers are handed out one per `open` and compaction never drops an `open`,
-    so the surviving numbers are dense and the window is 16; a number outside it
-    is REFUSED, since a number is a label a reader is shown. Sequence numbers
-    are not dense -- compaction drops superseded events out of the tree, so the
-    gap between two survivors is however many went between them -- so that
-    window is 2^24 and a seq outside it is ADMITTED and simply does not move the
-    mark. Refusing it would let a legitimately compacted canon become
-    unfoldable, which is a repository bricked by its own maintenance; leaving it
-    admitted costs at most a later duplicate seq, which is reported and ordered
-    deterministically. A generous window is still a bound: reaching the top of a
-    2^64 range through a 2^24 one takes 2^40 files, at which point flooding
-    canon is the cheaper attack.
-
-    `hub verify` reports the stamp that did not move the mark
-    (`SeqTooFarAhead`), which is the only trace such an event leaves and is what
-    PEP-19 asked for. A tree that lost files and a hard compaction produce it
-    too, and the report says so.
-
-    This is a consensus change and it raises `hub-min` with it, which no bump
-    has needed before: `frMaxSeq` IS the cursor, so two maintainers on either
-    side of the change would mint from different positions and fork rather than
-    one of them lagging. Free today because nothing has been published, and
-    impossible later, which is the whole reason it is being done now.
-
-  - **`hbs2-hub updates`: an ack was checked against the wrong repository's
-    maintainers.** The `RepoRef` an ack names was passed into the predicate and
-    then discarded, so membership was asked of the set belonging to the
-    repository the READER named. A maintainer of that repository could sign an
-    ack about a different one and have it printed as a maintainer's word about
-    the reader's own submission, with a status and a note of their choosing; a
-    thread-id is the hash of an author box in public canon, so naming one costs
-    nothing. The line now prints the repository the ack is about, which is what
-    made an honest cross-repository ack indistinguishable by eye from a forged
-    one.
-
-  - **`hbs2-hub publish`: the scenario it is shaped around answered with a raw
-    git error.** It learned the remote's canon from `ls-remote` and asked
-    `merge-base --is-ancestor` about it -- but a clone that has never fetched
-    does not HOLD that object, which is what "the remote is ahead" means, so
-    the default path produced "fatal: Not a valid commit name" at exit 46 and
-    the sentence written for the case appeared only after fetching by hand. Not
-    having the object is the strongest form of holding canon this clone does
-    not contain, so it is now the same refusal, with the same remedy.
-
-  - **`hbs2-hub publish`: it force-pushed staged proposals after refusing to
-    publish canon.** The canon push is a fast-forward check and the pulls push
-    is a force, and the second sat outside the branch that decides the first --
-    so a run that printed "NOT published, nothing was written" and exited 45
-    had just replaced the remote's `refs/hbs2/pulls/*` in the same breath.
-    Those refs are numbered out of canon, and the canon they were numbered out
-    of is the one this clone does not have. They are held back now, and the
-    report says so rather than leaving a reader to infer it from the canon
-    line.
-
-  - **`hbs2-hub`: the deny-list was rewritten in place.** A torn write leaves a
-    file that is SHORTER and still parses -- every line is one key -- so an
-    interrupted `hub ban` silently unbans whatever came after the break. That
-    is the one failure the design otherwise excludes: `loadBans` refuses a file
-    it cannot read entirely, precisely so that a list somebody shortened is a
-    refusal rather than a shorter list. Written beside it and renamed over it
-    now, in the same directory so the rename is atomic.
-
-  - **`hbs2-hub`: two files that are not UTF-8 threw past their own contract.**
-    `loadBans` and `loadSent` answer `Either Text`, and read through
-    `Data.Text.IO.readFile`, which throws `UnicodeException` -- so a corrupt
-    deny-list aborted an accept with a raw exception instead of the refusal
-    that has an exit code. Both catch it and report it as what it is.
-
-  - **`hbs2-hub`: `hub issue new` lost its exit code on an oversized field.**
-    It left through `throwIO (userError ...)`, which exits 1 via the RTS, where
-    the same check in `issue comment` and `pr new` goes through `refuse` --
-    the defect `refuse`'s own haddock is a paragraph about.
-
-  - **`hbs2-hub`: two positional numbers bypassed the guard written for them.**
-    `hub log <repo> <n>` and `hub issue show <repo> <n>` did an unguarded
-    `fromIntegral` on the `Integer` a literal carries, while `flagWord` exists
-    because `--number 18446744073709551617` once wrapped to 1 and the verb
-    answered about a thread nobody named. Display-only here, and the rule has
-    one source of truth or it has none.
-
-## Changed
-
-  - **`hbs2-hub`: the shared CLI plumbing is no longer part of the `hub inbox`
-    verb.** `refuse`, `saying`, the peer wiring and the exit codes lived in
-    `HBS2.Hub.CLI.Inbox`, and twelve other verb modules imported them from
-    there -- so `hub compact` depended on the queue verb in order to know how
-    to refuse, and `HBS2.Hub.Deny` carried a note about routing around the
-    near-cycle that caused. They are in `HBS2.Hub.CLI.Common` now, which is a
-    module and not a verb. No behaviour changes; what changes is that the exit
-    codes, which PEP-22 makes a contract, are in one file.
-
-  - **`hbs2-hub`: `pr` is a whole noun.** `close`, `reopen`, `label` and
-    `assign` were bound under `issue` only, so closing a pull request was
-    spelled `hub issue close --number <pr number>`. That WORKS -- the number
-    index does not filter on kind -- and nobody guesses it. All four are bound
-    under both nouns now, which is what `pr comment` had been doing since it
-    was written, for the same reason: a thread is an issue or a pull request
-    and these ops care about neither. `AClose` carries no kind.
-
-  - **`hbs2-hub`: `issue|pr comment` takes `--number`.** Every other thread
-    verb resolves a number against the local fold; this one required
-    `--thread` and 44 characters of base58 that no listing prints -- `hub issue
-    list` shows `#3` and `hub issue show` had to be read to find the id. It now
-    takes either, and refuses both at once, a number with no `--repo` to
-    resolve it against, and a comment naming no thread at all. The letter is
-    unchanged: it still carries a thread-id and no repository, which is what
-    PEP-18 says a comment names.
-
-## Fixed
-
-  - **`hbs2-hub`: a noun was not a help topic.** The top-level help prints
-    verbs as `issue new` and `pr list`; the search behind `hub help <word>`
-    matched the raw dictionary keys, every one of which begins `hub:`. So the
-    spelling the help printed could never match the search the help
-    advertised, and `hbs2-hub help issue` -- the first thing anybody types --
-    answered that no such entry exists. It now tries this tool's own spelling
-    first and what was typed second: `help issue`, `help pr` and `help
-    maintainer` list their families, and `help print` still finds the builtin.
-    Ordering matters and is why it is written down: with the other order,
-    `help pr` answers with `print`, `println` and `proc:pipe`.
-
-  - **`hbs2-hub`: `hub help unban`, `unblock`, `issue reopen` and `maintainer
-    remove` described their siblings.** Each pair is built from one helper with
-    one `desc`, so the help for the second verb opened with a paragraph about
-    what the first one does and never said what the second does. Each now
-    leads with its own sentence.
-
-  - **`hbs2-hub`: `hub help block` denied that `hub ban` exists.** It ended
-    "keeping an author out of canon is the triage layer, which this build does
-    not have" -- while `hub ban` is in the same binary and in the same listing,
-    and `hub policy pow`'s help fifty lines away points at it. The wrong one
-    was on the verb a maintainer reaches for first, so somebody being spammed
-    would block the envelope key, watch the spammer rewrap, and conclude the
-    tool could not stop it.
-
-  - **`hbs2-hub`: `--flag=value` on the last three verbs that refused it.**
-    `ban list`, `maintainer list` and `policy show` matched their arguments by
-    hand, in one fixed order. They go through `flagsOf` now, like every other
-    verb and like the spelling `hub issue new`'s usage advertises to everybody.
-
-  - **`hbs2-hub`: `--version`, and two exit codes that were not what they said.**
-    There was no way to ask which build was answering, though the exit codes
-    are a documented contract that may be added to: `--version` and `version`
-    were both "unknown verb". `codeNothingToCompact` (42) was defined,
-    exported, documented as the thing a scheduled compaction tells from a
-    refusal, and returned by no path -- the verb printed and exited zero.
-    And `hub sync` exited 27 on a git failure, which is documented as
-    belonging to `hub pr new`: a number naming a command nobody ran. It has
-    its own now, shared with `hub publish`, since those two are the ends of one
-    wire.
-
-  - **`hbs2-hub`: an unknown verb named the word that was right.** `hub issue
-    nwe` reported `unknown verb: issue`, pointing at the half that is a verb
-    and saying nothing about the half that is not. It prints the whole line.
-
-  - **`hbs2-hub`: several synopses showed optional flags as required and left
-    others out entirely.** The SYNOPSIS line is rendered from each verb's
-    `args` list, which carries no optionality marker and had been filled
-    inconsistently. `hub help sync` never mentioned `--repo`, which is the flag
-    that turns a divergence into a resolved compaction, while `hub help
-    compact` tells you to run exactly that. `hub help compact` itself omitted
-    `--dry-run` -- the flag its own prose says to run first. `inbox accept`
-    omitted `--as` and `--keep`; `issue close` showed `--note` as required;
-    `comment` never mentioned how to name a thread. Optionals are bracketed
-    now and the missing flags are there.
-
-    Not fixed: these are still hand-written per verb rather than derived from
-    each reader's own flag list, so the next one added can drift the same way.
-
-  - **`hbs2-hub`: `hub issue list` took a flag as a filter value.** It was the
-    last argument reader in the package not going through `flagsOf`, and it had
-    the hole the shared reader exists to close: its check looked at
-    even-indexed words only, so `hub issue list K --status --label` passed it
-    (index 0 is a known flag, the length is even) and the pairing then bound
-    `--label` as the value of `--status`. A listing filtered on a status nobody
-    typed, exit zero, which is the worst shape a filter can fail in: the caller
-    reads the output as filtered. This is the same case `c40ed994` removed from
-    six other readers.
-
-    It goes through `flagsOf` now, which also brings `--flag=value` -- the
-    spelling `hub issue new`'s usage has been advertising to everybody and
-    which this verb refused -- and refuses a stray word and an unknown flag
-    instead of answering with an unfiltered listing.
-
-  - **`hbs2-hub`: nine of the ten ops were rendered by no test.**
-    `contentDoc` dispatches on every constructor of `AuthorContent` and one
-    test passed `AOpen`. The other nine were unreached on the verb that prints
-    a stranger's UNFOLDED letter -- the surface that produced `054d4dd2`, and
-    the thing a maintainer reads while deciding whether to sign it into canon
-    forever. One escape in one field of one op rewrites the lines above it in
-    that terminal, and which arm carries it is the attacker's choice: they
-    write the letter.
-
-    A table drives all eleven shapes with `\ESC[2K` in every text field. No
-    defect was found -- every arm was already correct -- and the point is that
-    nothing said so, and nothing would have said otherwise. Two more assert
-    what escaping is FOR: the bytes survive (a maintainer has to be able to
-    read what they are deciding about) and a newline cannot forge a field of
-    the report.
-
-  - **`hbs2-hub`: a test in `ReadSpec` that could not fail.** It asserted that
-    a forged row was absent from `unlines (drop 1 (lines out))` after the line
-    above it had established there was exactly one line -- so the predicate ran
-    against the empty string and was constantly true. The row count was the
-    only real assertion, and a renderer that CLIPPED a title at its newline
-    would have passed it while silently throwing away what a stranger wrote.
-    It now asserts that the newline is escaped rather than dropped.
-
-  - **`hbs2-hub`: the step that chooses the attachment secret canon publishes
-    forever was run by no test.** `igOpenPart` turns a fetched encrypted tree
-    into the `PartSecret` the owner puts into canon, where it stays in every
-    clone that ever fetches the thread. It had four sites in the repository:
-    the declaration, the production wiring, one caller inside the accept verb,
-    and a stub in the test suite that answers `Left`. No test overrode the
-    stub, so every `PartOpened` in the whole suite was a fixture literal and
-    the arm that picks the published secret was reached by nothing.
-    `measurePart` was tested at one end and `requireParts` at the other; what
-    joins them was not.
-
-    The loop is now `partEvidence`, a named exported function rather than
-    fifteen lines inside a verb, and five tests drive it with an
-    `igOpenPart` that really returns bytes and a key. What they pin: the secret
-    arrives in the evidence unchanged, a secret of the wrong length is refused
-    rather than published, a part this node cannot open is locked, an
-    oversized part is NOT opened at all (opening is the spend the size gate
-    exists to prevent), and a part still arriving is told from one that will
-    not be taken.
-
-    That last one also closes a gap in the existing fixture, whose two
-    `igSize` branches returned the same value, so the "not all of it is here"
-    answer was never produced -- the case the accept turns into a retry rather
-    than a refusal.
-
-## Security
-
   - **`hbs2-hub`: `hub compact` could publish canon with an event silently
     gone.** `git update-index --index-info` answers a path it will not take
     with `Ignoring path ...` on stderr and EXIT ZERO, so `write-tree`,
@@ -2227,76 +1983,6 @@
     not an optimisation but the value: the queue is empty at that point.
     Writing the truth rather than adjusting towards it also repairs a counter
     that has already drifted, which an increment can never do.
-
-## Added
-
-  - **`hbs2-hub publish`, and the line every canon-writing verb was missing.**
-    `refs/hbs2/meta` is an ordinary git ref in the repository the operator is
-    standing in. Every verb that writes canon -- accept, merge, close, label,
-    assign, redact, maintainer add, compact -- wrote it locally, printed the
-    commit, and exited zero, and nothing in the tool ever said the word push.
-    So a maintainer could triage a queue, fold six letters, close two issues
-    and record a merge, have every command succeed, and have the contributor's
-    `hub updates` still show nothing a week later, with `hub verify` and
-    `hub log` locally confirming, correctly, that everything was fine.
-
-    `hub publish` is the other half of `hub sync` and carries the same two
-    things: canon, and the staged proposals under `refs/hbs2/pulls/*` that
-    `hub pr checkout` reads. Without the second, a reviewer's clone has nothing
-    to check out.
-
-    CANON IS NOT FORCED, mirroring the fetch side. A remote holding canon this
-    clone does not contain is what a second maintainer's folds look like, and a
-    forced push would take them out of the ref every reader follows while their
-    events sat unreferenced in the object store. The push is refused, nothing
-    is written, and the report names the remedy (`hub sync --repo <key>`, which
-    folds both lineages and takes a rewrite when it is one). Exit code 45.
-
-    THE PROPOSAL REFS ARE FORCED, and the asymmetry is deliberate: a revised
-    pull request moves its head, which is a rewrite by construction, and
-    `hub sync` already fetches them with a plus. They are derived from canon
-    rather than authored, and PEP-21's A1 has one publisher, so there is no
-    second author to race with.
-
-    It signs nothing and checks no key: what gates publishing is who may push.
-    A delegate can bless events into canon and cannot publish them, and this
-    verb is where that stops being an abstraction.
-
-    Every canon-writing verb now ends with a note on stderr saying the commit
-    has not left the machine and naming the verb that sends it.
-
-## Changed
-
-  - **`hbs2-hub`: the repository key is spelled `--repo` everywhere.** It was
-    one value under two names, one noun apart: `hub pr new --target K` beside
-    `hub pr merge --repo K`. Both are thirty-two bytes of base58, so neither
-    reader could tell it had been handed its sibling's spelling -- what it
-    produced was a usage message about a flag the caller had just supplied.
-    `--target` also collided with a second meaning: `target` is a field inside
-    the signed author box (PEP-19), which is a different thing from the flag
-    that used to fill it.
-
-    `--target` STILL WORKS on every verb and is printed by none. It is a hidden
-    alias for one release, so a script written against the old spelling keeps
-    running; the comment on `repoFlags` is the reminder to take it out.
-
-    Giving both spellings at once is refused rather than resolved, even when
-    they agree: two spellings of one value on one line is a line somebody
-    edited half way, and picking one is the guess `flagOnce` exists to refuse.
-
-    Both readers are one function now (`flagRepo`, `flagRepoMaybe`), used by
-    every verb that takes a repository, rather than a `flagOnce kvs "--repo"`
-    per verb.
-
-  - **`hbs2-hub`: `hub issue new`'s usage no longer denies reading the
-    manifest it reads.** The text said `--recipient` could not be resolved from
-    `--target` because "this verb does not read" the repository's manifest,
-    while the verb has read it -- that is what makes `--recipient` optional and
-    what saves a contributor from finding a 44-character sigil hash before they
-    can file anything. The paragraph now says which flag is optional and what
-    happens when both are given.
-
-## Security
 
   - **`hbs2-hub`: three places where one stranger chose how much work this node
     did.** Each is the same shape: a bound existed for the size of one thing
@@ -2950,348 +2636,758 @@
     port a neighbour cannot open is nothing but an invitation to probe
     it.
 
-## Features
-
-  - **`hbs2-hub`: canon can be written, and one letter can be accepted
-    into it.** Everything around this existed already and had nowhere to
-    put its result: the fold decided what canon means, the bridge minted
-    an event from a stranger's letter, the file format rendered one, and
-    the reader folded a tree back. Nothing committed a tree. The vertical
-    slice PEP-17 is for, a stranger files an issue and a maintainer takes
-    it, was open at exactly that step.
-
-    `planCanon` turns accepted events into the files PEP-19's layout puts
-    them in: the `version` file, one immutable file per event under
-    `threads/<id>/` or `repo/`, and a regenerated `index/number.sexp`.
-    Every file is READ BACK with this build's own reader before it is
-    accepted, because being able to write what cannot be read is the
-    failure that costs most here, and the reader has three bounds a size
-    check would not cover. A number the index cannot hold is reported
-    rather than dropped in silence.
-
-    `CanonSink` is the mirror of `CanonSource`, and `withGitSink` is its
-    git half: `hash-object`, `read-tree`, `update-index --index-info`,
-    `write-tree`, `commit-tree`, `update-ref`. Paths only ever travel on
-    stdin, never argv, for the reason the reader already documents at
-    length. The index it builds is its own, named by `GIT_INDEX_FILE`, so
-    accepting an issue does not stage the operator's working tree. The
-    ref move is a compare-and-swap against the canon that was folded, so
-    two accepts racing leave one refusal instead of one silent loss, and
-    the commit's dates come from the caller's stamp, which makes the
-    commit id a function of canon rather than of when the writer ran.
-
-    `hub inbox accept --mailbox K --repo R --message H` is the verb. It
-    re-reads canon from git, requires the letter to actually be in that
-    mailbox rather than merely present in local storage, asks the bridge,
-    and commits. Every value is behind a flag, including the message,
-    because a sign key and a hash are both thirty-two bytes of base58: a
-    positional message parsed `--repo <hash> <key>` happily with the two
-    swapped, and the first thing to notice was the bridge.
-
-    Two things PEP-22 puts in this verb are deliberately absent, and the
-    verb says so on success rather than leaving them to be discovered:
-    the letter is not deleted (fold-then-delete is PEP-21 retention) and
-    no acknowledgement is sent (the record type exists, the sending does
-    not). Neither loses anything, since re-accepting the same letter is
-    refused as `AlreadyInCanon`. No deny-list is applied either: PEP-21
-    policy lives in the repo manifest and there is no manifest reader.
-
-  - **`hbs2-hub`: the tracker can be read.** Accepting an issue into
-    canon and then having no verb that shows it was a strange place to
-    stop: `hub verify` prints an audit, which is counts and problems,
-    and never a title or a status. `hub issue list`, `hub issue show`,
-    `hub pr list`, `hub pr show` and `hub log` are the read side, and
-    like `hub verify` they need no peer and no key, because canon is a
-    git ref and the fold over it is all they print.
-
-    A title, a label and a body arrive in a letter anybody may send, so
-    every one of them is printed through `safeText`: a title carrying a
-    newline would otherwise forge a second row of the listing, and one
-    carrying an erase-line sequence would rewrite the row above it. Both
-    are tested by trying it. Order is imposed rather than taken from a
-    container: `frThreads` iterates in hash order, which is stable for a
-    build and is not a promise, so threads sort by number and events by
-    seq.
-
-    `--status` and `--label` narrow a listing. They are exact matches
-    and not the query DSL PEP-22 inherits from fixme-new, which compiles
-    to SQL over a materialized cache this build does not have; the help
-    says so rather than leaving the difference to be discovered. A label
-    is one an owner applied: what an author asked for on open is shown
-    separately and never counted, since applying one is an owner-signed
-    event (PEP-19) and merging the two would let a stranger label their
-    own issue.
-
-  - **`hbs2-hub`: the git side of a pull request.** PEP-20's delta path
-    as far as git is concerned: build a bundle of `base..source-ref` and
-    report the tip it recorded, take a stranger's bundle in, answer the
-    ancestor question, and stage a proposed tip under
-    `refs/hbs2/pulls/<n>/head`. What is still missing above it is the
-    letter that carries the bundle, the triage that runs this, and the
-    merge event.
-
-    A ref name and a sha arrive inside a contributor's signed box, which
-    says who wrote them and nothing about what they are, and both reach
-    a git command line. git reads a leading dash as an option, so a
-    `source-ref` of `--upload-pack=...` would be a signed letter that
-    runs a program. Every value is checked against a shape first, and
-    the shape is narrower than what git would accept. `fsck` is turned
-    on explicitly for the fetch, twice, because git leaves it off and
-    these are a stranger's objects.
-
-    The signed tip is an argument to the fetch rather than something the
-    caller compares afterwards. It is the step the whole delta path
-    rests on, git's own hashing binds the content to it, and a check the
-    caller performs is a check the caller can omit; the one who omits it
-    stages unsigned objects under a number. Staging is a
-    compare-and-swap for the same reason canon's ref move is: a pull ref
-    that moved means somebody else used that number.
-
-    An empty range gets its own answer instead of git's prose. It is the
-    ordinary mistake (nothing committed yet, or the base named as the
-    branch itself), not a failure.
-
-    One git runner now serves the canon writer and this, in
-    `Repo/Git.hs` beside `gitIn`. It decides only the two answers that
-    are not about the command, so each caller reads a non-zero exit in
-    its own vocabulary; for one of them an exit of 1 is not a failure at
-    all. The audit reader deliberately keeps its own, which has bounds
-    this does not.
-
-  - **`hbs2-peer`: a sender can name its own attachment in the payload it
-    signs.** `createMessage` built a message's parts itself, from
-    producers, and returned when they were already inside a signed box.
-    A part is named by the hash of its encrypted tree, so a sender that
-    wanted to REFERENCE one learned the name after the signature was
-    over bytes that did not mention it. PEP-18's letters need exactly
-    that (`body-part`, `bundle-part`), and it was not expressible.
-
-    It is now two functions: `createAttachments` stores the parts and
-    says what they are called, `createMessageWith` builds the message
-    around parts that already exist. `createMessage` keeps its signature
-    and is the two of them in a row, so every existing caller is
-    unaffected and the wire format is untouched.
-
-    The separation the split had to preserve is that the parts carry a
-    group key of their own, never the message's. PEP-18 turns on it:
-    folding an attachment into public canon publishes the key to it, and
-    the message key also opens the back-channel that a contributor's
-    personal mailbox address rides in.
-
-  - **`hbs2-hub`: `hub pr new` proposes a change as a bundle.** The
-    contributor's end of PEP-20's delta path: build a git bundle of
-    `base..--from` in this repository, ship it as an encrypted
-    attachment, and sign coordinates that name it. The bundle's size is
-    the delta, so proposing a change to a large repository does not
-    transfer the repository.
-
-    The order is the whole difficulty, and it is why `sendLetter` split
-    the way `createMessage` did: a part is named by the hash of its
-    encrypted tree and PEP-18 puts that hash inside the signed box, so
-    the bundle exists before the box that names it. `attachToLetter`
-    stores the parts, `sendLetterWith` seals a letter around parts that
-    already exist, and `sendLetter` is the no-attachment case.
-
-    `--base` defaults to the merge-base of `--onto` and `--from`, which
-    is what a contributor almost always means; naming it is for the case
-    where git's answer is wrong, such as a rebase onto something the
-    maintainer does not have. The tip comes from the bundle rather than
-    from a second lookup: it is the tip of the ref the bundle recorded,
-    which is what the maintainer's fetch will produce, and asking git
-    again would answer a different question.
-
-    Not done yet, and needed before a maintainer can act on one of
-    these: the read side has to fetch and decrypt the attachment, and
-    triage has to run the verification and stage the tip.
-
-  - **`hbs2-hub`: an accepted letter's attachment reaches public canon.**
-    `hub inbox accept` handed the bridge `noMessageParts`, so a folded
-    event referencing an attachment carried no part-secret and a public
-    clone could see the reference and not the bytes (PEP-18
-    "Attachments in public canon"). It now measures each part the
-    message carries, opens the ones it can, and hands over real
-    evidence, so the owner publishes the secret the fold is supposed to.
-
-    The size comes from walking the part's tree rather than from a
-    declaration. PEP-18's gate refuses an oversized attachment before
-    anything is paid for it, and its note assumed a size in the tree's
-    root block; nothing in this project writes one, so the alternative
-    would have been a number the sender chose. The walk reads the tree's
-    nodes and asks each leaf's size without fetching it, which also
-    answers whether the part is fully downloaded, and that is the
-    difference between a wait and a refusal. An oversized part is
-    reported at its size and never opened, since decrypting one the gate
-    is about to refuse is the spend the gate exists to prevent.
-
-  - **`hbs2-hub`: accepting a pull request verifies it and stages the
-    tip.** `hub inbox accept` now does the two steps PEP-20 puts either
-    side of the fold. It takes the bundle in with fsck on, checks that
-    what arrives is the commit the contributor signed for, and checks
-    that the signed base really is an ancestor of it; then, after the
-    canon commit, it stages the tip under `refs/hbs2/pulls/<n>/head`.
-
-    The order is the one the dependencies force and the one the spec
-    gives. Verification sits between the mint and the commit, because
-    minting writes nothing and the commit is the only step that
-    publishes, so a bundle that does not match leaves canon untouched
-    and no seq spent. Staging follows the commit, because the pull ref
-    needs the number and the number is not public until canon holds it.
-    A staging failure is reported and does not undo the fold: the
-    coordinates are in canon and the objects are already here, so it is
-    a step to repeat rather than something lost.
-
-    An issue and a fork-pointer pull request both have nothing here to
-    verify, and they mean it for different reasons, so the decision is
-    its own exported function rather than a branch inside the verb.
-
-  - **`hbs2-hub`: `hub pr merge` records a merge, and refuses to record
-    one that did not happen.** It records rather than performs:
-    PEP-20 leaves the integration to whatever policy the repository uses
-    (merge, rebase, squash, fast-forward), so the maintainer does that
-    with git and then tells canon.
-
-    What it checks is the sentence it is about to publish. A merge event
-    says a proposal was integrated, and if the commit it names does not
-    contain the tip the contributor signed for, that is false in every
-    clone forever. git answers the question exactly, so it is asked
-    before anything is written and nothing is written when the answer is
-    no.
-
-    The merge event sets the status to merged by itself, which is what
-    PEP-19 specifies: no second `set` is written, because canon would
-    otherwise claim a merged pull request was open until it arrived.
-
-    That completes PEP-20's delta path: propose, verify, stage, merge.
-
-  - **`hbs2-hub`: `hub maintainer add|remove|list`.** The verbs over
-    PEP-21 delegation, which the fold and the bridge already decided:
-    who may bless a canon event is a function of the log, and adding or
-    withdrawing a key is an ordinary owner-signed event.
-
-    Only the repository's own key may write one, so there is no `--as`.
-    PEP-19 rule 5 requires both signatures on a delegation to be the
-    owner's exactly, because a delegate that could delegate could grow
-    the maintainer set; offering a flag that can only be wrong would
-    mint an event the fold then drops with the seq already spent.
-
-    The help says the thing a person adding a maintainer will assume
-    otherwise: signing is not publishing. A delegate may sign events
-    every clone will admit and cannot push `refs/hbs2/meta` to put them
-    there, which needs the reflog key. How their events reach canon is a
-    deployment question, and PEP-21 answers it three ways.
-
-    `list` marks the owner, because the owner is in the set by
-    definition rather than by any event, and a reader comparing the list
-    against the log would otherwise find one entry with nothing behind
-    it.
-
-  - **`hbs2-hub`: `hub inbox reject`, and the rule it is the first to
-    obey.** A letter can be dropped from the triage queue without being
-    folded. It writes a tombstone, which is what "delete" means here:
-    the queue stops showing the letter and no disk is freed, because
-    nothing in this build walks a mailbox and deletes blocks.
-
-    The mailbox key signs it. The peer takes the signer of the payload
-    as the mailbox being deleted from, so a repo key or a delegate's
-    canon key produces a delete against a mailbox nobody has.
-
-    `--repo` is optional and its absence is a real difference rather
-    than a default: without a canon to consult, the check that refuses a
-    letter already folded cannot run, and the verb says which of the two
-    happened instead of implying it looked.
-
-    That check is PEP-21 retention's canon-awareness, now settled in the
-    drafts: the protected set is derived from canon and not recorded
-    anywhere, and a hub may not drop an attachment canon references.
-    Neither half is urgent, because what they guard against does not
-    exist yet -- `delBlock` is in the storage class and nothing walks a
-    mailbox to call it -- but they are the obligation a purge inherits.
-
-  - **`hbs2-hub`: `hub policy show`, `hub block` and `hub unblock`.**
-    PEP-21's peer layer over the existing BasicPolicy: read a mailbox's
-    accept policy, add a sender-deny clause, take one out. The help says
-    which of the two layers this is, because the difference decides
-    whether the operator is finished. A deny here matches the ENVELOPE
-    key before anything is decrypted, so it bounds what the peer stores
-    and relays; anyone holding a decrypted letter can re-send it under a
-    fresh envelope, and keeping an author out of canon is the triage
-    layer, which this build does not have.
-
-    The file it writes is sorted. `getAsSyntax` renders a policy from
-    two hash maps, so its clause order is hash order, and this text is
-    hashed and versioned: without an imposed order, reading a policy and
-    writing it back unchanged would produce different bytes. For the
-    same reason a block that changes nothing writes nothing, since a
-    version bump republishes the file to every peer holding the mailbox.
-
-    Unblocking removes the clause rather than setting it to allow: an
-    allow beside a default of allow says nothing and never goes away,
-    and against a default of deny it would grant something the operator
-    did not ask this verb for.
-
-  - **`hbs2-hub`: `hub ban`, and the first predicate that is not `const
-    True`.** PEP-21's triage layer, which denies an INNER author: the
-    key inside the signed box, which a rewrapper cannot change, and
-    therefore the only deny that is authoritative for canon. `hub inbox
-    accept` now applies it, so a banned author's letter is refused
-    before anything is minted.
-
-    Local state and unsigned, which is PEP-21's own decision rather than
-    an omission: publishing a ban into canon needs a new author-content
-    op and an admission rule, and the spec defers that to `hub-meta 2`.
-    So the list does not travel, two hubs serving one repository may
-    disagree, and the verb says so. It lives outside the working tree
-    for the same reason: a file under the repository looks like
-    something that travels and is eventually committed by accident.
-
-    A file it cannot read stops an accept rather than reading as empty.
-    A deny-list that silently returns nothing when it is damaged is one
-    an attacker shortens by writing something odd into it, and the
-    accept it silently permits is the thing the list existed to stop.
-
-  - **`hbs2-peer`, `hbs2-hub`: a mailbox can charge proof-of-work for a
-    letter.** PEP-21's peer layer for the open inbox, which is the one
-    tier where `(sender allow all)` means anybody may grow the tree.
-    `(pow D)` in a mailbox's signed policy asks for D leading zero bits
-    over `(mailbox key, message hash, nonce)`, and `hub` reads that
-    policy before sending and solves what it finds. Absent or zero is
-    every mailbox that exists today, unchanged and needing no stamp.
-
-    The work binds to the hash of the message AS STORED and to one
-    mailbox key. To the stored bytes, so it is paid for exactly what will
-    occupy disk, and because that hash is fixed before the search starts
-    the grind is hashing and nothing else -- the letter is signed once,
-    before the stamp exists. To one mailbox, so a solution cannot be
-    moved to another inbox; a letter to two mailboxes that both charge is
-    solved and sent twice, with the same bytes each time.
-
-    Checked in two places, because the flood and the disk are different
-    surfaces. `(hbs2:mailbox:pow-min D)` in the peer's config is a floor
-    checked before the message is forwarded, where the peer does not yet
-    know which mailbox it is for; the mailbox's own `(pow D)` is checked
-    where the message is stored, which is the only place its policy has
-    been read. Replication between a mailbox's own hosts pays nothing: a
-    stamp is not kept in the tree, so a co-host has none to offer, and
-    what bounds that path is `(peer allow|deny)` as before.
-
-    THE COST IS A WIRE BREAK, taken deliberately. A stamped letter
-    travels as a new protocol constructor, relaying re-encodes what it
-    decoded, and a peer that cannot parse it forwards nothing -- so a
-    stamped letter only crosses upgraded peers, and an old one in the
-    path is silence. Nothing else changes: an unstamped letter is the
-    message it always was, and the constructor is appended last so every
-    existing encoding is untouched. A sender gets no rejection signal
-    either, and reading the policy first only works for a mailbox the
-    local peer holds. Both are written up in PEP-21 rather than papered
-    over.
-
-    `MailboxAPIProto` is bumped again, and this time the REQUEST changed:
-    `RpcMailboxSend` carries the stamp beside the message. An old client
-    calling a new peer would send bytes it cannot decode, and a new
-    client calling an old peer would have its letter sent without the
-    work the mailbox asked for. The id makes both refuse to connect.
-
 ## Fixed
+
+  - **`hbs2-git3`: two manifest writes in one second lost one of them.** The
+    lwwref seq was the time in seconds, so a second write in the same
+    second carried the same seq and the lwwref kept one of the two by hash,
+    after both commands had reported success. `repo:mailbox:set` followed
+    by `repo:mailbox:sigil` lost the sigil about half the time. The seq is
+    now strictly greater than the value it replaces.
+
+  - **`hbs2-hub`: hints named `hbs2-peer download <hash>`, which does not
+    exist.** Five messages; the command is `hbs2-peer fetch <hash>`.
+
+  - **`hbs2-hub policy default` and `policy show` printed the policy on one
+    line with `\u{0a}` for every line break.** Now one clause a line,
+    indented, so a policy somebody else wrote cannot print a line that
+    passes for the tool's own.
+
+  - **`hbs2-git3 repo:init --new` names the remote `origin`** when the
+    clone has none, instead of two random words.
+
+  - **`hbs2-peer` no longer warns "upgrade it" about up-to-date
+    neighbours.** Setting a mailbox policy gossips the mailbox status,
+    which answers no nonce, so every policy change printed the warning on
+    every neighbour. It is a debug line now; the tree in such a status is
+    still ignored. And the first policy a mailbox gets is no longer logged
+    as an error (with a profanity).
+
+  - **`hbs2-hub whoami --repo` no longer tells a contributor in capitals
+    that it holds no signing key** for canon, which contributors never
+    need.
+
+  - **`hbs2-hub inbox --follow` survives a peer restart.** The follower
+    called through the RPC client every verb is handed, which is built once
+    and retries in the background forever. When the local peer restarted it
+    never picked the new one up, and its stderr turned into a stream of
+    `MessagingUnix. runClient failed, probably server is gone` and `failed to
+    connect` lines, one pair a second, which a watcher merging stderr read as
+    events. The follower now opens its own connection, notices when it drops,
+    and reconnects to the same socket after 1, 2, 4 and 8 seconds and then
+    every 15. It prints `the peer is gone; waiting for it to come back` once
+    and `the peer is back; following again` once, both on stderr, and the RPC
+    layer's warnings are off while it runs. What it has printed is kept
+    across the reconnect and the first read on the new connection is a whole
+    one, so a letter that arrived during the outage is printed and none is
+    printed twice. `--json` stdout carries only queue documents as before;
+    exit codes do not change. `hub mcp`'s `inbox_wait` runs this follower and
+    waits a restart out the same way.
+
+  - **`git push` to a repository whose lwwref has no value hung forever and
+    printed nothing.** Every wait for a repository -- push, fetch, clone and
+    the `repo:` commands -- polled for the lwwref, then the manifest, then the
+    reflog, with no deadline at all (`waitRepo Nothing`; `waitRepo (Just t)`
+    bounded only the reflog). An lwwref nobody holds and one that has not
+    arrived yet look the same to a peer, so a lost repository was a command
+    that never returned. Each stage now gives up after `HBS2_GIT_REPO_WAIT`
+    seconds (60 by default; `repo:wait:timeout` sets it from the CLI or
+    `.hbs2-git3/config`) and says which stage, for example:
+
+        repository <key> not found: its lwwref has no value on this peer or
+        its neighbours (waited 60s). If you own its key, run
+        `hbs2-git3 repo:init <key>` to publish it again.
+
+    A reflog that is still arriving is not cut off: that limit counts from the
+    last time the number of missing blocks went down.
+
+    The remote helper also printed nothing when it failed before reading its
+    first command, which is where a repository that cannot be found fails: the
+    status pump erases each line it prints when the next one comes. Those
+    errors now go to the original stderr, as the command loop's already did.
+
+  - **An lwwref update was read back before the peer had taken it.** The peer
+    answers the update RPC before it stores the value, so a manifest edit
+    followed by a read could see the value it replaced, or none. Writing the
+    repository head now waits until it reads back.
+
+  - **`hbs2-peer` refused every ping and was left with no peers.** The
+    handshake signs only a nonce of `pingNonceSize` bytes, which closed a
+    signing oracle. The size was written as 32, taken from the `BS.take 32` in
+    the `HasNonces` instance, but that instance takes from a crypto_box nonce,
+    which is 24 bytes, and every released peer sends 24. A node with the check
+    answered no ping at all: older peers and nodes of its own build never got a
+    pong, never listed it as known, and their TCP connections to it closed after
+    67 seconds without a frame. The log showed `refused to sign a ping nonce of
+    length 24`. The size is 24 now, the wire is unchanged, so this node and
+    0.25.4/0.25.5 peers talk again, and a test asks the real instance what it
+    produces instead of a comment saying it.
+
+  - **A TCP neighbour that was down for a moment was not dialled again
+    until a queue aged out.**
+    A send asks for a connection only when it finds no out-queue for the peer,
+    and creates the queue as it asks. The queue was removed only when a
+    connection that had come up went down, so a connect that failed outright,
+    say during the neighbour's restart, left a queue with no connection under
+    it. Every later send went into it and asked for nothing, and the ping loop,
+    sending every thirty seconds, kept the sweep from collecting it. A dial
+    that fails before the cookie exchange now removes its queue, and the next
+    send dials again. Older releases have the same defect: after a restart a
+    node waited for its neighbours' queues to age out, a quarter of an hour on
+    our bootstrap node, before anybody dialled it again.
+
+  - **The deny-list and the sent log were read whole, and reading them is
+    quadratic.** The S-expression parser is superlinear in the number of forms
+    handed to it at once: the deny-list measured 42 ms at 1024 bans, 1.97 s at
+    8192 and 8.86 s at 16384. It is read on every `hbs2-hub inbox accept`, and
+    the sent log grows by one record per letter sent with nothing trimming it.
+    Both are read a line at a time now, which is what they are written as, and
+    the cost is linear: 0.41 s for the 16384 bans that took 8.86 s.
+
+    Not bounded, which would have been the other way to fix it: both files are
+    the operator's own and both grow by the tool working normally, so a ceiling
+    on the file would eventually refuse an accept over a list nobody did
+    anything wrong with. What is bounded is the line.
+
+  - **A rewrite could drop a delegation and the revoke that undid it, and still
+    look like the same canon.** The check that decides whether somebody else's
+    rewritten canon is a compaction or a fork compared the maintainer set as of
+    the END of the log, where a `delegate` and its `revoke` cancel out. So a
+    lineage with the pair removed matched on every field, while what was erased
+    is the record that a key was ever authorized -- which is what says whether
+    the events it signed were admissible when they were signed. The two
+    unconditionally-retained ops are compared directly now.
+
+    The two counters the check omitted are compared as well: the highest number
+    and the last folded-ts, on the argument already written for the highest seq.
+    A publisher mints the next value from each, and a rewrite that lowers one
+    hands the next publisher a value that has already been spent.
+
+  - **git could answer with as much as it liked.** The runner kept stdout with
+    no ceiling at all, under a sentence that is true of exactly one caller:
+    stdout of `git bundle create -` IS the bundle, so a bound there truncates an
+    artifact. Every other caller is asked about bytes somebody else published.
+    `git bundle verify` on a header-only bundle of 20000 refs -- a small text
+    file, attached to a letter -- answers with 1.1 MB at exit zero, and every
+    one of those bytes was then decoded, escaped, split into a line apiece and
+    rendered before anything was printed. `git diff` for the JSON contract was
+    bounded by nothing but its timeout, and then truncated to 256 KiB after the
+    whole of it had been held.
+
+    The ceiling is a parameter now, and the reader says whether it cut: a prefix
+    of a message needs no announcement, a prefix of an ANSWER is a wrong answer
+    that looks like a right one, so over the bound the call fails instead of
+    returning half a listing. `bundle create` passes the size a letter may
+    carry, which also closes the other half of this: a bundle too large to send
+    is refused as it is produced rather than built whole and held.
+
+  - **A repository's manifest and a mailbox's policy were fetched whole before
+    anything asked how big they were.** Both carried a byte bound and both
+    bounds were arguments to the PARSER: by the time the parser saw the file,
+    the tree had been concatenated into memory and copied strict. So the bound
+    said what would be parsed and nothing said what would be fetched, against a
+    tree whose size is chosen by whoever published it. A manifest is read by
+    `issue new`, `pr new`, `comment` and `whoami --repo` from a key the caller
+    typed; a policy is read once per recipient on every send.
+
+    Both are weighed first now: one walk, a byte budget and a block budget, leaf
+    sizes taken from the block index and no leaf content read at all -- a tree
+    naming a hundred gigabytes is refused having moved none of them. The block
+    budget is the half a byte budget misses, since a leaf naming ten thousand
+    empty blocks weighs nothing and costs ten thousand lookups.
+
+    The manifest's LOG was read whole to take its first entry, and now stops
+    after that entry. It also no longer throws: the ref can be fetched while
+    the log under it is not, which is what a peer that has just seen a
+    repository looks like, and `hbs2-hub issue new --repo <key>` against one
+    died with a raw `MerkleHashNotFound` rather than saying which block it was
+    waiting for.
+
+  - **The canon writer checked that the planned file landed, not that the
+    inherited one survived.** `update-index --index-info` adds an entry with
+    `OK_TO_REPLACE`, so writing `threads/<id>/1.event` into an index that holds
+    a FILE at `threads/<id>` removes that file: exit zero, nothing on stderr,
+    and the planned path lands -- so the check that was there was satisfied and
+    the commit was published with a file of canon silently gone. Reproduced on
+    git 2.46 before it was fixed.
+
+    One more `ls-tree -r`, on the parent, and its own refusal beside the
+    existing one: a planned file that did not land and a file canon already had
+    are different facts. Only where there is a parent to keep, so `hub compact`
+    is untouched -- it commits an orphan root from an empty index and drops
+    files on purpose. The writer's own haddock had been claiming this direction
+    came free from `read-tree`, which is what made the half-check look whole.
+
+  - **`hbs2-hub log <repo> <n>` walked every thread once per line.** The
+    resolution from a number to the threads carrying it sat inside the
+    comprehension's guard, so it ran per LOG ENTRY, over a canon bounded at
+    200000 files in each direction and published by somebody else. It is
+    resolved once now, and by the same function every other resolver in the
+    package uses: the renderer takes the threads rather than the number, which
+    makes the quadratic version unwritable instead of merely absent. The
+    refusal for a number canon does not hold used to ask the same question a
+    second way, a few lines above, and now shares the one answer. `hub log <n>`
+    had no test; nothing asked what the filter answered, so nothing noticed
+    what answering it cost.
+
+  - **`hbs2-hub inbox`: the mailbox walk has a ceiling.** Entering each node
+    once bounded the SHAPE of a stranger's tree; nothing bounded its SIZE. A
+    mailbox is public, how many entries its tree lists is chosen by whoever
+    writes to it, and that walk runs in full on `inbox`, on `inbox show` and on
+    `inbox accept`, every time -- one call per node and one per entry, at the
+    tree's count. Bounding the letters OPENED bounded the keyman lookups and the
+    secretbox opens and left the walk itself.
+
+    One budget over blocks, spent by both halves, because charging entries alone
+    leaves a million empty leaves free and charging nodes alone leaves one leaf
+    naming a million entries free. It is charged when a leaf is entered, so a
+    list longer than the budget is refused before its entries are fetched.
+
+    A walk that stops is a WRONG answer and not a short one, the way a hole in
+    the tree is: the part not read may hold `Exists` entries, which hides
+    letters, or `Deleted` entries, which brings back letters that were settled.
+    So it goes through the gate holes already go through -- `hub inbox` exits 2
+    and says so, `hub inbox accept` refuses until `--incomplete` -- with its own
+    words, because no fetch fixes this one and telling somebody a block could
+    not be read sends them looking for a peer that is still downloading.
+
+    What keeps a mailbox under the line is retention, and PEP-21 defers it:
+    nothing here prunes a mailbox and triage GROWS one, since rejecting a letter
+    writes a tombstone beside the entry it settles. The bound does not fix that.
+    It makes a mailbox past the line loud instead of slow.
+
+  - **`hbs2-hub --codes`: the exit codes are a table the tool prints.** PEP-22
+    calls them a contract and the manual repeats it; they were defined in
+    fifteen modules, four of them documented nowhere, and the next number was
+    chosen by grepping for the last one -- which is how two would eventually be
+    chosen at once. There is one list now, and it is not copied into the manual:
+    a table in two places disagrees with itself, so this one is generated from
+    the constants the verbs actually exit with and the manual points at it. The
+    constants stay where they are used, since each carries a paragraph about why
+    that refusal is worth its own number, and the list is an enum the two
+    functions over it are total on -- an entry without a number or a sentence
+    does not compile. Six tests, the first of which is that no two share a
+    number.
+
+  - **`hbs2-hub issue new`: the positional form is gone.** It took five values,
+    four of them base58 blobs, and two PAIRS of those are interchangeable at the
+    pattern level -- the repository key and the author key are both signing
+    keys, the two sigils are both hashes. So a swap within either pair sent a
+    correctly signed, delivered letter authored by the repository key, with no
+    error and a zero exit, and an authorship claim lives inside a signed box
+    where nothing afterwards can take it back. The verb's own documentation
+    said as much and kept the form because the tests drove it, which is a reason
+    to keep a form and not a reason it is safe. Every value is behind a flag
+    now; a name cannot be swapped silently. Before a release rather than after,
+    because afterwards removing it is a break.
+
+  - **`hbs2-hub`: `--key` meant four different kinds of key.** An inner author
+    at `ban`, an envelope key at `block`, a canon signer at `maintainer add`, a
+    person at `assign --to` -- all thirty-two bytes of base58, so every swap
+    between them was well-typed and silent, and each of the four help pages
+    spent a paragraph explaining which layer its own verb was about. The verbs
+    keep their names, which say what they do; the flag says which layer, which
+    is the half that was missing: `--author-key`, `--envelope-key`,
+    `--maintainer-key`, `--assignee`. A reader who has the flag right cannot
+    have the layer wrong.
+
+    The old spellings still work and are no longer printed, on the same terms as
+    `--target`: one release for the scripts that have them. And the same change
+    puts `ban` and `unban` on the shared repository flags, so `--target` works
+    on the verb and not only on `ban list`, which is where it worked before.
+
+  - **`hbs2-hub`: the six read verbs refused the flag every writing verb
+    takes.** `issue list`, `pr list`, `issue show`, `pr show`, `log` and
+    `verify` took the repository positionally and only positionally, so
+    `--repo` -- which every verb that writes takes, and which a user therefore
+    learns from the other half of the tool -- was a usage error on the half that
+    reads. All six take it now, through one reader so they cannot drift apart,
+    and `show` grew `--number`/`--thread` to go with it. The positional form
+    still works: accepting the flag is additive today, and removing the
+    positional form after a release would not be, so whichever way this settles
+    the flag had to exist first.
+
+  - **`hbs2-hub rm <file>` deleted the file.** The dictionary inherited about
+    154 verbs nothing here documents -- `rm`, `mv`, `cp`, `cd`, `setenv` and the
+    whole `run:proc:*` family -- so a typo landed in them: `hbs2-hub rm
+    victim.txt` removed it and exited 0, and `help rm` answered for it while
+    `--help`, which lists the forge verbs, did not.
+
+    The surface is stated positively now: the dictionary is filtered to the
+    `hub:` verbs plus `help`, `--help`, `--version` and `--run`. Not by dropping
+    a module -- those primitives live next to the evaluator, not in the
+    file-operations module their names suggest, so the obvious removal takes
+    something else and leaves `rm` bound -- and not by a blocklist, which the
+    upstream set would outgrow. `--run` evaluates in the same dictionary, so a
+    script gets the forge verbs in sequence and nothing that touches the
+    filesystem or spawns a process; anything that has to move a file has a
+    shell, and `hbs2-cli` still ships the full set.
+
+  - **`hbs2-hub compact`: it erased the only record a tree keeps of two rule
+    sets.** `(hub-event N)` is per file and has no consumer yet; every retained
+    file goes back through the renderer on a compaction, and the version came
+    from this build's constant -- so a file that said 1 came back saying 2, and
+    a reader could no longer tell an old event from a new one, in a tree that no
+    longer held the evidence. The one verb that rewrites files was the one that
+    destroyed what it had to preserve. The declared version survives now, keyed
+    by the path the file is written back under, which is the path it was read
+    at. A clause nothing reads yet is exactly the one that must survive until
+    something does: it cannot be recovered afterwards.
+
+  - **`hbs2-hub`: two frozen things nothing was watching.** The part-proof
+    preimage is `(part, secret, author)` in that order, and the order is as
+    frozen as the domain tag beside it, which was carefully labelled while this
+    was not: swapping two fields compiles, passes every distinctness property
+    the suite asserts, and turns every event that names an attachment into a
+    `PartNotProven` drop -- canon that still looks well formed and is quietly
+    shorter, with no signature to have failed. And domain separation was an
+    argument rather than a check: `Domained` protects the two records this
+    package signs, and nothing stopped a record in another package -- a git3
+    LWWRef, a sigil -- from acquiring the shape of one, which would make a
+    signature made for that record a signed event. Both are pinned by tests now,
+    the second with a positive control, since a negative that cannot pass is a
+    test that asserts nothing.
+
+  - **`hbs2-hub`: canon bytes depended on the compiler's Unicode tables.** What
+    is escaped in a projection is decided by `generalCategory`, which is GHC's
+    table and not a constant, so a code point that moves into `Cf` in a later
+    Unicode revision is escaped by one build and not another -- the same event
+    rendering to different bytes, and canon's bytes are a commit id. Two clones
+    would hold canons that say the same thing and compare as diverged. The
+    predicate is pinned by a checksum over every code point: that does not make
+    the classification portable, and nothing short of an explicit table would,
+    but a compiler whose tables differ now fails the build instead of forking
+    canon in silence.
+
+  - **`hbs2-peer`: three unbounded stores behind the mailbox worker, and a
+    batch that took the whole worker down with it.**
+
+    The merge queue took every `Deleted` entry of a downloaded tree with no
+    validation, and put an entry back whenever its proof block was absent, for
+    as long as it stayed absent. So a tree a stranger uploaded -- about ten
+    megabytes for a hundred thousand entries naming proofs that do not exist --
+    bought a hundred thousand permanent queue entries, and behind each of them a
+    `wip` entry the downloader sweeps only on completion and a row in the brains
+    database that survives a restart, plus a storage read per entry per poll.
+    Bounded per mailbox now, in `enqueueMerge`, which is the one function all
+    three call sites go through. Nothing is lost over the cap: an entry that
+    does not fit is still in the tree it came from, and the next status walks
+    that tree again.
+
+    An accepted message's attachments went to the downloader one by one with no
+    cap, on a different path from the one `maxMailboxDownloads` guards, so a
+    single message could commit an unbounded number of downloads. The reader's
+    own bound fires much later and cannot help: hbs2-hub walks at most sixteen
+    parts, at triage, by which time the peer has paid for all of them.
+
+    And the drain took a whole batch out of the queue before processing it, with
+    no handler: any throw -- a busy sqlite, a storage error -- unwound out of
+    the worker, which was then torn down and restarted, and the rest of the
+    batch went with it, already out of the queue and in nobody's. Only messages
+    a co-host will send again ever came back. Confined to the message that
+    raised it, with `tryAny` rather than `try` so that cancelling the worker
+    still stops it.
+
+  - **`hbs2-peer`: a relay's proof-of-work floor was invisible to everyone.** A
+    sender solves for what the MAILBOX charges, which is in its signed policy; a
+    peer's `pow-min` is that peer's own number and is in nobody's policy, so a
+    relay set to 16 does not carry a message that honestly paid the 12 its
+    destination asked for. The only trace was a debug line. It is counted into
+    the periodic report now -- a warning per message would fire hardest exactly
+    when a flood is arriving, which is what the floor is for -- and the option's
+    own documentation says what a non-zero value costs somebody else. The sender
+    still cannot observe the floor it failed; that needs a refusal on the wire.
+
+  - **`hbs2-hub`: one event could put a chosen letter beyond folding, forever
+    and in silence.** An event's `origin` says "I was folded from the message
+    with this hash", and nothing bound the claim to a message that exists -- the
+    fold records it for any admitted event and cannot do better, having no
+    mailbox. So an authorized key could mint one ordinary event carrying the
+    hash of a letter it wanted kept out, and that letter was refused as already
+    folded from then on: the origin set never shrinks, so revoking the key did
+    not free it, and `DupOrigin` fires only on a SECOND event with that origin,
+    so `hub verify` reported nothing.
+
+    The other end of the claim was already in canon. Folding a letter produces
+    an event whose id is the hash of the author's inner box, and honouring its
+    request records that same box id, so the gate now fires only when canon also
+    holds one of the two. A claim that fits neither is ignored rather than
+    reported: the gate exists so a triage loop re-reading a mailbox after a
+    restart does not fold one letter twice, and in that case canon does hold the
+    letter's own event. Where it does not, the letter folds and canon ends up
+    with two events claiming one origin -- which is what `DupOrigin` is for, so
+    the attack turns itself into a reported anomaly instead of a silent block.
+    `inbox reject` asks the same question, or the two verbs would disagree about
+    one letter.
+
+  - **`hbs2-hub inbox`: the queue could be pushed off its own first page, and
+    a ban did not take a letter out of it.** Two ways the only screen a
+    maintainer triages from was a stranger's to fill.
+
+    The page is the first N of the live set in hash order, and a mailbox is
+    public, so which N those are is chosen by whoever writes to it: grinding
+    message hashes below the honest ones is a few thousand signatures and
+    displaces every real letter, permanently, since nothing raised the bound
+    and the only remedy was rejecting junk one hash at a time. `--after` walks
+    past it and the truncation note prints the value to continue with; `--limit`
+    lowers how many are opened and is clamped, so it cannot raise the cost past
+    what one read will take. By hash and not by offset, because the set grows
+    underneath and an offset would skip a page.
+
+    And `igAllowed` has always said the queue applies the deny-list "because
+    triage is a queue a human reads and a banned author's letter should not be
+    in it". It was in it, as one more unreadable line. Such letters are left out
+    and COUNTED -- dropping them silently would leave a queue that says nothing
+    about how much of itself a stranger is producing, and no sign at all to a
+    maintainer who banned a key by mistake. The slot is not given back and
+    cannot be: the ban is on the inner author, so the letter is decrypted before
+    anybody knows whose it is.
+
+  - **`hbs2-hub inbox accept`: it folded over a mailbox tree it had not read
+    whole.** `hub inbox` has said for a long time that a chunk which would not
+    read makes its list wrong in BOTH directions -- a missing chunk of `Exists`
+    entries hides letters, one of `Deleted` entries brings back letters that
+    were already settled -- and exits 2 for it. The two verbs that ask a
+    MEMBERSHIP question over the same walk read only the live set, so the
+    reasoning stopped at the verb that lists and never reached the one that
+    publishes to every clone forever.
+
+    `accept` refuses now, rather than warning: the act is irreversible, and a
+    warning before an irreversible act that proceeds anyway is a warning nobody
+    reads twice. `--incomplete` is the way past it, and it exists because a
+    mailbox tree is a stranger's -- without it one block nobody can serve would
+    make a mailbox permanently unacceptable-from, which is a denial anybody
+    could arrange. `inbox show` writes nothing, so it says so instead of
+    refusing, and both verbs qualify their "is not in mailbox" refusal, which
+    is the direction in which it can be a lie.
+
+  - **`hbs2-hub`: a repository could send every contribution to the wrong
+    mailbox, silently.** The manifest carries two clauses written by hand and
+    only one of them decides anything: `resolveKeys` on the peer takes the
+    recipient's sign key out of the SIGIL's own signed box, so
+    `(mailbox-sigil K H)` where `H` names some other key delivered every letter
+    to that other key's mailbox. The owner read `K`, saw an empty queue, and had
+    no reason to doubt it; the contributor was told `queued` and exited 0; no
+    layer between them was wrong about anything. `sigilNames` is exactly the
+    predicate for this and was applied on the reply side only.
+
+    The sigil is checked against the mailbox it was published for, and the
+    refusal names both keys, because the fix is to change one of the two and the
+    owner has to see which. One block read, and the sigil is about to be read
+    anyway to seal the message. A sigil named by hand with `--recipient` is not
+    checked -- that is the documented way to mean a mailbox other than the
+    declared one -- and one this node cannot read proceeds rather than accuses.
+
+  - **`hbs2-hub`: the reply channel claimed a privacy it does not have.** Its
+    comment said a contributor's mailbox key must not end up in every clone,
+    which is why it sits outside the inner box. It does end up there: the
+    channel key has to equal the inner author (or a hub could be made to send
+    maintainer-signed acks to somebody who asked for none), and the author key
+    is what canon publishes verbatim, forever. Corrected in the code and in the
+    manual, which now has a section saying it plainly: a reader of canon can
+    NAME your mailbox and watch its tree, and cannot put anything in it --
+    sealing needs the encryption key, which is in your sigil, which canon does
+    not carry. Nothing about identity changes either way, since the author key
+    already correlates a person across everything they have written in.
+
+  - **`hbs2-hub inbox`: one letter under many envelopes cost one decision
+    each.** Re-signing a captured message under a fresh key needs no key and no
+    plaintext: a signed box keeps its payload as opaque bytes and the message
+    carries no sender field, so anyone who saw the ciphertext go past can put
+    their own signature on it. PEP-18 reads as though this is available to a
+    recipient; it is available to a bystander.
+
+    Canon was never at risk -- an event is named by the hash of the author's
+    inner box, so a second copy is refused as already folded -- but everything a
+    PERSON does was one-shot: a queue line, a decision and a tombstone per copy,
+    for a letter read once.
+
+    The queue groups copies onto one line with a count, and `inbox reject` drops
+    the group. The grouping key is the hash of the ciphertext, which a re-wrap
+    cannot change (producing a different valid ciphertext of one plaintext needs
+    the plaintext) and which this node computes before any keyman lookup, so a
+    letter now costs one decrypt however many envelopes it arrives under. A copy
+    made distinct by padding the ciphertext no longer opens, so it is a line
+    rather than a decision.
+
+    WHAT THIS DOES NOT FIX, now said in `hub ban`'s own help and in the manual:
+    every copy carries the same inner author, so the only ban that stops a flood
+    names the person whose letter was captured. `hub block` names the envelope
+    key and a re-wrapper mints a fresh one per copy. An open inbox has no
+    re-wrap resistance of its own; what prices the flood is `hub policy pow`,
+    which charges nothing until it is set.
+
+  - **`hbs2-hub inbox accept`: it decrypted every attachment a message carried,
+    and published a key to all of them.** Two halves of one gap between what a
+    message carries and what its letter names, and nothing compared the two
+    sets.
+
+    The walk took the message's whole part set while the gate that reads its
+    result only ever looks up what the content references, so a letter naming
+    nothing could still have this node fetch, measure and decrypt sixteen
+    attachments of 64 MiB, all of it live at once, for an event that would point
+    at none of them. It reads the inner box first now -- a signature check over
+    bytes already in memory -- and walks only what the letter names.
+
+    And the secret the owner signs into canon is ONE KEY FOR THE WHOLE MESSAGE.
+    PEP-18 argues that publishing it is safe because it opens what the event
+    points at, which is only true when the two sets agree; a letter naming one
+    part in a message carrying sixteen had the owner publish the key to all
+    sixteen, in public append-only canon, forever. A message carrying an
+    attachment its letter never names is refused, which is what makes the
+    argument true. The refusal is decided from what the message DECLARES, so it
+    needs nothing opened.
+
+  - **`hbs2-hub`: a banned sender could park a letter in the queue forever.**
+    `openLetterAs` has a branch that applies the deny-list to the envelope key
+    when a letter's schema is one this build cannot read -- the one case where
+    there is no inner author to ask about -- and it was dead code: the version
+    is checked a layer earlier, so such a letter never reached the function that
+    would ban its sender. The tests reached it by building the value by hand, so
+    they were green over a path production does not take. Since an
+    unreadable-version letter is a wait rather than a discard (rightly: a newer
+    build folds it), every pass opened it again. The check now runs where the
+    version is actually decided.
+
+  - **`hbs2-hub compact`: every compaction commit was dated 1970.** The stamp
+    is deliberately taken from canon rather than from a clock, so that two
+    maintainers compacting one canon produce one commit -- but the field taken
+    was `frMaxSeq`, a position, where `cnWhen` is documented as epoch
+    milliseconds and the writer divides it by 1000. So a canon holding forty
+    events was published at the epoch while every other canon writer passed a
+    real clock, and a canon whose highest seq passed 2^63-1 could not be
+    compacted at all, git refusing that date. `frLastFolded` is the same
+    determinism and is the value the field asks for; it is bounded by
+    `maxFoldedTs`, which is an admission rule, so no admitted event can carry a
+    date git will not take.
+
+  - **`hbs2-hub pr merge`: the ordinary way of naming a commit was refused.**
+    `--commit` went to a check written for the shape CANON holds -- 40 or 64
+    hex -- so the seven characters `git log --oneline` prints came back as the
+    refusal written for a forged letter ("a signed letter says who wrote a
+    name, not what it is"), at an exit code documented as belonging to
+    `hub pr new`. An abbreviation is resolved through git now, and the whole
+    object name is what canon records: an abbreviation is unambiguous only in
+    the repository it was read in and only while that repository stays this
+    size, and a merge event is permanent. Still hex only, not a branch or tag
+    name, for the same reason.
+
+  - **`hbs2-hub`: one canon file could end a repository, and `hub-meta` is 3.**
+    A key whose delegation was current spent its stamp outright, so a single
+    canon box at `seq = maxBound - 1` put the cursor at the top of its range,
+    and every entry point in the bridge is gated on that cursor -- including the
+    `revoke` the owner would answer it with. PEP-19 promised a recovery
+    (compaction re-stamping the retained events) that was never implemented, and
+    promised that `hub verify` would notice beforehand, which it did not.
+
+    A window existed and applied only to a key whose delegation had ALREADY been
+    withdrawn: it bounded the case where the owner has noticed and left the one
+    where they have not. It applies to every authorized key now. A bound that
+    only takes effect after the harm is visible is not a bound.
+
+    THE TWO COUNTERS TAKE DIFFERENT WINDOWS, because their honest gaps differ.
+    Numbers are handed out one per `open` and compaction never drops an `open`,
+    so the surviving numbers are dense and the window is 16; a number outside it
+    is REFUSED, since a number is a label a reader is shown. Sequence numbers
+    are not dense -- compaction drops superseded events out of the tree, so the
+    gap between two survivors is however many went between them -- so that
+    window is 2^24 and a seq outside it is ADMITTED and simply does not move the
+    mark. Refusing it would let a legitimately compacted canon become
+    unfoldable, which is a repository bricked by its own maintenance; leaving it
+    admitted costs at most a later duplicate seq, which is reported and ordered
+    deterministically. A generous window is still a bound: reaching the top of a
+    2^64 range through a 2^24 one takes 2^40 files, at which point flooding
+    canon is the cheaper attack.
+
+    `hub verify` reports the stamp that did not move the mark
+    (`SeqTooFarAhead`), which is the only trace such an event leaves and is what
+    PEP-19 asked for. A tree that lost files and a hard compaction produce it
+    too, and the report says so.
+
+    This is a consensus change and it raises `hub-min` with it, which no bump
+    has needed before: `frMaxSeq` IS the cursor, so two maintainers on either
+    side of the change would mint from different positions and fork rather than
+    one of them lagging. Free today because nothing has been published, and
+    impossible later, which is the whole reason it is being done now.
+
+  - **`hbs2-hub updates`: an ack was checked against the wrong repository's
+    maintainers.** The `RepoRef` an ack names was passed into the predicate and
+    then discarded, so membership was asked of the set belonging to the
+    repository the READER named. A maintainer of that repository could sign an
+    ack about a different one and have it printed as a maintainer's word about
+    the reader's own submission, with a status and a note of their choosing; a
+    thread-id is the hash of an author box in public canon, so naming one costs
+    nothing. The line now prints the repository the ack is about, which is what
+    made an honest cross-repository ack indistinguishable by eye from a forged
+    one.
+
+  - **`hbs2-hub publish`: the scenario it is shaped around answered with a raw
+    git error.** It learned the remote's canon from `ls-remote` and asked
+    `merge-base --is-ancestor` about it -- but a clone that has never fetched
+    does not HOLD that object, which is what "the remote is ahead" means, so
+    the default path produced "fatal: Not a valid commit name" at exit 46 and
+    the sentence written for the case appeared only after fetching by hand. Not
+    having the object is the strongest form of holding canon this clone does
+    not contain, so it is now the same refusal, with the same remedy.
+
+  - **`hbs2-hub publish`: it force-pushed staged proposals after refusing to
+    publish canon.** The canon push is a fast-forward check and the pulls push
+    is a force, and the second sat outside the branch that decides the first --
+    so a run that printed "NOT published, nothing was written" and exited 45
+    had just replaced the remote's `refs/hbs2/pulls/*` in the same breath.
+    Those refs are numbered out of canon, and the canon they were numbered out
+    of is the one this clone does not have. They are held back now, and the
+    report says so rather than leaving a reader to infer it from the canon
+    line.
+
+  - **`hbs2-hub`: the deny-list was rewritten in place.** A torn write leaves a
+    file that is SHORTER and still parses -- every line is one key -- so an
+    interrupted `hub ban` silently unbans whatever came after the break. That
+    is the one failure the design otherwise excludes: `loadBans` refuses a file
+    it cannot read entirely, precisely so that a list somebody shortened is a
+    refusal rather than a shorter list. Written beside it and renamed over it
+    now, in the same directory so the rename is atomic.
+
+  - **`hbs2-hub`: two files that are not UTF-8 threw past their own contract.**
+    `loadBans` and `loadSent` answer `Either Text`, and read through
+    `Data.Text.IO.readFile`, which throws `UnicodeException` -- so a corrupt
+    deny-list aborted an accept with a raw exception instead of the refusal
+    that has an exit code. Both catch it and report it as what it is.
+
+  - **`hbs2-hub`: `hub issue new` lost its exit code on an oversized field.**
+    It left through `throwIO (userError ...)`, which exits 1 via the RTS, where
+    the same check in `issue comment` and `pr new` goes through `refuse` --
+    the defect `refuse`'s own haddock is a paragraph about.
+
+  - **`hbs2-hub`: two positional numbers bypassed the guard written for them.**
+    `hub log <repo> <n>` and `hub issue show <repo> <n>` did an unguarded
+    `fromIntegral` on the `Integer` a literal carries, while `flagWord` exists
+    because `--number 18446744073709551617` once wrapped to 1 and the verb
+    answered about a thread nobody named. Display-only here, and the rule has
+    one source of truth or it has none.
+
+  - **`hbs2-hub`: a noun was not a help topic.** The top-level help prints
+    verbs as `issue new` and `pr list`; the search behind `hub help <word>`
+    matched the raw dictionary keys, every one of which begins `hub:`. So the
+    spelling the help printed could never match the search the help
+    advertised, and `hbs2-hub help issue` -- the first thing anybody types --
+    answered that no such entry exists. It now tries this tool's own spelling
+    first and what was typed second: `help issue`, `help pr` and `help
+    maintainer` list their families, and `help print` still finds the builtin.
+    Ordering matters and is why it is written down: with the other order,
+    `help pr` answers with `print`, `println` and `proc:pipe`.
+
+  - **`hbs2-hub`: `hub help unban`, `unblock`, `issue reopen` and `maintainer
+    remove` described their siblings.** Each pair is built from one helper with
+    one `desc`, so the help for the second verb opened with a paragraph about
+    what the first one does and never said what the second does. Each now
+    leads with its own sentence.
+
+  - **`hbs2-hub`: `hub help block` denied that `hub ban` exists.** It ended
+    "keeping an author out of canon is the triage layer, which this build does
+    not have" -- while `hub ban` is in the same binary and in the same listing,
+    and `hub policy pow`'s help fifty lines away points at it. The wrong one
+    was on the verb a maintainer reaches for first, so somebody being spammed
+    would block the envelope key, watch the spammer rewrap, and conclude the
+    tool could not stop it.
+
+  - **`hbs2-hub`: `--flag=value` on the last three verbs that refused it.**
+    `ban list`, `maintainer list` and `policy show` matched their arguments by
+    hand, in one fixed order. They go through `flagsOf` now, like every other
+    verb and like the spelling `hub issue new`'s usage advertises to everybody.
+
+  - **`hbs2-hub`: `--version`, and two exit codes that were not what they said.**
+    There was no way to ask which build was answering, though the exit codes
+    are a documented contract that may be added to: `--version` and `version`
+    were both "unknown verb". `codeNothingToCompact` (42) was defined,
+    exported, documented as the thing a scheduled compaction tells from a
+    refusal, and returned by no path -- the verb printed and exited zero.
+    And `hub sync` exited 27 on a git failure, which is documented as
+    belonging to `hub pr new`: a number naming a command nobody ran. It has
+    its own now, shared with `hub publish`, since those two are the ends of one
+    wire.
+
+  - **`hbs2-hub`: an unknown verb named the word that was right.** `hub issue
+    nwe` reported `unknown verb: issue`, pointing at the half that is a verb
+    and saying nothing about the half that is not. It prints the whole line.
+
+  - **`hbs2-hub`: several synopses showed optional flags as required and left
+    others out entirely.** The SYNOPSIS line is rendered from each verb's
+    `args` list, which carries no optionality marker and had been filled
+    inconsistently. `hub help sync` never mentioned `--repo`, which is the flag
+    that turns a divergence into a resolved compaction, while `hub help
+    compact` tells you to run exactly that. `hub help compact` itself omitted
+    `--dry-run` -- the flag its own prose says to run first. `inbox accept`
+    omitted `--as` and `--keep`; `issue close` showed `--note` as required;
+    `comment` never mentioned how to name a thread. Optionals are bracketed
+    now and the missing flags are there.
+
+    Not fixed: these are still hand-written per verb rather than derived from
+    each reader's own flag list, so the next one added can drift the same way.
+
+  - **`hbs2-hub`: `hub issue list` took a flag as a filter value.** It was the
+    last argument reader in the package not going through `flagsOf`, and it had
+    the hole the shared reader exists to close: its check looked at
+    even-indexed words only, so `hub issue list K --status --label` passed it
+    (index 0 is a known flag, the length is even) and the pairing then bound
+    `--label` as the value of `--status`. A listing filtered on a status nobody
+    typed, exit zero, which is the worst shape a filter can fail in: the caller
+    reads the output as filtered. This is the same case `c40ed994` removed from
+    six other readers.
+
+    It goes through `flagsOf` now, which also brings `--flag=value` -- the
+    spelling `hub issue new`'s usage has been advertising to everybody and
+    which this verb refused -- and refuses a stray word and an unknown flag
+    instead of answering with an unfiltered listing.
+
+  - **`hbs2-hub`: nine of the ten ops were rendered by no test.**
+    `contentDoc` dispatches on every constructor of `AuthorContent` and one
+    test passed `AOpen`. The other nine were unreached on the verb that prints
+    a stranger's UNFOLDED letter -- the surface that produced `054d4dd2`, and
+    the thing a maintainer reads while deciding whether to sign it into canon
+    forever. One escape in one field of one op rewrites the lines above it in
+    that terminal, and which arm carries it is the attacker's choice: they
+    write the letter.
+
+    A table drives all eleven shapes with `\ESC[2K` in every text field. No
+    defect was found -- every arm was already correct -- and the point is that
+    nothing said so, and nothing would have said otherwise. Two more assert
+    what escaping is FOR: the bytes survive (a maintainer has to be able to
+    read what they are deciding about) and a newline cannot forge a field of
+    the report.
+
+  - **`hbs2-hub`: a test in `ReadSpec` that could not fail.** It asserted that
+    a forged row was absent from `unlines (drop 1 (lines out))` after the line
+    above it had established there was exactly one line -- so the predicate ran
+    against the empty string and was constantly true. The row count was the
+    only real assertion, and a renderer that CLIPPED a title at its newline
+    would have passed it while silently throwing away what a stranger wrote.
+    It now asserts that the newline is escaped rather than dropped.
+
+  - **`hbs2-hub`: the step that chooses the attachment secret canon publishes
+    forever was run by no test.** `igOpenPart` turns a fetched encrypted tree
+    into the `PartSecret` the owner puts into canon, where it stays in every
+    clone that ever fetches the thread. It had four sites in the repository:
+    the declaration, the production wiring, one caller inside the accept verb,
+    and a stub in the test suite that answers `Left`. No test overrode the
+    stub, so every `PartOpened` in the whole suite was a fixture literal and
+    the arm that picks the published secret was reached by nothing.
+    `measurePart` was tested at one end and `requireParts` at the other; what
+    joins them was not.
+
+    The loop is now `partEvidence`, a named exported function rather than
+    fifteen lines inside a verb, and five tests drive it with an
+    `igOpenPart` that really returns bytes and a key. What they pin: the secret
+    arrives in the evidence unchanged, a secret of the wrong length is refused
+    rather than published, a part this node cannot open is locked, an
+    oversized part is NOT opened at all (opening is the spend the size gate
+    exists to prevent), and a part still arriving is told from one that will
+    not be taken.
+
+    That last one also closes a gap in the existing fixture, whose two
+    `igSize` branches returned the same value, so the "not all of it is here"
+    answer was never produced -- the case the accept turns into a retry rather
+    than a refusal.
 
   - **`hbs2-peer`: a neighbour with no HTTP API was re-probed for its
     metadata forever.** `fillPeerMeta` abandoned its whole `runMaybeT`
@@ -3625,6 +3721,30 @@
     held one module, so the arithmetic that was wrong here was arithmetic
     nothing could ask a question of.
 
+  - **Signed payloads carry their domain (`hbs2-hub`).** Ed25519 signs
+    bytes, so a signature was bound to a record type only by the accident
+    that no other record encoded the same way, and the owner key signs
+    four of them across two packages. A sum constructor tag is an
+    ordinary small CBOR integer, so anything of shape [small int, hash,
+    int] signed by the owner for any purpose was byte for byte a signed
+    redaction of any event. Every signed payload now carries a domain
+    constant as its first field. This had to land before any canon
+    exists, since an event-id hashes the whole box.
+
+  - **Mailbox attachments get their own group secret.** `createMessage`
+    encrypted the message parts with the same secret as `messageData`.
+    That is fine in isolation, but it makes the forge unbuildable:
+    folding an attachment into public canon means publishing the key to
+    it (PEP-19), and if that key also opens `messageData` it publishes
+    the sender's private reply address along with it, to every clone,
+    forever. Retroactively, too: the ciphertext sits with every peer that
+    ever hosted or relayed the mailbox, so a copy kept today reads the
+    address out of a message folded years later. Parts now get a separate
+    secret over the same recipients, and since each part tree embeds its
+    own group key, a reader given a part hash and that secret needs
+    nothing from the message it arrived in. No wire-format change, and no
+    existing caller sends parts.
+
 ## Fixed in the release artifacts
 
 Three things that are user-visible on an install rather than in a source
@@ -3852,32 +3972,6 @@ tree:
         `(mailbox-sigil <mailbox-key> <hashref>)`, so a fresh clone can
         find where to submit and how to encrypt to it with no live
         lookup.
-
-## Fixes
-
-  - **Signed payloads carry their domain (`hbs2-hub`).** Ed25519 signs
-    bytes, so a signature was bound to a record type only by the accident
-    that no other record encoded the same way, and the owner key signs
-    four of them across two packages. A sum constructor tag is an
-    ordinary small CBOR integer, so anything of shape [small int, hash,
-    int] signed by the owner for any purpose was byte for byte a signed
-    redaction of any event. Every signed payload now carries a domain
-    constant as its first field. This had to land before any canon
-    exists, since an event-id hashes the whole box.
-
-  - **Mailbox attachments get their own group secret.** `createMessage`
-    encrypted the message parts with the same secret as `messageData`.
-    That is fine in isolation, but it makes the forge unbuildable:
-    folding an attachment into public canon means publishing the key to
-    it (PEP-19), and if that key also opens `messageData` it publishes
-    the sender's private reply address along with it, to every clone,
-    forever. Retroactively, too: the ciphertext sits with every peer that
-    ever hosted or relayed the mailbox, so a copy kept today reads the
-    address out of a message folded years later. Parts now get a separate
-    secret over the same recipients, and since each part tree embeds its
-    own group key, a reader given a part hash and that secret needs
-    nothing from the message it arrived in. No wire-format change, and no
-    existing caller sends parts.
 
 ## Documentation
 
