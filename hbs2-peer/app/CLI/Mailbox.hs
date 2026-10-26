@@ -47,6 +47,7 @@ import Lens.Micro.Platform
 import Options.Applicative
 import System.Environment (lookupEnv)
 import System.Exit
+import System.IO (hPutStrLn)
 import UnliftIO
 
 import Text.InterpolatedString.Perl6 (qc)
@@ -62,7 +63,7 @@ mailboxTypeLike = \case
 pMailBox :: Parser (IO ())
 pMailBox = do
  rpc <- pRpcCommon
- what <- many (strArgument (metavar "ARGS" <> help "hbs2-cli mailbox command-line"))
+ what <- many (strArgument (metavar "ARGS" <> help "hbs2-cli mailbox command-line, e.g. `create --key KEY hub`; everything from the first ARG on is passed through, dashes included"))
  pure (runMailboxCLI rpc what)
 
 
@@ -455,7 +456,25 @@ runMailboxCLI rpc s = do
     let cli' | List.null cli = [mkList [mkSym @C "help"]]
              | otherwise     = cli
 
-    lift $ run (dict sto caller) cli' >>= eatNil display
+    -- A verb given arguments it does not take threw BadFormException, which
+    -- reached the terminal as `hbs2-peer: BadFormException (create)`: no
+    -- usage, no hint which arguments, and the shape of a crash. The help
+    -- entry for the verb is what that person needed, so it is printed, with
+    -- a non-zero exit so a script still sees the failure.
+    let verb = case cli' of
+                 (ListVal (SymbolVal v : _) : _) -> Just v
+                 _                               -> Nothing
+
+    let badArgs = do
+          hPutStrLn stderr $ "hbs2-peer mailbox: bad arguments"
+            <> maybe "" (\v -> " to `" <> show (pretty v) <> "`") verb
+            <> "; usage:"
+          for_ verb \v ->
+            void (run (dict sto caller) [mkList [mkSym @C "help", mkSym @C v]])
+          exitWith (ExitFailure 2)
+
+    lift $ (run (dict sto caller) cli' >>= eatNil display)
+             `catch` \(_ :: BadFormException C) -> badArgs
 
 
 -- man entries

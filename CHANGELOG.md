@@ -197,6 +197,18 @@
 
 ## Changed
 
+  - **`hbs2-peer mailbox create --key KEY hub` works as documented.** The
+    `mailbox` subcommand hands its arguments to the mailbox command line, and
+    optparse read `--key` as an option of `hbs2-peer` itself: "Invalid option
+    `--key'" and the daemon's usage. Only `hbs2-peer mailbox -- create ...`
+    got through, and no document spelled it that way. `mailbox`, `do` and
+    `migrate` now stop parsing options at their first argument, so everything
+    from the verb on is passed through, dashes included; `--` still works.
+
+    A verb given arguments it does not take printed `hbs2-peer:
+    BadFormException (create)`. It now says which verb, prints that verb's
+    help, and exits 2.
+
   - **`hbs2-hub`: the canon versions are reset to 1.** `hub-meta`, `hub-min`
     and `hub-event` had reached 3, 3 and 2 during development. Every one of
     those bumps was free, because a version number costs something only once a
