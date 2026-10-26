@@ -36,7 +36,10 @@ is_excluded() {
 }
 
 echo "==> Building .#packages.aarch64-darwin.default"
-DARWIN_PKG="$(nix build --no-link --print-out-paths "${REPO_ROOT}#packages.aarch64-darwin.default")"
+# -L: the 0.26.0.0 run sat for six hours after "building hbs2-core" with
+# nothing in the log, and without the build logs there was no telling a
+# hang from a slow compile, or which of the four builds it was.
+DARWIN_PKG="$(nix build -L --no-link --print-out-paths "${REPO_ROOT}#packages.aarch64-darwin.default")"
 echo "    ${DARWIN_PKG}"
 
 echo "==> Preparing ${BUNDLE}"
