@@ -1,3 +1,26 @@
+# Unreleased
+
+## Added
+
+  - **The `issue_reopen` MCP tool**, beside `issue_close`: the browser
+    extension's Reopen button runs it.
+
+## Fixed
+
+  - **`hbs2-hub issue open --label` applies the labels**, as its help
+    said. An open's own labels are what its author asked for, whoever the
+    author is, so the labels showed as asked for and the thread had none.
+    The same commit now carries the set that applies them.
+
+  - **`inbox_show` and `inbox_reject` take the repository alone**, as
+    the verbs do: the mailbox is read from the repository's manifest. The
+    tools asked for `mailbox` too, and the browser's inbox could not
+    open a letter.
+
+  - **`hbs2-hub native-host --install` writes the Chrome and Chromium
+    manifests without `--chrome-id`**: the extension's id is fixed by its
+    key. An upgrade that re-ran `--install` skipped both browsers.
+
 # 0.26.0.1  2026-10-27
 
 The release 0.26.0.0 meant to be on macOS: its Apple Silicon build ran

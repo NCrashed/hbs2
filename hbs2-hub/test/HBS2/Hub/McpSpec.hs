@@ -171,6 +171,13 @@ tooling = describe "hub mcp: the tools" $ do
     plan cfg0 "pr_land" [("number", Number 4), ("mirror", "gh"), ("no_mirror", Bool True)]
       `shouldSatisfy` either (const True) (const False)
 
+  -- The browser's inbox names the repository and nothing else: the verbs read
+  -- the mailbox out of its manifest, and the tools were stricter than them.
+  it "opens and rejects a letter with only the repository" $ do
+    let msg = ("message", "6emnPfjcUddSbasux8EEe1bR2nuuHfd1tWJzpUJxLUAr")
+    argvOf (plan cfg0 "inbox_show" [msg]) `shouldSatisfy` maybe False (not . any ("--mailbox" `isPrefixOf`))
+    argvOf (plan cfg0 "inbox_reject" [msg]) `shouldSatisfy` maybe False (\a -> take 2 a == ["inbox","reject"])
+
   it "will not clear labels because none were given" $
     plan cfg0 "issue_label" [("number", Number 3)] `shouldSatisfy` either (const True) (const False)
 

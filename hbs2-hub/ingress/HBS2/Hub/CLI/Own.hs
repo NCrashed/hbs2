@@ -212,10 +212,18 @@ ownEntries = do
       -- an open names no thread, and the first issue in a repository is the
       -- ordinary way canon begins.
       (parent, fr) <- withCanon TreatAsEmpty (opRepo op) withGitCanon
-      writeOwn (opRepo op) (opAs op) (opDry op) parent fr
+      -- THE LABELS ARE APPLIED by a set in the same commit. An open's own
+      -- labels are what its author asked for (PEP-19), whoever the author is,
+      -- and the fold shows them as asked for; so this verb said it applied
+      -- them and canon showed a request. The set is the one `hub issue label`
+      -- writes, signed by the same key, on the thread the open just minted.
+      let applied acc = case (opLabels op, acScope acc) of
+            (ls@(_:_), ThreadScope t) -> Just (uncurry (ASet t) (labelSet False ls))
+            _ -> Nothing
+      writeOwnThen (opRepo op) (opAs op) (opDry op) parent fr
         (\now -> AOpen (opRepo op) kind (opTitle op) (opLabels op)
                        (letterBody body) Nothing Nothing now)
-        "hub: open"
+        applied "hub: open"
 
     labelVerb name =
       brief "set the labels of a thread that is in canon"
@@ -388,7 +396,11 @@ ownEntries = do
     -- The shared tail: sign, mint, plan, commit. The same order 'hub inbox
     -- accept' uses, and for the same reason -- minting writes nothing, so a
     -- refusal anywhere above the commit leaves canon untouched.
-    writeOwn repo mas dry parent fr mk message = do
+    writeOwn repo mas dry parent fr mk message =
+      writeOwnThen repo mas dry parent fr mk (const Nothing) message
+
+    -- The same, with a second event made from the first, in one commit.
+    writeOwnThen repo mas dry parent fr mk follow message = do
       -- --as, then HBS2_HUB_AS, then git config hbs2.hub.as, then the repo
       -- key: see "HBS2.Hub.CLI.Signer".
       signer <- canonSigner repo mas
@@ -401,6 +413,10 @@ ownEntries = do
       acc <- blessed codeTriageRefused
                (ownerEvent ctx (viewOf fr) now noOwnAttachments (mk now))
 
+      -- Minted on the view the first one left, so it takes the next seq.
+      more <- for (follow acc) $ \c ->
+        blessed codeTriageRefused (ownerEvent ctx (acView acc) now noOwnAttachments (c now))
+
       -- THE NUMBER THIS MINT ADDS, which is empty for every verb here but the
       -- open: 'acNumber' carries one only on an open, and the index is
       -- regenerated from the fold, which does not yet know about the event
@@ -409,11 +425,12 @@ ownEntries = do
       let minted = [ (n, t) | Just n <- [acNumber acc], ThreadScope t <- [acScope acc] ]
 
       commit <- committing (oneStop codeCanonUnwritable) dry parent
-                  (frMeta fr) [(eventPath acc, acEvent acc)]
+                  (frMeta fr) ([(eventPath acc, acEvent acc)] <> [ (eventPath a, acEvent a) | Just a <- [more] ])
                   (List.sortOn fst (numberIndexOf fr <> minted)) message now
 
       liftIO $ print $ vcat
         ( [ "event" <+> pretty (eventId (acEvent acc)) ]
+       <> [ "event" <+> pretty (eventId (acEvent a)) <+> "(labels)" | Just a <- [more] ]
        <> [ "number" <+> pretty n | Just n <- [acNumber acc] ]
        <> [ "seq" <+> pretty (acSeq acc)
           , "commit" <+> pretty commit

@@ -191,7 +191,7 @@ tools =
   , tAccept "inbox_accept" ["inbox","accept"] acceptDesc
   , tAccept "inbox_honour" ["inbox","honour"] honourDesc
   , tReject
-  , tIssueOpen, tIssueClose, tIssueLabel, tIssueReply, tIssueComment
+  , tIssueOpen, tIssueClose, tIssueReopen, tIssueLabel, tIssueReply, tIssueComment
   , tIssueNew, tPrNew, tPrLand
   , tPublish, tSync
   ]
@@ -330,10 +330,6 @@ needed k why = maybe (Left ("no " <> k <> ": pass " <> k <> why)) pure
 repoOf :: McpConfig -> Args -> Either Text Text
 repoOf cfg as = keyOr "repo" (mcRepo cfg) as
   >>= needed "repo" ", or start the server with --repo <key> (or HBS2_HUB_REPO)"
-
-mailboxOf :: McpConfig -> Args -> Either Text Text
-mailboxOf cfg as = keyOr "mailbox" (mcMailbox cfg) as
-  >>= needed "mailbox" ", or start the server with --mailbox <key> (or HBS2_HUB_MAILBOX)"
 
 -- | @--flag=value@, which is the spelling a verb reads without ever taking the
 -- value for a flag: a title that starts with a dash is a title.
@@ -544,10 +540,10 @@ tInboxShow = Tool
 showRun :: McpConfig -> Args -> Either Text Run
 showRun cfg as = do
   h <- hashOr "message" Nothing as >>= needed "message" ""
-  m <- mailboxOf cfg as
-  r <- keyOr "repo" (mcRepo cfg) as
-  pure (Run (["inbox","show", flag "mailbox" m, flag "message" h] <> flagM "repo" r
-               <> ["--json"])
+  -- The mailbox, or the repository that declares it: the verb reads the
+  -- manifest for one when it is given the other.
+  q <- queueFlags cfg as
+  pure (Run (["inbox","show", flag "message" h] <> q <> ["--json"])
             Nothing AsJson)
 
 tInboxWait :: Tool
@@ -637,11 +633,11 @@ tReject = Tool
   , toolPlan = \cfg as -> do
       h <- hashOr "message" Nothing as >>= needed "message" ""
       r <- repoOf cfg as
-      m <- mailboxOf cfg as
+      m <- keyOr "mailbox" (mcMailbox cfg) as
       a <- asFlag cfg as
       silent <- optBool "silent" as
       dry <- optBool "dry_run" as
-      let run = Run (["inbox","reject", flag "repo" r, flag "mailbox" m, flag "message" h]
+      let run = Run (["inbox","reject", flag "repo" r, flag "message" h] <> flagM "mailbox" m
                        <> a <> switch "silent" silent) Nothing AsText
       if dry then do
           probe <- showRun cfg as
@@ -693,6 +689,29 @@ tIssueClose = Tool
       dry <- optBool "dry_run" as
       pure $ native dry $
         Run ([k, "close", flag "repo" r, flag "number" (Text.pack (show n))]
+               <> flagM "note" note <> a)
+            Nothing AsText
+  }
+
+tIssueReopen :: Tool
+tIssueReopen = Tool
+  { toolName = "issue_reopen", toolTitle = "Reopen a thread"
+  , toolDesc = "Reopen a closed issue (or, with kind: pr, a closed pull request) that is in "
+      <> "canon. A note is published as a comment in the signer's own words. A merged pull "
+      <> "request stays merged." <> canonIsForever <> defaultsNote
+  , toolProps = [ pNumber, prop "note" "A comment, published with the reopen."
+                , pKind, pRepo, pAs, pDry ]
+  , toolRequired = ["number"]
+  , toolAccess = Writes, toolOpenWorld = False, toolVerb = ["issue","reopen"]
+  , toolPlan = \cfg as -> do
+      k <- kindOf as
+      n <- optNat "number" as >>= needed "number" ""
+      note <- optText "note" as
+      r <- repoOf cfg as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $
+        Run ([k, "reopen", flag "repo" r, flag "number" (Text.pack (show n))]
                <> flagM "note" note <> a)
             Nothing AsText
   }
