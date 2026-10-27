@@ -192,7 +192,13 @@ serveNative hc hin hout = do
         case dir of
           Left why -> bad i Null "no-clone" why
           Right d -> do
-            let cfg' = cfg { mcDir = d, mcRepo = repo }
+            -- THE IDENTITY `hub identity init` wrote, for a letter: the host
+            -- is started by a browser and given no flags, and a letter needs
+            -- an author and a sender. Read per call, so an identity made after
+            -- the browser started is the one used.
+            au <- maybe (globalConfig "hbs2.hub.author") (pure . Just) (mcAuthor cfg)
+            se <- maybe (globalConfig "hbs2.hub.sender") (pure . Just) (mcSender cfg)
+            let cfg' = cfg { mcDir = d, mcRepo = repo, mcAuthor = au, mcSender = se }
             case planFor cfg' t as of
               Left why -> bad i Null "bad-arguments" why
               Right a -> act i cfg' a
@@ -224,6 +230,11 @@ serveNative hc hin hout = do
             then bad i Null "refused" (Text.intercalate "\n" texts)
             else ok i (fromMaybe (object ["text" .= Text.intercalate "\n" texts]) (KM.lookup "structuredContent" m))
         v -> ok i v
+
+      globalConfig k = do
+        (code, out, _) <- readProcess (proc "git" ["config", "--global", "--get", k])
+        let v = Text.strip (Text.decodeUtf8 (LBS.toStrict out))
+        pure (if code == ExitSuccess && not (Text.null v) then Just v else Nothing)
 
       workingClone key = do
         (code, out, _) <- readProcess (proc "git" ["config", "--global", "--get", "hbs2-hub." <> Text.unpack key <> ".clone"])

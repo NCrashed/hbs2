@@ -43,6 +43,8 @@ import HBS2.Hub.CLI.Common (overRpc,signerFor,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),SignerTrouble,resolveSignerIn
                            ,signerEnvVar,signerDoc)
 import HBS2.Hub.Render (contractVersion,renderDocument,key58)
+import HBS2.Hub.CLI.Defaults (currentBranch,remoteHeadBranch,localBranches)
+import Data.Aeson.KeyMap qualified as KM
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
@@ -112,7 +114,7 @@ data Standing = Standing
   deriving stock (Eq,Show)
 
 statusUsage :: Doc ()
-statusUsage = "usage: hbs2-hub status --repo <key> [--remote <name>] [--json]"
+statusUsage = "usage: hbs2-hub status --repo <key> [--remote <name>] [--json] [--local]"
 
 -- | The report.
 statusDoc :: Standing -> [Doc ann]
@@ -255,7 +257,7 @@ statusOrder =
   [ "repo", "signing", "signer", "key", "source", "maintainer"
   , "canon", "commit", "threads", "events", "maintainers"
   , "published", "remotes", "name", "state", "remote_canon"
-  , "mailbox", "waiting", "error" ]
+  , "mailbox", "waiting", "error", "clone", "branch", "onto", "branches" ]
 
 statusEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
@@ -268,10 +270,12 @@ statusEntries = do
 
   brief "say where this clone stands: canon, publication, mailbox"
     $ args [ arg "string" "--repo repo-key", arg "string" "[--remote name]"
-           , arg "string" "[--json]" ]
+           , arg "string" "[--json]", arg "string" "[--local]" ]
     $ desc ( "Read-only, and it pushes nothing: the publication check is a"
              <> line <> "probe of the remote, not a push that reports what it"
              <> line <> "would have done."
+             <> line
+             <> line <> "--local asks no remote: the signer, canon and the clone only."
              <> line
              <> line <> "Six facts, each of which was computable and none of"
              <> line <> "which was askable: the repository, whether this machine"
@@ -343,6 +347,7 @@ statusEntries = do
 
       published <- case mine of
         Nothing -> pure (Right [])
+        Just _ | saLocal sa -> pure (Left "not asked (--local)")
         Just c  -> remotes >>= traverse (traverse (\r -> (r,) <$> probe c r))
 
       -- The mailbox the repository declares, and then the queue in it. Both
@@ -381,8 +386,24 @@ statusEntries = do
               , stWaiting = waiting
               }
 
+      -- THE CLONE ITSELF, for the JSON only: what a form proposing a pull
+      -- request offers to pick from (PEP-24). Kept out of 'Standing', which
+      -- is about canon and its publication, and added to the document as
+      -- one more object, which readers that do not know it ignore.
+      clone <- if not (saJson sa) then pure Null else do
+        here <- currentBranch
+        onto <- remoteHeadBranch
+        bs <- localBranches
+        pure $ object [ "branch" .= fmap Text.pack here
+                      , "onto" .= fmap Text.pack onto
+                      , "branches" .= fmap Text.pack bs ]
+
+      let withClone = \case
+            Object o -> Object (KM.insert "clone" clone o)
+            v -> v
+
       liftIO $ if saJson sa
-        then LBS.putStr (renderDocument statusOrder (statusContract st))
+        then LBS.putStr (renderDocument statusOrder (withClone (statusContract st)))
         else mapM_ print (statusDoc st)
 
 -- | What one @hub status@ was asked about.
@@ -392,16 +413,20 @@ data StatusArgs = StatusArgs
   , saRemote :: Maybe Text
     -- | The standing as a document. See 'statusContract'.
   , saJson   :: Bool
+    -- | Ask no remote. For a caller that wants the signer and the clone and
+    -- must not wait on the network for them: the browser asks on every page.
+  , saLocal  :: Bool
   }
   deriving stock (Eq,Show)
 
 -- | @--repo <key> [--remote <name>]@.
 statusArgs :: forall c . IsContext c => [Syntax c] -> Maybe StatusArgs
 statusArgs syn = do
-  kvs    <- flagsAndSwitches (repoFlags <> ["--remote"]) ["--json"] syn
+  kvs    <- flagsAndSwitches (repoFlags <> ["--remote"]) ["--json","--local"] syn
   repo   <- flagRepo asKey kvs
   remote <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
   asJson <- flagSwitch kvs "--json"
-  pure (StatusArgs repo remote asJson)
+  local  <- flagSwitch kvs "--local"
+  pure (StatusArgs repo remote asJson local)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

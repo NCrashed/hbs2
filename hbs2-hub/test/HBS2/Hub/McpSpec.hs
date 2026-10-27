@@ -144,6 +144,33 @@ tooling = describe "hub mcp: the tools" $ do
         take 2 (runArgv run) `shouldBe` ["inbox","reject"]
       other -> expectationFailure (show other)
 
+  -- PEP-24 phases 2 and 3: what the browser's forms run.
+  it "files an issue and proposes a pull request as letters, with the server's identity" $ do
+    let me = cfg0 { mcAuthor = Just "3a8Rv9dbVQAprna3GzgfihUpq64wCSLX2nyfhgDB5MH3"
+                  , mcSender = Just "HK6W3fanQz1z9DVymPrkiVqTsJquWfk1oAUnmXBp8xg6" }
+    case plan me "issue_new" [("title", "t"), ("body", "b"), ("labels", Aeson.toJSON ["bug" :: Text])] of
+      Right (RunVerb r) -> do
+        take 2 (runArgv r) `shouldBe` ["issue","new"]
+        runArgv r `shouldSatisfy` elem "--label=bug"
+        runStdin r `shouldBe` Just "b"
+      other -> expectationFailure (show other)
+    -- onto and from left out are the verb's to fill from the clone.
+    case plan me "pr_new" [("title", "t")] of
+      Right (RunVerb r) -> do
+        take 2 (runArgv r) `shouldBe` ["pr","new"]
+        runArgv r `shouldSatisfy` (not . any ("--onto" `isPrefixOf`))
+      other -> expectationFailure (show other)
+    case plan me "pr_new" [("title", "t"), ("dry_run", Bool True)] of
+      Right (Rehearse (Just probe) _) -> take 1 (runArgv probe) `shouldBe` ["whoami"]
+      other -> expectationFailure (show other)
+    plan cfg0 "issue_new" [("title", "t")] `shouldSatisfy` either ("author" `Text.isInfixOf`) (const False)
+
+  it "lands a pull request with the verb's own dry run" $ do
+    argvOf (plan cfg0 "pr_land" [("number", Number 4), ("dry_run", Bool True)])
+      `shouldBe` Just ["pr","land","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9","--number=4","--dry-run"]
+    plan cfg0 "pr_land" [("number", Number 4), ("mirror", "gh"), ("no_mirror", Bool True)]
+      `shouldSatisfy` either (const True) (const False)
+
   it "will not clear labels because none were given" $
     plan cfg0 "issue_label" [("number", Number 3)] `shouldSatisfy` either (const True) (const False)
 

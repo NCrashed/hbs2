@@ -131,9 +131,9 @@ spec = do
     it "takes the repository, and probes every remote unless one is named" $ do
       repo <- aKey
       statusArgs (argv ["--repo", b58 repo])
-        `shouldBe` Just (StatusArgs repo Nothing False)
+        `shouldBe` Just (StatusArgs repo Nothing False False)
       statusArgs (argv ["--repo", b58 repo, "--remote", "upstream"])
-        `shouldBe` Just (StatusArgs repo (Just "upstream") False)
+        `shouldBe` Just (StatusArgs repo (Just "upstream") False False)
 
     it "refuses a call with no repository, and a flag it does not know" $ do
       repo <- aKey
@@ -283,7 +283,7 @@ spec = do
     it "reads --json" $ do
       repo <- aKey
       statusArgs (argv ["--repo", b58 repo, "--json"])
-        `shouldBe` Just (StatusArgs repo Nothing True)
+        `shouldBe` Just (StatusArgs repo Nothing True False)
 
 -- A path into a document.
 at :: [Text.Text] -> Value -> Maybe Value

@@ -38,6 +38,10 @@ module HBS2.Hub.CLI.Pr
   , prMergeUsage
   , prMergeArgs
   , PrMerge(..)
+  , prLandUsage
+  , prLandArgs
+  , PrLand(..)
+  , landMessage
   ) where
 
 import HBS2.Hub.Types
@@ -51,13 +55,13 @@ import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagOnce,flagMaybe,flagText,flagWord,repoFlags,flagRepo,flagRepoMaybe
                          ,flagsAndSwitches,flagSwitch)
-import HBS2.Hub.CLI.Publish (notPublishedYet)
+import HBS2.Hub.CLI.Publish (notPublishedYet,publishDoc,publishCode)
 import HBS2.Hub.CLI.Read (oneNumbered)
 import HBS2.Hub.CLI.Signer (canonSigner,signingAs,signerDoc,signerPrecedenceHelp)
 import HBS2.Hub.CLI.Common (refuse,saying,codePeerSilent,manifestCode,withCanon,OnMissing(..)
                            ,signerFor,signingPair
                            ,blessed,committing,oneStop
-                           ,Writing,writingOf,dryRunHelp)
+                           ,Writing(..),writingOf,dryRunHelp)
 import HBS2.Hub.Repo.Manifest (sigilFor,fetchSigil)
 import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Hub.CLI.Compose (queuedNext,Outbound(..),attachToLetter,sendLetterWith,codeNoKey,readBody,letterBody
@@ -77,10 +81,11 @@ import HBS2.Storage
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashMap.Strict qualified as HM
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,isJust)
 import Data.Word (Word64)
 import Data.Text qualified as Text
-import System.Exit (die)
+import System.Exit (die,exitSuccess,exitWith,ExitCode(..))
+import System.Process.Typed (readProcess,proc)
 
 -- | git would not build or would not answer.
 --
@@ -251,8 +256,43 @@ prEntries = do
              <> line <> signerPrecedenceHelp
              <> dryRunHelp )
     $ entry $ bindMatch "hub:pr:merge" $ nil_ \case
-        (prMergeArgs -> Just pm) -> lift (prMerge pm)
+        (prMergeArgs -> Just pm) -> lift (prMerge True pm)
         other -> liftIO (badArgs prMergeUsage other)
+
+  brief "merge a pull request, push it, record it and publish canon"
+    $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
+           , arg "string" "[--remote name]", arg "string" "[--mirror name]"
+           , arg "string" "[--no-mirror]", arg "string" "[--message text]"
+           , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
+    $ desc ( "What a maintainer does by hand after reviewing, in one step,"
+             <> line <> "and what the browser's Merge button runs:"
+             <> line
+             <> line <> "  1. fetches the target branch from --remote and merges"
+             <> line <> "     the staged proposal into it with a merge commit"
+             <> line <> "     (--no-ff), computed by git merge-tree: the working"
+             <> line <> "     tree and the branch you are on are not touched;"
+             <> line <> "  2. pushes it to --remote, never forced;"
+             <> line <> "  3. moves your local branch, by fast-forward;"
+             <> line <> "  4. pushes it to the mirror, origin by default when that"
+             <> line <> "     is another remote (a GitHub copy, say);"
+             <> line <> "  5. records the merge in canon, as `hub pr merge` does;"
+             <> line <> "  6. publishes canon to --remote."
+             <> line
+             <> line <> "ANY REFUSAL BEFORE THE PUSH LEAVES THE CLONE AS IT WAS:"
+             <> line <> "a conflict, a target branch that has moved on here or"
+             <> line <> "there, a proposal that is not what canon says, a signer"
+             <> line <> "that may not bless canon. A conflict names the paths;"
+             <> line <> "merge those by hand and record it with `hub pr merge`."
+             <> line
+             <> line <> "--remote defaults to the clone's hbs23:// remote. The"
+             <> line <> "merge commit is signed when git config commit.gpgsign"
+             <> line <> "says so. --message replaces the commit message."
+             <> line
+             <> line <> "--dry-run fetches and computes the merge, and stops there:"
+             <> line <> "nothing is pushed, signed or written." )
+    $ entry $ bindMatch "hub:pr:land" $ nil_ \case
+        (prLandArgs -> Just pl) -> lift (prLand pl)
+        other -> liftIO (badArgs prLandUsage other)
 
   where
 
@@ -349,7 +389,31 @@ prEntries = do
                               codeNotStaged
             Left e -> liftIO (refuse (show (pretty e)) codeBundleFailed)
 
-    prMerge pm = do
+    -- The note that canon is not published yet is left out when the caller
+    -- publishes next, which is what `pr land` does.
+    prMerge unpublishedNote pm = do
+      (signer, parent, fr, acc, now) <- mergeEvent pm
+
+      commit <- committing (oneStop codeNotMerged) (pmDry pm) parent
+                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
+                  ("hub: merged #" <> tshow (pmNumber pm)) now
+
+      liftIO $ print $ vcat
+        [ "merged #" <> pretty (pmNumber pm) <+> "into" <+> pretty (pmInto pm)
+        , "event" <+> pretty (eventId (acEvent acc))
+        , "commit" <+> pretty commit
+        , "signed by" <+> signerDoc signer
+        , "status is now merged; PEP-19 has the merge event set it, so no"
+            <+> "second event was written"
+        ]
+
+      when unpublishedNote $ liftIO (saying (notPublishedYet <> line))
+
+    -- Every check a merge record runs, and the event it would be, with nothing
+    -- written: 'prMerge' commits it, and 'prLand' asks it first, before a
+    -- single ref moves, so that a signer who may not bless canon finds out
+    -- before their merge is on a remote rather than after.
+    mergeEvent pm = do
       signer <- canonSigner (pmRepo pm) (pmAs pm)
       creds <- signingAs codeNoKey signer
 
@@ -398,23 +462,148 @@ prEntries = do
       acc <- blessed codeNotMerged
                (ownerEvent ctx (viewOf fr) now noOwnAttachments content)
 
-      commit <- committing (oneStop codeNotMerged) (pmDry pm) parent
-                  (frMeta fr) [(eventPath acc, acEvent acc)] (numberIndexOf fr)
-                  ("hub: merged #" <> tshow (pmNumber pm)) now
-
-      liftIO $ print $ vcat
-        [ "merged #" <> pretty (pmNumber pm) <+> "into" <+> pretty (pmInto pm)
-        , "event" <+> pretty (eventId (acEvent acc))
-        , "commit" <+> pretty commit
-        , "signed by" <+> signerDoc signer
-        , "status is now merged; PEP-19 has the merge event set it, so no"
-            <+> "second event was written"
-        ]
-
-      liftIO (saying (notPublishedYet <> line))
+      pure (signer, parent, fr, acc, now)
 
     tshow :: Word64 -> Text
     tshow = fromString . show
+
+    prLand pl = do
+      let n = plNumber pl
+          stop d = liftIO (refuse (show d) codeNotMerged)
+          gitStop e = liftIO (refuse (show (pretty e)) codeNotMerged)
+          remote = fromMaybe "origin" (plRemote pl)
+
+      (_, fr) <- withCanon Refuse (plRepo pl) withGitCanon
+      t <- numbered fr n
+      pr <- case (tsKind t, tsPR t) of
+              (HubPR, Just pr) -> pure pr
+              _ -> liftIO $ refuse (show ("#" <> pretty n <+> "is not a pull request"))
+                                   codeNoSuchPr
+
+      let status = fromMaybe "open" (HM.lookup "status" (tsAttrs t))
+      unless (status == "open") $
+        stop ("#" <> pretty n <+> "is" <+> pretty (safeText status) <> ", not open; nothing was done")
+
+      let coords = psCoords pr
+          tip = prSourceTip coords
+          onto = fromMaybe (prOnto coords) (Text.stripPrefix "refs/heads/" (prOnto coords))
+          into = "refs/heads/" <> onto
+
+      -- What is staged is what gets merged, and it must be what canon says:
+      -- the same check as `pr checkout`, for the same reason.
+      staged <- pullTip Nothing n >>= either gitStop pure
+      case staged of
+        Just got | got == tip -> pure ()
+        Just got -> stop ( "what is staged for #" <> pretty n <+> "is not what canon proposes"
+                             <> line <> "  canon " <+> pretty (safeText tip)
+                             <> line <> "  staged" <+> pretty (safeText got)
+                             <> line <> "  nothing was done" )
+        Nothing -> stop ( "nothing is staged for #" <> pretty n <+> "in this clone"
+                            <> line <> "  run `hbs2-hub sync` first; nothing was done" )
+
+      -- MAY THIS SIGNER RECORD IT, asked before anything moves: the same
+      -- checks the record will run, against the tip itself, which contains
+      -- the tip. A refusal here is a refusal with nothing pushed.
+      _ <- mergeEvent (PrMerge (plRepo pl) n tip into (plAs pl) DryRun)
+
+      old <- fetchBranch Nothing remote onto >>= either gitStop pure
+      local <- refTip Nothing into >>= either gitStop pure
+
+      -- The local branch may be behind the remote (it moves forward below);
+      -- AHEAD of it or apart from it is somebody's unpushed work, and a merge
+      -- based on the remote would leave that behind without a word.
+      for_ local $ \l -> when (l /= old) $ do
+        behind <- isAncestor Nothing l old >>= either gitStop pure
+        unless behind $
+          stop ( "your" <+> pretty onto <+> "is not where" <+> pretty remote <> "'s is"
+                   <> line <> "  here  " <+> pretty l
+                   <> line <> "  remote" <+> pretty old
+                   <> line <> "  push or set aside the commits that are only here,"
+                   <+> "then run this again; nothing was done" )
+
+      already <- isAncestor Nothing tip old >>= either gitStop pure
+      when already $
+        stop ( pretty remote <> "'s" <+> pretty onto <+> "already contains #" <> pretty n
+                 <> line <> "  record that instead:"
+                 <> line <> "  hbs2-hub pr merge --number" <+> pretty n
+                   <+> "--commit" <+> pretty old <+> "--into" <+> pretty into )
+
+      tree <- mergeTree Nothing old tip >>= either gitStop pure >>= \case
+        MergedTree tr -> pure tr
+        MergeConflicts ps -> stop ( "#" <> pretty n <+> "does not merge cleanly into"
+                                      <+> pretty onto <> "; these conflict:"
+                                    <> line <> indent 2 (vcat (fmap (pretty . safeText) ps))
+                                    <> line <> "  merge it by hand (`hbs2-hub pr checkout --number"
+                                      <+> pretty n <> "`), push, then"
+                                    <> line <> "  `hbs2-hub pr merge --number" <+> pretty n
+                                      <+> "--commit <sha> --into" <+> pretty into <> "`."
+                                    <> line <> "  nothing was done" )
+
+      let message = fromMaybe (landMessage n (prSourceRef coords) (tsTitle t)) (plMessage pl)
+
+      mirrors <- if plNoMirror pl then pure [] else case plMirror pl of
+        Just m -> pure [m]
+        Nothing -> remoteNames Nothing <&> \case
+          Right rs | remote /= "origin", "origin" `elem` rs -> ["origin"]
+          _ -> []
+
+      when (plDry pl == DryRun) $ do
+        liftIO $ print $ vcat
+          [ "would merge #" <> pretty n <+> pretty (safeText (tsTitle t))
+          , "  into   " <+> pretty onto <+> "at" <+> pretty old <+> "(from" <+> pretty remote <> ")"
+          , "  tip    " <+> pretty tip
+          , "  tree   " <+> pretty tree <+> "(it merges cleanly)"
+          , "then push" <+> pretty onto <+> "to" <+> pretty (Text.intercalate " and " (remote : mirrors))
+              <> ", record the merge in canon and publish canon to" <+> pretty remote
+          , "nothing was pushed, signed or written (dry run)" ]
+        liftIO exitSuccess
+
+      sign <- gitConfigBool "commit.gpgsign"
+      merged <- commitMerge Nothing tree [old, tip] message sign >>= either gitStop pure
+
+      pushBranch Nothing remote merged onto >>= \case
+        Right () -> pure ()
+        Left e -> stop ( "the push to" <+> pretty remote <+> "was refused, so nothing was recorded"
+                           <> line <> "  " <> pretty e
+                           <> line <> "  the merge commit" <+> pretty merged <+> "exists only here" )
+
+      liftIO $ print ("merged #" <> pretty n <+> "as" <+> pretty merged <> ", pushed to" <+> pretty remote)
+
+      for_ local $ \l ->
+        advanceBranch Nothing onto l merged >>= \case
+          Right AdvancedCheckout -> liftIO (print ("your" <+> pretty onto <+> "is at the merge now"))
+          Right AdvancedRef -> liftIO (print ("your" <+> pretty onto <+> "points at the merge now"))
+          Right (NotAdvanced why) -> liftIO (saying ( "your checked-out" <+> pretty onto
+                                                       <+> "was left behind:" <+> pretty (safeText why)
+                                                     <> line <> "  `git merge --ff-only" <+> pretty merged
+                                                       <> "` catches it up" <> line ))
+          Left e -> liftIO (saying ("your" <+> pretty onto <+> "was not moved:" <+> pretty e <> line))
+
+      for_ mirrors $ \m ->
+        pushBranch Nothing m merged onto >>= \case
+          Right () -> liftIO (print ("pushed to" <+> pretty m <+> "too"))
+          Left e -> liftIO (saying ( "the push to" <+> pretty m <+> "failed; push"
+                                       <+> pretty onto <+> "there yourself:" <> line
+                                     <> "  " <> pretty e <> line ))
+
+      prMerge False (PrMerge (plRepo pl) n merged into (plAs pl) ForReal)
+
+      r <- publishTo Nothing remote
+             >>= either (\e -> liftIO (refuse ( show ( "the merge is pushed and recorded here, and"
+                                                        <+> "publishing canon failed:" <> line
+                                                      <> "  " <> pretty e <> line
+                                                      <> "  `hbs2-hub publish` sends it" ))
+                                             codeNotMerged)) pure
+      liftIO $ mapM_ print (publishDoc remote r)
+      liftIO $ case publishCode r of
+        0 -> pure ()
+        c -> exitWith (ExitFailure c)
+
+    gitConfigBool k = do
+      r <- liftIO (try @_ @SomeException (readProcess (proc "git" ["config", "--bool", "--get", k])))
+      pure $ case r of
+        Right (ExitSuccess, out, _) -> LBS.toStrict out == "true\n"
+        _ -> False
 
     -- The thread by its number, which is what a person has in front of them.
     -- Canon is the only place that maps one to the other, and it is the map the
@@ -775,6 +964,53 @@ prMergeArgs syn = do
     -- Through 'flagText': an abbreviated sha can be all digits, and one in
     -- twenty-seven of the seven-character ones is.
     asText = fmap Text.pack . flagText
+
+-- | What @hub pr land@ was asked to merge.
+data PrLand = PrLand
+  { plRepo     :: RepoRef
+  , plNumber   :: Word64
+  , plRemote   :: Maybe Text    -- ^ where the branch and canon go; the clone's hbs23 remote
+  , plMirror   :: Maybe Text    -- ^ a second remote for the branch; origin by default
+  , plNoMirror :: Bool
+  , plMessage  :: Maybe Text
+  , plAs       :: Maybe HubKey
+  , plDry      :: Writing
+  }
+  deriving stock (Eq,Show)
+
+prLandUsage :: Doc ()
+prLandUsage =
+  "usage: hbs2-hub pr land --repo <key> --number <n> [--remote <name>] [--mirror <name> | --no-mirror]"
+    <> line <> "       [--message <text>] [--as <key>] [--dry-run]"
+
+prLandArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrLand
+prLandArgs syn = do
+  kvs <- flagsAndSwitches (repoFlags <> ["--number","--remote","--mirror","--message","--as"])
+                          ["--no-mirror","--dry-run"] syn
+  repo <- flagRepo asKey kvs
+  n    <- flagOnce kvs "--number" >>= flagWord
+  rm   <- flagMaybe kvs "--remote" asText
+  mi   <- flagMaybe kvs "--mirror" asText
+  nm   <- flagSwitch kvs "--no-mirror"
+  msg  <- flagMaybe kvs "--message" asText
+  as   <- flagMaybe kvs "--as" asKey
+  dry  <- flagSwitch kvs "--dry-run"
+  -- Both is a line edited half way; see 'showArgs' for the rule.
+  guard (not (nm && isJust mi))
+  pure (PrLand repo n rm mi nm msg as (writingOf dry))
+  where
+    asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
+    asText = fmap Text.pack . flagText
+
+-- | The merge commit's message: what `git merge` would say, and the title.
+--
+-- The title is a contributor's bytes and goes into a commit, where git keeps
+-- it as given; 'safeText' keeps a control character from rewriting the log a
+-- maintainer reads it in.
+landMessage :: Word64 -> Text -> Text -> Text
+landMessage n from title =
+  "Merge hbs2 pull request #" <> Text.pack (show n) <> " from " <> safeText from
+    <> (if Text.null title then "" else "\n\n" <> safeText title) <> "\n"
 
 -- | How much a proposal may add to a working tree before this asks first.
 --

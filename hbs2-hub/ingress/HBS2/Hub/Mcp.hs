@@ -192,6 +192,7 @@ tools =
   , tAccept "inbox_honour" ["inbox","honour"] honourDesc
   , tReject
   , tIssueOpen, tIssueClose, tIssueLabel, tIssueReply, tIssueComment
+  , tIssueNew, tPrNew, tPrLand
   , tPublish, tSync
   ]
 
@@ -385,14 +386,17 @@ tStatus = Tool
       <> "signer.source: env, git_config or repo_key), whether this machine can sign as it "
       <> "(signing) and whether it is a maintainer, what canon holds here, whether canon has "
       <> "reached each remote, which mailbox the repository declares and how many letters "
-      <> "wait in it. Read-only; pushes nothing." <> defaultsNote
-  , toolProps = [pRepo, pRemote], toolRequired = []
+      <> "wait in it. Read-only; pushes nothing. local: true asks no remote, and says "
+      <> "so under published." <> defaultsNote
+  , toolProps = [pRepo, pRemote, propBool "local" "Ask no remote: the signer, canon and the clone only."]
+  , toolRequired = []
   , toolAccess = Reads, toolOpenWorld = True, toolVerb = ["status"]
   , toolPlan = \cfg as -> do
       r <- repoOf cfg as
       rm <- optText "remote" as
+      local <- optBool "local" as
       pure $ RunVerb (Run (["status", flag "repo" r] <> flagM "remote" (rm `orElse` mcRemote cfg)
-                             <> ["--json"])
+                             <> ["--json"] <> switch "local" local)
                           Nothing AsJson)
   }
 
@@ -792,6 +796,135 @@ tIssueComment = Tool
           probe = Run (["whoami", flag "author" au, flag "sender" se] <> flagM "repo" r)
                       Nothing AsText
       pure (if dry then Rehearse (Just probe) run else RunVerb run)
+  }
+
+-- The letters a contributor sends, and the merge (PEP-24 phases 2 and 3) ------
+
+-- | Author and sender for a letter, from the call or the server's defaults.
+letterKeys :: McpConfig -> Args -> Either Text (Text, Text)
+letterKeys cfg as = do
+  au <- keyOr "author" (mcAuthor cfg) as
+          >>= needed "author" ", or start the server with --author <key> (or HBS2_HUB_AUTHOR)"
+  se <- hashOr "sender" (mcSender cfg) as
+          >>= needed "sender" ", or start the server with --sender <sigil> (or HBS2_HUB_SENDER)"
+  pure (au, se)
+
+pAuthor, pSender, pRecipient :: (Text, Value)
+pAuthor    = prop "author" "Author sign key (base58). Defaults to the server's --author."
+pSender    = prop "sender" "Sender sigil hash (base58). Defaults to the server's --sender."
+pRecipient = prop "recipient" "Recipient sigil hash, when not the one the repository declares."
+
+lettersNote :: Text
+lettersNote =
+  " SENDS: a sent letter cannot be recalled, and once folded it is PUBLIC and PERMANENT "
+  <> "canon. The author key is in canon verbatim. The verb has no dry run of its own: "
+  <> "dry_run: true checks that the sender sigil names the author key and where the "
+  <> "letter would go (whoami), and shows the command that would run."
+
+tIssueNew :: Tool
+tIssueNew = Tool
+  { toolName = "issue_new", toolTitle = "File an issue (letter)"
+  , toolDesc = "File an issue by composing a letter: signed by author, sealed to the "
+      <> "repository's ingress mailbox and sent over the hbs2 network. It is a request until "
+      <> "a maintainer folds it (inbox_accept); canon mints its number then. Labels given "
+      <> "here are REQUESTED, not applied. A maintainer opening one directly uses issue_open."
+      <> lettersNote <> defaultsNote
+  , toolProps = [ prop "title" "Issue title."
+                , prop "body" "Issue body (Markdown). Optional."
+                , propList "labels" "Labels to ask for."
+                , pRepo, pAuthor, pSender, pRecipient, pDry ]
+  , toolRequired = ["title"]
+  , toolAccess = Writes, toolOpenWorld = True, toolVerb = ["issue","new"]
+  , toolPlan = \cfg as -> do
+      title <- optText "title" as >>= needed "title" ""
+      when (Text.all isSpace title) $ Left "title is empty"
+      body <- optText "body" as
+      ls <- fromMaybe [] <$> optTexts "labels" as
+      r <- repoOf cfg as
+      (au, se) <- letterKeys cfg as
+      rc <- hashOr "recipient" Nothing as
+      dry <- optBool "dry_run" as
+      let run = Run ( ["issue","new", flag "repo" r, flag "sender" se, flag "author" au
+                      , flag "title" title]
+                      <> maybe [] (const ["--body=-"]) body
+                      <> fmap (flag "label") ls <> flagM "recipient" rc )
+                    body AsText
+          probe = Run ["whoami", flag "author" au, flag "sender" se, flag "repo" r] Nothing AsText
+      pure (if dry then Rehearse (Just probe) run else RunVerb run)
+  }
+
+tPrNew :: Tool
+tPrNew = Tool
+  { toolName = "pr_new", toolTitle = "Propose a pull request (letter)"
+  , toolDesc = "Propose a change: bundles the commits on from that are not on onto, in the "
+      <> "working clone, and sends them as an encrypted attachment to a letter, as issue_new "
+      <> "does. onto defaults to the branch the clone's hbs23 remote names as HEAD, from to "
+      <> "the branch checked out. Only the new commits travel."
+      <> lettersNote <> defaultsNote
+  , toolProps = [ prop "title" "Pull request title."
+                , prop "body" "Description (Markdown). Optional."
+                , prop "onto" "Branch to merge into. Default: the remote's HEAD branch."
+                , prop "from" "Branch to propose. Default: the branch checked out."
+                , prop "base" "Fork point, when the merge-base of onto and from is not it."
+                , pRepo, pAuthor, pSender, pRecipient, pDry ]
+  , toolRequired = ["title"]
+  , toolAccess = Writes, toolOpenWorld = True, toolVerb = ["pr","new"]
+  , toolPlan = \cfg as -> do
+      title <- optText "title" as >>= needed "title" ""
+      when (Text.all isSpace title) $ Left "title is empty"
+      body <- optText "body" as
+      onto <- optText "onto" as
+      from <- optText "from" as
+      base <- optText "base" as
+      r <- repoOf cfg as
+      (au, se) <- letterKeys cfg as
+      rc <- hashOr "recipient" Nothing as
+      dry <- optBool "dry_run" as
+      -- Left out, onto and from are filled by the verb from the clone it runs
+      -- in ("HBS2.Hub.CLI.Defaults"), which is the clone this server runs in.
+      let run = Run ( ["pr","new", flag "repo" r, flag "sender" se, flag "author" au
+                      , flag "title" title]
+                      <> maybe [] (const ["--body=-"]) body
+                      <> flagM "onto" onto <> flagM "from" from <> flagM "base" base
+                      <> flagM "recipient" rc )
+                    body AsText
+          probe = Run ["whoami", flag "author" au, flag "sender" se, flag "repo" r] Nothing AsText
+      pure (if dry then Rehearse (Just probe) run else RunVerb run)
+  }
+
+tPrLand :: Tool
+tPrLand = Tool
+  { toolName = "pr_land", toolTitle = "Merge a pull request"
+  , toolDesc = "Merge an open pull request in the working clone, as a maintainer: a merge "
+      <> "commit of the staged proposal into its target branch, computed without touching "
+      <> "the working tree; pushed to the hbs23 remote (never forced) and to the mirror "
+      <> "(origin, when that is another remote); the local branch fast-forwarded; the merge "
+      <> "recorded in canon; canon published. A conflict, a target branch that moved, or a "
+      <> "signer that may not bless canon is refused before anything is pushed. PUSHES AND "
+      <> "PUBLISHES: the merge is on the remotes and in canon, PUBLIC and PERMANENT. dry_run: true "
+      <> "fetches and computes the merge, and stops." <> defaultsNote
+  , toolProps = [ pNumber, pRemote
+                , prop "mirror" "A second remote for the branch. Default: origin, when it is another remote."
+                , propBool "no_mirror" "Push to the hbs23 remote only."
+                , prop "message" "The merge commit's message. Default: what git merge says, and the title."
+                , pRepo, pAs, pDry ]
+  , toolRequired = ["number"]
+  , toolAccess = Writes, toolOpenWorld = True, toolVerb = ["pr","land"]
+  , toolPlan = \cfg as -> do
+      n <- optNat "number" as >>= needed "number" ""
+      rm <- (`orElse` mcRemote cfg) <$> optText "remote" as
+      mi <- optText "mirror" as
+      nm <- optBool "no_mirror" as
+      when (nm && isJust mi) $ Left "mirror and no_mirror both given; pass one"
+      msg <- optText "message" as
+      r <- repoOf cfg as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $
+        Run ( ["pr","land", flag "repo" r, flag "number" (Text.pack (show n))]
+              <> flagM "remote" rm <> flagM "mirror" mi <> switch "no-mirror" nm
+              <> flagM "message" msg <> a )
+            Nothing AsText
   }
 
 tPublish :: Tool

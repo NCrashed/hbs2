@@ -53,6 +53,14 @@ module HBS2.Hub.Repo.GitBundle
   , validAbbrevSha
   , resolveCommit
   , addedBytes
+    -- * Landing a pull request (`hub pr land`)
+  , fetchBranch
+  , mergeTree
+  , Merged(..)
+  , commitMerge
+  , pushBranch
+  , advanceBranch
+  , Advanced(..)
   ) where
 
 import HBS2.Hub.Types (safeText,validRefName,validSha,validAbbrevSha)
@@ -1094,3 +1102,121 @@ stdinTo cwd secs what args input =
     Left (GitTooMuch w n _) -> Left (BundleTooMuch w n)
     Right (ExitSuccess, out, _)  -> Right out
     Right (ExitFailure c, _, e0) -> Left (refusal what c e0)
+
+-- Landing a pull request -------------------------------------------------------
+--
+-- `hub pr land` merges in the clone a person works in, and the first rule
+-- of these is that NONE OF THEM TOUCHES THE WORKING TREE or the branch checked
+-- out, except 'advanceBranch' and only through a fast-forward git agrees to.
+-- The merge is computed by @merge-tree@ and written by @commit-tree@, which
+-- make objects and nothing else, so a refusal anywhere before the push leaves
+-- the clone exactly as it was.
+
+-- | What a remote's branch holds now, fetched.
+--
+-- Through FETCH_HEAD rather than a remote-tracking ref: the refspec a remote is
+-- configured with is not this verb's to depend on (see 'BundleCanonClobbered'),
+-- and a named source with no destination writes no ref at all.
+fetchBranch :: MonadUnliftIO m
+            => Maybe FilePath -> Text -> Text -> m (Either BundleError Text)
+fetchBranch cwd remote branch = runExceptT do
+  checked "remote name" validRefName remote
+  checked "ref name" validRefName branch
+  _ <- ExceptT $ call cwd fetchSeconds "fetch"
+         [ "fetch", "--no-tags", "--end-of-options", Text.unpack remote
+         , "refs/heads/" <> Text.unpack branch ]
+  tip <- ExceptT (refTip cwd "FETCH_HEAD")
+  maybe (throwError (BundleRefused "fetch" (ReaderSays "it fetched no commit"))) pure tip
+
+-- | A three-way merge, computed without a working tree.
+data Merged
+  = MergedTree Text        -- ^ it merges cleanly to this tree
+  | MergeConflicts [Text]  -- ^ these paths conflict
+  deriving stock (Eq,Show)
+
+-- | @git merge-tree --write-tree@: the tree a merge of the two commits would
+-- have, or the paths that conflict. Needs git 2.38.
+--
+-- Exit 1 is the answer "it conflicts", not a failure, for the reason
+-- 'isAncestor' reads exit 1 as "no". The paths are a contributor's bytes, so
+-- they are returned as data and the caller prints them through 'safeText'.
+mergeTree :: MonadUnliftIO m
+          => Maybe FilePath -> Text -> Text -> m (Either BundleError Merged)
+mergeTree cwd ours theirs = runExceptT do
+  checked "object name" validSha ours
+  checked "object name" validSha theirs
+  r <- ExceptT $ runKeeping [] gitListing cwd bundleSeconds "merge-tree"
+         [ "merge-tree", "--write-tree", "--name-only", "--no-messages"
+         , Text.unpack ours, Text.unpack theirs ]
+  let ls = Prelude.filter (not . Text.null) (Text.lines (Text.decodeUtf8Lenient (sel r)))
+      sel (_, out, _) = out
+  case (r, ls) of
+    ((ExitSuccess, _, _), tree : _) | validSha tree -> pure (MergedTree tree)
+    ((ExitFailure 1, _, _), _ : paths) -> pure (MergeConflicts paths)
+    ((ExitFailure c, _, e0), _) | c /= 1 -> throwError (refusal "merge-tree" c e0)
+    _ -> throwError (BundleRefused "merge-tree" (ReaderSays "it answered no tree"))
+
+-- | A merge commit with these parents, the first being the branch merged into.
+--
+-- Signed with the person's own key when their git config asks for that
+-- (@commit.gpgsign@), the way @git merge@ would have signed it.
+commitMerge :: MonadUnliftIO m
+            => Maybe FilePath -> Text -> [Text] -> Text -> Bool
+            -> m (Either BundleError Text)
+commitMerge cwd tree parents message sign = runExceptT do
+  checked "object name" validSha tree
+  forM_ parents (checked "object name" validSha)
+  out <- ExceptT $ stdinTo cwd fetchSeconds "commit-tree"
+           ( ["commit-tree"] <> ["-S" | sign]
+             <> concat [ ["-p", Text.unpack p] | p <- parents ]
+             <> [ "-F", "-", Text.unpack tree ] )
+           (LBS.fromStrict (Text.encodeUtf8 message))
+  let c = Text.strip (Text.decodeUtf8Lenient out)
+  unless (validSha c) $ throwError (BundleRefused "commit-tree" (ReaderSays "it answered no commit"))
+  pure c
+
+-- | Push a commit to a remote's branch. Never forced: a remote that moved
+-- since 'fetchBranch' refuses, which is the answer this wants.
+pushBranch :: MonadUnliftIO m
+           => Maybe FilePath -> Text -> Text -> Text -> m (Either BundleError ())
+pushBranch cwd remote commit branch = runExceptT do
+  checked "remote name" validRefName remote
+  checked "ref name" validRefName branch
+  checked "object name" validSha commit
+  void $ ExceptT $ call cwd fetchSeconds "push"
+    [ "push", "--end-of-options", Text.unpack remote
+    , Text.unpack commit <> ":refs/heads/" <> Text.unpack branch ]
+
+-- | What happened to the local branch.
+data Advanced
+  = AdvancedRef            -- ^ the ref moved; it was not checked out
+  | AdvancedCheckout       -- ^ it is checked out, and git fast-forwarded the tree
+  | NotAdvanced Text       -- ^ left where it was, and why
+  deriving stock (Eq,Show)
+
+-- | Move the local branch from @old@ to @new@, which descends from it.
+--
+-- A branch nobody has checked out moves by compare-and-swap. The one checked
+-- out moves only by @merge --ff-only@, which is git refusing to clobber an
+-- uncommitted change; that refusal is not an error here, because by now the
+-- merge is pushed and the person's clone is merely behind it.
+advanceBranch :: MonadUnliftIO m
+              => Maybe FilePath -> Text -> Text -> Text -> m (Either BundleError Advanced)
+advanceBranch cwd branch old new = runExceptT do
+  checked "ref name" validRefName branch
+  checked "object name" validSha old
+  checked "object name" validSha new
+  let ref = "refs/heads/" <> branch
+  hd <- lift (run cwd smallSeconds "symbolic-ref" ["symbolic-ref", "-q", "HEAD"])
+  let onIt = case hd of
+        Right (ExitSuccess, out, _) -> Text.strip (Text.decodeUtf8Lenient out) == ref
+        _ -> False
+  if onIt
+    then lift (run cwd fetchSeconds "merge" ["merge", "--ff-only", "-q", Text.unpack new]) <&> \case
+      Right (ExitSuccess, _, _) -> AdvancedCheckout
+      Right (_, _, e0) -> NotAdvanced (Text.strip (Text.decodeUtf8Lenient e0))
+      Left e -> NotAdvanced (Text.pack (show (pretty e)))
+    else do
+      void $ ExceptT $ call cwd smallSeconds "update-ref"
+        [ "update-ref", Text.unpack ref, Text.unpack new, Text.unpack old ]
+      pure AdvancedRef

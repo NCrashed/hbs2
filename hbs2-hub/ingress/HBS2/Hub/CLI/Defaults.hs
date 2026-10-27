@@ -38,6 +38,10 @@ module HBS2.Hub.CLI.Defaults
   , keyShaped
   , gatherSurroundings
   , hbs23Key
+  , hbs23Remote
+  , remoteHeadBranch
+  , currentBranch
+  , localBranches
   , defaultsFor
   , repoEnvVar, repoGitKey
   , authorEnvVar, authorGitKey
@@ -96,6 +100,7 @@ wantsOf v
   | v == "hub:maintainer:use" = [WRepo, WSelf]
   | v == "hub:sync"          = [WRepo, WRemote]
   | v == "hub:publish"       = [WRemote]
+  | v == "hub:pr:land"       = [WRepo, WRemote]
   | v `elem` byRepo          = [WRepo]
   | otherwise                = []
   where
@@ -239,6 +244,11 @@ remoteHeadBranch = hbs23Remote >>= \case
 
 currentBranch :: MonadUnliftIO m => m (Maybe String)
 currentBranch = git ["symbolic-ref", "--short", "-q", "HEAD"]
+
+-- | The clone's local branches, for a form that asks which one to propose.
+localBranches :: MonadUnliftIO m => m [String]
+localBranches = git ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads/"]
+  <&> maybe [] lines
 
 -- | One line out of git, or nothing for any trouble at all: a default that
 -- cannot be read is a default that is not there.

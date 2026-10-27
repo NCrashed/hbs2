@@ -19,7 +19,30 @@
     applied labels, author, comment count and folded times. The
     `issue_list` and `pr_list` MCP tools return it as structured content.
 
+  - **`hbs2-hub pr land`: merge a pull request in one step.** It merges
+    the staged proposal into its target branch with a merge commit,
+    computed by `git merge-tree` without touching the working tree, pushes
+    the branch to the hbs23 remote (never forced) and to `origin` when
+    that is a different remote, fast-forwards the local branch, records the
+    merge in canon, and publishes canon. A conflict, a target branch that
+    moved, or a signer that may not bless canon stops it before anything
+    is pushed. `--dry-run` computes the merge and stops. The merge commit
+    is signed when `commit.gpgsign` says so.
+
+  - **Writing from the browser extension (PEP-24 phases 2 and 3).** The
+    MCP tools `issue_new`, `pr_new` and `pr_land`; `status --local`,
+    which asks no remote, and a `clone` object in the status document
+    (the branch checked out, the remote's HEAD branch, the local branches).
+    `native-host` signs letters as the identity `hbs2-hub identity init`
+    wrote to `git config --global`.
+
 ## Fixed
+
+  - **The nix build makes each library once.** The shipped outputs linked
+    against a second copy of every hbs2 library, built with its test suite,
+    haddock and profiling, so `nix build`, `nix profile install` and the
+    release jobs compiled the tree about twice; the 0.26.0.0 macOS build ran
+    out of memory and never finished.
 
   - **`hbs2-hub publish` and `sync` use the clone's hbs23:// remote**, the
     one `--repo` is read from, instead of the remote named `origin`. In a

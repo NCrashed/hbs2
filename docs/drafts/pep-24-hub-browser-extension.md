@@ -251,11 +251,25 @@ On github.com/<owner>/<repo>, when a pointer or a mapping exists:
     and for a PR its coordinates and precomputed diff (PEP-22). Every item is
     attributed by `author` and `canon_by` key. The same view is the
     extension's own thread page, and later the standalone frontend's;
-  - "New issue (hbs2)" and "New pull request (hbs2)" buttons, opening forms in
-    extension pages;
+  - "New issue on hbs2" and "New pull request on hbs2" buttons in the list
+    panel, a comment box at the end of a thread, and for a maintainer a merge
+    box on an open pull request. Each opens the extension's form in a window of
+    its own (`compose.html`); a draft typed on the GitHub page is carried there
+    and shown again;
   - for a maintainer (the identity is in `maintainer list`), an inbox page
     with accept, reject and honour per letter, reply and close on threads,
     and an "unpublished" badge with a Publish button.
+
+The form works in three steps: the form; a review, which runs the tool with
+`dry_run` and shows its output and what signing does; and the write, after
+which canon is published when the tool wrote it. Whether the person maintains
+the repository comes from `status --local` in the working clone (no remote is
+asked): a maintainer's issue and comment go straight into canon (`issue_open`,
+`issue_reply`) and are published, anybody else's are letters (`issue_new`,
+`issue_comment`). A pull request is always a letter (`pr_new`), since its
+commits travel as the letter's bundle. Merge is `hub pr land` (`pr_land`):
+a merge commit computed without touching the working tree, pushed to the hbs23
+remote and to `origin` when that is another remote, recorded and published.
 
 On a GitHub pull request or commit page of the same repository, "Record merge"
 offers `hub pr merge` with that commit filled in, for a maintainer who merged
@@ -333,7 +347,7 @@ Code layout
     `--install`), the `index` document and `--json` on the list verbs, and the
     MCP tools still missing for this UI: `issue_new`, `pr_new`, `pr_merge`,
     `pr_checkout`, `maintainer_list`, `maintainer_add`, `identity_init` and
-    `project_open`. (`issue_list`, `pr_list`, `issue_show`, `pr_show`,
+    `project_open` (`issue_new`, `pr_new` and `pr_land` are in). (`issue_list`, `pr_list`, `issue_show`, `pr_show`,
     `inbox_*`, `issue_reply`, `issue_comment`, `publish` and `sync` exist.)
 
 
@@ -343,9 +357,9 @@ Phases
   1. Read. `index` document and list `--json`; `native-host` with read tools;
      the extension shows lists and threads on GitHub. Tried on openwar3.
   2. Contribute. `issue_new`, `issue_comment` and `pr_new` from a working clone
-     and from a public GitHub fork branch, with confirmation and progress.
-  3. Maintain. Inbox, accept, reject, honour, reply, close, label, record
-     merge, publish.
+     (done), and from a public GitHub fork branch, with confirmation and progress.
+  3. Maintain. Reply and merge (`pr_land`) with publish are done; inbox, accept,
+     reject, honour, close, label and record merge remain.
   4. Standalone. `hub serve` over the same pages; `hub render` static export.
 
 
