@@ -96,13 +96,16 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         overrides = pkgs.lib.composeExtensions (oldAttrs.overrides or (_: _: { })) overrides;
       });
 
-    makePkgsFromDirOverride = pkgs: ov: pkgNames: mkPath:
+    # `hp` is the package set the packages are made IN, so that their
+    # dependencies on each other resolve inside it: a set that overrides them
+    # (leanPackages below) gets packages that link against its own copies.
+    makePkgsFromDirOverride = pkgs: hp: ov: pkgNames: mkPath:
       pkgs.lib.genAttrs pkgNames (name:
-        ov (pkgs.haskellPackages.callCabal2nix name "${self}/${mkPath name}" {})
+        ov (hp.callCabal2nix name "${self}/${mkPath name}" {})
       );
 
-    makePkgsFromDir = pkgs: makePkgsFromDirOverride pkgs (q: q);
-    makePkgsFromDirWithMan = pkgs: makePkgsFromDirOverride pkgs (q:
+    makePkgsFromDir = pkgs: hp: makePkgsFromDirOverride pkgs hp (q: q);
+    makePkgsFromDirWithMan = pkgs: hp: makePkgsFromDirOverride pkgs hp (q:
       q.overrideDerivation (drv: {
           postInstall = ''
             if [ -d man ]; then
@@ -127,13 +130,15 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     withGitForTests = pkgs: p:
       pkgs.haskell.lib.addTestToolDepends p [ pkgs.gitMinimal ];
 
-    ourHaskellPackages = pkgs: (
+    ourHaskellPackagesIn = pkgs: hp: (
       let base = {}
-            // makePkgsFromDirWithMan pkgs topLevelPackages (n: n)
-            // makePkgsFromDirWithMan pkgs keymanPackages (name: "hbs2-keyman/${name}")
-            // makePkgsFromDir pkgs miscellaneous (name: "miscellaneous/${name}");
+            // makePkgsFromDirWithMan pkgs hp topLevelPackages (n: n)
+            // makePkgsFromDirWithMan pkgs hp keymanPackages (name: "hbs2-keyman/${name}")
+            // makePkgsFromDir pkgs hp miscellaneous (name: "miscellaneous/${name}");
       in base // { hbs2-hub = withGitForTests pkgs base.hbs2-hub; }
     );
+
+    ourHaskellPackages = pkgs: ourHaskellPackagesIn pkgs pkgs.haskellPackages;
 
     overlay = final: prev: {
       haskellPackages = overrideComposable prev prev.haskellPackages
@@ -180,10 +185,34 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           }))
       ];
 
+    # Our packages that ship no executable. They are built once, lean, as what
+    # the others link against, and the static-executable pass below is not run
+    # on them: it made a second copy of each that installed nothing.
+    libraryOnly = [ "hbs2-core" "hbs2-keyman-direct-lib" "hbs2-log-structured" ];
+
+    # WHAT THE SHIPPED OUTPUTS ARE BUILT FROM. packagePostOverrides is applied to
+    # each output on its own, outside the package set, because inside it would
+    # take the linking info away from the packages that depend on it. So the
+    # dependencies are the package set's own copies, and in the overlay those
+    # are plain: test suites, haddock and profiling libraries, every one of
+    # them built a second time beside the shipped copy. On a 3-core, 7 GiB
+    # macOS runner that was two GHCs at a time over hbs2-core and the 0.26.0.0
+    # darwin build never finished. Here they are lean; the exported overlay,
+    # whose test run is deliberate (see withGitForTests), is left as it is.
+    leanPackages = pkgs: overrideComposable pkgs pkgs.haskellPackages (new: _old:
+      pkgs.lib.mapAttrs (_name: p: pkgs.lib.pipe p (with pkgs.haskell.lib.compose; [
+          dontCheck
+          dontHaddock
+          dontCoverage
+          dontBenchmark
+          disableLibraryProfiling
+        ]))
+        (pkgs.lib.getAttrs packageNames (ourHaskellPackagesIn pkgs new)));
+
     makePackages = pkgs:
       let ps = pkgs.lib.mapAttrs
-        (_name: packagePostOverrides) # we can't apply overrides inside our overlay because it will remove linking info
-        (pkgs.lib.getAttrs packageNames (ourHaskellPackages pkgs))
+        (name: p: if builtins.elem name libraryOnly then p else packagePostOverrides p)
+        (pkgs.lib.getAttrs packageNames (leanPackages pkgs))
         ;
       in ps // {
         bf6-git-hbs2 = pkgs.callPackage ./nix/bf6-hbs2-git.nix { inherit (pkgs.haskellPackages) suckless-conf; };
@@ -339,12 +368,12 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
           # .#hbs2-hub` or `nix profile install .#hbs2-hub`, which take the
           # package and not this join. git is a documented requirement instead
           # (INSTALL.md), which is the same answer every non-nix install gets.
-          paths = builtins.attrValues packagesDynamic ++ [ hubAlias ];
+          paths = builtins.attrValues (removeAttrs packagesDynamic libraryOnly) ++ [ hubAlias ];
         };
         static =
         pkgs.symlinkJoin {
           name = "hbs2-static";
-          paths = builtins.attrValues packagesStatic ++ [ hubAlias ];
+          paths = builtins.attrValues (removeAttrs packagesStatic libraryOnly) ++ [ hubAlias ];
         };
         # See the dockerImageFor comment: aarch64-linux cannot build
         # the musl cross-GHC, so its image ships dynamic binaries.

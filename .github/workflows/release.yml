@@ -219,19 +219,21 @@ jobs:
           fi
 
       - name: Build darwin bundle
-        # The longest good run took 34 minutes. 0.26.0.0 hung after starting
-        # hbs2-core and was killed at GitHub's six-hour job limit; a step
-        # timeout fails it in 90 minutes instead. magic-nix-cache uploads each
-        # path as it is built, so a re-run keeps what this one finished.
+        # The longest good run took 34 minutes. 0.26.0.0 sat in hbs2-core
+        # until GitHub's six-hour job limit: the flake built every library
+        # twice, the second copy with tests and profiling (see leanPackages in
+        # flake.nix), and the runner ran out of memory. A step timeout fails
+        # it in 90 minutes instead. magic-nix-cache uploads each path as it is
+        # built, so a re-run keeps what this one finished.
         timeout-minutes: 90
-        env:
-          # The same as the script's -L, for a tag whose script predates it.
-          NIX_CONFIG: print-build-logs = true
         run: |
           set -euo pipefail
           # Memory and load every five minutes, to tell a stuck build from a
           # runner swapping itself to a standstill.
-          ( while sleep 300; do
+          # Without pipefail and -e: `ps | head` ends in SIGPIPE, and under the
+          # step's own settings that ended the loop after its first sample.
+          ( set +e +o pipefail
+            while sleep 300; do
               echo "::group::runner load $(date -u +%H:%M)"
               uptime; vm_stat | head -n 6; sysctl -n vm.swapusage
               ps -Ao pid,etime,rss,pcpu,comm -r | head -n 8
