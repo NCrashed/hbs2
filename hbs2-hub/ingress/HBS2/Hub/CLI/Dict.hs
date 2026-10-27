@@ -38,6 +38,7 @@ import HBS2.Hub.CLI.Sync
 import HBS2.Hub.CLI.Updates
 import HBS2.Hub.CLI.Verify
 import HBS2.Hub.CLI.Whoami
+import HBS2.Hub.CLI.Serve (serveEntries)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run
@@ -88,6 +89,7 @@ hubEntries = do
   identityEntries
   projectEntries
   nativeHostEntries
+  serveEntries
 
 -- | AN ALLOWLIST, and it is the whole of what this tool answers to.
 --

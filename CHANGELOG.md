@@ -1,3 +1,18 @@
+# Unreleased
+
+## Added
+
+  - **`hbs2-hub serve`: the hub in a browser, for a project without GitHub
+    (PEP-25).** LOCAL, the default, on 127.0.0.1: the browser extension's
+    pages over HTTP, reading and writing with your keys after the same
+    review; the address it prints carries a token every request needs, and
+    a request that reached it by any name but its loopback one is refused.
+    PUBLIC, with `--public --listen <host:port> --repo <key>...`: read-only
+    for anyone, the named repositories only, from cache clones, offering the
+    lists, threads, log and maintainers and nothing that is the operator's.
+    The pages are built by hbs2-hub-browser (`dist/web`) and named with
+    `--web`.
+
 # 0.26.0.2  2026-10-27
 
 What the browser extension's maintainer side runs on: the inbox, labels,

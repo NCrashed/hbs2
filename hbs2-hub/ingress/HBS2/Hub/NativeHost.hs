@@ -32,13 +32,12 @@ module HBS2.Hub.NativeHost
   ) where
 
 import HBS2.Hub.Mcp
-import HBS2.Hub.Types (hubMetaVersion,hubMetaMin)
-import HBS2.Hub.CLI.Defaults (keyShaped)
+import HBS2.Hub.Host
 
 import Control.Concurrent (forkIO,threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception qualified as E
-import Control.Monad (forM_,unless,void,when)
+import Control.Monad (forM_,unless,void)
 import Data.Aeson (Value(..),object,(.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
@@ -51,21 +50,8 @@ import Data.List qualified as List
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as Text
-import Data.Time.Clock (UTCTime,getCurrentTime,diffUTCTime)
 import Data.Word (Word32)
-import System.Directory (createDirectoryIfMissing,doesDirectoryExist)
-import System.Exit (ExitCode(..))
-import System.FilePath ((</>),takeDirectory)
 import System.IO
-import System.Process.Typed
-
--- | What the host was started with.
-data HostConfig = HostConfig
-  { hcMcp      :: McpConfig    -- ^ the tool layer: binary, timeout, read-only
-  , hcCache    :: FilePath     -- ^ where cache clones live, one per repository
-  , hcSyncEach :: Int          -- ^ seconds between syncs of one cache clone
-  }
 
 -- | The name both browsers know this host by, in its manifest.
 hostName :: Text
@@ -96,10 +82,6 @@ encodeFrame :: LBS.ByteString -> LBS.ByteString
 encodeFrame bs = LBS.pack [ fromIntegral ((n `shiftR` s) .&. 0xff) | s <- [0, 8, 16, 24] ] <> bs
   where n = fromIntegral (LBS.length bs) :: Word32
 
--- | Where the cache clone of a repository lives.
-cacheCloneDir :: HostConfig -> Text -> FilePath
-cacheCloneDir hc key = hcCache hc </> Text.unpack key
-
 serveNative :: HostConfig -> Handle -> Handle -> IO ()
 serveNative hc hin hout = do
   hSetBinaryMode hin True
@@ -107,11 +89,10 @@ serveNative hc hin hout = do
   hSetBuffering hout (BlockBuffering Nothing)
   outLock <- newMVar ()
   calls <- newMVar (HM.empty :: HM.HashMap Value (IO (), MVar (), Bool))
-  synced <- newMVar (HM.empty :: HM.HashMap Text UTCTime)
-  cloning <- newMVar ()
+  hub <- newHub hc
 
   let cfg = hcMcp hc
-      offered = toolsFor cfg
+      offered = hubTools hub
 
       -- Uninterruptible, as in `hub mcp`: a message cut off half way is a
       -- broken stream for every call after it.
@@ -137,15 +118,9 @@ serveNative hc hin hout = do
       progress i m = send (object ["id" .= i, "progress" .= (m :: Text)])
 
       request i op o = case op of
-        "hello" -> ok i $ object
-          [ "host" .= ("hbs2-hub" :: Text)
-          , "version" .= mcVersion cfg
-          , "hub_meta" .= hubMetaVersion, "hub_min" .= hubMetaMin
-          , "contracts" .= object [ "thread" .= (1 :: Int), "index" .= (1 :: Int)
-                                  , "log" .= (1 :: Int), "queue" .= (1 :: Int)
-                                  , "letter" .= (1 :: Int) ]
-          , "read_only" .= mcReadOnly cfg
-          , "ops" .= (["hello","tools","call","cancel"] :: [Text]) ]
+        "hello" -> ok i $ case hostHello hub of
+          Object h -> Object (KM.insert "ops" (Aeson.toJSON (["hello","tools","call","cancel"] :: [Text])) h)
+          v -> v
         "tools" -> ok i (object ["tools" .= fmap toolJson offered])
         "call" -> do
           let name = case KM.lookup "tool" o of { Just (String s) -> Just s ; _ -> Nothing }
@@ -157,7 +132,9 @@ serveNative hc hin hout = do
           case (name >>= \n -> List.find ((== n) . toolName) offered, args) of
             (Nothing, _) -> bad i Null "unknown-tool" ("no such tool here: " <> fromMaybe "(none)" name)
             (_, Left ()) -> bad i Null "bad-arguments" "args must be an object"
-            (Just t, Right as) -> spawnCall i (toolAccess t == Writes) (runCall i t as)
+            (Just t, Right as) -> spawnCall i (toolAccess t == Writes) $
+              hubCall hub (progress i) (toolName t) as
+                >>= either (\e -> bad i (heCode e) (heMeaning e) (heMessage e)) (ok i)
         "cancel" -> do
           let target = fromMaybe Null (KM.lookup "target" o)
           k <- withMVar calls (pure . HM.lookup target)
@@ -165,105 +142,6 @@ serveNative hc hin hout = do
           forM_ k $ \(stop, _, writes) -> unless writes stop
           ok i (object ["cancelled" .= maybe False (\(_, _, w) -> not w) k])
         _ -> bad i Null "unknown-op" ("no such op: " <> op)
-
-      -- WHICH CLONE: the working clone the user named for this repository,
-      -- or, for a read, a cache clone this host keeps. A write never runs in
-      -- the cache: canon written there would be published from a directory
-      -- nobody looks at.
-      runCall i t as = do
-        let repo = case KM.lookup "repo" as of
-                     Just (String r) | not (Text.null r) -> Just r
-                     _ -> mcRepo cfg
-        dir <- case repo of
-          Nothing -> pure (Right Nothing)
-          -- A KEY AND NOTHING ELSE, checked before it names a directory: the
-          -- value comes from a browser and becomes a path under the cache and
-          -- an argument to git, so `../../x` would have been both.
-          Just key | not (keyShaped (Text.unpack key)) ->
-            pure (Left ("not a repository key: " <> Text.take 64 key))
-          Just key -> do
-            working <- workingClone key
-            case (working, toolAccess t) of
-              (Just w, _)     -> pure (Right (Just w))
-              (Nothing, Writes) -> pure (Left ( "no working clone for " <> key <> ": set one with "
-                                                 <> "`git config --global hbs2-hub." <> key <> ".clone"
-                                                 <> " <path>`; writes do not go to the cache" ))
-              (Nothing, Reads) -> fmap Just <$> cacheClone i key
-        case dir of
-          Left why -> bad i Null "no-clone" why
-          Right d -> do
-            -- THE IDENTITY `hub identity init` wrote, for a letter: the host
-            -- is started by a browser and given no flags, and a letter needs
-            -- an author and a sender. Read per call, so an identity made after
-            -- the browser started is the one used.
-            au <- maybe (globalConfig "hbs2.hub.author") (pure . Just) (mcAuthor cfg)
-            se <- maybe (globalConfig "hbs2.hub.sender") (pure . Just) (mcSender cfg)
-            let cfg' = cfg { mcDir = d, mcRepo = repo, mcAuthor = au, mcSender = se }
-            case planFor cfg' t as of
-              Left why -> bad i Null "bad-arguments" why
-              Right a -> act i cfg' a
-
-      act i cfg' = \case
-        RunVerb r -> do
-          o <- runVerb cfg' r
-          answer i r o
-        Rehearse probe r -> fromMcp i =<< rehearsed cfg' probe r
-        WaitInbox argv known secs ->
-          fromMcp i =<< waitInbox cfg' (\_ _ -> progress i "waiting for letters") argv known secs
-
-      answer i r o
-        | oTimedOut o = bad i (Number 124) "timeout" ("stopped: " <> argvShown r)
-        | oCode o == 0 || (runShape r == AsAudit && oCode o == 2) = ok i $ case runShape r of
-            AsJson | Just v@(Object _) <- Aeson.decodeStrict (Text.encodeUtf8 (Text.strip (oOut o))) -> v
-            _ -> object [ "text" .= Text.strip (oOut o), "notes" .= Text.strip (oErr o) ]
-        | otherwise = bad i (Number (fromIntegral (oCode o))) (exitMeaning (oCode o))
-                        (Text.strip (oErr o <> "\n" <> oOut o))
-
-      -- A result already shaped for MCP, reshaped for this transport.
-      fromMcp i = \case
-        Object m -> do
-          let isErr = KM.lookup "isError" m == Just (Bool True)
-              texts = case KM.lookup "content" m of
-                Just (Array xs) -> [ s | Object b <- foldr (:) [] xs, Just (String s) <- [KM.lookup "text" b] ]
-                _ -> []
-          if isErr
-            then bad i Null "refused" (Text.intercalate "\n" texts)
-            else ok i (fromMaybe (object ["text" .= Text.intercalate "\n" texts]) (KM.lookup "structuredContent" m))
-        v -> ok i v
-
-      globalConfig k = do
-        (code, out, _) <- readProcess (proc "git" ["config", "--global", "--get", k])
-        let v = Text.strip (Text.decodeUtf8 (LBS.toStrict out))
-        pure (if code == ExitSuccess && not (Text.null v) then Just v else Nothing)
-
-      workingClone key = do
-        (code, out, _) <- readProcess (proc "git" ["config", "--global", "--get", "hbs2-hub." <> Text.unpack key <> ".clone"])
-        let p = Text.unpack (Text.strip (Text.decodeUtf8 (LBS.toStrict out)))
-        exists <- if null p then pure False else doesDirectoryExist p
-        pure (if code == ExitSuccess && exists then Just p else Nothing)
-
-      -- Made on first use and synced at most every 'hcSyncEach' seconds, so a
-      -- page that lists and then shows does not fetch twice.
-      cacheClone i key = withMVar cloning $ \_ -> do
-        let dir = cacheCloneDir hc key
-        have <- doesDirectoryExist dir
-        made <- if have then pure (Right ()) else do
-          progress i ("cloning hbs23://" <> key)
-          createDirectoryIfMissing True (takeDirectory dir)
-          (code, _, err) <- readProcess (proc "git" ["clone", "-q", "hbs23://" <> Text.unpack key, dir])
-          pure $ if code == ExitSuccess then Right ()
-                 else Left ("git clone hbs23://" <> key <> " failed: " <> Text.strip (Text.decodeUtf8 (LBS.toStrict err)))
-        case made of
-          Left e -> pure (Left e)
-          Right () -> do
-            now <- getCurrentTime
-            last' <- withMVar synced (pure . HM.lookup key)
-            let stale = maybe True (\t -> diffUTCTime now t > fromIntegral (hcSyncEach hc)) last'
-            when stale $ do
-              progress i "fetching the record"
-              void $ readProcess (setWorkingDir dir (proc (mcHub cfg) ["sync", "--repo", Text.unpack key]))
-              modifyMVar_ synced (pure . HM.insert key now)
-            pure (Right dir)
 
       spawnCall i writes body = do
         gate <- newEmptyMVar
