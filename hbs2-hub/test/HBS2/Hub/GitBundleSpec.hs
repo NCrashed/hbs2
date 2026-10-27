@@ -87,6 +87,18 @@ spec = do
 spec1 :: Spec
 spec1 = do
 
+  -- The URL comes from a browser page and reaches git's command line.
+  describe "PEP-24 a pull request from another repository's URL" $
+    it "takes an https URL and nothing that git or a shell reads twice" $ do
+      validFetchUrl "https://github.com/alice/repo" `shouldBe` True
+      validFetchUrl "https://github.com/alice/repo.git" `shouldBe` True
+      validFetchUrl "http://github.com/alice/repo" `shouldBe` False
+      validFetchUrl "file:///etc" `shouldBe` False
+      validFetchUrl "--upload-pack=touch /tmp/x" `shouldBe` False
+      validFetchUrl "https://h/a b" `shouldBe` False
+      validFetchUrl "https://h/a;rm" `shouldBe` False
+      validFetchUrl "ext::sh -c x" `shouldBe` False
+
   describe "PEP-20 delta path: building a bundle" $ do
 
     it "bundles the range and reports the tip it recorded" $ withWork $ \dir base tip -> do

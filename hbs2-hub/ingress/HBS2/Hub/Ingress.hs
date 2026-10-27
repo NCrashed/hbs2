@@ -1323,8 +1323,10 @@ newtype PeerSilent = PeerSilent String
 
 instance Show PeerSilent where
   show (PeerSilent what) =
+    -- In whole seconds: the Timeout prints as the Fixed E12 it is made of,
+    -- "10.000000000000", which read as a malformed number in a refusal.
     "the peer did not answer for " <> show what <> " within "
-      <> show (pretty rpcTimeout) <> ". It is running, so this is not a"
+      <> show (toNanoSeconds rpcTimeout `div` 1000000000) <> " seconds. It is running, so this is not a"
       <> " connection problem: check `hbs2-peer poke` and the peer's log."
 
 instance Exception PeerSilent

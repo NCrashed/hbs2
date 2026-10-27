@@ -178,6 +178,28 @@ tooling = describe "hub mcp: the tools" $ do
     argvOf (plan cfg0 "inbox_show" [msg]) `shouldSatisfy` maybe False (not . any ("--mailbox" `isPrefixOf`))
     argvOf (plan cfg0 "inbox_reject" [msg]) `shouldSatisfy` maybe False (\a -> take 2 a == ["inbox","reject"])
 
+  it "assigns, redacts and names maintainers with one way of saying who" $ do
+    plan cfg0 "issue_assign" [("number", Number 2)] `shouldSatisfy` either (const True) (const False)
+    argvOf (plan cfg0 "issue_assign" [("number", Number 2), ("clear", Bool True)])
+      `shouldSatisfy` maybe False (elem "--clear")
+    argvOf (plan cfg0 "maintainer_add" [("author_of", Number 4)])
+      `shouldBe` Just ["maintainer","add","--repo=7VM1rtxrTmpXYVidNFHu5ZbNqRKMhKoRAV8vJebGaRN9","--author-of=4"]
+    plan cfg0 "maintainer_remove" [] `shouldSatisfy` either (const True) (const False)
+    argvOf (plan cfg0 "redact" [("event", "6emnPfjcUddSbasux8EEe1bR2nuuHfd1tWJzpUJxLUAr")])
+      `shouldSatisfy` maybe False (\a -> take 1 a == ["redact"])
+
+  it "records a merge made elsewhere, fetching first when asked" $
+    argvOf (plan cfg0 "pr_merge" [("number", Number 3), ("commit", "abc1234"), ("into", "refs/heads/master"), ("fetch", "origin")])
+      `shouldSatisfy` maybe False (elem "--fetch=origin")
+
+  it "proposes another repository's ref only with the ref named" $ do
+    let me = cfg0 { mcAuthor = Just "3a8Rv9dbVQAprna3GzgfihUpq64wCSLX2nyfhgDB5MH3"
+                  , mcSender = Just "HK6W3fanQz1z9DVymPrkiVqTsJquWfk1oAUnmXBp8xg6" }
+    plan me "pr_new" [("title", "t"), ("from_url", "https://github.com/a/b")]
+      `shouldSatisfy` either ("from" `Text.isInfixOf`) (const False)
+    argvOf (plan me "pr_new" [("title", "t"), ("from_url", "https://github.com/a/b"), ("from", "pull/3/head")])
+      `shouldSatisfy` maybe False (elem "--from-url=https://github.com/a/b")
+
   it "will not clear labels because none were given" $
     plan cfg0 "issue_label" [("number", Number 3)] `shouldSatisfy` either (const True) (const False)
 

@@ -61,6 +61,10 @@ module HBS2.Hub.Repo.GitBundle
   , pushBranch
   , advanceBranch
   , Advanced(..)
+  , fetchFromUrl
+  , validFetchUrl
+  , incomingRef
+  , fetchRemote
   ) where
 
 import HBS2.Hub.Types (safeText,validRefName,validSha,validAbbrevSha)
@@ -1220,3 +1224,52 @@ advanceBranch cwd branch old new = runExceptT do
       void $ ExceptT $ call cwd smallSeconds "update-ref"
         [ "update-ref", Text.unpack ref, Text.unpack new, Text.unpack old ]
       pure AdvancedRef
+
+-- Proposing what is not on a branch here -----------------------------------
+
+-- | Where 'fetchFromUrl' puts what it fetched: one ref, overwritten each time.
+incomingRef :: Text
+incomingRef = "refs/hbs2-hub/incoming"
+
+-- | An https URL and nothing else, because it reaches a command line and a
+-- network: no option, no local path, no other transport, nothing a shell or
+-- git would read twice. The browser hands this verb a GitHub repository's
+-- address, and that is the shape this admits.
+validFetchUrl :: Text -> Bool
+validFetchUrl u =
+  "https://" `Text.isPrefixOf` u
+    && Text.length u <= 512
+    && Text.all ok u
+  where ok c = c > ' ' && c < '\DEL' && c `notElem` ("\\\"'`$;|&<>" :: String)
+
+-- | Fetch one ref of a repository by URL into 'incomingRef', and say what it
+-- holds.
+--
+-- For a pull request from somebody else's repository: a GitHub fork's branch,
+-- or GitHub's own @pull/N/head@ for a pull request opened there. The objects
+-- land in this repository like any fetch's; the ref is ours and is forced,
+-- since it names whatever was fetched last and nothing else.
+fetchFromUrl :: MonadUnliftIO m
+             => Maybe FilePath -> Text -> Text -> m (Either BundleError Text)
+fetchFromUrl cwd url ref = runExceptT do
+  checked "repository URL" validFetchUrl url
+  checked "ref name" validRefName ref
+  _ <- ExceptT $ call cwd fetchSeconds "fetch"
+         [ "fetch", "--no-tags", "--end-of-options", Text.unpack url
+         , "+" <> Text.unpack ref <> ":" <> Text.unpack incomingRef ]
+  tip <- ExceptT (refTip cwd incomingRef)
+  maybe (throwError (BundleRefused "fetch" (ReaderSays "it fetched no commit"))) pure tip
+
+-- | Fetch a remote's branches, by its own refspec. For a merge that was made
+-- somewhere else (on GitHub, say) and is to be recorded here.
+fetchRemote :: MonadUnliftIO m => Maybe FilePath -> Text -> m (Either BundleError ())
+fetchRemote cwd remote = runExceptT do
+  checked "remote name" validRefName remote
+  -- A refspec that covers refs/hbs2/* moves canon under the verb; see
+  -- 'BundleCanonClobbered', which is the same case met by `hub sync`.
+  was <- ExceptT (refTip cwd "refs/hbs2/meta")
+  void $ ExceptT $ call cwd fetchSeconds "fetch" [ "fetch", "--no-tags", "--end-of-options", Text.unpack remote ]
+  now <- ExceptT (refTip cwd "refs/hbs2/meta")
+  case was of
+    Just w | now /= was -> throwError (BundleCanonClobbered w now)
+    _ -> pure ()

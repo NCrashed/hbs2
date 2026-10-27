@@ -143,7 +143,10 @@ fillArgv cx ws args0 = List.foldl' step args0 ws
       -- Not when it would propose the branch onto itself, which is what being
       -- on master and typing `pr new` would otherwise mean; the verb's own
       -- usage error then names the missing --from.
+      -- Nor with --from-url, whose --from is a ref of ANOTHER repository: the
+      -- branch checked out here is not it.
       WFrom       -> case (cxFrom cx, cxOnto cx) of
+        _ | given ["--from-url"] args -> args
         (Just f, o) | Just f /= ontoGiven args o -> flag ["--from"] "--from" (Just f) args
         _ -> args
       WOwnMailbox -> flag ["--mailbox"] "--mailbox" (cxAuthor cx) args

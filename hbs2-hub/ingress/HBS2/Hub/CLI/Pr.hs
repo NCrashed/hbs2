@@ -107,6 +107,9 @@ data PrNew = PrNew
   , pnFrom   :: Text          -- ^ the branch being proposed
   , pnBase   :: Maybe Text    -- ^ override for the fork point
   , pnBody   :: Maybe Text    -- ^ --body, where "-" means stdin
+    -- | Fetch --from from this repository first, instead of proposing a
+    -- branch of this one: a GitHub fork, or GitHub's own pull/N/head.
+  , pnFromUrl :: Maybe Text
   }
   deriving stock (Eq,Show)
 
@@ -114,6 +117,7 @@ prNewUsage :: Doc ()
 prNewUsage =
   "usage: hbs2-hub pr new --repo <repo-key> --sender <sigil> --recipient <sigil>"
     <> line <> "       --author <key> --title <text> --onto <ref> --from <ref> [--base <sha>]"
+    <> line <> "       [--from-url <https-url>]"
 
 prEntries :: forall c m . ( IsContext c
                           , MonadUnliftIO m
@@ -134,7 +138,8 @@ prEntries = do
            -- --recipient is optional (the manifest is read without it), and
            -- --base and --body are how a fork point and a body get in.
            , arg "string" "[--recipient recipient-sigil]"
-           , arg "string" "[--base ref]", arg "string" "[--body text | -]" ]
+           , arg "string" "[--base ref]", arg "string" "[--body text | -]"
+           , arg "string" "[--from-url https-url]" ]
     $ desc ( "Builds a git bundle of base..--from in THIS repository and ships"
              <> line <> "it as an encrypted attachment (PEP-20's delta path). The"
              <> line <> "bundle's size is the delta, so proposing a change to a"
@@ -154,6 +159,11 @@ prEntries = do
              <> line <> "stdin. Nothing is read from stdin otherwise: git hands a"
              <> line <> "hook <old> <new> <ref-name> there, and a body goes inside"
              <> line <> "the signature and the event-id, where canon cannot fix it."
+             <> line
+             <> line <> "--from-url proposes what another repository holds: --from"
+             <> line <> "is fetched from that https URL first (a GitHub fork's"
+             <> line <> "branch, or pull/<n>/head for a pull request opened on"
+             <> line <> "GitHub), and only its new commits travel, as ever."
              <> line
              <> line <> "Prints the message hash and the thread-id, which the"
              <> line <> "sender can compute before any maintainer has looked." )
@@ -229,6 +239,7 @@ prEntries = do
   brief "record that a pull request was merged"
     $ args [ arg "string" "--repo repo-key", arg "string" "--number n"
            , arg "string" "--commit sha", arg "string" "--into ref"
+           , arg "string" "[--fetch remote]"
            , arg "string" "[--as canon-key]", arg "string" "[--dry-run]" ]
     $ desc ( "RECORDS a merge; it does not perform one. PEP-20 leaves the"
              <> line <> "integration to whatever policy the repository uses --"
@@ -251,6 +262,9 @@ prEntries = do
              <> line <> "(PEP-19). No second 'set' is written and none should be:"
              <> line <> "canon would claim a merged pull request was open until it"
              <> line <> "arrived."
+             <> line
+             <> line <> "--fetch fetches that remote first, for a merge made there"
+             <> line <> "(on GitHub, say) whose commit this clone has not seen."
              <> line
              <> line <> "--as names the canon key to sign with, for a delegate (PEP-21)."
              <> line <> signerPrecedenceHelp
@@ -392,6 +406,8 @@ prEntries = do
     -- The note that canon is not published yet is left out when the caller
     -- publishes next, which is what `pr land` does.
     prMerge unpublishedNote pm = do
+      for_ (pmFetch pm) $ \r ->
+        fetchRemote Nothing r >>= either (\e -> liftIO (refuse (show (pretty e)) codeNotMerged)) pure
       (signer, parent, fr, acc, now) <- mergeEvent pm
 
       commit <- committing (oneStop codeNotMerged) (pmDry pm) parent
@@ -504,7 +520,7 @@ prEntries = do
       -- MAY THIS SIGNER RECORD IT, asked before anything moves: the same
       -- checks the record will run, against the tip itself, which contains
       -- the tip. A refusal here is a refusal with nothing pushed.
-      _ <- mergeEvent (PrMerge (plRepo pl) n tip into (plAs pl) DryRun)
+      _ <- mergeEvent (PrMerge (plRepo pl) n tip into (plAs pl) DryRun Nothing)
 
       old <- fetchBranch Nothing remote onto >>= either gitStop pure
       local <- refTip Nothing into >>= either gitStop pure
@@ -586,7 +602,7 @@ prEntries = do
                                        <+> pretty onto <+> "there yourself:" <> line
                                      <> "  " <> pretty e <> line ))
 
-      prMerge False (PrMerge (plRepo pl) n merged into (plAs pl) ForReal)
+      prMerge False (PrMerge (plRepo pl) n merged into (plAs pl) ForReal Nothing)
 
       r <- publishTo Nothing remote
              >>= either (\e -> liftIO (refuse ( show ( "the merge is pushed and recorded here, and"
@@ -635,8 +651,18 @@ prEntries = do
       -- address is not going to be sent.
       rcpt <- addressed (pnRcpt pn) (pnRepo pn)
 
+      -- Somebody else's commits come into a ref of ours first. The ref the
+      -- letter names is still the one that was asked for, since that is where
+      -- they live; what is bundled is what the fetch brought.
+      source <- case pnFromUrl pn of
+        Nothing -> pure (pnFrom pn)
+        Just url -> do
+          liftIO (saying ("hbs2-hub: fetching" <+> pretty (safeText (pnFrom pn)) <+> "from" <+> pretty (safeText url) <> line))
+          _ <- gitOr =<< fetchFromUrl Nothing url (pnFrom pn)
+          pure incomingRef
+
       (b, base, part) <- propose (pnAuthor pn) (pnSender pn) rcpt
-                                 (pnOnto pn) (pnFrom pn) (pnBase pn)
+                                 (pnOnto pn) source (pnBase pn)
 
       now <- liftIO getPOSIXTime <&> floor . (* 1000)
 
@@ -817,14 +843,15 @@ prNewArgs syn = do
   -- Named, not taken off stdin: see 'readBody'. A hook that opens a pull
   -- request is exactly the caller that has git's own bytes on its stdin.
   body   <- flagMaybe kvs "--body" asText
-  pure (PrNew repo sender rcpt author title onto from base body)
+  url    <- flagMaybe kvs "--from-url" asText
+  pure (PrNew repo sender rcpt author title onto from base body url)
   where
     -- The list is the point: this reader used to pair each word with the next
     -- and ask no more, so `--title --onto refs/heads/master` bound the title
     -- `--onto` and signed it into the event-id, and `--dry-run` was dropped on
     -- the floor. Both guards live in 'flagsOf' now.
     knownFlags = repoFlags <> [ "--sender","--recipient","--author"
-                 , "--title","--onto","--from","--base","--body" ]
+                 , "--title","--onto","--from","--base","--body","--from-url" ]
 
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     asHash = \case { HashLike h -> Just h ; _ -> Nothing }
@@ -927,12 +954,15 @@ data PrMerge = PrMerge
   , pmInto   :: Text        -- ^ the branch it landed on
   , pmAs     :: Maybe HubKey  -- ^ @--as@; see "HBS2.Hub.CLI.Signer" for the default
   , pmDry    :: Writing
+    -- | Fetch this remote first: the merge was made there (on GitHub, say)
+    -- and its commit is not in this clone yet.
+  , pmFetch  :: Maybe Text
   }
   deriving stock (Eq,Show)
 
 prMergeUsage :: Doc ()
 prMergeUsage =
-  "usage: hbs2-hub pr merge --repo <key> --number <n> --commit <sha> --into <ref> [--as <key>] [--dry-run]"
+  "usage: hbs2-hub pr merge --repo <key> --number <n> --commit <sha> --into <ref> [--fetch <remote>] [--as <key>] [--dry-run]"
 
 -- | Canon holds no such pull request, or the number names something else.
 codeNoSuchPr :: Int
@@ -947,7 +977,7 @@ codeNotMerged = 30
 
 prMergeArgs :: forall c . IsContext c => [Syntax c] -> Maybe PrMerge
 prMergeArgs syn = do
-  kvs  <- flagsAndSwitches (repoFlags <> ["--number","--commit","--into","--as"])
+  kvs  <- flagsAndSwitches (repoFlags <> ["--number","--commit","--into","--as","--fetch"])
                            ["--dry-run"] syn
   repo <- flagRepo asKey kvs
   -- A number, non-negative AND small enough to be the one that was typed:
@@ -958,7 +988,8 @@ prMergeArgs syn = do
   into <- flagOnce kvs "--into"   >>= asText
   as   <- flagMaybe kvs "--as" asKey
   dry  <- flagSwitch kvs "--dry-run"
-  pure (PrMerge repo n sha into as (writingOf dry))
+  fe   <- flagMaybe kvs "--fetch" asText
+  pure (PrMerge repo n sha into as (writingOf dry) fe)
   where
     asKey  = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }
     -- Through 'flagText': an abbreviated sha can be all digits, and one in

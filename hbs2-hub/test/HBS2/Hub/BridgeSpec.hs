@@ -444,6 +444,31 @@ spec = promise >> do
     -- thread's `updated`, was counted by `hub verify`, was retained forever by
     -- compaction -- and changed no rendering anywhere, while the verb printed an
     -- event id, a seq and a commit. This test used to assert that it worked.
+    -- A close's note is shown as a comment under it, so it is text a reader
+    -- shows, and it was refused as though it were a note-less close.
+    it "redacts a close's note, and still refuses a close without one" $ do
+      alice <- kp
+      owner <- kp
+      origin <- someHash
+      let repo = fst owner
+          letter = makeLetter (fst alice) (snd alice)
+                     (AOpen repo HubIssue "t" [] Nothing Nothing Nothing 1) noReplyChannel
+      aOpen <- expectRight
+        (acceptLetter (ctxOf owner) (EnvelopeSigner (fst alice)) (emptyView repo) 1 origin noParts letter)
+      aClose <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (AClose (scopeOf aOpen) (Just "spam, closing") 2))
+      aRed <- expectRight
+        (ownerEvent (ctxOf owner) (acView aClose) 3 noOwnAttachments
+           (ARedact repo (eventId (acEvent aClose)) 3))
+      let fr = foldEvents repo (map acEvent [aOpen, aClose, aRed])
+          comments = foldMap tsComments (HM.elems (frThreads fr))
+      fmap cRedacted comments `shouldBe` [True]
+      aBare <- expectRight
+        (ownerEvent (ctxOf owner) (acView aOpen) 2 noOwnAttachments (AClose (scopeOf aOpen) Nothing 2))
+      expectOwn NotRedactable
+        (ownerEvent (ctxOf owner) (acView aBare) 3 noOwnAttachments
+           (ARedact repo (eventId (acEvent aBare)) 3))
+
     it "refuses to redact an event no reader would hide anything of" $ do
       alice <- kp
       owner <- kp

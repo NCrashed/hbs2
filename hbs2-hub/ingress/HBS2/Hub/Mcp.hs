@@ -192,7 +192,10 @@ tools =
   , tAccept "inbox_honour" ["inbox","honour"] honourDesc
   , tReject
   , tIssueOpen, tIssueClose, tIssueReopen, tIssueLabel, tIssueReply, tIssueComment
-  , tIssueNew, tPrNew, tPrLand
+  , tIssueNew, tPrNew, tPrLand, tPrMerge
+  , tIssueAssign, tRedact
+  , tMaintainerList, tMaintainer "maintainer_add" "add" "Add a maintainer"
+  , tMaintainer "maintainer_remove" "remove" "Remove a maintainer"
   , tPublish, tSync
   ]
 
@@ -885,6 +888,9 @@ tPrNew = Tool
                 , prop "onto" "Branch to merge into. Default: the remote's HEAD branch."
                 , prop "from" "Branch to propose. Default: the branch checked out."
                 , prop "base" "Fork point, when the merge-base of onto and from is not it."
+                , prop "from_url" ("Propose a ref of ANOTHER repository: fetch from from this https URL "
+                                   <> "first (a GitHub fork's branch, or pull/<n>/head of a pull request "
+                                   <> "opened on GitHub). from is then required.")
                 , pRepo, pAuthor, pSender, pRecipient, pDry ]
   , toolRequired = ["title"]
   , toolAccess = Writes, toolOpenWorld = True, toolVerb = ["pr","new"]
@@ -895,6 +901,8 @@ tPrNew = Tool
       onto <- optText "onto" as
       from <- optText "from" as
       base <- optText "base" as
+      url <- optText "from_url" as
+      when (isJust url && not (isJust from)) $ Left "from_url needs from: the ref to fetch from it"
       r <- repoOf cfg as
       (au, se) <- letterKeys cfg as
       rc <- hashOr "recipient" Nothing as
@@ -905,6 +913,7 @@ tPrNew = Tool
                       , flag "title" title]
                       <> maybe [] (const ["--body=-"]) body
                       <> flagM "onto" onto <> flagM "from" from <> flagM "base" base
+                      <> flagM "from-url" url
                       <> flagM "recipient" rc )
                     body AsText
           probe = Run ["whoami", flag "author" au, flag "sender" se, flag "repo" r] Nothing AsText
@@ -943,6 +952,119 @@ tPrLand = Tool
         Run ( ["pr","land", flag "repo" r, flag "number" (Text.pack (show n))]
               <> flagM "remote" rm <> flagM "mirror" mi <> switch "no-mirror" nm
               <> flagM "message" msg <> a )
+            Nothing AsText
+  }
+
+tIssueAssign :: Tool
+tIssueAssign = Tool
+  { toolName = "issue_assign", toolTitle = "Say who is looking at a thread"
+  , toolDesc = "Set the assignee of an issue (or, with kind: pr, a pull request) that is in "
+      <> "canon: one key, which replaces the one before; clear: true unassigns. A note about "
+      <> "who is looking, not a grant of anything." <> canonIsForever <> defaultsNote
+  , toolProps = [ pNumber, prop "assignee" "The assignee's key (base58)."
+                , propBool "clear" "Unassign (instead of assignee)."
+                , pKind, pRepo, pAs, pDry ]
+  , toolRequired = ["number"]
+  , toolAccess = Writes, toolOpenWorld = False, toolVerb = ["issue","assign"]
+  , toolPlan = \cfg as -> do
+      k <- kindOf as
+      n <- optNat "number" as >>= needed "number" ""
+      who <- keyOr "assignee" Nothing as
+      clear <- optBool "clear" as
+      case (who, clear) of
+        (Nothing, False) -> Left "pass assignee, or clear: true to unassign"
+        (Just _, True) -> Left "assignee and clear both given; pass one"
+        _ -> pure ()
+      r <- repoOf cfg as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $
+        Run ([k, "assign", flag "repo" r, flag "number" (Text.pack (show n))]
+               <> flagM "assignee" who <> switch "clear" clear <> a)
+            Nothing AsText
+  }
+
+tRedact :: Tool
+tRedact = Tool
+  { toolName = "redact", toolTitle = "Withhold an event's text"
+  , toolDesc = "Redact one event (an opening or a comment) by its event id: readers withhold "
+      <> "its title and body from then on. The event itself stays in canon, as canon is "
+      <> "append-only; what a clone already holds is not taken back." <> canonIsForever
+      <> defaultsNote
+  , toolProps = [ prop "event" "The event id (base58), as the thread document gives it.", pRepo, pAs, pDry ]
+  , toolRequired = ["event"]
+  , toolAccess = Writes, toolOpenWorld = False, toolVerb = ["redact"]
+  , toolPlan = \cfg as -> do
+      e <- hashOr "event" Nothing as >>= needed "event" ""
+      r <- repoOf cfg as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $ Run (["redact", flag "repo" r, flag "event" e] <> a) Nothing AsText
+  }
+
+tMaintainerList :: Tool
+tMaintainerList = Tool
+  { toolName = "maintainer_list", toolTitle = "Who may write canon"
+  , toolDesc = "The keys that may bless canon here, as the maintainers JSON document: the "
+      <> "owner (the repository key) and every maintainer canon names. Read-only." <> defaultsNote
+  , toolProps = [pRepo], toolRequired = []
+  , toolAccess = Reads, toolOpenWorld = False, toolVerb = ["maintainer","list"]
+  , toolPlan = \cfg as -> do
+      r <- repoOf cfg as
+      pure $ RunVerb (Run ["maintainer","list", flag "repo" r, "--json"] Nothing AsJson)
+  }
+
+tMaintainer :: Text -> String -> Text -> Tool
+tMaintainer name verb title = Tool
+  { toolName = name, toolTitle = title
+  , toolDesc = (if verb == "add"
+                  then "Make a key a maintainer: it may then accept letters and write canon. "
+                  else "Take a key's maintainership away: what it wrote stays in canon. ")
+      <> "Name the key, or author_of a thread number to take that thread's author. Only the "
+      <> "owner may do this." <> canonIsForever <> defaultsNote
+  , toolProps = [ prop "key" "The maintainer's key (base58)."
+                , propInt "author_of" "Instead of key: the author of this thread number."
+                , pRepo, pDry ]
+  , toolRequired = []
+  , toolAccess = Writes, toolOpenWorld = False, toolVerb = ["maintainer", verb]
+  , toolPlan = \cfg as -> do
+      k <- keyOr "key" Nothing as
+      n <- optNat "author_of" as
+      who <- case (k, n) of
+        (Just key, Nothing) -> pure [flag "maintainer-key" key]
+        (Nothing, Just m) -> pure [flag "author-of" (Text.pack (show m))]
+        (Nothing, Nothing) -> Left "pass key, or author_of"
+        _ -> Left "key and author_of both given; pass one"
+      r <- repoOf cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $ Run (["maintainer", verb, flag "repo" r] <> who) Nothing AsText
+  }
+
+tPrMerge :: Tool
+tPrMerge = Tool
+  { toolName = "pr_merge", toolTitle = "Record a merge made elsewhere"
+  , toolDesc = "Record that an open pull request was merged by a commit made outside this "
+      <> "tool (with git, or on GitHub): canon checks that the commit contains the proposed "
+      <> "tip, and the status becomes merged. fetch names a remote to fetch first, for a "
+      <> "merge whose commit this clone has not seen. pr_land is the one that merges."
+      <> canonIsForever <> defaultsNote
+  , toolProps = [ pNumber, prop "commit" "The merge commit (a full or abbreviated sha)."
+                , prop "into" "The branch it landed on, as refs/heads/<name>."
+                , prop "fetch" "A remote to fetch first, such as origin."
+                , pRepo, pAs, pDry ]
+  , toolRequired = ["number", "commit", "into"]
+  , toolAccess = Writes, toolOpenWorld = True, toolVerb = ["pr","merge"]
+  , toolPlan = \cfg as -> do
+      n <- optNat "number" as >>= needed "number" ""
+      c <- optText "commit" as >>= needed "commit" ""
+      i <- optText "into" as >>= needed "into" ""
+      fe <- optText "fetch" as
+      r <- repoOf cfg as
+      a <- asFlag cfg as
+      dry <- optBool "dry_run" as
+      pure $ native dry $
+        Run ( ["pr","merge", flag "repo" r, flag "number" (Text.pack (show n)), flag "commit" c
+              , flag "into" i] <> flagM "fetch" fe <> a )
             Nothing AsText
   }
 

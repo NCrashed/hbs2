@@ -51,6 +51,11 @@ spec = describe "hub defaults from the clone" $ do
   it "leaves a read verb alone when it already starts with a key" $
     fill "hub:issue:show" [repo, "7"] `shouldBe` [repo, "7"]
 
+  it "does not take the checkout for a ref of another repository" $
+    fill "hub:pr:new" ["--title", "t", "--from-url", "https://github.com/a/b", "--from", "pull/3/head"]
+      `shouldBe` [ "--title", "t", "--from-url", "https://github.com/a/b", "--from", "pull/3/head"
+                 , "--repo", repo, "--author", author, "--sender", sender, "--onto", "master" ]
+
   it "does not propose a branch onto itself" $ do
     let onMaster = known { cxFrom = Just "master" }
     fillArgv onMaster (wantsOf "hub:pr:new") ["--title", "t"]

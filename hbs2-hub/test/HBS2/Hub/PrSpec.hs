@@ -59,7 +59,7 @@ spec1 = do
       repo <- aKey ; author <- aKey
       let sender = aHash "sender" ; rcpt = aHash "rcpt"
           want = Just (PrNew repo sender (Just rcpt) author "make it work"
-                             "refs/heads/master" "refs/heads/feature" Nothing Nothing)
+                             "refs/heads/master" "refs/heads/feature" Nothing Nothing Nothing)
       prNewArgs (argv (full repo sender rcpt author)) `shouldBe` want
       -- The same call with the flag PAIRS in the opposite order, which is what
       -- "in any order" means: a flag and its value stay adjacent.
@@ -167,7 +167,7 @@ spec2 =
       repo <- aKey
       prMergeArgs (argv [ "--repo", b58 repo, "--number", "7"
                         , "--commit", "abc", "--into", "refs/heads/master" ])
-        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" Nothing ForReal)
+        `shouldBe` Just (PrMerge repo 7 "abc" "refs/heads/master" Nothing ForReal Nothing)
 
     it "takes a delegate's key when one is named" $ do
       repo <- aKey ; bob <- aKey

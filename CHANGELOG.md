@@ -2,10 +2,27 @@
 
 ## Added
 
-  - **The `issue_reopen` MCP tool**, beside `issue_close`: the browser
-    extension's Reopen button runs it.
+  - **MCP tools for the browser extension's maintainer side:**
+    `issue_reopen`, `issue_assign`, `redact`, `pr_merge`, and
+    `maintainer_list`, `maintainer_add`, `maintainer_remove`.
+
+  - **`hbs2-hub pr new --from-url <https-url>`** proposes a ref of another
+    repository: a GitHub fork's branch, or `pull/<n>/head` for a pull
+    request opened on GitHub. The ref is fetched into the working clone
+    first; only its new commits travel. `pr_new` takes it as `from_url`.
+
+  - **`hbs2-hub pr merge --fetch <remote>`** fetches first, for a merge
+    made on GitHub whose commit this clone has not seen.
 
 ## Fixed
+
+  - **A close's or a reopen's note can be redacted.** It is shown as a
+    comment, and `redact` refused it as though the event carried no text.
+    The fold already withheld it once redacted, so no clone reads canon
+    differently.
+
+  - **The peer timeout reads "within 10 seconds"**, not "within
+    10.000000000000".
 
   - **`hbs2-hub issue open --label` applies the labels**, as its help
     said. An open's own labels are what its author asked for, whoever the

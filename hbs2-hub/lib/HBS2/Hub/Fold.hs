@@ -1194,8 +1194,11 @@ redactable = \case
   AComment{}  -> True   -- body, body-part, part-secret
   ARevise{}   -> False
   ASet{}      -> False
-  AClose{}    -> False
-  AReopen{}   -> False
+  -- A note is text: the fold shows it as a comment under the close or the
+  -- reopen, with the event's own id, and a redact of the event withholds it
+  -- there. Without one there is nothing to hide, as the paragraph above says.
+  AClose _ note _  -> isJust note
+  AReopen _ note _ -> isJust note
   AMerge{}    -> False
   ARedact{}   -> False
   ADelegate{} -> False
