@@ -1,4 +1,13 @@
-# Unreleased
+# 0.26.0.2  2026-10-27
+
+What the browser extension's maintainer side runs on: the inbox, labels,
+closing and reopening, assignees, redaction, the maintainers, merges
+recorded from GitHub, and pull requests proposed from another repository
+or from one of GitHub's own. The extension needs this release for those;
+on 0.26.0.1 it says the host is older than it.
+
+Also fixed: `issue open --label` now applies the labels it said it
+applied, and a close's note can be redacted.
 
 ## Added
 
