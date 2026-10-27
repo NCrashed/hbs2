@@ -14,6 +14,7 @@ import HBS2.Git3.State
 import HBS2.Git3.Repo qualified as Repo
 import HBS2.Git3.Repo
 import HBS2.Git3.Repo.Mailbox
+import HBS2.Git3.Repo.About
 import HBS2.Git3.Logger
 import HBS2.Git3.Man
 import HBS2.Net.Auth.GroupKeySymm
@@ -622,6 +623,45 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
                                <+> pretty (mkForm @C "mailbox"
                                      [ mkSym (show (pretty (AsBase58 mbox)))
                                      , mkSym (Text.unpack hubRole) ])
+
+        brief "give the repository a name and a description, in its manifest" $
+          args [ arg "string" "repo", arg "string" "--name text", arg "string" "--description text"
+               , arg "string" "--clear-name", arg "string" "--clear-description" ] $
+          desc ( "What a page shows for the repository instead of its key (PEP-25):"
+                 <> line <> "a name of at most 100 characters and a description of at"
+                 <> line <> "most 1000, each one line with no quote or backslash, given"
+                 <> line <> "as quoted strings: --name '\"my project\"'. Written into the manifest and"
+                 <> line <> "published with it, as the mailbox clauses are. Run with"
+                 <> line <> "nothing to say but the repository to see what it declares." ) $
+          entry $ bindMatch "repo:describe" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [ ("--name",1), ("--description",1)
+                                         , ("--clear-name",0), ("--clear-description",0) ] syn
+                given f = headMay [ Text.pack t | ListVal [StringLike f', StringLike t] <- opts, f' == f ]
+                clear f = not (null [ () | ListVal [StringLike f'] <- opts, f' == f ])
+                change f = case (given f, clear ("--clear-" <> drop 2 f)) of
+                  (Just _, True) -> throwIO (userError (f <> " and --clear-" <> drop 2 f <> " both given; pass one"))
+                  (Just t, False) -> pure (Just (Just t))
+                  (Nothing, True) -> pure (Just Nothing)
+                  (Nothing, False) -> pure Nothing
+            name <- change "--name"
+            description <- change "--description"
+
+            repo <- resolveRepoKeyThrow argz
+
+            wrote <- withManifest repo $ \mf -> do
+              let step f v m = maybe (pure m) (\x -> either (throwIO . userError . Text.unpack) pure (setAbout f x m)) v
+              mf' <- step "name" name mf >>= step "description" description
+              -- The clause is read in another package; see 'writesBackAsAbout'.
+              unless (writesBackAsAbout (aboutOf mf') mf') $
+                throwIO (userError "the clauses would not read back; nothing was written")
+              pure mf'
+
+            RepoManifest now <- getRepoManifest
+            let About n d = aboutOf now
+            liftIO $ print $ vcat
+              [ (if wrote then "declared" else "as it was") <> ":"
+              , "  name        " <> maybe "(none)" pretty n
+              , "  description " <> maybe "(none)" pretty d ]
 
         brief "publish a sigil so contributors can seal letters to a mailbox" $
           args [arg "string" "repo", arg "string" "--key mailbox-key"

@@ -13,6 +13,17 @@
     The pages are built by hbs2-hub-browser (`dist/web`) and named with
     `--web`.
 
+  - **`hbs2-hub code refs|tree|blob|log|show --json`, the code view (PEP-25):**
+    a repository's branches and tags, a directory with its README, a file
+    (at most 512 KiB of it), the history of a ref or a path, and a commit
+    with its diff, as documents; the MCP tools `code_refs`, `code_tree`,
+    `code_blob`, `code_log`, `code_commit`. A public `serve` offers them.
+
+  - **`hbs2-git3 repo:describe <repo> --name '"..."' --description '"..."'`**
+    gives a repository a name and a description in its manifest, which the
+    hub's pages show instead of its key. `--clear-name` and
+    `--clear-description` take them out.
+
 # 0.26.0.2  2026-10-27
 
 What the browser extension's maintainer side runs on: the inbox, labels,

@@ -39,6 +39,7 @@ import HBS2.Hub.CLI.Updates
 import HBS2.Hub.CLI.Verify
 import HBS2.Hub.CLI.Whoami
 import HBS2.Hub.CLI.Serve (serveEntries)
+import HBS2.Hub.CLI.Code (codeEntries)
 
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run
@@ -90,6 +91,7 @@ hubEntries = do
   projectEntries
   nativeHostEntries
   serveEntries
+  codeEntries
 
 -- | AN ALLOWLIST, and it is the whole of what this tool answers to.
 --
@@ -156,4 +158,6 @@ peerFulNames =
   , "hub:project:open"
   -- It reads the mailbox: see the mailbox line in its report.
   , "hub:status"
+  -- It reads the manifest, for the name and the description.
+  , "hub:code:refs"
   ]

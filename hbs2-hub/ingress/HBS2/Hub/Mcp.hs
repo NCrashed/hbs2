@@ -197,7 +197,7 @@ tools =
   , tMaintainerList, tMaintainer "maintainer_add" "add" "Add a maintainer"
   , tMaintainer "maintainer_remove" "remove" "Remove a maintainer"
   , tPublish, tSync
-  ]
+  ] <> codeTools
 
 -- | The tools a server with this configuration offers.
 toolsFor :: McpConfig -> [Tool]
@@ -1067,6 +1067,56 @@ tPrMerge = Tool
               , flag "into" i] <> flagM "fetch" fe <> a )
             Nothing AsText
   }
+
+-- The code view (PEP-25) ----------------------------------------------------------
+
+-- | One of the @hub code@ verbs, as a read tool returning its document.
+tCode :: Text -> Text -> String -> Text -> [(Text, Value)] -> [Text] -> (Args -> Either Text [String]) -> Tool
+tCode name title verb what props required extra = Tool
+  { toolName = name, toolTitle = title
+  , toolDesc = what <> " As a JSON document, from the clone the call runs in. Read-only." <> defaultsNote
+  , toolProps = props <> [pRepo], toolRequired = required
+  , toolAccess = Reads, toolOpenWorld = name == "code_refs", toolVerb = ["code", verb]
+  , toolPlan = \cfg as -> do
+      r <- repoOf cfg as
+      more <- extra as
+      pure $ RunVerb (Run (["code", verb, flag "repo" r] <> more <> ["--json"]) Nothing AsJson)
+  }
+
+pRef, pPath :: (Text, Value)
+pRef = prop "ref" "A branch, a tag, a sha, or HEAD (the default)."
+pPath = prop "path" "A path inside the tree; the root when left out."
+
+codeTools :: [Tool]
+codeTools =
+  [ tCode "code_refs" "Branches, tags, name" "refs"
+      "The repository's branches and tags, the branch HEAD names, and the name and description its manifest declares."
+      [] [] (const (pure []))
+  , tCode "code_tree" "A directory" "tree"
+      "The entries of a directory at a ref, directories first, and which of them is its README."
+      [pRef, pPath] [] (\as -> (<>) <$> refPath as <*> pure [])
+  , tCode "code_blob" "A file" "blob"
+      "A file at a ref: its text, at most 512 KiB of it with truncated set past that, or binary and no text."
+      [pRef, pPath] ["path"] refPath
+  , tCode "code_log" "History" "log"
+      "The commits that reach a ref, newest first, or those that touched a path; a page of them."
+      [ pRef, pPath, propInt "skip" "Commits to skip, for the next page."
+      , propInt "limit" "Commits in this page, at most 100. Default 30." ] []
+      (\as -> do
+          rp <- refPath as
+          sk <- optNat "skip" as
+          li <- optNat "limit" as
+          pure (rp <> flagM "skip" (Text.pack . show <$> sk) <> flagM "limit" (Text.pack . show <$> li)))
+  , tCode "code_commit" "A commit" "show"
+      "One commit: author, committer, message, and its diff (a merge against its first parent), at most 512 KiB of it."
+      [prop "commit" "The commit (a sha)."] ["commit"]
+      (\as -> (\c -> [flag "commit" c]) <$> (optText "commit" as >>= needed "commit" ""))
+  ]
+  where
+    refPath as = do
+      r <- optText "ref" as
+      p <- optText "path" as
+      pure (flagM "ref" r <> flagM "path" p)
 
 tPublish :: Tool
 tPublish = Tool

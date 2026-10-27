@@ -69,11 +69,17 @@ The API
     `call`, streamed as newline-delimited JSON: progress lines, then one
     result line.
 
-The code view needs read tools the table does not have yet: `code_refs`,
-`code_tree`, `code_blob`, `code_log`, `code_commit`. They run new verbs,
-`hub code refs|tree|blob|log|show --json`, against the clone a call runs
-in, with the same bounds every git read in hbs2-hub has (time, size, the
-paths a stranger chose treated as bytes).
+The code view's read tools, `code_refs`, `code_tree`, `code_blob`,
+`code_log` and `code_commit`, run the verbs `hub code refs|tree|blob|log|show`
+against the clone a call runs in, with the same bounds every git read in
+hbs2-hub has: a time limit, a cap on what is read (512 KiB of a file or a
+diff, cut there and marked truncated), and git's environment hardened. A ref
+is a branch, a tag, a sha or HEAD and never an expression; a path is plain
+names, none of them `.` or `..`; both reach git after `--end-of-options`.
+
+A repository is named on its pages by its manifest: `(name "...")` and
+`(description "...")`, which `hbs2-git3 repo:describe` writes and
+publishes as it does the mailbox clauses. Without them it is its key.
 
 
 Threat model
@@ -125,7 +131,9 @@ Phases
      HTTP transport, the home page and the forge views. Done, with the
      public mode's tool allowlist and repository allowlist, which phase 3
      builds on.
-  2. The code view: the `hub code` verbs, their tools, the pages.
+  2. The code view: the `hub code` verbs, their tools, the pages. Done,
+     with `hbs2-git3 repo:describe`, which writes `(name ...)` and
+     `(description ...)` into the manifest for the header to show.
   3. `--public`: the allowlist, the read-only table, the bounds.
   4. Packaging: the web directory in the nix package and the tarballs.
 

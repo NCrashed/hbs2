@@ -161,6 +161,7 @@ library hub-ingress
       HBS2.Hub.CLI.Project
       HBS2.Hub.CLI.NativeHost
       HBS2.Hub.CLI.Serve
+      HBS2.Hub.CLI.Code
       HBS2.Hub.NativeHost
       HBS2.Hub.Host
       HBS2.Hub.Serve
@@ -249,6 +250,7 @@ test-suite spec
       HBS2.Hub.DefaultsSpec
       HBS2.Hub.NativeHostSpec
       HBS2.Hub.ServeSpec
+      HBS2.Hub.CodeSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
       HBS2.Hub.StatusSpec
