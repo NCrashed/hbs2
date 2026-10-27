@@ -1,12 +1,23 @@
-# Unreleased
+# 0.26.0.1  2026-10-27
+
+The release 0.26.0.0 meant to be on macOS: its Apple Silicon build ran
+out of memory, because the nix build compiled every hbs2 library twice.
+That is fixed, and the build is about twice as fast everywhere.
+
+It also brings the forge to the browser. `hbs2-hub native-host` serves
+the [hbs2-hub browser extension](https://github.com/NCrashed/hbs2-hub-browser),
+which shows a repository's hbs2 issues and pull requests in its GitHub
+pages and can file, comment on, propose and merge them. Merging is the
+new `hbs2-hub pr land`, which does in one step what a maintainer did
+by hand: merge, push, record, publish.
 
 ## Added
 
   - **`hbs2-hub native-host`: the forge for a browser extension (PEP-24).**
     The `hub mcp` tools over the browsers' native messaging, so the
     [hbs2-hub browser extension](https://github.com/NCrashed/hbs2-hub-browser)
-    can show and, later, write a repository's issues and pull requests on
-    its GitHub pages. Each tool runs a verb of this binary, as `hub mcp`
+    can show and write a repository's issues and pull requests on its
+    GitHub pages. Each tool runs a verb of this binary, as `hub mcp`
     does. A call for a repository runs in the clone named by
     `git config --global hbs2-hub.<repo-key>.clone <path>`, or, for a read,
     in a cache clone under `~/.cache/hbs2-hub/repos`; a write never runs in

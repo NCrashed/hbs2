@@ -28,7 +28,7 @@ PATH. `hbs2-peer`, `hbs2-cli`, `hbs2-keyman`, `hbs2-sync` and `ncq3`
 need nothing.
 
 ```
-TAG=0.26.0.0  # set to the release you want
+TAG=0.26.0.1  # set to the release you want
 curl -fL -o hbs2.tar.gz "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz"
 curl -fL -o hbs2.tar.gz.sha256 "https://github.com/NCrashed/hbs2/releases/download/${TAG}/hbs2-${TAG}-x86_64-linux-musl.tar.gz.sha256"
 sha256sum -c hbs2.tar.gz.sha256

@@ -160,6 +160,18 @@ hbs2-hub issue close --number <issue> --note "Fixed by #<n>."
 The merge is ordinary git, in whatever style you like. `pr merge` only
 records it, and refuses if the commit does not contain the proposal.
 
+Or all of it in one step, with a merge commit:
+
+```
+hbs2-hub pr land --number <n> --dry-run   # what it would do
+hbs2-hub pr land --number <n>
+```
+
+It merges without touching your working tree, pushes the branch to the
+hbs23 remote (and to `origin` when that is another remote, such as a
+GitHub copy), records the merge and publishes. A conflict stops it
+before anything is pushed, and names the files.
+
 ### Publish
 
 ```
