@@ -55,8 +55,8 @@ spec = describe "PEP-24 native host" $ do
     let parse = nativeArgs @C . fmap argvAtom
     parse [] `shouldBe` Just (Serve False)
     parse ["--read-only"] `shouldBe` Just (Serve True)
-    parse ["--install"] `shouldBe` Just (Install False Nothing firefoxExtensionId)
-    parse ["--install", "--chrome-id", "abc"] `shouldBe` Just (Install False (Just "abc") firefoxExtensionId)
+    parse ["--install"] `shouldBe` Just (Install False chromeExtensionId firefoxExtensionId)
+    parse ["--install", "--chrome-id", "abc"] `shouldBe` Just (Install False "abc" firefoxExtensionId)
     parse ["--uninstall"] `shouldBe` Just Uninstall
     parse ["--install", "--uninstall"] `shouldBe` Nothing
     -- An id without --install is a mistake, not a server.

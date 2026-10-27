@@ -5,6 +5,7 @@ module HBS2.Hub.CLI.NativeHost
   , NativeArgs(..)
   , nativeArgs
   , firefoxExtensionId
+  , chromeExtensionId
   , manifestFor
   , Browser(..)
   ) where
@@ -31,13 +32,22 @@ import System.FilePath ((</>),takeDirectory)
 
 data NativeArgs
   = Serve Bool                          -- ^ read-only
-  | Install Bool (Maybe Text) Text      -- ^ read-only, the Chrome id, the Firefox id
+  | Install Bool Text Text              -- ^ read-only, the Chrome id, the Firefox id
   | Uninstall
   deriving stock (Eq,Show)
 
 -- | The id the Firefox build of the extension is published under.
 firefoxExtensionId :: Text
 firefoxExtensionId = "hbs2-hub@hbs2.app"
+
+-- | The id Chrome and Chromium give the extension.
+--
+-- Chrome derives an id from the extension's public key, and the build carries
+-- that key (keys/chrome-public.b64 in hbs2-hub-browser), so an unpacked build
+-- has this id on every machine. It was a required flag, and the one command an
+-- upgrade asks for skipped both browsers without it.
+chromeExtensionId :: Text
+chromeExtensionId = "llmffghhboheiadaadikapcdifeolepc"
 
 nativeArgs :: forall c . IsContext c => [Syntax c] -> Maybe NativeArgs
 nativeArgs syn = do
@@ -48,7 +58,7 @@ nativeArgs syn = do
   ch  <- flagMaybe kvs "--chrome-id" (fmap Text.pack . flagText)
   ff  <- flagMaybe kvs "--firefox-id" (fmap Text.pack . flagText)
   case (ins, uni) of
-    (True, False) -> Just (Install ro ch (fromMaybe firefoxExtensionId ff))
+    (True, False) -> Just (Install ro (fromMaybe chromeExtensionId ch) (fromMaybe firefoxExtensionId ff))
     (False, True) -> Just Uninstall
     (False, False) | ch == Nothing && ff == Nothing -> Just (Serve ro)
     _ -> Nothing
@@ -105,7 +115,9 @@ nativeHostEntries =
              <> line <> "naming the extension allowed to start it. The browser lets"
              <> line <> "no other extension and no web page reach it. Run it again"
              <> line <> "after upgrading hbs2, since the launcher names this binary."
-             <> line <> "--read-only installs a host that offers no tool that writes." )
+             <> line <> "--read-only installs a host that offers no tool that writes."
+             <> line <> "--chrome-id and --firefox-id name another build of the"
+             <> line <> "extension; the defaults are the ids the published one has." )
     $ entry $ bindMatch "hub:native-host" $ nil_ \case
         (nativeArgs -> Just na) -> liftIO (runIt na)
         other -> liftIO (badArgs nativeUsage other)
@@ -134,10 +146,9 @@ nativeHostEntries =
         p <- getPermissions wrapper
         setPermissions wrapper (setOwnerExecutable True p)
         say ("launcher" <+> pretty wrapper)
-        forM_ [minBound .. maxBound] $ \b -> case (b, chrome) of
-          (Firefox, _) -> put home b wrapper firefox
-          (_, Just c)  -> put home b wrapper c
-          (_, Nothing) -> say (pretty (show b) <> ": skipped, no --chrome-id given")
+        forM_ [minBound .. maxBound] $ \b -> case b of
+          Firefox -> put home b wrapper firefox
+          _       -> put home b wrapper chrome
 
       Uninstall -> do
         home <- getHomeDirectory
