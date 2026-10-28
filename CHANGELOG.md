@@ -1,4 +1,15 @@
-# Unreleased
+# 0.26.0.3  2026-10-28
+
+hbs2-hub on the web, without GitHub (PEP-25): `hbs2-hub serve` shows a
+repository's code, README, history, issues and pull requests, locally
+with your keys or publicly read-only, and its pages now ship in the
+package, the tarballs and the Homebrew keg. Clones remember themselves for
+hbs2-hub, the browser pages load in a fraction of a second, and a
+repository can have a name and a description.
+
+Also fixed in hbs2-git3: a manifest keeps a quote, a backslash and
+non-ASCII text, and verbs with no repository named find the clone's
+hbs23 remote.
 
 ## Added
 
