@@ -237,8 +237,15 @@ codeEntries = do
         out <- must "the history" (4 * 1024 * 1024)
                  ( ["log", "-z", "--no-color", logFormat, "--skip=" <> show skip, "--max-count=" <> show limit
                    , "--end-of-options", Text.unpack c] <> (if Text.null p then [] else ["--", Text.unpack p]) )
+        -- How many there are in all, as GitHub's count beside History; left
+        -- out rather than refused when git cannot say.
+        total <- git "the count" 64 ( ["rev-list", "--count", "--end-of-options", Text.unpack c]
+                                      <> (if Text.null p then [] else ["--", Text.unpack p]) ) <&> \case
+          Right (ExitSuccess, n, _) -> readMaybe (Text.unpack (Text.strip (Text.decodeUtf8Lenient n))) :: Maybe Integer
+          _ -> Nothing
         emit $ doc "commits" repo
-          [ "ref" .= r, "commit" .= c, "path" .= p, "skip" .= skip, "limit" .= limit, "commits" .= commitsOf out ]
+          [ "ref" .= r, "commit" .= c, "path" .= p, "skip" .= skip, "limit" .= limit, "commits" .= commitsOf out
+          , "total" .= total ]
 
       Show sha -> do
         unless (validAbbrevSha sha) $ liftIO (refuse "--commit is a sha" 2)

@@ -24,6 +24,17 @@
     hub's pages show instead of its key. `--clear-name` and
     `--clear-description` take them out.
 
+  - **`git-remote-hbs23` remembers your clone for hbs2-hub.** On a clone,
+    and on a fetch or a push in an older clone, it sets
+    `hbs2-hub.<key>.clone` in your global git config when nothing names a
+    clone for that key yet, so the extension and `serve` can write without
+    it being set by hand. Never for a bare clone, a linked worktree or one
+    under the temporary directory or `~/.cache`; `HBS2_GIT_NO_HUB_PIN=1`
+    turns it off.
+
+  - `code log` says how many commits there are in all (`total`), as the
+    count beside History on the pages.
+
 # 0.26.0.2  2026-10-27
 
 What the browser extension's maintainer side runs on: the inbox, labels,

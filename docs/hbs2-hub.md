@@ -927,6 +927,92 @@ verb is stopped after `--timeout` seconds (600 by default). When the
 client goes away, reads in flight are stopped and writes are left to
 finish.
 
+## In a browser
+
+The same forge has two faces in a browser, built from one set of pages
+([hbs2-hub-browser](https://github.com/NCrashed/hbs2-hub-browser)):
+
+- the **browser extension**, for a project that still lives on GitHub:
+  its issues and pull requests from hbs2 appear on the project's GitHub
+  pages;
+- **`hbs2-hub serve`**, for a project that has left GitHub: the code,
+  the README, the history, the issues and the pull requests, served from
+  your machine.
+
+Both read through the MCP tool table above and write the same way the
+command line does, with your keys and after the same dry run.
+
+### The pointer: which repository a GitHub page means
+
+A GitHub page knows only `owner/name`. The extension finds the hbs2
+repository from a file at the root of the default branch:
+
+```
+# .hbs2/hub
+hbs23://<repo-key>
+```
+
+Lines starting with `#` are comments. Commit it and push it to GitHub.
+
+### The clone a write runs in
+
+Reading needs nothing: the extension and `serve` keep their own cache
+clones. A write (an issue, a comment, a merge) runs in your working clone,
+which they find by repository key:
+
+```
+git config --global hbs2-hub.<repo-key>.clone /path/to/clone
+```
+
+You rarely type this. `git-remote-hbs23` sets it on a clone, and on any
+fetch or push in a clone made before, when nothing names a clone for that
+key yet or what it names is gone. A second clone of the same repository
+does not take it over. It never names a bare clone, a linked worktree, or
+a clone under the temporary directory or `~/.cache`, and
+`HBS2_GIT_NO_HUB_PIN=1` turns it off.
+
+### What a repository is called
+
+Pages name a repository by its manifest, and by its key when the
+manifest says nothing:
+
+```
+hbs2-git3 repo:describe <repo-key> --name '"hbs2"' --description '"Distributed git and P2P CAS platform"'
+```
+
+The inner quotes are needed: hbs2-git3 reads its arguments as script, and
+a string is written between quotes. Each value is one line, with no
+quote or backslash in it. `--clear-name` and `--clear-description` take
+them out. It publishes the manifest, as `repo:mailbox:set` does.
+
+### `hbs2-hub serve`
+
+```
+hbs2-hub serve --web ~/dev/hbs2-hub-browser/dist/web
+```
+
+LOCAL, the default: on `127.0.0.1:8484`, for you. It prints the address
+to open, with a token in it; a request without the token is refused, and
+so is one that reached the server by any name but its loopback one. The
+home page lists the repositories that have a clone named as above, and
+the ones this browser opened lately.
+
+PUBLIC, for anyone, read-only:
+
+```
+hbs2-hub serve --public --listen 0.0.0.0:8080 --repo <repo-key> [--repo <key>]...
+```
+
+It shows the repositories named with `--repo` and no other, from its own
+cache clones, and offers only the tools that read and are not yours: no
+inbox, no status, no identity. `--busy` bounds the verbs it runs at once
+(4 public, 8 local).
+
+`--web` is the `dist/web` directory of an hbs2-hub-browser build
+(`npm run build`). Without it, `serve` looks in `share/hbs2-hub/web`
+beside its binary, where packages are to put the pages; the nix package
+and the release tarballs do not ship them yet.
+
 ## Scripting
 
 Exit codes are a contract: they may be added to and are never
@@ -962,11 +1048,12 @@ Branch on the exit code, not on the absence of output.
 
 Worth knowing before you commit to this.
 
-- **No web interface.** The per-thread render contract exists (see
-  below) and nothing consumes it yet: there is no `hub render` static
-  export, no `hub serve`, and no index or activity document. PEP-22
-  leaves the schemas for those last two open, so they are not written
-  yet rather than written wrong.
+- **The web interface is young.** `hbs2-hub serve` and the browser
+  extension exist (see [In a browser](#in-a-browser)); there is no
+  `hub render` static export, no index or activity document, and the
+  packages do not ship the pages yet. PEP-22 leaves the schemas for the
+  index and the activity document open, so they are not written yet
+  rather than written wrong.
 
 - **Queries are exact matches.** `--status` and `--label` filter, and
   that is all. There is no query language and no cache; every read folds

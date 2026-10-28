@@ -11,6 +11,7 @@ import HBS2.Git3.Import
 import HBS2.Git3.Export
 import HBS2.Git3.Git
 import HBS2.Git3.Repo
+import HBS2.Git3.Repo.Pin (pinClone)
 import HBS2.Git3.Logger
 
 import Data.Config.Suckless
@@ -329,6 +330,9 @@ main =  flip runContT pure do
       waitRepo Nothing =<< getGitRepoKeyThrow
 
       notice "wait-for-repo-done"
+
+      -- Where this clone is, for hbs2-hub; see "HBS2.Git3.Repo.Pin".
+      for_ url (pinClone . Text.pack . show . pretty . AsBase58)
 
       void $ run dict conf
 
