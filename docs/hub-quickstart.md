@@ -241,7 +241,7 @@ the repository with `hbs2-git3 repo:describe`. See
 | You see | It means | Do |
 | --- | --- | --- |
 | `fetching sigil ... from the network`, then `this node does not hold the sigil` | your peer could not get the project's sigil from its neighbours | check `hbs2-peer peers`; retry later |
-| a verb asks for `--repo` | you are not in a clone with an `hbs23://` remote, or it has several and none is `origin` | `cd` into the clone, or pass `--repo` |
+| a verb asks for `--repo` | you are not in a clone with an `hbs23://` remote, or it has several and none is `origin` | `cd` into the clone; with several remotes, `git config hbs2.hub.repo <key>` once; or pass `--repo` |
 | a verb asks for `--author` or `--sender` | no identity on this machine | `hbs2-hub identity init` |
 | `nothing waiting` in `inbox`, but a letter was sent | it has not arrived yet | wait, or use `inbox --follow` |
 | the issue you sent is not in `issue list` | the owner has not accepted it, or not published | `hbs2-hub updates`; `hbs2-hub sync` again later |

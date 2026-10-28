@@ -7,7 +7,7 @@ module Main where
 
 import HBS2.Hub.Types (safeText,hubMetaVersion,hubMetaMin)
 import HBS2.Hub.CLI.Argv (verbOf)
-import HBS2.Hub.CLI.Defaults (defaultsFor,wantsOf,Want(..))
+import HBS2.Hub.CLI.Defaults (defaultsFor,remoteNote,wantsOf,Want(..))
 import HBS2.Hub.CLI.Say (saying)
 import HBS2.Hub.CLI.Accept
 import HBS2.Hub.CLI.Ban
@@ -199,6 +199,7 @@ main = do
     Just (ListVal (SymbolVal (Id v) : _)) | "hub:" `Text.isPrefixOf` v -> do
       let (ws, rest) = splitAt (length (Text.splitOn ":" v) - 1) argv
       filled <- defaultsFor v rest
+      remoteNote (wantsOf v) rest >>= mapM_ (\n -> saying ("hbs2-hub:" <+> pretty n <> line))
       let added = drop (length rest) filled
       when (not (List.null added) && WRepoFirst `notElem` wantsOf v) $
         saying ("hbs2-hub: using" <+> hsep (fmap pretty added) <> line)

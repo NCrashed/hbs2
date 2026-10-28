@@ -96,3 +96,13 @@ spec = describe "hub defaults from the clone" $ do
     keyShaped repo `shouldBe` True
     keyShaped "7" `shouldBe` False
     keyShaped "--json" `shouldBe` False
+
+  it "picks the hbs23 remote the configured key names, then origin, then the only one" $ do
+    let other = "8ZUnKpYfxTbDPQH85WMh9xmG5zXTVUeevsHexFxHLQAS"
+        two = [("hbs2", repo), ("indicate-exist", other)]
+    pickRemote Nothing two `shouldBe` Left ["hbs2", "indicate-exist"]
+    pickRemote (Just repo) two `shouldBe` Right ("hbs2", repo)
+    pickRemote (Just other) (("origin", repo) : two) `shouldBe` Right ("indicate-exist", other)
+    pickRemote Nothing (("origin", other) : two) `shouldBe` Right ("origin", other)
+    pickRemote (Just sender) [("hbs2", repo)] `shouldBe` Right ("hbs2", repo)
+    pickRemote Nothing [] `shouldBe` Left []

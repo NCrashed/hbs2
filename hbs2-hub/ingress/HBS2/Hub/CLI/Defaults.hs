@@ -21,7 +21,9 @@
 --   * for @publish@ and @sync@: @--remote@ is the hbs23:// remote the key
 --     comes from. A clone kept on GitHub has @origin@ there and its hbs23
 --     remote under another name, and defaulting to @origin@ pushed canon to
---     GitHub and fetched it back from there.
+--     GitHub and fetched it back from there. With several hbs23:// remotes
+--     and none of them @origin@, it is the one whose key @hbs2.hub.repo@
+--     names (see 'pickRemote').
 --
 -- The same names the MCP server reads, so one configuration serves both.
 --
@@ -39,6 +41,9 @@ module HBS2.Hub.CLI.Defaults
   , gatherSurroundings
   , hbs23Key
   , hbs23Remote
+  , hbs23Remotes
+  , pickRemote
+  , remoteNote
   , remoteHeadBranch
   , currentBranch
   , localBranches
@@ -217,19 +222,61 @@ gatherSurroundings ws
       _ -> Nothing
     conf k = git ["config", "--get", k]
 
--- | A clone's hbs23:// remotes: origin when it is one, else the only one.
+-- | The key of the clone's hbs23:// remote, as 'pickRemote' chooses it.
 remoteKey :: MonadUnliftIO m => m (Maybe String)
 remoteKey = hbs23Remote <&> fmap snd
 
+-- | The clone's hbs23:// remote, as 'pickRemote' chooses it.
 hbs23Remote :: MonadUnliftIO m => m (Maybe (String, String))
 hbs23Remote = do
+  pref <- configuredRepo
+  hbs23Remotes <&> either (const Nothing) Just . pickRemote pref
+
+-- | Every remote of the clone with an hbs23:// URL, as (name, key).
+hbs23Remotes :: MonadUnliftIO m => m [(String, String)]
+hbs23Remotes = do
   names <- git ["remote"] <&> maybe [] lines
   found <- forM names $ \n -> git ["remote", "get-url", n] <&> \u -> (,) n <$> (u >>= hbs23Key)
-  let ours = catMaybes found
-  pure $ case (List.lookup "origin" ours, ours) of
-    (Just k, _) -> Just ("origin", k)
-    (_, [one])  -> Just one
-    _           -> Nothing
+  pure (catMaybes found)
+
+-- | Which hbs23:// remote a clone means: the one with the key the user
+-- configured, else @origin@, else the only one. A clone kept on GitHub can
+-- hold several (its own and others it fetches), and then nothing but the
+-- configured key says which; 'Left' is their names, for 'remoteNote'.
+pickRemote :: Maybe String -> [(String, String)] -> Either [String] (String, String)
+pickRemote pref ours = case ([ r | Just k <- [pref], r@(_, k') <- ours, k' == k ], List.lookup "origin" ours, ours) of
+  (r:_, _, _)   -> Right r
+  (_, Just k, _) -> Right ("origin", k)
+  (_, _, [one])  -> Right one
+  _              -> Left (fmap fst ours)
+
+-- | Why a verb that takes its repository from the clone got none: several
+-- hbs23:// remotes and nothing to choose between them. Said once, before the
+-- verb's own usage line, which on its own does not tell anyone why.
+remoteNote :: MonadUnliftIO m => [Want] -> [String] -> m (Maybe String)
+remoteNote ws args
+  | not wanted = pure Nothing
+  | otherwise = do
+      pref <- configuredRepo
+      hbs23Remotes <&> \rs -> case pickRemote pref rs of
+        Left names@(_:_:_) -> Just
+          ( "this clone has several hbs23:// remotes (" <> List.intercalate ", " names
+            <> ") and none is origin; pick one with\n  git config hbs2.hub.repo <key>\n"
+            <> "or pass --repo (and --remote for publish and sync)" )
+        _ -> Nothing
+  where
+    wanted = (WRepo `elem` ws && not (given "--repo"))
+          || (WRepoFirst `elem` ws && not (given "--repo") && not (any keyShaped (take 1 args)))
+          || (WRemote `elem` ws && not (given "--remote"))
+    given n = any (\a -> a == n || (n <> "=") `List.isPrefixOf` a) args
+
+-- | The repository named outside the clone's remotes.
+configuredRepo :: MonadUnliftIO m => m (Maybe String)
+configuredRepo = do
+  e <- liftIO (lookupEnv repoEnvVar)
+  case e of
+    Just s | not (all isSpace s) -> pure (Just (strip s))
+    _ -> git ["config", "--get", repoGitKey]
 
 -- | The key in an hbs23:// URL.
 hbs23Key :: String -> Maybe String

@@ -32,6 +32,11 @@
     under the temporary directory or `~/.cache`; `HBS2_GIT_NO_HUB_PIN=1`
     turns it off.
 
+  - A clone with several hbs23:// remotes and none of them `origin`
+    (one kept on GitHub that fetches others) now gets its `--remote` from
+    `git config hbs2.hub.repo`, as `--repo` already did, and a verb that
+    finds neither says why before its usage line.
+
   - `code log` says how many commits there are in all (`total`), as the
     count beside History on the pages.
 
