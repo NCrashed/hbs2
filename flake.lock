@@ -39,6 +39,22 @@
         "type": "github"
       }
     },
+    "hbs2-hub-browser": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793179248,
+        "narHash": "sha256-0jVrw0gQYiwCY+wM3d1+xAc8plXzcr0irLGlRn7zp9I=",
+        "owner": "NCrashed",
+        "repo": "hbs2-hub-browser",
+        "rev": "8178cd9c464ef7e483061778ff607d0cebcd5b94",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NCrashed",
+        "repo": "hbs2-hub-browser",
+        "type": "github"
+      }
+    },
     "hspup": {
       "inputs": {
         "haskell-flake-utils": [
@@ -82,6 +98,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "haskell-flake-utils": "haskell-flake-utils",
+        "hbs2-hub-browser": "hbs2-hub-browser",
         "hspup": "hspup",
         "nixpkgs": "nixpkgs"
       }

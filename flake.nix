@@ -14,6 +14,13 @@ inputs = {
     hspup.inputs.nixpkgs.follows = "nixpkgs";
     hspup.inputs.haskell-flake-utils.follows = "haskell-flake-utils";
 
+    # The pages `hbs2-hub serve` shows (PEP-25), built from their own repository
+    # into share/hbs2-hub/web of the hbs2-hub package.
+    hbs2-hub-browser = {
+        url = "github:NCrashed/hbs2-hub-browser";
+        flake = false;
+    };
+
 };
 
 outputs = { self, nixpkgs, flake-utils, ... }@inputs:
@@ -218,8 +225,41 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
         bf6-git-hbs2 = pkgs.callPackage ./nix/bf6-hbs2-git.nix { inherit (pkgs.haskellPackages) suckless-conf; };
       };
 
-    packagesDynamic = makePackages pkgs;
-    packagesStatic = makePackages pkgs.pkgsStatic;
+    # THE PAGES `hbs2-hub serve` SHOWS (PEP-25), built by hbs2-hub-browser's own
+    # script. Node and esbuild only, and the same for every system: the output is
+    # HTML, CSS and JavaScript.
+    hubWeb = pkgs.buildNpmPackage {
+      pname = "hbs2-hub-web";
+      version = (builtins.fromJSON (builtins.readFile "${inputs.hbs2-hub-browser}/package.json")).version;
+      src = inputs.hbs2-hub-browser;
+      npmDepsHash = "sha256-9tU5LtVDtevpKcx68FJcftqJ01ML+Vc5yKfrO9jOJ7w=";
+      npmBuildScript = "build";
+      installPhase = ''
+        mkdir -p $out/share/hbs2-hub
+        cp -r dist/web $out/share/hbs2-hub/web
+      '';
+    };
+
+    # hbs2-hub with the pages beside it, where `serve` looks: share/hbs2-hub/web
+    # next to the bin/ its binary REALLY is in, after symlinks, so in this
+    # package and not in a join over it. A copy of the built package rather
+    # than a postInstall, so a change to the pages does not rebuild Haskell.
+    withWeb = hub: pkgs.runCommand "hbs2-hub-${hub.version}" {
+        pname = "hbs2-hub";
+        inherit (hub) version meta;
+        passthru = { unwrapped = hub; web = hubWeb; };
+      } ''
+      mkdir -p $out
+      cp -r ${hub}/. $out/
+      chmod -R u+w $out
+      mkdir -p $out/share/hbs2-hub
+      cp -r ${hubWeb}/share/hbs2-hub/web $out/share/hbs2-hub/web
+    '';
+
+    withHubWeb = ps: ps // { hbs2-hub = withWeb ps.hbs2-hub; };
+
+    packagesDynamic = withHubWeb (makePackages pkgs);
+    packagesStatic = withHubWeb (makePackages pkgs.pkgsStatic);
 
     # hbs2-peer container image. On x86_64 the hbs2 binaries are the static
     # (musl) ones, so none of THEM carries glibc or distro userspace. The
@@ -251,6 +291,11 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
       for f in ${pkg}/bin/*; do
         cp -L "$f" $out/bin/
       done
+      # The pages hbs2-hub serve shows, beside the binary as in the package.
+      if [ -d ${pkg}/share/hbs2-hub ]; then
+        mkdir -p $out/share
+        cp -rL ${pkg}/share/hbs2-hub $out/share/
+      fi
       chmod -R u+w $out 2>/dev/null || true
     '';
 
@@ -357,6 +402,7 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
     packages =
       packagesDynamic //
       {
+        hbs2-hub-web = hubWeb;
         default =
         pkgs.symlinkJoin {
           name = "hbs2-all";

@@ -29,6 +29,8 @@ import System.Environment (getExecutablePath)
 import System.FilePath ((</>),takeDirectory)
 
 import Text.Read (readMaybe)
+import Control.Concurrent (forkIO,threadDelay)
+import System.IO (hPutStrLn)
 import Data.Maybe (fromMaybe,isNothing)
 
 data ServeArgs = ServeArgs
@@ -37,6 +39,8 @@ data ServeArgs = ServeArgs
   , saPublic   :: Bool
   , saRepos    :: [String]
   , saBusy     :: Maybe Int
+  , saQueue    :: Maybe Int
+  , saCache    :: Maybe Int
   }
   deriving stock (Eq,Show)
 
@@ -47,13 +51,15 @@ serveUsage =
 
 serveArgs :: forall c . IsContext c => [Syntax c] -> Maybe ServeArgs
 serveArgs syn = do
-  kvs <- flagsAndSwitches ["--listen", "--web", "--repo", "--busy"] ["--public"] syn
+  kvs <- flagsAndSwitches ["--listen", "--web", "--repo", "--busy", "--queue", "--cache"] ["--public"] syn
   listen <- flagMaybe kvs "--listen" flagText
   web <- flagMaybe kvs "--web" flagText
   pub <- flagSwitch kvs "--public"
   repos <- traverse flagText (flagEvery kvs "--repo")
   busy <- flagMaybe kvs "--busy" flagWord
-  pure (ServeArgs listen web pub repos (fromIntegral <$> busy))
+  queue <- flagMaybe kvs "--queue" flagWord
+  cache <- flagMaybe kvs "--cache" flagWord
+  pure (ServeArgs listen web pub repos (fromIntegral <$> busy) (fromIntegral <$> queue) (fromIntegral <$> cache))
 
 -- | @host:port@, the port last: an IPv6 host has colons of its own.
 splitListen :: String -> Maybe (String, Int)
@@ -69,7 +75,7 @@ serveEntries =
   brief "serve the hub's pages in a browser, for a project without GitHub"
     $ args [ arg "string" "[--listen host:port]", arg "string" "[--web dir]"
            , arg "string" "[--public]", arg "string" "[--repo key]..."
-           , arg "string" "[--busy n]" ]
+           , arg "string" "[--busy n]", arg "string" "[--queue n]", arg "string" "[--cache seconds]" ]
     $ desc ( "LOCAL, the default: on 127.0.0.1:8484, for you. It reads and"
              <> line <> "writes as the browser extension does, with your keys,"
              <> line <> "through the same tools and the same review before"
@@ -81,8 +87,15 @@ serveEntries =
              <> line <> "--listen address, which it then needs. It shows the"
              <> line <> "repositories named with --repo and no other, from its own"
              <> line <> "cache clones, never from a working clone, and offers no"
-             <> line <> "tool that writes. --busy bounds the verbs it runs at once"
-             <> line <> "(default 4 public, 8 local)."
+             <> line <> "tool that writes. Its clones are synced every five minutes,"
+             <> line <> "never while a request waits."
+             <> line
+             <> line <> "--busy bounds the verbs run at once (default 4 public, 8"
+             <> line <> "local); --queue how many more wait for one, each up to 30"
+             <> line <> "seconds (default 32 public, 64 local), and past it a call"
+             <> line <> "is answered 503 with Retry-After. --cache is how long a"
+             <> line <> "public answer is reused, in seconds (default 30, 0 for"
+             <> line <> "never); the same call asked at once is run once."
              <> line
              <> line <> "The pages come from --web, else share/hbs2-hub/web beside"
              <> line <> "this binary, where the package puts them." )
@@ -122,7 +135,15 @@ serveEntries =
           hc = HostConfig mcp cache (if pub then 300 else 60) (not pub)
                  (if pub then Just (HS.fromList (fmap Text.pack (saRepos sa))) else Nothing)
                  (if pub then Just publicTools else Nothing)
+                 (not pub)
       hub <- newHub hc
+      -- A PUBLIC SERVER'S CLONES ON A TIMER, never on a stranger's request:
+      -- made at start, then synced every five minutes, one after another.
+      when pub $ void $ forkIO $ forever $ do
+        for_ (saRepos sa) $ \k -> hubRefresh hub (Text.pack k) >>= \case
+          Left e -> hPutStrLn stderr ("hbs2-hub serve: " <> k <> ": " <> Text.unpack (heMessage e))
+          Right () -> pure ()
+        threadDelay (hcSyncEach hc * 1000000)
       token <- if pub then pure "" else newToken
       let shown = if host == "::1" then "[::1]" else host
       if pub
@@ -130,7 +151,10 @@ serveEntries =
         else putStrLn ("hbs2-hub serve: open http://" <> shown <> ":" <> show port <> "/#token=" <> Text.unpack token)
       hFlush stdout
       serveHttp (ServeConfig host port web (if pub then Public else Local) token
-                   (fromMaybe (if pub then 4 else 8) (saBusy sa))) hub
+                   (fromMaybe (if pub then 4 else 8) (saBusy sa))
+                   (fromMaybe (if pub then 32 else 64) (saQueue sa))
+                   30
+                   (fromMaybe 30 (saCache sa))) hub
 
     -- 24 bytes from the kernel, as hex: a token nobody guesses.
     newToken = do

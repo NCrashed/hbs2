@@ -26,7 +26,13 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.Maybe
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
+import HBS2.Git3.Repo.Mailbox (renderManifest)
 import Data.Word
+import Data.Char (isSpace)
+import Data.List qualified as List
+import System.Exit (ExitCode(..))
+import System.Process.Typed (readProcess,proc)
 import Lens.Micro.Platform
 import System.Random hiding (next)
 
@@ -71,7 +77,33 @@ resolveRepoKeyThrow s = case maybeToList (headMay s) of
   [ StringLike x ] -> do
     refs <- listRemotes
     lookup (fromString x) refs &  orThrow (GitRemoteKeyNotResolved x)
+  -- NO ARGUMENT: the clone's own hbs23:// remote, as hbs2-hub picks it. Used
+  -- to be an error naming "()", which a clone kept on GitHub (origin there,
+  -- the hbs23 remote under another name) got on every such verb.
+  [] -> do
+    refs <- listRemotes
+    pref <- hubRepo
+    case pickRemote3 pref [ (show (pretty r), k) | (r, k) <- refs ] of
+      Right k -> pure k
+      Left [] -> throwIO (GitRemoteKeyNotResolved "no hbs23:// remote in this clone; name the repository")
+      Left names -> throwIO (GitRemoteKeyNotResolved
+                      ( "several hbs23:// remotes (" <> List.intercalate ", " names
+                        <> ") and none is origin; name one, or set git config hbs2.hub.repo <key>" ))
   x -> throwIO (GitRemoteKeyNotResolved (show $ pretty (mkList x)))
+  where
+    hubRepo = liftIO $ do
+      (code, out, _) <- readProcess (proc "git" ["config", "--get", "hbs2.hub.repo"])
+      pure $ if code == ExitSuccess then fromStringMay @GitRepoKey (List.dropWhileEnd isSpace (LBS8.unpack out)) else Nothing
+
+-- | Which hbs23:// remote a clone means with no repository named: the one
+-- whose key @hbs2.hub.repo@ names, else @origin@, else the only one; 'Left'
+-- lists them when that does not decide. The rule hbs2-hub's defaults follow.
+pickRemote3 :: Eq k => Maybe k -> [(String, k)] -> Either [String] k
+pickRemote3 pref refs = case ([ k | Just p <- [pref], (_, k) <- refs, k == p ], lookup "origin" refs, refs) of
+  (k:_, _, _)   -> Right k
+  (_, Just k, _) -> Right k
+  (_, _, [(_, k)]) -> Right k
+  _ -> Left (fmap fst refs)
 
 newRemoteName :: MonadIO m => GitRepoKey -> m GitRef
 newRemoteName key = do
@@ -134,8 +166,11 @@ writeRepoHead keepOld repo manifest gkRefs' = do
 
   let (wsk, wpk) = (view peerSignSk creds, view peerSignPk creds)
 
-  let mfs = vcat $ fmap pretty manifest
-  manifestTree <- createTreeWithMetadata sto Nothing mempty (LBS8.pack (show mfs))
+  -- renderManifest, which escapes every string, and as UTF-8, which is what
+  -- every reader decodes: LBS8.pack kept the low byte of each character, so
+  -- a name or a description in anything but ASCII was stored mangled.
+  manifestTree <- createTreeWithMetadata sto Nothing mempty
+                    (LBS.fromStrict (TE.encodeUtf8 (Text.pack (renderManifest manifest))))
                      >>= orThrowPassIO
 
   lwwRef <- if keepOld then getRepoRefMaybe else pure Nothing

@@ -84,10 +84,19 @@ jobs:
           rm -f "${DIR}/bin/git-hbs2" "${DIR}/bin/hub"
           ln -s hbs2-git3 "${DIR}/bin/git-hbs2"
           ln -s hbs2-hub "${DIR}/bin/hub"
+          # The pages `hbs2-hub serve` shows, where it looks for them: share/
+          # beside the bin/ its binary is in. Copied, not linked, for the reason
+          # cp -L above gives.
+          mkdir -p "${DIR}/share"
+          cp -rL "${STATIC}/share/hbs2-hub" "${DIR}/share/"
+          chmod -R u+w "${DIR}/share"
           # Include a small README so the archive is self-explanatory.
           cat > "${DIR}/README.txt" <<EOF
           hbs2 ${TAG}, statically linked against musl libc.
-          Built for ${{ matrix.arch }}. Copy the bin/ contents anywhere on PATH.
+          Built for ${{ matrix.arch }}. Copy the bin/ contents anywhere on PATH, and
+          share/hbs2-hub to the share/ beside that bin/ (/usr/local/bin and
+          /usr/local/share, say): hbs2-hub serve looks for its pages there, or
+          is given them with --web.
 
           The binaries need no shared libraries. Three of them need a PROGRAM:
           hbs2-hub, hbs2-git3 and git-remote-hbs23 run git. For hbs2-hub that is
@@ -102,6 +111,8 @@ jobs:
           "${DIR}/bin/hbs2-cli" --help >/dev/null
           "${DIR}/bin/hbs2-hub" --help >/dev/null
           "${DIR}/bin/hub" --help >/dev/null
+          [ -f "${DIR}/share/hbs2-hub/web/index.html" ] \
+            || { echo "::error::share/hbs2-hub/web is missing: hbs2-hub serve has no pages"; exit 1; }
           # [ ] && [ ] || { exit }, not `test X && test Y`: under set -e bash exempts
           # every command of an AND-list except the last, so `test -L X && test -e X`
           # cannot fail the step. And -e as well as -L, because -L is true of a link
@@ -267,6 +278,8 @@ jobs:
           # ln that failed, or a shebang script naming a nix store path, is
           # invisible to a smoke test that only runs the daemon.
           "${BUNDLE}/bin/hbs2-hub" --help >/dev/null
+          [ -f "${BUNDLE}/share/hbs2-hub/web/index.html" ] \
+            || { echo "::error::share/hbs2-hub/web is missing from the bundle"; exit 1; }
           "${BUNDLE}/bin/hub" --help >/dev/null
           "${BUNDLE}/bin/hbs2-keyman" --help >/dev/null
           # NOT `|| true`: that swallows 127, which is what a shell returns for a

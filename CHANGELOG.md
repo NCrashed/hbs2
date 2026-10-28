@@ -37,6 +37,36 @@
     `git config hbs2.hub.repo`, as `--repo` already did, and a verb that
     finds neither says why before its usage line.
 
+  - **`hbs2-hub serve` finds its pages without `--web`.** They are built
+    from hbs2-hub-browser (a flake input) into `share/hbs2-hub/web` of the
+    hbs2-hub package, the release tarballs and the darwin bundle; the
+    Homebrew formula needs one line to install them (see
+    `docs/drafts/hbs2-peer.rb`).
+
+  - **A public `serve` is bounded.** A call past `--busy` waits in a
+    `--queue` of fixed depth for up to 30 seconds instead of being refused
+    at once (a page asks six things together, and the fifth used to come
+    back 503); past it, a 503 with Retry-After. Answers are reused for
+    `--cache` seconds (30), and the same call asked at once runs once.
+    Cache clones are synced every five minutes on a timer, not inside a
+    request, and made aside so no read sees a half-made clone.
+
+  - hbs2-git3 verbs with no repository named take the clone's hbs23
+    remote as hbs2-hub does (the one `hbs2.hub.repo` names, else `origin`,
+    else the only one) instead of failing with `GitRemoteKeyNotResolved "()"`.
+
+  - **A repository manifest keeps a quote, a backslash and non-ASCII
+    text.** hbs2-git3 wrote string clauses between quotes as they were, so
+    a quote in a name, a description or a mailbox tier ended the string
+    early and the manifest no longer parsed; every string is now escaped
+    when the manifest is written, and `repo:describe` takes quotes and
+    backslashes. And it stored the manifest one byte per character, so a
+    name or description in anything but ASCII was mangled; it is UTF-8
+    now, as every reader already decoded it. ASCII manifests are stored
+    byte for byte as before.
+
+  - The web pages' top bar shows the repository's name, not its key.
+
   - `hbs2-hub status --local` reads the mailbox as the peer holds it,
     without asking for a fetch and waiting a round for it to settle: 2.6 s
     became about 0.1 s, on every page of the extension and of `serve`.

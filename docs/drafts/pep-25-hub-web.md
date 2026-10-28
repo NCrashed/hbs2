@@ -134,8 +134,15 @@ Phases
   2. The code view: the `hub code` verbs, their tools, the pages. Done,
      with `hbs2-git3 repo:describe`, which writes `(name ...)` and
      `(description ...)` into the manifest for the header to show.
-  3. `--public`: the allowlist, the read-only table, the bounds.
+  3. `--public`: the allowlist, the read-only table, the bounds. Done: a
+     gate of `--busy` slots with a `--queue` of fixed depth and a 30 s wait
+     (503 with Retry-After past either), answers cached `--cache` seconds
+     with one run for a call asked at once, cache clones made aside and
+     moved into place, and synced on a timer rather than per request.
   4. Packaging: the web directory in the nix package and the tarballs.
+     Done: hbs2-hub-browser is a flake input built by buildNpmPackage,
+     copied into the hbs2-hub package (and so the static set, the docker
+     image and the darwin bundle) and into the linux tarball.
 
 `hub render` (a static site, PEP-24) stays an open question: a public
 `hub serve` covers the same ground with one implementation, and a static

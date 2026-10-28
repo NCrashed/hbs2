@@ -981,14 +981,15 @@ hbs2-git3 repo:describe <repo-key> --name '"hbs2"' --description '"Distributed g
 ```
 
 The inner quotes are needed: hbs2-git3 reads its arguments as script, and
-a string is written between quotes. Each value is one line, with no
-quote or backslash in it. `--clear-name` and `--clear-description` take
+a string is written between quotes. Each value is one line; a quote
+or a backslash inside is fine, though the shell needs it quoted too.
+`--clear-name` and `--clear-description` take
 them out. It publishes the manifest, as `repo:mailbox:set` does.
 
 ### `hbs2-hub serve`
 
 ```
-hbs2-hub serve --web ~/dev/hbs2-hub-browser/dist/web
+hbs2-hub serve
 ```
 
 LOCAL, the default: on `127.0.0.1:8484`, for you. It prints the address
@@ -1005,13 +1006,21 @@ hbs2-hub serve --public --listen 0.0.0.0:8080 --repo <repo-key> [--repo <key>]..
 
 It shows the repositories named with `--repo` and no other, from its own
 cache clones, and offers only the tools that read and are not yours: no
-inbox, no status, no identity. `--busy` bounds the verbs it runs at once
-(4 public, 8 local).
+inbox, no status, no identity. Its clones are made at start and synced
+every five minutes, never while a request waits.
 
-`--web` is the `dist/web` directory of an hbs2-hub-browser build
-(`npm run build`). Without it, `serve` looks in `share/hbs2-hub/web`
-beside its binary, where packages are to put the pages; the nix package
-and the release tarballs do not ship them yet.
+What it does for a stranger is bounded:
+
+- `--busy N`: verbs at once (4 public, 8 local);
+- `--queue N`: calls waiting for one, each at most 30 seconds (32
+  public, 64 local); past either, the answer is a 503 with `Retry-After`;
+- `--cache S`: seconds a public answer is reused (30; 0 turns it off).
+  The same call asked by several visitors at once is run once.
+
+The pages ship with hbs2-hub: in the nix package, the Homebrew keg and
+the release tarballs, under `share/hbs2-hub/web` beside `bin/`, where
+`serve` finds them. `--web <dir>` serves another build, such as the
+`dist/web` of an hbs2-hub-browser checkout (`npm run build`).
 
 ## Scripting
 
@@ -1050,9 +1059,8 @@ Worth knowing before you commit to this.
 
 - **The web interface is young.** `hbs2-hub serve` and the browser
   extension exist (see [In a browser](#in-a-browser)); there is no
-  `hub render` static export, no index or activity document, and the
-  packages do not ship the pages yet. PEP-22 leaves the schemas for the
-  index and the activity document open, so they are not written yet
+  `hub render` static export and no index or activity document. PEP-22
+  leaves the schemas for those two open, so they are not written yet
   rather than written wrong.
 
 - **Queries are exact matches.** `--status` and `--label` filter, and

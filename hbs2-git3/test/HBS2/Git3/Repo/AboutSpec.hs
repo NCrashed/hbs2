@@ -38,10 +38,28 @@ spec = describe "PEP-25 a repository's name and description" $ do
     isLeft (setAbout "name" (Just "   ") base) `shouldBe` True
     isLeft (setAbout "name" (Just "two\nlines") base) `shouldBe` True
     isLeft (setAbout "description" (Just "two\nlines") base) `shouldBe` True
-    -- The renderer writes a string as it is between quotes, so these would
-    -- end it early; see 'setAbout'.
-    isLeft (setAbout "name" (Just "a \"quoted\" name") base) `shouldBe` True
-    isLeft (setAbout "description" (Just "a back\\slash") base) `shouldBe` True
     isLeft (setAbout "name" (Just (Text.replicate (maxNameChars + 1) "x")) base) `shouldBe` True
     isLeft (setAbout "description" (Just (Text.replicate (maxDescriptionChars + 1) "x")) base) `shouldBe` True
     isLeft (setAbout "description" (Just "a bell \a here") base) `shouldBe` True
+
+  it "writes a quote and a backslash, and keeps them through a second edit" $ do
+    -- Finding 20: the renderer wrote a string between quotes as it is, so
+    -- a quote ended it early. Escaped on the way out now, and the clauses
+    -- in memory stay as the parser gives them, so an edit of a manifest
+    -- read back escapes once and not twice.
+    let name = "a \"quoted\" C:\\path"
+        Right mf = setAbout "name" (Just name) base
+        Right back = parseTop (renderManifest mf)
+        Right again = setAbout "description" (Just "and a \\ second") back
+        Right twice = parseTop (renderManifest again)
+    aboutOf back `shouldBe` About (Just name) Nothing
+    aboutOf twice `shouldBe` About (Just name) (Just "and a \\ second")
+    writesBackAsAbout (aboutOf again) again `shouldBe` True
+
+  it "escapes every string in the manifest, whoever put it there" $ do
+    let odd' = "tab\there, bell \a, nul \0 then 5, del \DEL"
+        clause = mkForm @C "note" [mkStr (odd' :: Text.Text)]
+        Right back = parseTop (renderManifest (base <> [clause]))
+    [ s | ListVal [SymbolVal "note", LitStrVal s] <- back ] `shouldBe` [odd']
+    -- and nothing raw that a terminal would act on
+    any (< ' ') (filter (/= '\n') (renderManifest (base <> [clause]))) `shouldBe` False

@@ -35,7 +35,8 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Time.Clock (UTCTime,getCurrentTime,diffUTCTime)
-import System.Directory (createDirectoryIfMissing,doesDirectoryExist)
+import System.Directory (createDirectoryIfMissing,doesDirectoryExist,removePathForcibly,renameDirectory)
+import System.Environment (getEnvironment)
 import System.FilePath ((</>),takeDirectory)
 import System.Process.Typed
 
@@ -57,6 +58,11 @@ data HostConfig = HostConfig
     -- letters sealed to the operator's mailbox, which are nobody else's until
     -- accepted, and status and whoami describe the operator's own keys.
   , hcTools    :: Maybe (HS.HashSet Text)
+    -- | Whether a read syncs a stale cache clone before it runs. A public
+    -- server does not: a stranger's request would wait on a fetch, holding the
+    -- lock every first clone takes. Its clones are synced on a timer instead,
+    -- with 'hubRefresh'.
+  , hcSyncOnRead :: Bool
   }
 
 -- | What a public server offers: the repository's record and its code, and
@@ -85,6 +91,8 @@ data Hub = Hub
   , hubTools  :: [Tool]
     -- | Run one call: progress, the tool's name, its arguments.
   , hubCall   :: (Text -> IO ()) -> Text -> KM.KeyMap Value -> IO (Either HostError Value)
+    -- | Make or sync the cache clone of a repository now, whatever its age.
+  , hubRefresh :: Text -> IO (Either HostError ())
   }
 
 -- | What a frontend asks first, so an old host and a new page can tell each
@@ -191,27 +199,54 @@ newHub hc = do
         exists <- if null p then pure False else doesDirectoryExist p
         pure (if code == ExitSuccess && exists then Just p else Nothing)
 
-      -- Made on first use and synced at most every 'hcSyncEach' seconds, so a
-      -- page that lists and then shows does not fetch twice.
-      cacheClone progress key = withMVar cloning $ \_ -> do
+      -- Made on first use and, unless a timer does it ('hcSyncOnRead'),
+      -- synced at most every 'hcSyncEach' seconds, so a page that lists and
+      -- then shows does not fetch twice.
+      cacheClone progress key = do
         let dir = cacheCloneDir hc key
         have <- doesDirectoryExist dir
-        made <- if have then pure (Right ()) else do
+        if have && not (hcSyncOnRead hc) then pure (Right dir) else
+          withMVar cloning $ \_ -> made progress key >>= \case
+            Left e -> pure (Left e)
+            Right () -> do
+              now <- getCurrentTime
+              last' <- withMVar synced (pure . HM.lookup key)
+              let stale = maybe True (\t -> diffUTCTime now t > fromIntegral (hcSyncEach hc)) last'
+              when (stale && hcSyncOnRead hc) $ syncNow progress key now
+              pure (Right dir)
+
+      -- MADE ASIDE AND MOVED INTO PLACE, so a read that finds the directory
+      -- finds a clone: one that ran while git was still writing it read a
+      -- half-made repository.
+      made progress key = do
+        let dir = cacheCloneDir hc key
+        have <- doesDirectoryExist dir
+        if have then pure (Right ()) else do
           progress ("cloning hbs23://" <> key)
           createDirectoryIfMissing True (takeDirectory dir)
-          (code, _, err) <- readProcess (proc "git" ["clone", "-q", "hbs23://" <> Text.unpack key, dir])
-          pure $ if code == ExitSuccess then Right ()
-                 else Left ("no-clone", "git clone hbs23://" <> key <> " failed: " <> Text.strip (Text.decodeUtf8 (LBS.toStrict err)))
-        case made of
-          Left e -> pure (Left e)
-          Right () -> do
-            now <- getCurrentTime
-            last' <- withMVar synced (pure . HM.lookup key)
-            let stale = maybe True (\t -> diffUTCTime now t > fromIntegral (hcSyncEach hc)) last'
-            when stale $ do
-              progress "fetching the record"
-              void $ readProcess (setWorkingDir dir (proc (mcHub cfg) ["sync", "--repo", Text.unpack key]))
-              modifyMVar_ synced (pure . HM.insert key now)
-            pure (Right dir)
+          let tmp = dir <> ".cloning"
+          removePathForcibly tmp
+          -- Not the user's clone, so not one git-remote-hbs23 is to remember
+          -- for hbs2-hub (it skips a cache directory anyway; this says so).
+          env <- getEnvironment
+          let env' = ("HBS2_GIT_NO_HUB_PIN", "1") : [ kv | kv@(k, _) <- env, k /= "HBS2_GIT_NO_HUB_PIN" ]
+          (code, _, err) <- readProcess (setEnv env' (proc "git" ["clone", "-q", "hbs23://" <> Text.unpack key, tmp]))
+          if code == ExitSuccess
+            then renameDirectory tmp dir >> pure (Right ())
+            else do
+              removePathForcibly tmp
+              pure (Left ("no-clone", "git clone hbs23://" <> key <> " failed: " <> Text.strip (Text.decodeUtf8 (LBS.toStrict err))))
 
-  pure (Hub hc offered call)
+      syncNow progress key now = do
+        let dir = cacheCloneDir hc key
+        progress "fetching the record"
+        void $ readProcess (setWorkingDir dir (proc (mcHub cfg) ["sync", "--repo", Text.unpack key]))
+        modifyMVar_ synced (pure . HM.insert key now)
+
+      refresh key
+        | not (keyShaped (Text.unpack key)) = pure (Left (HostError Null "no-clone" "not a repository key"))
+        | otherwise = withMVar cloning $ \_ -> made (const (pure ())) key >>= \case
+            Left (meaning, why) -> pure (Left (HostError Null meaning why))
+            Right () -> getCurrentTime >>= syncNow (const (pure ())) key >> pure (Right ())
+
+  pure (Hub hc offered call refresh)

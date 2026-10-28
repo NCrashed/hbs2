@@ -79,6 +79,15 @@ ln -s hbs2-git3 "${BUNDLE}/bin/git-hbs2"
 rm -f "${BUNDLE}/bin/hub"
 ln -s hbs2-hub "${BUNDLE}/bin/hub"
 
+# The pages `hbs2-hub serve` shows (PEP-25), where it looks for them:
+# share/hbs2-hub/web beside the bin/ its binary is in. The formula installs
+# share/ into the keg, so the same holds there.
+if [ -d "${DARWIN_PKG}/share/hbs2-hub" ]; then
+  mkdir -p "${BUNDLE}/share"
+  cp -RL "${DARWIN_PKG}/share/hbs2-hub" "${BUNDLE}/share/"
+  chmod -R u+w "${BUNDLE}/share"
+fi
+
 echo "==> Bundling dylibs via dylibbundler"
 # dylibbundler walks each binary's dylib closure, copies non-system
 # dylibs into ${BUNDLE}/lib, and rewrites install names (both in the

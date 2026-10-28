@@ -128,7 +128,7 @@ nativeHostEntries =
         cache <- getXdgDirectory XdgCache ("hbs2-hub" </> "repos")
         let mcp = (defaultMcpConfig self)
                     { mcReadOnly = ro, mcVersion = Text.pack (showVersion Version.version) }
-        serveNative (HostConfig mcp cache 60 True Nothing Nothing) stdin stdout
+        serveNative (HostConfig mcp cache 60 True Nothing Nothing True) stdin stdout
 
       Install ro chrome firefox -> do
         real <- getExecutablePath

@@ -87,9 +87,10 @@ mailboxSigilClause k h =
 -- The role and the tier are written bare, matching PEP-18's examples, and the
 -- leading-letter rule is what keeps that honest: a value starting with a digit
 -- would lex back as a number and one with a space in it as two atoms. The
--- string branch escapes, because a tier reaches this from wherever the owner
--- copied it and an unescaped quote would close the string early and leave the
--- rest of the manifest reading as whatever it happened to look like.
+-- string branch is escaped when the manifest is written ('renderManifest'),
+-- because a tier reaches this from wherever the owner copied it and an
+-- unescaped quote would close the string early and leave the rest of the
+-- manifest reading as whatever it happened to look like.
 atom :: Text -> Syntax C
 atom t = case Text.uncons t of
   Just (c,rest) | isAlpha c, Text.all plain rest -> mkSym (Text.unpack t)
@@ -97,13 +98,39 @@ atom t = case Text.uncons t of
   where
     plain ch = isAlphaNum ch || ch `elem` ("-_.:/" :: String)
 
--- | The manifest as 'updateRepoHead' will store it.
+-- | The manifest as 'updateRepoHead' stores it: this text, as UTF-8.
 --
 -- Exported so the round-trip guards below check the BYTES and not the value:
 -- what the hub eventually parses is this text, read out of a tree, and an
 -- escaping bug lives exactly in the gap between the two.
+--
+-- EVERY STRING ESCAPED, here and only here. suckless-conf prints a string
+-- between quotes as it is and its parser reads escapes, so a quote inside
+-- ended the literal early, a backslash began an escape nobody wrote, and the
+-- manifest no longer parsed. Escaping on the way out keeps the clauses in
+-- memory as the parser gives them back, so a manifest read, edited and
+-- written again is escaped once, whoever edited it. hbs2-hub's canon writer
+-- spells the escapes the same way ('sexpStr').
 renderManifest :: [Syntax C] -> String
-renderManifest = show . vcat . fmap pretty
+renderManifest = show . vcat . fmap (pretty . escapedStrings)
+
+escapedStrings :: Syntax C -> Syntax C
+escapedStrings = \case
+  List c xs -> List c (fmap escapedStrings xs)
+  Literal c (LitStr s) -> Literal c (LitStr (Text.concatMap esc s))
+  x -> x
+  where
+    esc = \case
+      '\\' -> "\\\\"
+      '"'  -> "\\\""
+      '\n' -> "\\n"
+      '\r' -> "\\r"
+      '\t' -> "\\t"
+      -- \^X, one character after the caret, so what follows cannot be read as
+      -- part of it, which a numeric escape does to the digits after it.
+      ch | ch < ' ' -> Text.pack ['\\', '^', toEnum (fromEnum ch + 64)]
+         | ch == '\DEL' -> "\\DEL"
+         | otherwise -> Text.singleton ch
 
 -- | Replace this mailbox's clause, or add it.
 --

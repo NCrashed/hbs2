@@ -629,7 +629,7 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
                , arg "string" "--clear-name", arg "string" "--clear-description" ] $
           desc ( "What a page shows for the repository instead of its key (PEP-25):"
                  <> line <> "a name of at most 100 characters and a description of at"
-                 <> line <> "most 1000, each one line with no quote or backslash, given"
+                 <> line <> "most 1000, each one line, given"
                  <> line <> "as quoted strings: --name '\"my project\"'. Written into the manifest and"
                  <> line <> "published with it, as the mailbox clauses are. Run with"
                  <> line <> "nothing to say but the repository to see what it declares." ) $

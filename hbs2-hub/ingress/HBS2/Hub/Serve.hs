@@ -30,8 +30,8 @@ module HBS2.Hub.Serve
 
 import HBS2.Hub.Host
 import HBS2.Hub.Mcp (toolJson)
+import HBS2.Hub.Serve.Limits
 
-import Control.Concurrent.MVar
 import Control.Exception qualified as E
 import Data.Aeson (Value(..),object,(.=))
 import Data.Aeson qualified as Aeson
@@ -63,7 +63,10 @@ data ServeConfig = ServeConfig
   , scWeb   :: FilePath      -- ^ the built pages
   , scMode  :: Mode
   , scToken :: Text          -- ^ local mode: what every @/api@ request carries
-  , scBusy  :: Int           -- ^ verbs at once; a request past it is told to wait
+  , scBusy  :: Int           -- ^ verbs at once
+  , scQueue :: Int           -- ^ calls waiting for a slot; one past it is refused
+  , scWait  :: Int           -- ^ seconds a call waits in the queue at most
+  , scCache :: Int           -- ^ seconds a public answer is reused; 0 for never
   }
 
 -- | What every answer carries. The pages run nothing from elsewhere, are
@@ -119,7 +122,9 @@ sameToken want got =
 
 serveHttp :: ServeConfig -> Hub -> IO ()
 serveHttp sc hub = do
-  running <- newMVar (0 :: Int)
+  gate <- newGate (scBusy sc) (scQueue sc) (scWait sc)
+  answers <- newAnswerCache (if scMode sc == Public then scCache sc else 0)
+  let running = (gate, answers)
   let settings = Warp.setHost (fromString (scHost sc)) (Warp.setPort (scPort sc) Warp.defaultSettings)
   Warp.runSettings settings (app running)
   where
@@ -165,21 +170,43 @@ serveHttp sc hub = do
              _ -> respond (json status404 (err "not-found" "no such API"))
 
     -- Progress and then the answer, one JSON object a line, so a page can
-    -- show what a long call is doing. Past the limit of verbs at once the
-    -- request is told to wait rather than queued without bound.
-    call running name args respond = do
-      admitted <- modifyMVar running $ \n -> pure (if n < scBusy sc then (n + 1, True) else (n, False))
-      if not admitted
-        then respond (json status503 (err "busy" "too many calls at once; try again shortly"))
-        else (`E.finally` modifyMVar_ running (pure . subtract 1)) $
-          respond $ responseStream status200 (ndjson <> securityHeaders) $ \write flush -> do
+    -- show what a long call is doing. Through the gate: a few verbs at once,
+    -- a queue of fixed depth for the rest, and past it a 503 that says when
+    -- to come back.
+    --
+    -- PUBLIC answers come from the cache when it has them, and a call the
+    -- cache does not have is run once however many ask it at the same time.
+    -- No progress lines there: the run may be another request's, and the
+    -- answer is one line either way.
+    call (gate, answers) name args respond
+      | scMode sc == Local = do
+          r <- withGate gate $ respond $ responseStream status200 (ndjson <> securityHeaders) $ \write flush ->
             let line v = write (B.lazyByteString (Aeson.encode v) <> B.char7 '\n') >> flush
-            r <- E.try (hubCall hub (\p -> line (object ["progress" .= p])) name args)
-            case r of
-              Right (Right v) -> line (object ["ok" .= True, "result" .= v])
-              Right (Left e) -> line (object ["ok" .= False, "error" .= hostErrorJson e])
-              Left (e :: E.SomeException) -> line (object ["ok" .= False, "error" .= hostErrorJson
-                                                  (HostError Null "internal" (Text.pack (show e)))])
+            in answer line =<< E.try (hubCall hub (\p -> line (object ["progress" .= p])) name args)
+          either (respond . busy . refusal) pure r
+      | otherwise = do
+          r <- E.try $ cachedAnswer answers (cacheKey name args) $
+                 withGate gate (hubCall hub (const (pure ())) name args) >>= \case
+                   Left why -> pure (Left (HostError Null "busy" (refusal why)))
+                   Right a -> pure a
+          case r of
+            Right (Left e) | heMeaning e == "busy" -> respond (busy (heMessage e))
+            _ -> respond $ responseStream status200 (ndjson <> securityHeaders) $ \write flush ->
+                   answer (\v -> write (B.lazyByteString (Aeson.encode v) <> B.char7 '\n') >> flush) r
+
+    answer line = \case
+      Right (Right v) -> line (object ["ok" .= True, "result" .= v])
+      Right (Left e) -> line (object ["ok" .= False, "error" .= hostErrorJson e])
+      Left (e :: E.SomeException) -> line (object ["ok" .= False, "error" .= hostErrorJson
+                                          (HostError Null "internal" (Text.pack (show e)))])
+
+    refusal = \case
+      QueueFull -> "too many calls are waiting; try again shortly"
+      WaitedOut -> "no slot came free in time; try again shortly" :: Text
+
+    busy msg = responseLBS status503 (("Content-Type", "application/json") : ("Cache-Control", "no-store")
+                                      : ("Retry-After", "5") : securityHeaders)
+                 (Aeson.encode (err "busy" msg))
 
     static path respond = case assetPath path of
       Nothing -> respond (plain status404 "not found")

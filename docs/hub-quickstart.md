@@ -230,8 +230,8 @@ proof-of-work price is per letter.
 
 The extension shows a project's hbs2 issues and pull requests on its
 GitHub pages, found through a `.hbs2/hub` file holding `hbs23://<repo-key>`.
-`hbs2-hub serve --web <hbs2-hub-browser>/dist/web` serves the same pages
-and the code from your machine, for a project without GitHub. Writes run
+`hbs2-hub serve` serves the same pages and the code from your
+machine, for a project without GitHub. Writes run
 in your clone, which `git clone` and `git fetch` remember for you; name
 the repository with `hbs2-git3 repo:describe`. See
 [hbs2-hub.md](hbs2-hub.md#in-a-browser).

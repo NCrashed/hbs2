@@ -121,6 +121,7 @@ library hub-ingress
                     , wai
                     , warp
                     , http-types
+                    , stm
     exposed-modules:
       HBS2.Hub.Deny
       HBS2.Hub.Ingress
@@ -165,6 +166,7 @@ library hub-ingress
       HBS2.Hub.NativeHost
       HBS2.Hub.Host
       HBS2.Hub.Serve
+      HBS2.Hub.Serve.Limits
       HBS2.Hub.CLI.Sync
       HBS2.Hub.CLI.Updates
       HBS2.Hub.CLI.Verify
@@ -250,6 +252,7 @@ test-suite spec
       HBS2.Hub.DefaultsSpec
       HBS2.Hub.NativeHostSpec
       HBS2.Hub.ServeSpec
+      HBS2.Hub.LimitsSpec
       HBS2.Hub.CodeSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec

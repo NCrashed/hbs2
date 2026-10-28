@@ -46,8 +46,8 @@ aboutOf mf = About (field "name") (field "description")
 --
 -- Replaced where it is, so a manifest someone has read keeps its order, and
 -- appended when new. Refused rather than trimmed: an empty value is not one
--- this format can write (see "HBS2.Git3.Repo.Mailbox"), each is one line with
--- no quote or backslash in it, and neither carries a control character.
+-- this format can write (see "HBS2.Git3.Repo.Mailbox"), each is one line, and
+-- neither carries a control character.
 setAbout :: Id -> Maybe Text -> [Syntax C] -> Either Text [Syntax C]
 setAbout field mv mf = case mv of
   Nothing -> Right without
@@ -56,14 +56,11 @@ setAbout field mv mf = case mv of
         limit = if field == "name" then maxNameChars else maxDescriptionChars
     when (Text.null t) $ Left (idText <> " is empty; --clear-" <> idText <> " takes it out")
     when (Text.length t > limit) $ Left (idText <> " is longer than " <> Text.pack (show limit) <> " characters")
-    -- ONE LINE, AND NO QUOTE OR BACKSLASH, because the manifest's renderer
-    -- writes a string between quotes as it is: a quote inside ends it early, a
-    -- newline comes back a space, and the manifest no longer parses.
-    -- 'writesBackAsAbout' would refuse that before anything is published; this
-    -- says why, in words, first.
+    -- ONE LINE: a name and a one-paragraph description, as a page shows them.
     when (Text.any (`elem` ("\n\r" :: String)) t) $ Left (idText <> " is one line")
-    when (Text.any (`elem` ("\"\\" :: String)) t) $ Left (idText <> " may not contain a quote or a backslash")
     when (Text.any isControl t) $ Left (idText <> " has a control character in it")
+    -- As given: a quote or a backslash in it is escaped when the manifest is
+    -- written ('renderManifest'), and 'writesBackAsAbout' checks the bytes.
     let c = mkForm @C (Text.unpack idText) [mkStr t]
     pure $ if any isIt mf then [ if isIt x then c else x | x <- dropLater mf ] else mf <> [c]
   where
