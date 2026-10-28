@@ -275,7 +275,8 @@ statusEntries = do
              <> line <> "probe of the remote, not a push that reports what it"
              <> line <> "would have done."
              <> line
-             <> line <> "--local asks no remote: the signer, canon and the clone only."
+             <> line <> "--local asks no remote: the signer, canon and the clone only,"
+             <> line <> "and the mailbox as the peer holds it, without a fetch."
              <> line
              <> line <> "Six facts, each of which was computable and none of"
              <> line <> "which was askable: the repository, whether this machine"
@@ -366,7 +367,9 @@ statusEntries = do
           -- letters as well as resurrecting settled ones. This verb prints one
           -- number per line by design; `hub inbox` is where a read that cannot
           -- be believed says so, with the hashes and a non-zero exit.
-          tryAny (readInbox (overRpc sto api) k) <&> \case
+          -- As the peer holds it under --local: the honest read fetches and
+          -- waits a round for the copy to settle, 2.5 s a page waits on.
+          tryAny ((if saLocal sa then readInboxHeld else readInbox) (overRpc sto api) k) <&> \case
             Left e  -> Left (Text.pack (show e))
             Right r -> Right (length (irLetters r) + irOmitted r + irDenied r)
 

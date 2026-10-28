@@ -30,8 +30,11 @@ module HBS2.Hub.Ingress
   , liveMessages
   , readInbox
   , readInboxFrom
+  , readInboxHeld
+  , Freshness(..)
   , MailboxLive(..)
   , mailboxLive
+  , mailboxLiveWith
   , openMessage
   , openBlock
   , copyOf
@@ -625,8 +628,18 @@ readInboxFrom :: MonadUnliftIO m
               -> Maybe HashRef  -- ^ start after this message
               -> Int            -- ^ how many to open, clamped
               -> m InboxRead
-readInboxFrom ig mbox after limit = do
-  ml <- mailboxLive ig mbox
+readInboxFrom = readInboxWith Fetched
+
+-- | The first page of the queue as the peer holds it NOW: no fetch and no
+-- wait for it to settle. For a count on a page (@hub status --local@), where
+-- the 2.5 s the honest read spends waiting is a page nobody sees; @hub inbox@
+-- is where a read that has to be complete is made.
+readInboxHeld :: MonadUnliftIO m => Ingress m -> HubKey -> m InboxRead
+readInboxHeld ig mbox = readInboxWith AsHeld ig mbox Nothing maxInboxLetters
+
+readInboxWith :: MonadUnliftIO m => Freshness -> Ingress m -> HubKey -> Maybe HashRef -> Int -> m InboxRead
+readInboxWith fresh ig mbox after limit = do
+  ml <- mailboxLiveWith fresh ig mbox
   -- Sorted explicitly. This used to be HS.toList with a comment claiming it
   -- was sorted by hash: that is the HAMT traversal order, which is a property
   -- of the container's implementation and not a promise it makes. A triage
@@ -752,9 +765,22 @@ data MailboxLive = MailboxLive
 maxMailboxBlocks :: Int
 maxMailboxBlocks = 200000
 
+-- | How a read finds the mailbox's root.
+data Freshness
+  = Fetched  -- ^ ask the peer to fetch it, and wait for its copy to settle ('awaitMailbox')
+  | AsHeld   -- ^ the root the peer holds now, never called settled
+  deriving stock (Eq,Show)
+
 mailboxLive :: MonadUnliftIO m => Ingress m -> HubKey -> m MailboxLive
-mailboxLive ig mbox = do
-  (root, settled) <- awaitMailbox ig mbox
+mailboxLive = mailboxLiveWith Fetched
+
+mailboxLiveWith :: MonadUnliftIO m => Freshness -> Ingress m -> HubKey -> m MailboxLive
+mailboxLiveWith fresh ig mbox = do
+  (root, settled) <- case fresh of
+    Fetched -> awaitMailbox ig mbox
+    AsHeld -> igStatus ig mbox >>= \case
+      Nothing -> throwIO (MailboxUnknown mbox)
+      Just () -> igRoot ig mbox <&> (,False)
   case root of
     Nothing   -> pure (MailboxLive mempty [] settled False)
     Just tree -> do

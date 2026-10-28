@@ -37,6 +37,10 @@
     `git config hbs2.hub.repo`, as `--repo` already did, and a verb that
     finds neither says why before its usage line.
 
+  - `hbs2-hub status --local` reads the mailbox as the peer holds it,
+    without asking for a fetch and waiting a round for it to settle: 2.6 s
+    became about 0.1 s, on every page of the extension and of `serve`.
+
   - `code log` says how many commits there are in all (`total`), as the
     count beside History on the pages.
 

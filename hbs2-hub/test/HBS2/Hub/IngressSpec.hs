@@ -184,6 +184,24 @@ spec1 = do
       irLetters r `shouldBe` []
       irSettled r `shouldBe` True
 
+    it "reads a mailbox as held without a fetch or a pause, and never calls it settled" $ do
+      k <- aKey
+      -- For a count on a page (hub status --local): the honest read waits a
+      -- round, 2.5 s, which a page showing a number in a tab should not.
+      fetched <- newIORef (0 :: Int)
+      pauses <- newIORef (0 :: Int)
+      let ig = stub { igFetch = const (liftIO (modifyIORef' fetched succ))
+                    , igIdle  = const (pure (Just True))
+                    , igPause = const (modifyIORef' pauses succ) }
+      r <- readInboxHeld ig k
+      irLetters r `shouldBe` []
+      irSettled r `shouldBe` False
+      readIORef fetched `shouldReturn` 0
+      readIORef pauses `shouldReturn` 0
+      -- and a mailbox the peer does not hold is still said to be unknown
+      readInboxHeld stub { igStatus = const (pure Nothing) } k
+        `shouldThrow` \(MailboxUnknown _) -> True
+
     it "does not believe an idle peer on the look taken straight after the fetch" $ do
       k <- aKey
       -- A copy held by another peer shows up as a download only once that peer
