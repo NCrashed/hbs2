@@ -18,6 +18,7 @@ import HBS2.Base58
 import HBS2.Net.IP.Addr
 
 import HBS2.Peer.Brains
+import HBS2.Peer.Proto.RepositoryLease
 
 import HBS2.Misc.PrettyStuff
 
@@ -28,12 +29,15 @@ import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Trans.Cont
+import Codec.Serialise
 import Crypto.Saltine.Core.Box qualified as Encrypt
 import Database.SQLite.Simple
 import Database.SQLite.Simple.FromField
 import Database.SQLite.Simple.ToField
 import Data.Cache (Cache)
 import Data.Cache qualified as Cache
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Either
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
@@ -353,6 +357,14 @@ instance ( Hashable (Peer e)
        |] (hash, peer)
        pure $ fromOnly <$> listToMaybe result
 
+  putRepositoryLease brains lease = do
+    updateOP brains (insertRepositoryLease brains lease)
+    commitNow brains True
+
+  getRepositoryLease brains = liftIO . selectRepositoryLease brains
+
+  listRepositoryLeases = liftIO . selectRepositoryLeases
+
 commitNow :: forall e m . MonadIO m
           => BasicBrains e
           -> Bool
@@ -375,6 +387,44 @@ updateOP :: forall e m . MonadIO m => BasicBrains e -> IO () -> m ()
 updateOP br op = do
   let pip = view brainsPipeline br
   liftIO $ atomically $ writeTQueue pip (liftIO op)
+
+insertRepositoryLease :: BasicBrains e -> RepositoryLease -> IO ()
+insertRepositoryLease brains lease = do
+  let conn = view brainsDb brains
+      leaseId = show (pretty (repositoryLeaseId lease))
+      repository = show (pretty (AsBase58 (repositoryLeaseRepository lease)))
+      value = LBS.toStrict (serialise lease)
+  void $ execute conn [qc|
+    insert into statedb.repository_lease (id,repository,value,updated)
+    values (?,?,?,?)
+    on conflict(repository) do update set
+      id = excluded.id,
+      value = excluded.value,
+      updated = excluded.updated
+  |] (leaseId, repository, value, repositoryLeaseUpdatedAt lease)
+
+selectRepositoryLease
+  :: BasicBrains e
+  -> RepositoryLeaseId
+  -> IO (Maybe RepositoryLease)
+selectRepositoryLease brains leaseId = do
+  let conn = view brainsDb brains
+  rows <- query @_ @(Only BS.ByteString) conn [qc|
+    select value from statedb.repository_lease where id = ? limit 1
+  |] (Only (show (pretty leaseId)))
+  pure $ listToMaybe rows >>= decodeRepositoryLease . fromOnly
+
+selectRepositoryLeases :: BasicBrains e -> IO [RepositoryLease]
+selectRepositoryLeases brains = do
+  let conn = view brainsDb brains
+  rows <- query_ @(Only BS.ByteString) conn [qc|
+    select value from statedb.repository_lease order by repository
+  |]
+  pure $ mapMaybe (decodeRepositoryLease . fromOnly) rows
+
+decodeRepositoryLease :: BS.ByteString -> Maybe RepositoryLease
+decodeRepositoryLease bytes =
+  either (const Nothing) Just (deserialiseOrFail (LBS.fromStrict bytes))
 
 insertSize :: forall e . Pretty (Peer e)
            => BasicBrains e
@@ -1001,6 +1051,15 @@ newBasicBrains cfg = liftIO do
     )
   |]
 
+  execute_ conn [qc|
+    create table if not exists statedb.repository_lease
+    ( id         text not null primary key
+    , repository text not null unique
+    , value      blob not null
+    , updated    unsigned big int not null
+    )
+  |]
+
   BasicBrains <$> newTVarIO mempty
               <*> newTVarIO mempty
               <*> Cache.newCache (Just (toTimeSpec (30 :: Timeout 'Seconds)))
@@ -1122,9 +1181,5 @@ runBasicBrains cfg brains@BasicBrains{..} = do
       del <- liftIO $ atomically $ flushTQueue _brainsDelDownload
       for_ del $ \d -> do
         delDownload @e brains (HashRef d)
-
-
-
-
 
 

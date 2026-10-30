@@ -10,6 +10,7 @@ import HBS2.Actors.Peer
 import HBS2.Net.Messaging.Encrypted.ByPass(ByPassStat)
 
 import HBS2.Peer.RPC.Internal.Types
+import HBS2.Peer.Proto.RepositoryLease
 
 import Control.Monad.Reader
 import Data.ByteString.Lazy (ByteString)
@@ -40,6 +41,10 @@ data RpcGetProbes
 
 data RpcRunScript
 
+data RpcRepositoryLeasePut
+data RpcRepositoryLeaseGet
+data RpcRepositoryLeaseList
+
 type PeerAPI = '[ RpcPoke
                 , RpcPing
                 , RpcAnnounce
@@ -58,6 +63,9 @@ type PeerAPI = '[ RpcPoke
                 , RpcPollList2
                 , RpcGetProbes
                 , RpcRunScript
+                , RpcRepositoryLeasePut
+                , RpcRepositoryLeaseGet
+                , RpcRepositoryLeaseList
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -125,10 +133,18 @@ type instance Output RpcGetProbes = [ProbeSnapshotElement]
 type instance Input  RpcRunScript = Text
 type instance Output RpcRunScript = Text
 
+type instance Input RpcRepositoryLeasePut = RepositoryLease
+type instance Output RpcRepositoryLeasePut = ()
+
+type instance Input RpcRepositoryLeaseGet = RepositoryLeaseId
+type instance Output RpcRepositoryLeaseGet = Maybe RepositoryLease
+
+type instance Input RpcRepositoryLeaseList = ()
+type instance Output RpcRepositoryLeaseList = [RepositoryLease]
+
 data SetLogging =
     DebugOn Bool
   | TraceOn Bool
   deriving (Generic,Eq,Show)
 
 instance Serialise SetLogging
-

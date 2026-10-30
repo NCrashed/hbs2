@@ -9,6 +9,7 @@ import HBS2.Hash
 
 import Data.Word
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Peer.Proto.RepositoryLease
 
 import Data.Time.Clock (NominalDiffTime)
 
@@ -181,6 +182,16 @@ class HasBrains e a where
   isSeen :: (Hashed HbSync x, MonadIO m) => a -> x -> m Bool
   isSeen _ _ = pure False
 
+  putRepositoryLease :: MonadIO m => a -> RepositoryLease -> m ()
+  putRepositoryLease _ _ = pure ()
+
+  getRepositoryLease :: MonadIO m
+                     => a -> RepositoryLeaseId -> m (Maybe RepositoryLease)
+  getRepositoryLease _ _ = pure Nothing
+
+  listRepositoryLeases :: MonadIO m => a -> m [RepositoryLease]
+  listRepositoryLeases _ = pure []
+
 type NoBrains = ()
 
 instance Pretty (Peer e) => HasBrains e NoBrains  where
@@ -224,4 +235,6 @@ instance HasBrains e (SomeBrains e) where
 
   brainsCacheBlockSize (SomeBrains a) = brainsCacheBlockSize @e a
   brainsFindBlockSize (SomeBrains a) = brainsFindBlockSize @e a
-
+  putRepositoryLease (SomeBrains a) = putRepositoryLease @e a
+  getRepositoryLease (SomeBrains a) = getRepositoryLease @e a
+  listRepositoryLeases (SomeBrains a) = listRepositoryLeases @e a

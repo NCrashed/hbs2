@@ -56,6 +56,7 @@ import CheckMetrics
 import RefLog qualified
 import RefLog (reflogWorker)
 import LWWRef (lwwRefWorker)
+import RepositoryLeaseWorker (repositoryLeaseWorker)
 import Multicast
 import MailboxProtoWorker
 import HttpWorker
@@ -1286,6 +1287,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "lwwRefWorker" (lwwRefWorker @e conf (SomeBrains brains))
 
+                peerThread "repositoryLeaseWorker" $
+                  liftIO (repositoryLeaseWorker (SomeBrains brains) (AnyStorage s))
+
                 -- setup mailboxes stuff
                 let PeerConfig defConf = coerce conf
                 let mboxConf = do -- maybe1 pref defConf $ \p -> do
@@ -1485,5 +1489,4 @@ checkMigration prefix  = flip runContT pure $ callCC \exit -> do
     liftIO exitFailure
 
   liftIO exitFailure
-
 
