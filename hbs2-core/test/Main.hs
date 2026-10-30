@@ -41,6 +41,8 @@ main =
               testInventoryReportsBadFrontier
           , testCase "stops explicitly at configured work bounds"
               testInventoryBoundsWork
+          , testCase "does not guess a block into the wrong protocol role"
+              testTypedInventoryRejectsMalformedRole
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"
@@ -91,4 +93,3 @@ main =
               testTCPRedialsAfterFailedDial
           ]
       ]
-

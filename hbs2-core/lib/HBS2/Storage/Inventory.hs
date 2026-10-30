@@ -3,6 +3,7 @@ module HBS2.Storage.Inventory
   , InventoryStatus(..)
   , InventoryScan(..)
   , scanInventory
+  , scanInventoryTyped
   ) where
 
 import HBS2.Data.Types.Refs
@@ -43,6 +44,7 @@ data InventoryScan = InventoryScan
   , inventoryBlocks       :: Map HashRef Word64
   , inventoryMissing      :: Set HashRef
   , inventoryCorrupt      :: Set HashRef
+  , inventoryMalformed    :: Set HashRef
   , inventoryLogicalBytes :: Word64
   }
   deriving stock (Eq, Show)
@@ -67,53 +69,87 @@ scanInventory
   -> [HashRef]
   -> m InventoryScan
 scanInventory limits readBlock edges roots =
-  go Set.empty (Set.fromList roots) Map.empty Set.empty Set.empty 0
+  scanInventoryTyped limits readBlock decode (((),) <$> roots)
   where
-    go seen pending blocks missing corrupt total =
+    decode () href bytes = Right (((),) <$> edges href bytes)
+
+-- | Role-aware variant of 'scanInventory'.
+--
+-- A hash is charged once, while each distinct @(role, hash)@ is expanded once.
+-- This lets a protocol distinguish, for example, a Merkle node from an opaque
+-- Git payload even though both are ordinary CAS blocks.  Returning 'Left'
+-- means the bytes hash correctly but are malformed for the expected role.
+scanInventoryTyped
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> [(r, HashRef)]
+  -> m InventoryScan
+scanInventoryTyped limits readBlock edges roots =
+  go Set.empty Set.empty (Set.fromList roots) Map.empty Set.empty Set.empty Set.empty 0
+  where
+    go seen expanded pending blocks missing corrupt malformed total =
       case Set.minView pending of
         Nothing -> pure InventoryScan
           { inventoryStatus = InventoryTraversalComplete
           , inventoryBlocks = blocks
           , inventoryMissing = missing
           , inventoryCorrupt = corrupt
+          , inventoryMalformed = malformed
           , inventoryLogicalBytes = total
           }
 
-        Just (href, pending')
-          | Set.member href seen ->
-              go seen pending' blocks missing corrupt total
+        Just (node@(_role, href), pending')
+          | Set.member node expanded ->
+              go seen expanded pending' blocks missing corrupt malformed total
 
-          | fromIntegral (Set.size seen) >= inventoryMaxBlocks limits ->
+          | Set.notMember href seen
+          , fromIntegral (Set.size seen) >= inventoryMaxBlocks limits ->
               pure InventoryScan
                 { inventoryStatus = InventoryBlockLimitExceeded href
                 , inventoryBlocks = blocks
                 , inventoryMissing = missing
                 , inventoryCorrupt = corrupt
+                , inventoryMalformed = malformed
                 , inventoryLogicalBytes = total
                 }
 
           | otherwise -> do
               let seen' = Set.insert href seen
+                  expanded' = Set.insert node expanded
               readBlock href >>= \case
                 Nothing ->
-                  go seen' pending' blocks (Set.insert href missing) corrupt total
+                  go seen' expanded' pending' blocks (Set.insert href missing)
+                    corrupt malformed total
 
                 Just bytes
                   | hashObject @HbSync bytes /= fromHashRef href ->
-                      go seen' pending' blocks missing (Set.insert href corrupt) total
+                      go seen' expanded' pending' blocks missing
+                        (Set.insert href corrupt) malformed total
 
-                  | size > inventoryMaxBytes limits - total ->
+                  | Set.notMember href seen
+                  , size > inventoryMaxBytes limits - total ->
                       pure InventoryScan
                         { inventoryStatus = InventoryByteLimitExceeded href
                         , inventoryBlocks = blocks
                         , inventoryMissing = missing
                         , inventoryCorrupt = corrupt
+                        , inventoryMalformed = malformed
                         , inventoryLogicalBytes = total
                         }
 
-                  | otherwise ->
-                      let blocks' = Map.insert href size blocks
-                          pending'' = Set.union pending' (Set.fromList (edges href bytes))
-                      in go seen' pending'' blocks' missing corrupt (total + size)
+                  | otherwise -> case edges _role href bytes of
+                      Left{} ->
+                        go seen' expanded' pending' blocks' missing corrupt
+                          (Set.insert href malformed) total'
+
+                      Right children ->
+                        let pending'' = Set.union pending' (Set.fromList children)
+                        in go seen' expanded' pending'' blocks' missing corrupt
+                             malformed total'
                   where
                     size = fromIntegral (LBS.length bytes)
+                    firstVisit = Set.notMember href seen
+                    blocks' = if firstVisit then Map.insert href size blocks else blocks
+                    total' = if firstVisit then total + size else total

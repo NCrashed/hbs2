@@ -6,6 +6,7 @@ module TestStorageInventory
   ( testInventoryDeterministic
   , testInventoryReportsBadFrontier
   , testInventoryBoundsWork
+  , testTypedInventoryRejectsMalformedRole
   ) where
 
 import HBS2.Data.Types.Refs
@@ -62,6 +63,7 @@ testInventoryDeterministic = do
   inventoryLogicalBytes a @?= fromIntegral (sum (LBS.length <$> Map.elems blocks))
   inventoryMissing a @?= Set.empty
   inventoryCorrupt a @?= Set.empty
+  inventoryMalformed a @?= Set.empty
 
 -- | Missing bytes and bytes returned under the wrong hash are different
 -- evidence and neither contributes stored logical bytes.
@@ -79,6 +81,7 @@ testInventoryReportsBadFrontier = do
   inventoryBlocks result @?= Map.singleton goodHash (fromIntegral (LBS.length goodBytes))
   inventoryMissing result @?= Set.singleton missingHash
   inventoryCorrupt result @?= Set.singleton corruptHash
+  inventoryMalformed result @?= Set.empty
 
 -- | Bounds stop traversal deterministically; a partial result is explicitly
 -- not complete and cannot be mistaken for a small valid inventory.
@@ -98,3 +101,22 @@ testInventoryBoundsWork = do
   case inventoryStatus byBytes of
     InventoryByteLimitExceeded _ -> pure ()
     other -> assertFailure ("expected byte limit, got " <> show other)
+
+data Role = Tree | Opaque
+  deriving stock (Eq, Ord, Show)
+
+-- | The same bytes are not guessed into a structure: the role supplied by the
+-- owning protocol decides whether they must decode and expose children.
+testTypedInventoryRejectsMalformedRole :: IO ()
+testTypedInventoryRejectsMalformedRole = do
+  let item@(href, _) = block "not a tree"
+      blocks = Map.singleton href (snd item)
+      decode Opaque _ _ = Right []
+      decode Tree h _ = Left ("not a tree: " <> show h)
+
+  result <- scanInventoryTyped limits (reader blocks) decode
+              [(Opaque, href), (Tree, href)]
+
+  inventoryStatus result @?= InventoryTraversalComplete
+  Map.size (inventoryBlocks result) @?= 1
+  inventoryMalformed result @?= Set.singleton href
