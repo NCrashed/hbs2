@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               hbs2-storage-simple
-version:            0.26.0.3
+version:            0.26.0.4
 -- synopsis:
 -- description:
 license:            BSD-3-Clause
@@ -190,7 +190,6 @@ executable hbs2-storage-simple-benchmarks
 
     hs-source-dirs: benchmarks
     default-language: Haskell2010
-
 
 
 

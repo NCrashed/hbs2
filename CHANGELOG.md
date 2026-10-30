@@ -1,4 +1,8 @@
-# Unreleased
+# 0.26.0.4  2026-10-31
+
+Sigils created by hbs2-hub setup now reach relay peers, so a fresh
+contributor can file the first issue or pull request using only the repository
+key, and acknowledgements can find the contributor's reply sigil.
 
 ## Fixed
 

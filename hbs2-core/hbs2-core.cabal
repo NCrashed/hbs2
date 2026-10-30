@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               hbs2-core
-version:            0.26.0.3
+version:            0.26.0.4
 -- synopsis:
 -- description:
 license:            BSD-3-Clause
@@ -276,5 +276,4 @@ test-suite test
         , network-byte-order
         , cryptonite
         , text
-
 

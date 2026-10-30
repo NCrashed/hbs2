@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               hbs2-hub
-version:            0.26.0.3
+version:            0.26.0.4
 synopsis:           hbs2-hub: decentralized forge (issues/PRs) over hbs2
 license:            BSD-3-Clause
 license-file:       LICENSE

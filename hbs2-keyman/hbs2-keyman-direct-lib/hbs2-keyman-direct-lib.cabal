@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               hbs2-keyman-direct-lib
-version:            0.26.0.3
+version:            0.26.0.4
 -- synopsis:
 -- description:
 license:            BSD-3-Clause
@@ -106,4 +106,3 @@ library
     build-depends:    base
     hs-source-dirs:   .
     default-language: GHC2021
-
