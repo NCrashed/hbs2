@@ -6,6 +6,7 @@ import TestFileLogger
 import TestScheduled
 import TestDerivedKey
 import TestMerkleWalk
+import TestStorageInventory
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -32,6 +33,14 @@ main =
               testMerkleWalkBounded
           , testCase "still repeats a leaf that a tree names twice"
               testMerkleWalkKeepsDuplicates
+          ]
+      , testGroup "canonical storage inventory"
+          [ testCase "is a deterministic set of distinct blocks"
+              testInventoryDeterministic
+          , testCase "separates missing and corrupt frontier blocks"
+              testInventoryReportsBadFrontier
+          , testCase "stops explicitly at configured work bounds"
+              testInventoryBoundsWork
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"
@@ -82,5 +91,4 @@ main =
               testTCPRedialsAfterFailedDial
           ]
       ]
-
 

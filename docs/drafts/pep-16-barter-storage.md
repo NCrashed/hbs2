@@ -589,6 +589,8 @@ Defines `RepositoryLease`, snapshot identity, canonical inventory, receipts,
 the durable state machine, NCQ3 pin integration, restart recovery, size limits,
 retention, and the `repo:relay-only` integration.
 
+The detailed draft is [PEP-06](pep-06-repository-lease.md).
+
 This is the first implementation target.
 
 

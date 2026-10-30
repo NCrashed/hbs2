@@ -128,6 +128,7 @@ library
                     , HBS2.Storage.Operations.ByteString
                     , HBS2.Storage.Operations.Missed
                     , HBS2.Storage.Operations.Delete
+                    , HBS2.Storage.Inventory
                     , HBS2.System.Logger.Simple
                     , HBS2.System.Logger.Simple.ANSI
                     , HBS2.System.Logger.Simple.Class
@@ -225,6 +226,7 @@ test-suite test
                   , TestScheduled
                   , TestDerivedKey
                   , TestMerkleWalk
+                  , TestStorageInventory
                   , TestKeyEncoding
                   , TestByPassFlow
                   , TestEncryptedTree
@@ -276,5 +278,4 @@ test-suite test
         , network-byte-order
         , cryptonite
         , text
-
 
