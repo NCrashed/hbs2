@@ -13,8 +13,9 @@
 --      hbs2-keyman, and the mailbox on this peer);
 --   2. writes its policy when it has none: anyone may write, any peer may sync,
 --      and @--pow N@ charges N bits of work per letter;
---   3. stores the mailbox's sigil and declares mailbox and sigil in the
---      repository manifest, through @hbs2-git3@, which owns that file;
+--   3. stores and announces the mailbox's sigil, and declares mailbox and
+--      sigil in the repository manifest, through @hbs2-git3@, which owns that
+--      file;
 --   4. when an identity is set up (@hub identity init@), makes it a maintainer
 --      and this clone's default signer, so accepts are signed by a key that CAN
 --      seal an acknowledgement.
@@ -30,7 +31,7 @@ module HBS2.Hub.CLI.Project
 
 import HBS2.Hub.Types (HubKey,HubScheme,RepoRef)
 import HBS2.Hub.Ingress (rpcTimeout)
-import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf,sigilOf)
+import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf,sigilOf,announceSigil)
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,flagMaybe,flagWord,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (refuse,saying,signerFor,codePeerSilent,Writing(..))
 import HBS2.Hub.CLI.Compose (codeNoKey,codeNotStored)
@@ -52,6 +53,7 @@ import HBS2.Peer.Proto.Mailbox.Policy.Basic (BasicPolicyAction(..),defaultBasicP
 import HBS2.Peer.Proto.Mailbox.PoW (PoWDifficulty)
 import HBS2.Peer.RPC.API.LWWRef (LWWRefAPI)
 import HBS2.Peer.RPC.API.Mailbox
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
@@ -88,6 +90,7 @@ projectEntries :: forall c m . ( IsContext c
                                , HasStorage m
                                , HasClientAPI MailboxAPI UNIX m
                                , HasClientAPI LWWRefAPI UNIX m
+                               , HasClientAPI PeerAPI UNIX m
                                , Exception (BadFormException c)
                                ) => MakeDictM c m ()
 projectEntries = do
@@ -173,6 +176,9 @@ projectEntries = do
                  (makeSigilFromCredentials @HubScheme creds enc Nothing Nothing)
       href <- storeSigil sto sigil
                 >>= maybe (liftIO (refuse "the peer would not store the sigil" codeNotStored)) pure
+      announceSigil href >>= \case
+        True  -> pure ()
+        False -> liftIO (refuse "the peer stored the sigil but did not answer its announce request" codePeerSilent)
 
       when (mailboxOf manifest /= Just mbox) $
         hbs2git3 ["repo:mailbox:set", key58 repo, "--key", key58 mbox]

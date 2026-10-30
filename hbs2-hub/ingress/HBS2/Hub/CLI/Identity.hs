@@ -20,6 +20,7 @@ module HBS2.Hub.CLI.Identity
 import HBS2.Hub.Types (HubKey,HubScheme)
 import HBS2.Hub.Ingress (rpcTimeout)
 import HBS2.Hub.Repo.Git (gitRun)
+import HBS2.Hub.Repo.Manifest (announceSigil)
 import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagMaybe)
 import HBS2.Hub.CLI.Common (refuse,signerFor,codePeerSilent)
 import HBS2.Hub.CLI.Compose (codeNoKey,codeNotStored)
@@ -37,6 +38,7 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Net.Auth.Credentials.Sigil (makeSigilFromCredentials,storeSigil)
 import HBS2.Peer.Proto.Mailbox.Types (MailboxType(..))
 import HBS2.Peer.RPC.API.Mailbox
+import HBS2.Peer.RPC.API.Peer (PeerAPI)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
@@ -63,6 +65,7 @@ identityEntries :: forall c m . ( IsContext c
                                 , MonadUnliftIO m
                                 , HasStorage m
                                 , HasClientAPI MailboxAPI UNIX m
+                                , HasClientAPI PeerAPI UNIX m
                                 , Exception (BadFormException c)
                                 ) => MakeDictM c m ()
 identityEntries = do
@@ -114,6 +117,9 @@ identityEntries = do
                  (makeSigilFromCredentials @HubScheme creds enc Nothing Nothing)
       href <- storeSigil sto sigil
                 >>= maybe (liftIO (refuse "the peer would not store the sigil" codeNotStored)) pure
+      announceSigil href >>= \case
+        True  -> pure ()
+        False -> liftIO (refuse "the peer stored the sigil but did not answer its announce request" codePeerSilent)
 
       api <- getClientAPI @MailboxAPI @UNIX
       callRpcWaitMay @RpcMailboxCreate rpcTimeout api (author, MailboxHub)

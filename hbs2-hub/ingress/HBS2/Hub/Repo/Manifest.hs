@@ -26,6 +26,7 @@ module HBS2.Hub.Repo.Manifest
   , mailboxFor
   , sigilFor
   , fetchSigil
+  , announceSigil
   , byHandOr
   , sigilTrouble
   , mailboxOf
@@ -50,7 +51,7 @@ import HBS2.Net.Auth.Credentials.Sigil (loadSigil,Sigil)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.LWWRef
 import HBS2.Peer.RPC.API.LWWRef
-import HBS2.Peer.RPC.API.Peer (PeerAPI,RpcFetch)
+import HBS2.Peer.RPC.API.Peer (PeerAPI,RpcAnnounce,RpcFetch)
 import HBS2.Peer.RPC.Client
 import HBS2.Peer.RPC.Client.Unix (UNIX)
 import HBS2.Storage
@@ -61,6 +62,20 @@ import Data.Maybe (listToMaybe,isJust)
 import Data.Text.Encoding qualified as Text
 import Data.ByteString.Lazy qualified as LBS
 import Streaming.Prelude qualified as S
+
+-- | Tell the peer about a sigil immediately after storing it.
+--
+-- A repository manifest only names the sigil's block hash.  The hash is text,
+-- not a Merkle edge, so peers polling the repository cannot discover the block
+-- from the manifest alone.  A 'BlockAnnounce' lets a connected relay fetch and
+-- retain it before the owner goes away.
+announceSigil :: forall m . ( MonadUnliftIO m
+                            , HasClientAPI PeerAPI UNIX m
+                            )
+              => HashRef -> m Bool
+announceSigil h = do
+  api <- getClientAPI @PeerAPI @UNIX
+  callRpcWaitMay @RpcAnnounce rpcTimeout api h <&> isJust
 
 -- | Why this node cannot say what a repository declares.
 --

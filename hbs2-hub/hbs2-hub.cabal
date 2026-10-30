@@ -225,6 +225,7 @@ test-suite spec
                  , unordered-containers
                  , saltine
                  , text
+                 , mtl
                  , directory
                  , filepath
                  , temporary

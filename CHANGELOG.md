@@ -1,3 +1,16 @@
+# Unreleased
+
+## Fixed
+
+  - **`hbs2-hub project open` and `identity init` announce the sigils they
+    store.** A repository manifest names a sigil by hash, but that text is not
+    a Merkle edge: a relay polling the repository learned the hash and never
+    fetched the block, so a fresh contributor with only the repository key
+    could not seal the first issue or pull request. The same omission kept an
+    acknowledgement from finding a contributor's reply sigil. Both setup
+    commands now emit `BlockAnnounce`; an accepting relay fetches and retains
+    the block while its owner is online.
+
 # 0.26.0.3  2026-10-28
 
 hbs2-hub on the web, without GitHub (PEP-25): `hbs2-hub serve` shows a
