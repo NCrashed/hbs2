@@ -1,3 +1,18 @@
+# 0.26.0.6  2026-10-31
+
+Peers now retry a block after a fresh announcement, even when an earlier
+request cached that the announcing peer did not have it yet.
+
+## Fixed
+
+  - **A new `BlockAnnounce` invalidates a cached negative block-size answer.**
+    A relay can first announce a referenced hash before it has fetched the
+    block, then announce it again after acquiring it. The downloader used to
+    retain the first "not found" answer for the lifetime of the pending
+    download and would never ask that relay again. Negative answers are now
+    scoped to an announcement revision, so the later announcement triggers a
+    new size query and download.
+
 # 0.26.0.5  2026-10-31
 
 Public relays configured to accept block announcements now accept the first
