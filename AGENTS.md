@@ -9,7 +9,7 @@ implementation stage with a quality gate over the changed scope:
 - inspect `git diff --check` and the final diff;
 - fix actionable findings before committing.
 
-Crapper, Dryer, Mutator, and UML Viewer currently have no Haskell parser. Mark
-their results as `N/A (unsupported language)`; an empty scan is not a pass.
-Use them normally if a stage changes a supported language. Record each gate as
-pass, fail, or N/A in the stage handoff.
+Crapper, Dryer, Mutator, and UML Viewer support Haskell. Run them on the
+changed production modules after each stage; give Mutator the focused test
+command and use `:lang :haskell` in UML policies. An empty scan is not a pass.
+Record each native and companion gate as pass, fail, or N/A in the handoff.
