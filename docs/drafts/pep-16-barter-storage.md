@@ -654,6 +654,13 @@ the milestone; completing code without the scenario does not complete it.
 | M6 | Scoped introductions and matching | Less manual partner selection |
 | M7 | N-party and erasure experiments | Optional utilization improvements |
 
+Implementation note (2026-10-30): the provider-local core of M1 is available:
+durable manual leases, polling recovery, typed complete-snapshot inventory,
+make-before-break local pinning, limits, expiry, CLI lifecycle commands, and
+purge protection. M1 is not yet complete by the exit criteria below: signed
+receipts, explicit grace/update-lag and aggregate capacity admission, plus the
+three-node offline-owner clone scenario remain. M2 and later are unchanged.
+
 
 ## Milestone 0: Measurement and design fixtures
 

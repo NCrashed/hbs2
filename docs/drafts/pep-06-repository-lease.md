@@ -1,6 +1,8 @@
 # PEP-06: repository lease, canonical inventory, and pinning
 
-Status: draft, first implementation work started 2026-10-30.
+Status: draft; provider-local lease MVP implemented 2026-10-30. Bilateral
+wire contracts, receipts, advertisements, and barter accounting are not part
+of this implementation.
 
 Author: NCrashed (Anton Gushcha)
 
@@ -231,15 +233,17 @@ The inventory walker returns four independent facts:
 - valid blocks and their lengths;
 - missing frontier hashes;
 - corrupt hashes for which returned bytes do not match the requested hash;
+- hashes whose bytes are malformed for their expected protocol role;
 - completion or the first configured limit which stopped traversal.
 
-Only a completed traversal with empty missing and corrupt sets can be sealed
-as a canonical inventory.  Partial results are diagnostic evidence and MUST
-NOT be hashed into a smaller apparently valid inventory.
+Only a completed traversal with empty missing, corrupt, and malformed sets can
+be sealed as a canonical inventory.  Partial results are diagnostic evidence
+and MUST NOT be hashed into a smaller apparently valid inventory.
 
 `HBS2.Storage.Inventory` implements the protocol-neutral bounded set walker.
-Repository-role decoders remain in hbs2-git3 so that hbs2-core does not acquire
-knowledge of Git repository formats.
+Repository-role decoders live in `HBS2.Peer.RepositoryLease`, next to the
+LWWRef and RefLog formats they verify, so that hbs2-core does not acquire
+knowledge of repository protocols.
 
 
 # Inventory commitment
@@ -359,20 +363,35 @@ snapshot id, and missing/corrupt frontier.  At least two independent traversal
 paths must agree: the hbs2-git3 implementation and a small fixture verifier.
 
 
-# Initial implementation plan
+# Provider-local implementation
 
-The first M0 slice is deliberately below the lease wire protocol:
+The first executable vertical slice is now present:
 
-1. Land the bounded deterministic walker in `HBS2.Storage.Inventory`.
-2. Add pure fixtures for shared blocks, duplicate edges, cycles, missing data,
-   corrupt data, and work limits.
-3. Implement typed repository-role decoders in hbs2-git3.
-4. Add `git hbs2 repo:inventory <repo>` which prints snapshot inputs, block
-   count, logical bytes, frontier, and elapsed time without creating a lease.
-5. Capture measurements for representative public, encrypted, and hbs2-hub
-   repositories.
-6. Freeze the snapshot descriptor and inventory-entry golden vectors.
-7. Only then add the durable lease database and NCQ3 pin interface.
+1. `HBS2.Storage.Inventory` performs deterministic, role-aware, bounded
+   traversal and separately reports missing, corrupt, and malformed blocks.
+2. `HBS2.Peer.RepositoryLease` verifies the signed LWWRef, manifest, signed
+   RefLog updates, and content trees, then repeats both mutable ref reads before
+   accepting a snapshot.
+3. The peer stores versioned lease records in its durable Brains SQLite
+   database and exposes append-only PeerAPI methods for put/get/list.
+4. A peer worker restores every lease after restart, durably registers the
+   LWWRef and discovered RefLog pollers, refreshes each repository, and changes
+   state only after a complete scan.
+5. Sealing writes a canonical Merkle commitment over ordered `(hash,length)`
+   entries and a separate Merkle pin tree over plain hashes. The lease ref
+   points to the latter so a storage root walker reaches the repository data.
+6. A failed or over-limit update changes an existing lease to `Degraded` while
+   retaining its previous complete snapshot and pin. Expiry or explicit
+   termination removes the pin idempotently.
+7. `hbs2-git3` provides `repo:lease:add`, `repo:lease:list`,
+   `repo:lease:show`/`status`, `repo:lease:terminate`, and
+   `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
+   by a non-terminated lease.
+
+`repo:lease:add` accepts `--max-bytes`, `--max-blocks`, and optional `--ttl`.
+The provider-local default limits are 10 GiB and 10,000,000 blocks. This slice
+does not publish a replica advertisement: knowing the provider remains
+necessary until PEP-10 is implemented.
 
 
 # Open questions
