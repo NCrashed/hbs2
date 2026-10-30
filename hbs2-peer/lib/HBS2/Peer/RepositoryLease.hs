@@ -1,5 +1,3 @@
-{-# LANGUAGE PatternSynonyms #-}
-
 module HBS2.Peer.RepositoryLease
   ( RepositoryBlockRole(..)
   , RepositorySnapshotCandidate(..)
