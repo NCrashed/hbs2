@@ -1,4 +1,8 @@
-# Unreleased
+# 0.26.0.5  2026-10-31
+
+Public relays configured to accept block announcements now accept the first
+contact from a repository contributor, completing the sigil publication path
+added in 0.26.0.4.
 
 ## Fixed
 
