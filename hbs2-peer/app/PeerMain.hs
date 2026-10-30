@@ -1288,7 +1288,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 peerThread "lwwRefWorker" (lwwRefWorker @e conf (SomeBrains brains))
 
                 peerThread "repositoryLeaseWorker" $
-                  liftIO (repositoryLeaseWorker (SomeBrains brains) (AnyStorage s))
+                  liftIO (repositoryLeaseWorker pc (SomeBrains brains) (AnyStorage s))
 
                 -- setup mailboxes stuff
                 let PeerConfig defConf = coerce conf
@@ -1489,4 +1489,3 @@ checkMigration prefix  = flip runContT pure $ callCC \exit -> do
     liftIO exitFailure
 
   liftIO exitFailure
-

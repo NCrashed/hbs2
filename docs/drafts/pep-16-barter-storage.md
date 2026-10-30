@@ -657,9 +657,13 @@ the milestone; completing code without the scenario does not complete it.
 Implementation note (2026-10-30): the provider-local core of M1 is available:
 durable manual leases, polling recovery, typed complete-snapshot inventory,
 make-before-break local pinning, limits, expiry, CLI lifecycle commands, and
-purge protection. M1 is not yet complete by the exit criteria below: signed
-receipts, explicit grace/update-lag and aggregate capacity admission, plus the
-three-node offline-owner clone scenario remain. M2 and later are unchanged.
+purge protection. Provider-signed local receipts were added on 2026-10-31 and
+are now required, together with the durable pin, before a lease can be
+`Active`; they can be verified with `repo:lease:receipt`. M1 is not yet
+complete by the exit criteria below: explicit grace/update-lag and aggregate
+capacity admission, plus the three-node offline-owner clone scenario remain.
+The receipt encoding stays provider-local until the M0 golden-vector gate is
+complete. M2 and later are unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

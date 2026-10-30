@@ -7,6 +7,8 @@ module HBS2.Peer.Proto.RepositoryLease
   , RepositorySnapshot(..)
   , RepositoryLease(..)
   , RepositoryLeasePin(..)
+  , RepositoryLeaseReceipt(..)
+  , ReplicaReceiptV1(..)
   , makeRepositoryLeaseId
   , makeRepositorySnapshotId
   ) where
@@ -98,6 +100,42 @@ instance Hashed HbSync RepositoryLeasePin where
 
 instance Pretty RepositoryLeasePin where
   pretty (RepositoryLeasePin leaseId) = "repository-lease-pin:" <> pretty leaseId
+
+-- | Durable local ref to the signed receipt block for a lease.  Keeping the
+-- receipt in its own root namespace makes it survive ordinary storage GC and
+-- lets recovery verify the Active invariant without trusting the state DB.
+newtype RepositoryLeaseReceipt = RepositoryLeaseReceipt RepositoryLeaseId
+  deriving stock (Eq, Ord, Generic)
+
+instance RefMetaData RepositoryLeaseReceipt where
+  refMetaData _ = [("kind", "repository-lease-receipt")]
+
+instance Hashed HbSync RepositoryLeaseReceipt where
+  hashObject (RepositoryLeaseReceipt leaseId) =
+    hashObject ("hbs2-repository-lease-receipt-v1\0" <> serialise leaseId)
+
+instance Pretty RepositoryLeaseReceipt where
+  pretty (RepositoryLeaseReceipt leaseId) =
+    "repository-lease-receipt:" <> pretty leaseId
+
+-- | Provider-signed evidence that one exact complete snapshot was pinned.
+-- This is deliberately a versioned payload: the enclosing SignedBox encoding
+-- is already wire-frozen, while later receipt versions may add policy fields.
+data ReplicaReceiptV1 = ReplicaReceiptV1
+  { replicaReceiptVersion       :: Word16
+  , replicaReceiptLeaseId       :: RepositoryLeaseId
+  , replicaReceiptRepository    :: PubKey 'Sign 'HBS2Basic
+  , replicaReceiptProvider      :: PubKey 'Sign 'HBS2Basic
+  , replicaReceiptSnapshotId    :: HashRef
+  , replicaReceiptInventoryRoot :: HashRef
+  , replicaReceiptBlockCount    :: Word64
+  , replicaReceiptLogicalBytes  :: Word64
+  , replicaReceiptCompletedAt   :: Word64
+  , replicaReceiptIssuedAt      :: Word64
+  }
+  deriving stock (Eq, Show, Generic)
+
+instance Serialise ReplicaReceiptV1
 
 makeRepositoryLeaseId
   :: PubKey 'Sign 'HBS2Basic

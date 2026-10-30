@@ -803,7 +803,11 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
 
         entry $ bindAlias "repo:lease:status" "repo:lease:show"
 
-        brief "terminate a repository storage lease and release its pin" $
+        brief "verify and show the provider-signed replica receipt" $
+          entry $ bindMatch "repo:lease:receipt" $ nil_ $ \syn ->
+            lift $ connectedDo (showRepositoryLeaseReceipt syn)
+
+        brief "terminate a repository storage lease and release its artifacts" $
           entry $ bindMatch "repo:lease:terminate" $ nil_ $ \syn ->
             lift $ connectedDo (terminateRepositoryLease syn)
 

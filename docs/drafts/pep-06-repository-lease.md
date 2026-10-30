@@ -1,8 +1,8 @@
 # PEP-06: repository lease, canonical inventory, and pinning
 
-Status: draft; provider-local lease MVP implemented 2026-10-30. Bilateral
-wire contracts, receipts, advertisements, and barter accounting are not part
-of this implementation.
+Status: draft; provider-local lease MVP implemented 2026-10-30, including
+provider-signed local receipts on 2026-10-31. Bilateral wire contracts,
+advertisements, and barter accounting are not part of this implementation.
 
 Author: NCrashed (Anton Gushcha)
 
@@ -288,6 +288,20 @@ transition; it is not a promise that the provider will remain online forever.
 
 `Syncing`, over-limit, stale, and partial states MUST NOT emit a receipt or a
 replica advertisement.
+
+Implementation note (2026-10-31): `ReplicaReceiptV1` contains the lease,
+repository, provider, snapshot and inventory identities, exact block and byte
+counts, completion time, and issue time.  The peer signs it with its node
+identity and stores the signed box in CAS behind the durable
+`RepositoryLeaseReceipt` root.  Recovery accepts `Active` only when the
+snapshot pin and a matching valid receipt are both present; a missing,
+corrupt, mismatched, or differently signed receipt is replaced before the
+lease can return to `Active`.  Termination and expiry remove both roots.
+`repo:lease:receipt` verifies and prints the local receipt.
+
+This provider-local encoding is not yet declared an interoperable wire
+contract.  The snapshot, inventory entry, and receipt golden vectors required
+by M0 remain the compatibility gate for that declaration.
 
 
 # Pinning and garbage collection

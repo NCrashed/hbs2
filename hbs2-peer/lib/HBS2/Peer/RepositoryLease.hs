@@ -7,7 +7,10 @@ module HBS2.Peer.RepositoryLease
   , discoverRepositoryRefLogKey
   , discoverRepositorySnapshot
   , sealRepositorySnapshot
+  , issueRepositoryReplicaReceipt
+  , readRepositoryReplicaReceipt
   , releaseRepositoryLeasePin
+  , releaseRepositoryReplicaReceipt
   ) where
 
 import HBS2.Data.Types.Refs
@@ -41,6 +44,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Text.Encoding.Error qualified as Text
 import Data.Word
+import Lens.Micro.Platform (view)
 
 data RepositoryBlockRole
   = RepositoryOpaque
@@ -80,6 +84,13 @@ data RepositorySnapshotError
   | RepositoryInventoryIncomplete InventoryStatus Int Int Int
   | RepositoryChangedDuringInventory
   | RepositoryInventoryPinFailed
+  | RepositoryReceiptPinMissing
+  | RepositoryReceiptStoreFailed
+  | RepositoryReceiptMissing
+  | RepositoryReceiptBlockMissing HashRef
+  | RepositoryReceiptMalformed HashRef
+  | RepositoryReceiptInvalid HashRef
+  | RepositoryReceiptMismatch
   deriving stock (Eq, Show)
 
 discoverRepositorySnapshot
@@ -357,3 +368,78 @@ sealRepositorySnapshot sto leaseId candidate = runExceptT do
 
 releaseRepositoryLeasePin :: AnyStorage -> RepositoryLeaseId -> IO ()
 releaseRepositoryLeasePin sto = delRef sto . RepositoryLeasePin
+
+-- | Sign and durably root a receipt only after the exact snapshot pin is
+-- visible.  A crash before the caller persists Active may leave an inert pin
+-- and receipt, which recovery can safely reuse; it can never leave Active
+-- without both artifacts already durable.
+issueRepositoryReplicaReceipt
+  :: AnyStorage
+  -> PeerCredentials 'HBS2Basic
+  -> RepositoryLease
+  -> RepositorySnapshot
+  -> IO (Either RepositorySnapshotError (HashRef, ReplicaReceiptV1))
+issueRepositoryReplicaReceipt sto credentials lease snapshot = runExceptT do
+  pinned <- getRef sto (RepositoryLeasePin (repositoryLeaseId lease))
+  unless (fmap HashRef pinned == Just (repositorySnapshotPinRoot snapshot)) $
+    throwError RepositoryReceiptPinMissing
+
+  issuedAt <- liftIO getPOSIXTime <&> floor
+  let provider = view peerSignPk credentials
+      payload = ReplicaReceiptV1
+        { replicaReceiptVersion = 1
+        , replicaReceiptLeaseId = repositoryLeaseId lease
+        , replicaReceiptRepository = repositoryLeaseRepository lease
+        , replicaReceiptProvider = provider
+        , replicaReceiptSnapshotId = repositorySnapshotId snapshot
+        , replicaReceiptInventoryRoot = repositorySnapshotInventoryRoot snapshot
+        , replicaReceiptBlockCount = repositorySnapshotBlockCount snapshot
+        , replicaReceiptLogicalBytes = repositorySnapshotLogicalBytes snapshot
+        , replicaReceiptCompletedAt = repositorySnapshotCompletedAt snapshot
+        , replicaReceiptIssuedAt = issuedAt
+        }
+      box = makeSignedBox @'HBS2Basic provider
+              (view peerSignSk credentials) payload
+
+  receiptHash <- putBlock sto (serialise box)
+                   >>= maybe (throwError RepositoryReceiptStoreFailed)
+                             (pure . HashRef)
+  updateRef sto (RepositoryLeaseReceipt (repositoryLeaseId lease))
+    (fromHashRef receiptHash)
+
+  (storedHash, signer, storedPayload) <-
+    liftIO (readRepositoryReplicaReceipt sto (repositoryLeaseId lease))
+      >>= either throwError pure
+  unless (storedHash == receiptHash && signer == provider
+          && storedPayload == payload) $
+    throwError RepositoryReceiptMismatch
+
+  pure (receiptHash, payload)
+
+-- | Load a receipt through its durable lease-owned ref and verify both the
+-- signature and the provider identity duplicated inside the signed payload.
+readRepositoryReplicaReceipt
+  :: AnyStorage
+  -> RepositoryLeaseId
+  -> IO (Either RepositorySnapshotError
+          (HashRef, PubKey 'Sign 'HBS2Basic, ReplicaReceiptV1))
+readRepositoryReplicaReceipt sto leaseId = runExceptT do
+  receiptHash <- getRef sto (RepositoryLeaseReceipt leaseId)
+                   >>= maybe (throwError RepositoryReceiptMissing)
+                             (pure . HashRef)
+  bytes <- getBlock sto (fromHashRef receiptHash)
+             >>= maybe (throwError (RepositoryReceiptBlockMissing receiptHash)) pure
+  box <- either (const (throwError (RepositoryReceiptMalformed receiptHash))) pure $
+           deserialiseOrFail @(SignedBox ReplicaReceiptV1 'HBS2Basic) bytes
+  (signer, payload) <- maybe
+    (throwError (RepositoryReceiptInvalid receiptHash))
+    pure
+    (unboxSignedBox0 box)
+  unless (replicaReceiptVersion payload == 1
+          && replicaReceiptLeaseId payload == leaseId
+          && replicaReceiptProvider payload == signer) $
+    throwError RepositoryReceiptMismatch
+  pure (receiptHash, signer, payload)
+
+releaseRepositoryReplicaReceipt :: AnyStorage -> RepositoryLeaseId -> IO ()
+releaseRepositoryReplicaReceipt sto = delRef sto . RepositoryLeaseReceipt

@@ -86,8 +86,22 @@ tests = testGroup "repository lease"
           MLeaf actualEntries -> actualEntries @?= expectedEntries
           MNode{} -> assertFailure "small inventory unexpectedly has an internal root"
 
+        providerCredentials <- newCredentials @'HBS2Basic
+        let lease = repositoryLeaseFixture leaseId fixtureRepository
+        (_, receipt) <- issueRepositoryReplicaReceipt
+          fixtureStorage providerCredentials lease snapshot >>= expectRight
+        replicaReceiptSnapshotId receipt @?= repositorySnapshotId snapshot
+        replicaReceiptInventoryRoot receipt @?=
+          repositorySnapshotInventoryRoot snapshot
+        (_, receiptSigner, storedReceipt) <-
+          readRepositoryReplicaReceipt fixtureStorage leaseId >>= expectRight
+        receiptSigner @?= view peerSignPk providerCredentials
+        storedReceipt @?= receipt
+
         releaseRepositoryLeasePin fixtureStorage leaseId
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        releaseRepositoryReplicaReceipt fixtureStorage leaseId
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
   , testCase "a missing transaction payload cannot become a snapshot" $
       withRepository $ \Fixture{..} -> do
@@ -106,25 +120,14 @@ tests = testGroup "repository lease"
   , testCase "the worker activates, degrades without dropping the old pin, and terminates" $
       withRepository $ \Fixture{..} -> do
         let leaseId = makeRepositoryLeaseId fixtureRepository 2
-            initial = RepositoryLease
-              { repositoryLeaseVersion = 1
-              , repositoryLeaseId = leaseId
-              , repositoryLeaseRepository = fixtureRepository
-              , repositoryLeaseState = RepositoryLeaseSyncing
-              , repositoryLeaseMaxBytes = 1024 * 1024
-              , repositoryLeaseMaxBlocks = 1000
-              , repositoryLeaseCreatedAt = 1
-              , repositoryLeaseUpdatedAt = 1
-              , repositoryLeaseExpiresAt = Nothing
-              , repositoryLeaseSnapshot = Nothing
-              , repositoryLeaseLastError = Nothing
-              }
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+        providerCredentials <- newCredentials @'HBS2Basic
         leaseRef <- newIORef initial
         pollsRef <- newIORef []
         let brains = TestBrains leaseRef pollsRef
             someBrains = SomeBrains @L4Proto brains
 
-        active <- refreshRepositoryLease someBrains fixtureStorage initial
+        active <- refreshRepositoryLease providerCredentials someBrains fixtureStorage initial
         repositoryLeaseState active @?= RepositoryLeaseActive
         activeSnapshot <- repositoryLeaseSnapshot active
                             & maybe (assertFailure "active lease has no snapshot") pure
@@ -132,8 +135,48 @@ tests = testGroup "repository lease"
         assertBool "LWWRef was subscribed" (elem (fixtureRepository, "lwwref") polls)
         assertBool "RefLog was subscribed" (length polls == 2)
 
+        (receiptHash, receiptSigner, receipt) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        receiptSigner @?= view peerSignPk providerCredentials
+        replicaReceiptSnapshotId receipt @?= repositorySnapshotId activeSnapshot
+
+        receiptBytes <- getBlock fixtureStorage (fromHashRef receiptHash)
+          >>= orThrowUser "receipt block disappeared"
+        receiptBox <- deserialiseOrFail
+          @(SignedBox ReplicaReceiptV1 'HBS2Basic) receiptBytes
+          & either (assertFailure . show) pure
+        let forgedSignature :: SignedBox ReplicaReceiptV1 'HBS2Basic
+            forgedSignature = case receiptBox of
+              SignedBox signer body signature ->
+                SignedBox signer (body <> "tampered") signature
+        forgedSignatureHash <- put fixtureStorage (serialise forgedSignature)
+        updateRef fixtureStorage (RepositoryLeaseReceipt leaseId)
+          forgedSignatureHash
+        readRepositoryReplicaReceipt fixtureStorage leaseId >>= \case
+          Left RepositoryReceiptInvalid{} -> pure ()
+          other -> assertFailure ("expected an invalid receipt signature, got " <> show other)
+
+        signatureRepaired <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState signatureRepaired @?= RepositoryLeaseActive
+
+        attacker <- newCredentials @'HBS2Basic
+        let attackerKey = view peerSignPk attacker
+            forgedPayload = receipt { replicaReceiptProvider = attackerKey }
+            forgedBox = makeSignedBox @'HBS2Basic attackerKey
+              (view peerSignSk attacker) forgedPayload
+        forgedHash <- put fixtureStorage (serialise forgedBox)
+        updateRef fixtureStorage (RepositoryLeaseReceipt leaseId) forgedHash
+        repaired <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage signatureRepaired
+        repositoryLeaseState repaired @?= RepositoryLeaseActive
+        (_, repairedSigner, _) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        repairedSigner @?= view peerSignPk providerCredentials
+
         delBlock fixtureStorage fixturePayloadBlock
-        degraded <- refreshRepositoryLease someBrains fixtureStorage active
+        degraded <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage repaired
         repositoryLeaseState degraded @?= RepositoryLeaseDegraded
         repositoryLeaseSnapshot degraded @?= Just activeSnapshot
         pin <- getRef fixtureStorage (RepositoryLeasePin leaseId)
@@ -141,8 +184,10 @@ tests = testGroup "repository lease"
 
         let terminated = degraded { repositoryLeaseState = RepositoryLeaseTerminated }
         writeIORef leaseRef terminated
-        _ <- refreshRepositoryLease someBrains fixtureStorage terminated
+        _ <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage terminated
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
   , testCase "a durable lease is visible after Brains is reopened" $
       withSystemTempDirectory "hbs2-repository-lease-brains" $ \directory -> do
@@ -227,3 +272,21 @@ put storage bytes = putBlock storage bytes >>= orThrowUser "test storage write f
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = either (assertFailure . show) pure
+
+repositoryLeaseFixture
+  :: RepositoryLeaseId
+  -> PubKey 'Sign 'HBS2Basic
+  -> RepositoryLease
+repositoryLeaseFixture leaseId repository = RepositoryLease
+  { repositoryLeaseVersion = 1
+  , repositoryLeaseId = leaseId
+  , repositoryLeaseRepository = repository
+  , repositoryLeaseState = RepositoryLeaseSyncing
+  , repositoryLeaseMaxBytes = 1024 * 1024
+  , repositoryLeaseMaxBlocks = 1000
+  , repositoryLeaseCreatedAt = 1
+  , repositoryLeaseUpdatedAt = 1
+  , repositoryLeaseExpiresAt = Nothing
+  , repositoryLeaseSnapshot = Nothing
+  , repositoryLeaseLastError = Nothing
+  }

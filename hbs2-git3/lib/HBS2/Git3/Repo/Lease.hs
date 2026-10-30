@@ -2,6 +2,7 @@ module HBS2.Git3.Repo.Lease
   ( addRepositoryLease
   , listRepositoryLeasesCLI
   , showRepositoryLease
+  , showRepositoryLeaseReceipt
   , terminateRepositoryLease
   , inventoryRepository
   , activeRepositoryLease
@@ -80,6 +81,28 @@ showRepositoryLease syntax = do
   lease <- resolveLease syntax
   printLease lease
 
+showRepositoryLeaseReceipt :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
+showRepositoryLeaseReceipt syntax = do
+  lease <- resolveLease syntax
+  storage <- getStorage
+  result <- liftIO $
+    readRepositoryReplicaReceipt storage (repositoryLeaseId lease)
+  (receiptHash, signer, ReplicaReceiptV1{..}) <- case result of
+    Left problem -> orThrowUser (viaShow problem) Nothing
+    Right value -> pure value
+  liftIO $ print $ parens $
+       "replica-receipt-v1"
+    <+> parens ("hash" <+> pretty receiptHash)
+    <+> parens ("lease" <+> pretty replicaReceiptLeaseId)
+    <+> parens ("repository" <+> pretty (AsBase58 replicaReceiptRepository))
+    <+> parens ("provider" <+> pretty (AsBase58 signer))
+    <+> parens ("snapshot" <+> pretty replicaReceiptSnapshotId)
+    <+> parens ("inventory" <+> pretty replicaReceiptInventoryRoot)
+    <+> parens ("blocks" <+> pretty replicaReceiptBlockCount)
+    <+> parens ("bytes" <+> pretty replicaReceiptLogicalBytes)
+    <+> parens ("completed-at" <+> pretty replicaReceiptCompletedAt)
+    <+> parens ("issued-at" <+> pretty replicaReceiptIssuedAt)
+
 terminateRepositoryLease :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
 terminateRepositoryLease syntax = do
   lease <- resolveLease syntax
@@ -94,6 +117,7 @@ terminateRepositoryLease syntax = do
   callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI terminated
     >>= orThrowUser "repository lease RPC timed out"
   liftIO $ releaseRepositoryLeasePin storage (repositoryLeaseId lease)
+  liftIO $ releaseRepositoryReplicaReceipt storage (repositoryLeaseId lease)
   printLease terminated
 
 inventoryRepository :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
