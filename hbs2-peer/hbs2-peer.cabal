@@ -223,10 +223,12 @@ test-suite test
         MessageParts
         HttpListen
         BlockAnnouncePolicySpec
+        BlockSizeCacheStateSpec
         -- from app/: these exercise the config and policy the peer itself
         -- uses, so the tests read the real modules rather than copies.
         PeerConfig
         BlockAnnouncePolicy
+        BlockSizeCacheState
         PeerMetaAnnounce
         PeerLogger
 
@@ -283,6 +285,7 @@ executable hbs2-peer
 
     other-modules:
                       BlockDownloadNew
+                    , BlockSizeCacheState
                     , BrainyPeerLocator
                     , ByPassWorker
                     , DownloadMon
