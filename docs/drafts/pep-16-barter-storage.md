@@ -1,318 +1,938 @@
-PEP-16: barter-storage (umbrella over PEP-06..12)
+# PEP-16: availability-qualified barter storage
 
-Status: draft, discussion started 2026-06-04.
+Status: draft, discussion started 2026-06-04, substantially revised
+2026-10-30.
 Author: NCrashed (Anton Gushcha)
 
-This is the umbrella vision; the concrete work is split into the
-sub-proposals PEP-06..12 defined below.
-
-
-Goal
-====
-
-Today in hbs2 the decision about which data a given node stores is
-made by hand: the operator must explicitly subscribe to refs
-(`hbs2-peer poll add ...`), explicitly fetch blocks
-(`hbs2-peer fetch`), explicitly tell the peer about known addresses
-(`known-peer ...`). There is no automatic replication between peers
-with different payloads.
-
-This is fine for the small-trusted-group scenario ("I know Boris, we
-share a git repo between our VPSes"), but it does not scale to the
-next step:
-
-1. I want to publish something. Who will store it besides my node? If
-   only me, it is not P2P. If I want to cooperate with someone on
-   storage, I have to negotiate by hand.
-2. Hubs with a large storage budget have nothing to spend it on except
-   explicitly subscribing to specific refs.
-3. Small nodes with limited storage need a way to say: "I am willing
-   to store N bytes of yours, provided N is proportional to what you
-   store of mine."
-
-The idea is a system of automatic barter, where storage capacity is
-exchanged between peers by mutual consent, with continuous
-verification and local reputation.
-
-
-Why this is not Filecoin/Sia/Storj
-==================================
-
-Existing decentralised-storage systems solve a similar problem, but
-through monetisation + blockchain + heavy crypto
-(proof-of-spacetime). That is the right path for an **open anonymous**
-network, but not for the hbs2 scenario.
-
-hbs2 targets small-trusted-group setups - friends-of-friends, a few
-teams, personal deployments. This is a **friendnet**. There is no need
-for a "pay per byte" crypto-economy here; what is needed is careful
-automation of what already happens by hand: "I store yours, you store
-mine." No tokens, no blockchain, no global consensus.
-
-The closest analogue in spirit is BitTorrent with tit-for-tat
-reciprocity, but there reciprocity works **only while downloading a
-single torrent**. After seeding completes there is no incentive. Our
-idea is to extend reciprocity to post-download long-term storage.
-
-
-Threat model
-============
-
-- **Free rider.** A neighbour gets its blocks stored by me but quietly
-  does not store its obligations. Mitigation: continuous probing with
-  cryptographic proof, reputation downgrade on failure.
-- **Sybil.** An attacker creates N fake identities to get an N-fold
-  storage budget. Mitigation: identity cost is not PoW (we are not a
-  blockchain) but **proof of own contribution** - you must have your
-  own signed content before you can demand that yours be stored. Plus
-  bootstrap only through an introduction from an existing trusted peer.
-- **Storage cheat.** A neighbour claims to store a block but on a
-  probe fetches it on the fly from the real holder. Mitigation: probes
-  must be verifiable by content (a Merkle proof of a random byte
-  range), and probe latency is bounded.
-- **Eviction griefing.** A neighbour silently deletes my data after
-  the contract is signed. Mitigation: same as free rider - probes +
-  reputation.
-- **Metadata privacy.** The mere fact that "Alice barters with Bob"
-  reveals the social graph. May be OK for a small group, bad for an
-  adversarial one. Integration with PEP-05 Tor to hide such links is
-  possible. **Deferred until a concrete use case.**
-
-
-Non-goals
-=========
-
-- No blockchain / global consensus.
-- No monetisation (no tokens, payments, escrow).
-- No proof-of-spacetime in the crypto-economic sense (only local
-  probing checks).
-- No global reputation. Reputation is local to each node;
-  recommendations are transferable but the decision always rests with
-  the recipient.
-- No automatic discovery of new barter partners over the public
-  network. Only through introductions.
-- No erasure coding in the first stage. Maybe later.
-
-
-Architectural principles
-========================
+This is the umbrella vision.  The concrete work is split into PEP-06..12
+below.  This revision replaces the original static-tree barter model with
+repository replication leases, measured availability, explicit replica
+discovery, and repair.
 
-1. **Locality of decisions.** Each node decides for itself whom to
-   barter with and how much to store. No global rules.
+
+# Summary
 
-2. **Reputation = local CRDT.** A peer's score is stored locally,
-   updated by probe results. Recommendations from others are signed,
-   advisory, not binding.
-
-3. **Minimum of new primitives.** Reuse the existing storage layer
-   (NCQ3), signed envelopes (PROTOCOL.md), and the ProtocolId
-   mechanism for the wire format.
+Today an hbs2 repository remains available only while at least one operator
+who subscribed to it is online.  Subscribing a mirror is a manual operation:
+the operator names a repository, polls its LWWRef and RefLog, and budgets the
+space by hand.  There is no protocol by which a node can offer spare storage,
+accept repositories automatically, or tell a future clone where a live copy
+can be found.
 
-4. **Capacity-proportional budget.** The size of the barter budget is
-   tied to the amount of one's own content. A big hub with terabytes
-   of its own can barter terabytes of others'; a phone peer with
-   megabytes of its own is limited to megabytes.
+PEP-16 turns that manual mirror arrangement into a friendnet service:
 
-5. **Incrementality.** We do not try to describe the whole system at
-   once. The probing protocol is useful on its own, barter is the next
-   step, recommendations are the third. Each step is closeable and
-   testable without the next ones.
+1. An operator advertises a bounded amount of space it is willing to donate.
+2. Two peers create a signed lease for a mutable repository, not one static
+   tree.
+3. The provider follows the repository LWWRef and RefLog, fetches the complete
+   reachable graph, and pins the last complete snapshot against garbage
+   collection.
+4. The provider publishes a short-lived signed replica advertisement only
+   after the snapshot is complete.
+5. The consumer measures reachability, retrievability, freshness, and service
+   rate separately.
+6. Credit accrues in availability-qualified byte-hours.  A peer that is online
+   half the time contributes less effective capacity than an always-on peer.
+7. When the replica set falls below its target, a replacement is made complete
+   before an old replica becomes eligible for deletion.
+
+The first useful vertical slice is therefore a repository lease and a
+discoverable, complete mirror.  Proof-of-custody is supporting evidence, not
+the first product milestone.
 
 
-Breakdown into PEPs
-===================
+# Goal
 
-In dependency order (each next one builds on the previous):
+The user-visible promise is that a publisher can go offline and a new user who
+knows only the repository key can still find a live replica and clone the
+repository.  Operators who make that possible receive proportional storage
+service in return.
 
+This includes future updates.  A lease covers the repository identity and its
+authenticated stream of states:
 
-PEP-06: Proof-of-custody probing
---------------------------------
+- the repository LWWRef and manifest;
+- the RefLog and repository transactions it names;
+- the block graph reachable from the retained transactions;
+- repository refs carried by those transactions, including hbs2-hub canon and
+  staged proposals when they have been published into the repository.
 
-A standalone module. No barter, no reputation, no budget - **only the
-mechanics of "prove you store block X".**
+The precise retained-history policy is part of a lease.  An implementation
+must not claim to mirror a repository merely because it has one historical
+tree or its current LWWRef box.
 
-In scope:
-- Wire protocol: `BlockProbeRequest`, `BlockProbeReply`.
-- Request: block hash + a random byte range [a, b].
-- Reply: SHA256 of the contents of that range + a peer-key signature.
-- Latency is bounded; expired replies are discarded.
-- Only for blocks larger than minSize (for small ones it proves
-  nothing - they can be loaded on the fly).
 
-Not in scope: barter, reputation, what the peer does with the result.
+# Why this is not Filecoin, Sia, or Storj
 
-Useful on its own: an operator can manually verify that a peer
-honestly stores what it promised. Low implementation cost, does not
-break backward compatibility (a new ProtocolId; peers without support
-silently ignore it).
+Open anonymous storage markets need globally enforceable accounting,
+provider-independent proofs, and often monetary settlement.  That leads to
+blockchains, sealing, proof-of-replication, proof-of-spacetime, or a trusted
+coordinator.
 
+hbs2 targets a friendnet: personal deployments, teams, and friends of friends.
+Decisions and balances remain local.  There is no token, global ledger, global
+reputation, or claim that a cheap audit proves a unique physical replica.
 
-PEP-07: Local trust ledger
---------------------------
+This narrower trust model does not remove the need for careful measurement.
+In particular, bytes on a node which is rarely reachable are not equivalent
+to bytes on a long-running public node.  PEP-16 accounts for that difference
+without introducing a global market.
 
-A local store of per-peer reputations. No network.
 
-In scope:
-- Record structure: `(peer_pubkey, score, last_probe_time, history)`.
-- The file is kept in the peer's storage directory; not replicated.
-- Score evolves from probing failures (PEP-06) and explicit operator
-  input ("I trust this peer more").
-- A CLI to view/edit: `hbs2-cli hbs2:trust:list`, `hbs2:trust:set`,
-  `hbs2:trust:bump`.
+# Terminology and service definition
 
-Not in scope: reputation gossip, recommendations, contracts.
+**Consumer**
+  The peer buying replication service with its bilateral credit.  It need not
+  own the repository key; public repositories may be sponsored by others.
 
-Used as a data block for decisions in PEP-08+.
+**Provider**
+  The peer reserving local capacity, following repository updates, pinning
+  complete snapshots, and serving blocks.
 
+**Repository lease**
+  A signed, time-bounded agreement to maintain a repository subject to size,
+  freshness, availability, and retention limits.
 
-PEP-08: Bilateral barter contracts
-----------------------------------
+**Snapshot**
+  A particular authenticated repository state identified by at least the
+  repository key, LWWRef sequence/value, manifest, and RefLog head.
 
-A two-sided contract between peers: "I store your tree X of size Y
-bytes for TTL T, you store my tree X' of size Y' bytes".
+**Inventory**
+  A canonical, unique list of blocks required by a snapshot under its
+  retention policy.  Its exact encoding is specified by PEP-06.
 
-In scope:
-- Wire protocol: `BarterOffer`, `BarterAccept`, `BarterDecline`.
-- Contract structure: signatures of both sides, tree hashes, sizes,
-  TTL, protocol version.
-- Local storage of active contracts (a per-peer log).
-- Renewal: automatic if both nodes are online and reputation is >=
-  threshold.
-- Termination: graceful (a signed termination message), and timeout
-  (if the counterparty does not respond for T minutes, consider it
-  terminated).
-- Probing based on PEP-06 runs automatically on a schedule for each
-  active contract.
+**Complete replica**
+  A provider has every block in the snapshot inventory and those blocks are
+  pinned by an active lease.  A partial download is not a replica.
 
-Not in scope: discovery of new partners (Phase 1 is explicit peer
-setup), N-party (Phase 1 is bilateral only), pools.
+**Replica receipt**
+  The provider's signed statement that a snapshot became complete.  It is
+  evidence and an accounting boundary, not proof that the provider will keep
+  the data forever.
+
+**Replica advertisement**
+  A short-lived, signed hint that a provider is willing to serve a repository.
+  It is verified by retrieval; it is not trusted merely because it is signed.
+
+**Effective byte-hour**
+  One reserved logical byte for one hour, discounted by measured service
+  quality.
 
-This PEP gives the barter MVP. Enough for a proof of concept on 2-3
-nodes.
+**Failure domain**
+  A grouping of replicas likely to fail together: operator, machine, site,
+  network, power source, or another locally meaningful tag.
 
 
-PEP-09: Capacity budget
------------------------
+# Non-goals
 
-Managing "how much of others' I am willing to store".
+- No blockchain, token, monetary settlement, or global consensus.
+- No global reputation number.
+- No promise to prove a unique physical copy with the first audit protocol.
+- No public permissionless market in the first implementation.  Partner
+  admission remains explicit or introduction-based.
+- No erasure coding in the first implementation.
+- No promise that a self-reported address, capacity, uptime, or failure domain
+  is true.  Local observations take precedence.
+- No requirement that private contract metadata or the social graph be
+  published.  Replica advertisements are opt-in.
+
+
+# Architectural principles
+
+1. **The unit of service is a mutable repository lease.**  Blocks and trees
+   are implementation units, not what the user buys.
+
+2. **Complete before advertise.**  A provider must never publish an incomplete
+   download as a replica.
 
-In scope:
-- Peer config: `barter-budget-bytes`, `barter-redundancy-cap` (for
-  example "at most 20x of my own content").
-- Accounting of space occupied by barter.
-- Eviction policy on overflow: low-reputation evicts first, then
-  oldest.
-- Notify the counterparty of graceful termination on eviction.
+3. **Make before break.**  Repair creates and verifies a replacement before an
+   old lease is released or its blocks become garbage-collectable.
 
-Not in scope: dynamic budget adjustment (the user changes the config
-by hand).
+4. **Separate observations.**  Reachability, custody, freshness, throughput,
+   and operator trust are different facts.  They must not be collapsed into a
+   single score at storage time.
+
+5. **Time matters.**  Accounting uses byte-hours, not a one-time byte count.
+   Availability qualifies those byte-hours.
+
+6. **Local decisions and bounded exposure.**  Every peer chooses partners,
+   budgets, priors, thresholds, and credit limits locally.
+
+7. **Reuse the working data plane.**  Repository replication should drive the
+   existing `repo:relay-only`, LWWRef/RefLog polling, block download, NCQ3, and
+   signed peer identity machinery rather than create a second repository
+   transport.
+
+8. **Discovery is part of availability.**  Stored data which a fresh clone
+   cannot locate does not satisfy the primary goal.
+
+9. **Conservative capacity accounting.**  Deduplication is a provider
+   optimisation.  It must not allow a provider to over-promise space needed by
+   active contracts.
+
+10. **Old complete state beats new partial state.**  During an update, the
+    last complete snapshot remains served and pinned until the new one is
+    complete.
+
+
+# Repository lease
+
+The concrete encoding belongs to PEP-06.  The umbrella requires the following
+semantic fields:
+
+```
+RepositoryLease
+  version
+  contract-id
+  consumer-peer
+  provider-peer
+  repository-key
+  retention-policy
+  max-logical-bytes
+  max-update-lag
+  not-before
+  not-after
+  grace-period
+  availability-class
+  audit-policy
+  failure-domain-hints
+  consumer-signature
+  provider-signature
+```
+
+The repository key authenticates repository state; the peer keys authenticate
+the service agreement.  They are intentionally different authorities.
+
+`max-logical-bytes` is checked against the canonical snapshot inventory.  The
+provider also reserves at least that much contract capacity even when NCQ3
+deduplicates some blocks with another lease.  This is conservative but makes
+admission deterministic and prevents deduplication from becoming an
+overcommitment loophole.
+
+An update which exceeds the limit is not partially accepted.  The provider
+keeps serving the previous complete snapshot, marks the lease `Degraded`, and
+requests a larger limit or a replacement provider.
+
+
+# Lease state machine
+
+```
+Offered -> Accepted -> Syncing -> Active -> Degraded -> Grace -> Expired
+               |          |         |          |          |
+               +----------+---------+----------+----------+-> Terminated
+
+Expired or Terminated -> GC-eligible only after retention/grace rules permit it
+```
+
+Required invariants:
+
+- `Active` implies a complete pinned snapshot and a signed receipt.
+- `Syncing` and partial snapshots are never advertised.
+- At least one complete snapshot remains pinned while an update is in flight.
+- An active lease cannot be evicted merely because another peer has a higher
+  reputation or an older lease.
+- Capacity pressure first stops new admission.  It does not silently delete
+  active data.
+- Expiry is determined by the signed lease and its grace period, not by a few
+  minutes of peer unreachability.
+- Graceful termination names the last time through which service and credit
+  accrue.
+- Recovery after process restart reconstructs the same state from the durable
+  contract log and pin set.
+
+
+# Observations and availability
+
+The local evidence journal records events, not a mutable scalar score:
+
+```
+Observation
+  contract-id
+  provider-peer
+  snapshot-id
+  time-window
+  kind                 ; reachability | retrieval | freshness | throughput
+  outcome              ; success | offline | missing | corrupt | stale | slow
+  measured-value
+  challenge-id
+  observer
+  signature?           ; required when transferred to another peer
+```
+
+The first implementation uses equal-duration time windows over a rolling
+tracking period.  Each window receives equal weight regardless of the number
+of probes in it.  This prevents a highly active contract from being punished
+or rewarded merely because it was sampled more often.
+
+If the observer itself was offline for a whole window, the provider's state is
+`unknown`, not `offline`.  A bilateral observer therefore measures overlap
+availability.  Claims about absolute public availability require independent
+witnesses and are deferred; the data model leaves room for their signed
+observations.
+
+The implementation should retain both:
+
+- a rolling aggregate for accounting and admission; and
+- a coarse time-of-week profile for replica placement.
+
+The second matters for intermittent nodes.  Two peers which are each online
+half the week may provide almost full coverage if their schedules complement
+one another, or almost no improvement if their outages coincide.
+
+New peers use a conservative prior or a lower confidence bound.  One successful
+probe must not create a 100% availability rating.  PEP-07 chooses a concrete
+Wilson/Beta calculation, window duration, tracking period, and minimum sample
+count after measurements on the real network.
+
+
+# Availability-qualified accounting
+
+The bilateral ledger is denominated in effective byte-hours:
+
+```
+effective-byte-hours =
+    reserved-logical-bytes
+  * active-hours
+  * availability-LCB
+  * custody-LCB
+  * freshness-factor
+  * bandwidth-factor
+```
+
+Where:
+
+- `availability-LCB` is the conservative reachability estimate over completed
+  time windows;
+- `custody-LCB` is the success rate of content checks conditional on the peer
+  being reachable;
+- `freshness-factor` is one while the replica is inside `max-update-lag`, and
+  zero or a specified decay while it is stale;
+- `bandwidth-factor` is capped at one, for example
+  `min(1, measured-rate / contracted-rate)`.
+
+PEP-08 fixes the exact arithmetic and rounding.  It must be deterministic for
+the two parties given the observations they both acknowledge, while each side
+may use stricter private estimates for future admission.
+
+Example: service with quality 0.40 must provide 2.375 GiB-hours to balance
+1 GiB-hour of service with quality 0.95.  This makes a useful but intermittent
+home node worth less than an always-on VPS without excluding it entirely.
+
+Balances are bilateral and non-transferable in the first version.  Each peer
+sets a maximum negative balance, limiting how much service it will provide
+before the counterparty contributes in return.  This avoids both a global
+currency and the deadlock of requiring two repositories of exactly equal size
+at contract creation.
+
+
+# Audit model
+
+The original proposal asked for a hash of a random byte range.  That is not a
+Merkle proof: an hbs2 block hash commits to the full block and cannot verify an
+arbitrary range without the bytes or a separate sub-block commitment.
+
+The first audit protocol therefore measures retrievability with existing CAS
+primitives:
+
+```
+ReplicaProbeRequest
+  version
+  contract-id
+  snapshot-id
+  challenge-id
+  nonce
+  expires-at
+  sampled-block-hashes
+  requester-signature
+
+ReplicaProbeReply
+  version
+  contract-id
+  snapshot-id
+  challenge-id
+  nonce
+  result
+  response-metadata
+  provider-signature
+```
+
+For each requested hash the provider returns the complete block, or a protocol
+response which lets the requester fetch that block from this provider.  The
+auditor verifies it with the normal hbs2 content hash.  Challenges are
+unpredictable, bound to the contract and snapshot, expire, and cannot be
+replayed into another protocol.
+
+If a fraction `d` of an inventory is absent, `k` independent samples detect the
+loss with probability:
+
+```
+1 - (1 - d)^k
+```
+
+Sampling therefore does not replace an occasional full inventory/deep scan.
+Audit rate is adaptive and bounded.  Only an authenticated counterparty or an
+explicitly accepted witness may issue probes, and every contract has a probe
+bandwidth limit to prevent audit amplification.
+
+A provider may answer a challenge by fetching the block from another replica.
+A deadline makes that harder but cannot prove a unique physical copy.  The
+first version calls this what it is: proof of retrieval service.  If experience
+shows that proof of independent custody is required, a later PEP can introduce
+provider-specific encoding, salt, or a real proof-of-retrievability scheme at
+the cost of deduplication and implementation complexity.
+
+
+# Capacity, admission, and eviction
+
+Operator configuration includes at least:
+
+```
+barter-budget-bytes
+barter-reserve-bytes
+barter-max-contracts
+barter-max-repo-bytes
+barter-credit-limit
+barter-min-availability-class
+barter-admission-policy
+```
+
+The budget is donated capacity, not a function of how much content the
+operator owns.  Requiring "own signed content" is not an anti-Sybil mechanism:
+arbitrary signed bytes are cheap to generate.
+
+Admission considers:
+
+- currently reserved capacity and headroom for updates;
+- bilateral credit and exposure limit;
+- locally observed availability and custody history;
+- introducer and operator policy;
+- failure-domain diversity of the repository's existing replicas;
+- current sync queue and expected ingress cost.
+
+When capacity becomes tight, the order is:
+
+1. refuse new offers;
+2. stop expanding leases beyond their signed limit;
+3. renew fewer leases and notify counterparties;
+4. create replacement replicas where required;
+5. expire whole leases after grace;
+6. allow their pins to be collected.
+
+Partial eviction of an active snapshot is a contract failure, not a normal
+space-management policy.
+
+
+# Sybil resistance and introductions
+
+An identity receives no storage merely by existing or publishing bytes.  It
+receives only the bounded credit a local peer chooses to expose, and earns more
+by delivering measured service.  Splitting one machine into many keys does not
+create additional effective byte-hours.
+
+Introductions are admission hints, not transferable reputation balances:
+
+```
+BarterIntroduction
+  introducer
+  target-peer
+  scope
+  expires-at
+  recommended-credit-limit
+  failure-domain-hints
+  signature
+```
+
+The receiver caps total exposure attributable to one introducer and may group
+apparently related identities into one failure domain.  A recommendation never
+overrides direct negative observations.  It expires and may be revoked.
+
+Signed observations may be shared later, but a universal scalar score is out
+of scope: availability depends on observer location, time, transport, and the
+specific repository service.
+
+
+# Replica discovery
+
+Partner discovery and replica discovery are separate problems:
+
+- **partner discovery** finds peers willing to negotiate new leases;
+- **replica discovery** finds peers currently serving a known repository.
+
+Partner discovery may remain introduction-only in the first deployment.
+Replica discovery is required for the core offline-clone goal.
+
+An active provider periodically emits a short-lived signed hint:
+
+```
+ReplicaAdvert
+  version
+  repository-key
+  provider-peer
+  snapshot-id
+  reachable-via
+  capabilities
+  issued-at
+  expires-at
+  signature
+```
+
+Advertisements are emitted only for complete active snapshots.  They expire
+unless renewed, may be withdrawn, and are never treated as proof of custody.
+
+PEP-10 evaluates delivery over bounded gossip, PEX metadata, a RefChan/index,
+and hbs2-hub rendezvous.  hbs2-hub may collect and render adverts, but it is an
+optional index rather than an authority: a client verifies signatures and
+performs retrieval itself.
+
+Advertising every block is unnecessary.  Advertising repository roots keeps
+the index small; once connected, the ordinary hbs2 block plane serves the
+reachable graph.
+
+
+# Replica placement and repair
+
+A repository policy may state either a minimum replica count or an availability
+target.  The scheduler prefers peers which improve the observed ensemble, not
+merely peers with the highest individual score.
+
+For independent replicas with availability `a_i`, the familiar estimate is:
+
+```
+P(at least one online) = 1 - product(1 - a_i)
+```
+
+The independence assumption is optimistic.  Placement also considers declared
+failure domains and the empirical time windows in which all current replicas
+were unavailable.  Failure-domain hints are advisory, but identical operator,
+site, address range, schedule, or introducer should prevent the scheduler from
+counting replicas as fully independent.
+
+Repair is triggered when a lease expires, a replica becomes incomplete or too
+stale, an advertisement stops renewing, or the ensemble falls below target.
+Repair follows make-before-break:
 
+1. choose and accept a replacement provider;
+2. sync and verify a complete snapshot;
+3. publish its receipt and advertisement;
+4. confirm the target is restored;
+5. only then release the failed or expiring lease where possible.
 
-PEP-10: Introductions and transitive trust
--------------------------------------------
+If no replacement exists, the old provider remains in `Grace` when policy and
+capacity permit it, and the operator is told that the repository is at risk.
 
-Solving the bootstrap problem. A new node with no reputation gets it
-through signed recommendations from existing trusted peers.
 
-In scope:
-- Format: `BarterIntroduction { introducer: PeerKey, target: PeerKey,
-  recommendation_score: 0..1, signature }`.
-- Wire protocol: requesting/offering introductions.
-- Effective trust computation: `min(introducer_trust * recommendation,
-  cap)`.
-- Transitive depth limit (1-2 levels, no more).
+# Threat model
 
-Not in scope: web-of-trust algorithms (PageRank-like). Simple
-multiplicative propagation in the first iteration.
+**Free rider**
+  A peer consumes more service than it supplies.  Bilateral credit limits stop
+  further admission; delivered byte-hours, not identity or promises, increase
+  the balance.
 
+**Silent eviction or corruption**
+  A provider deletes or corrupts active data.  Retrieval probes, full scans,
+  freshness checks, and clone failures produce separate observations and
+  trigger repair.
 
-PEP-11: Discovery (optional, future)
-------------------------------------
+**Proxying an audit**
+  A provider fetches challenged data elsewhere.  The first protocol measures
+  timely retrievability and does not claim unique physical custody.  Tight
+  deadlines and multi-block samples raise the cost but are not a proof.
 
-Automatic search for new barter partners via PEX or
-introduction-broadcast. Deferred until there is feedback from using
-PEP-08..10 in practice.
+**Sybil**
+  Many keys attempt to multiply budget or apparent diversity.  There is no
+  identity-granted budget; exposure is locally capped, introductions are
+  bounded, and correlated identities may be one failure domain.
 
+**Capacity overcommitment**
+  A provider signs more leases than it can preserve.  Capacity is reserved per
+  lease using logical limits, active pins are durable, and pressure stops new
+  admission before eviction.
 
-PEP-12: N-party pools (optional, future)
-----------------------------------------
+**Stale mirror**
+  A provider serves a valid old repository state.  Receipts and advertisements
+  name the snapshot and LWWRef sequence; credit decays after `max-update-lag`.
 
-Solving the long-tail problem (popular blocks get hyper-redundancy,
-rare ones get zero). A pool of 3+ peers that accept data not directly
-from each other but through rotation. More complex, not blocking.
+**Discovery poisoning**
+  A peer advertises repositories it does not serve.  Adverts are signed,
+  short-lived hints and are verified by retrieval.  Repeated false adverts
+  reduce local admission trust.
 
+**Audit denial of service**
+  A consumer sends expensive challenges.  Only contracted identities or
+  accepted witnesses can probe, with per-contract rate and bandwidth limits.
 
-Open questions
-==============
+**Correlated failure**
+  Several replicas share one operator, machine, site, or online schedule.
+  Placement uses failure-domain hints and empirical joint availability.
 
-1. **Probing granularity.** At what block size does probing become
-   "honest"? For 256KB blocks (the default block size in hbs2),
-   loading from another node takes milliseconds, and any "proof"
-   proves nothing. Probing makes sense from the tree level and up. A
-   concrete lower bound is needed (1 MB? 10 MB?).
+**Clock manipulation**
+  A peer lies about time to gain credit or extend a lease.  Signed terms use
+  bounded wall-clock intervals; accounting is reconciled over acknowledged
+  windows, and unreasonable skew is a protocol error.
 
-2. **Barter metadata privacy.** The social graph of "who barters with
-   whom" leaks to any node on the network that sees the wire protocol.
-   May be acceptable for friend-of-friend, bad for adversarial. Full
-   hiding requires Tor (PEP-05). It may be enough to onion-route only
-   Offer/Accept and do probes in the clear - a simplification.
+**Metadata privacy**
+  Offers and adverts reveal relationships and repository interest.  Public
+  advertising is opt-in.  Contract negotiation may use PEP-05 onion transport;
+  encrypted repositories still leak keys, sizes, timing, and provider links.
 
-3. **Probing cost vs frequency.** On a mobile node with 200 contracts,
-   probes every 30 minutes is a lot of traffic and battery. Adaptive
-   probing (probabilistic probes with an exponential backoff on stable
-   contracts) is a must, but the exact formula is open.
 
-4. **Identity hardness.** What stops me from creating 100 key pairs
-   and demanding 100x barter? The current defence is "an identity must
-   have its own content". But how to measure "own content"? Just the
-   presence of trees signed with one's key? Size? Age? This is part of
-   PEP-08 that is not yet thought through.
+# Breakdown into sub-proposals
 
-5. **Erasure coding.** Currently a contract = "one node = one copy".
-   With 3 counterparties I have 3x redundancy. Instead one could do
-   5-of-3 erasure coding - each node stores a bit less, but any 3 of 5
-   reconstruct. That is a different PEP, not blocking.
+The original draft ordered proof, trust, and contracts before defining the
+replication service.  This revision assigns PEP-06..12 by implementation
+dependency instead.
 
-6. **Anti-Sybil via the social graph.** An alternative to
-   identity-hardness via own-content: introduction-only joining. Only
-   someone who received an introduction from an already trusted peer
-   may participate. Stronger against Sybil, but turns hbs2 into a
-   jealous friendnet. This may be the right choice for our scenario -
-   to be discussed.
 
+## PEP-06: Repository lease, inventory, and pinning
 
-What we do first
-================
+Defines `RepositoryLease`, snapshot identity, canonical inventory, receipts,
+the durable state machine, NCQ3 pin integration, restart recovery, size limits,
+retention, and the `repo:relay-only` integration.
 
-PEP-06 (proof-of-custody probing). Narrow, testable, useful on its
-own. Once it works on the current network, we can move toward PEP-07
-and PEP-08 in parallel (they do not depend on each other).
+This is the first implementation target.
 
-PEP-09 makes sense only after PEP-08 gives an MVP and we understand
-how storage is really loaded. PEP-10 is needed only when the first
-external users beyond the first-movers appear.
 
+## PEP-07: Observation ledger and retrieval audit
 
-Comparison with alternatives
-============================
+Defines observation records, equal-duration availability windows, confidence
+bounds, freshness checks, full-block retrieval challenges, adaptive sampling,
+rate limits, and CLI inspection.  Reachability, custody, freshness, and
+throughput remain separate dimensions.
 
-| Approach | Their weakness | What hbs2 takes |
-|---|---|---|
-| Filecoin | Heavy crypto-economy, blockchain | Not used |
-| Sia/Storj | Same + payments | The erasure-coding idea, later (PEP-12+) |
-| IPFS Cluster | Manual allowlist | What we have now |
-| Tahoe-LAFS | Client/server split | Not a fit |
-| BitTorrent | Reciprocity only during download | Extend to post-download |
-| Tor onion services | Not about storage | Take the introduction-points idea (PEP-10) |
 
+## PEP-08: Bilateral contracts and credit
 
-Relation to other PEPs
-======================
+Defines offer/accept/decline/renew/terminate messages, bilateral effective
+byte-hour accounting, credit limits, reconciliation, grace, and disagreement
+handling.  No transferable currency is introduced.
 
-- **PEP-05 (Tor transport).** Barter can optionally run over onion
-  routing for metadata privacy. Not blocking, but worth keeping
-  compatibility in mind.
-- **PEP-02 (ACB).** Access control blocks may be needed at the "whom
-  am I willing to barter with" decision layer - for example "only
-  those in my refchan X". To consider.
-- **PEP-03/04.** Intersections not investigated; check separately.
+
+## PEP-09: Capacity, placement, and repair
+
+Defines operator budgets, capacity reservation, admission, replica targets,
+failure-domain-aware placement, renewal policy, make-before-break repair, and
+safe expiry/GC.
+
+
+## PEP-10: Replica advertisements and lookup
+
+Defines `ReplicaAdvert`, expiry and withdrawal, bounded lookup, routing over
+the friendnet, and optional hbs2-hub indexing/rendering.  This PEP is required
+before the feature can claim to support a fresh clone while the owner is
+offline.
+
+
+## PEP-11: Introductions and partner matching
+
+Defines scoped expiring introductions, bounded initial exposure, revocation,
+manual/automatic offer matching, and privacy rules.  It does not define a
+global web of trust.
+
+
+## PEP-12: N-party settlement and erasure coding
+
+Explores barter cycles, non-bilateral settlement, erasure-coded shares, repair
+thresholds, and long-tail allocation.  It is not required for the first useful
+deployment.
+
+
+# Implementation roadmap
+
+Each milestone is independently demonstrable.  The exit criteria are part of
+the milestone; completing code without the scenario does not complete it.
+
+| Milestone | Outcome | Unlocks |
+|-----------|---------|---------|
+| M0 | Measured graph and deterministic inventory | A stable lease contract |
+| M1 | One manually leased complete mirror | Offline-owner clone from a known provider |
+| M2 | Availability and retrieval evidence | Quality-qualified accounting |
+| M3 | Bilateral barter and credit | Reciprocal storage without dummy files |
+| M4 | Replica adverts, lookup, and hub UX | Clone by repo key while owner is offline |
+| M5 | Placement and make-before-break repair | Maintained replica targets |
+| M6 | Scoped introductions and matching | Less manual partner selection |
+| M7 | N-party and erasure experiments | Optional utilization improvements |
+
+
+## Milestone 0: Measurement and design fixtures
+
+Deliverables:
+
+- record baseline repository graph sizes, update rates, clone times, NCQ3
+  physical growth, and poll latency for representative public and encrypted
+  repositories;
+- specify the canonical inventory and snapshot identifier in PEP-06;
+- add deterministic fixtures for an empty repo, shared blocks, rewritten refs,
+  tags, hbs2-hub canon, staged proposals, and encrypted data;
+- decide what repository history each retention mode keeps.
+
+Exit criteria:
+
+- two implementations of inventory traversal produce the same ordered block
+  set and logical size for every fixture;
+- the expected physical/logical size difference is measured rather than
+  guessed.
+
+
+## Milestone 1: Local repository lease MVP
+
+Deliverables:
+
+- durable local lease database and state machine;
+- manual `lease add/status/terminate` commands;
+- integration with existing LWWRef/RefLog polling and `repo:relay-only`;
+- lease-owned pin set which survives restart;
+- complete-snapshot verification and signed local receipt;
+- size limit, update lag, grace, and capacity reservation.
+
+Exit criteria:
+
+- in a three-node test, A publishes, B accepts a lease, A shuts down, and C can
+  clone the complete repository from B;
+- B restarts during `Syncing` and resumes without advertising a partial copy;
+- NCQ3 GC cannot remove blocks pinned by an active lease;
+- an oversized update leaves the previous complete snapshot available.
+
+
+## Milestone 2: Observation and availability MVP
+
+Deliverables:
+
+- observation journal;
+- signed reachability probes reusing the peer handshake where possible;
+- full-block randomized retrieval audits and periodic full inventory scans;
+- equal-duration rolling windows, conservative confidence bounds, freshness,
+  RTT, and throughput metrics;
+- CLI and hbs2-hub read-only rendering of evidence and derived quality.
+
+Exit criteria:
+
+- fault injection distinguishes offline, missing, corrupt, stale, and slow;
+- a peer online 50% of measured windows converges near 50% availability rather
+  than 100% because it happened to answer one probe;
+- windows in which the observer is offline remain unknown;
+- audit bandwidth remains inside its configured limit.
+
+
+## Milestone 3: Bilateral barter
+
+Deliverables:
+
+- versioned offer, accept, decline, renewal, termination, and receipt messages;
+- bilateral effective-byte-hour ledger;
+- credit exposure limits and probation;
+- durable reconciliation after peers reconnect;
+- admission and renewal driven by capacity plus local evidence.
+
+Exit criteria:
+
+- two peers with unequal repository sizes can trade without dummy content;
+- a 40%-availability provider accrues approximately 40% of the availability
+  component earned by an otherwise equal always-on provider;
+- creating additional peer keys does not increase a counterparty's configured
+  exposure;
+- neither side can gain credit for `Syncing`, expired, missing, or excessively
+  stale data.
+
+
+## Milestone 4: Discoverable replicas and hub UX
+
+Deliverables:
+
+- signed, expiring replica adverts and withdrawals;
+- bounded lookup by repository key;
+- at least one decentralized delivery path and optional hbs2-hub indexing;
+- clone path which tries verified live providers;
+- hub UI for replication target, complete replicas, freshness, observed
+  availability, and at-risk state;
+- operator UI/config for donated capacity and active leases.
+
+Exit criteria:
+
+- a fresh node which knows only the repo key and normal bootstrap peers can
+  find B and clone while owner A is offline;
+- incomplete, expired, and withdrawn adverts are not returned as live;
+- a malicious advert causes a failed attempt but cannot forge repository data
+  or become durable state without verification.
+
+This is the first milestone which closes the primary user problem stated by
+this PEP.
+
+
+## Milestone 5: Placement and automatic repair
+
+Deliverables:
+
+- minimum replica count and availability targets;
+- time-profile and failure-domain-aware provider selection;
+- health monitor and make-before-break replacement;
+- renewal throttling and safe expiry under disk pressure;
+- explicit at-risk alerts when no replacement exists.
+
+Exit criteria:
+
+- killing one provider causes a new complete replica to appear before the old
+  lease is collected when capacity is available;
+- replicas in one declared failure domain do not satisfy a multi-domain target;
+- correlated offline schedules are not scored as independent availability;
+- disk-full tests never partially evict an active complete snapshot.
+
+
+## Milestone 6: Introductions and automatic matching
+
+Deliverables:
+
+- scoped, expiring, revocable introductions;
+- bounded probationary capacity;
+- want/offer matching by size, availability class, privacy, and failure domain;
+- controls against one introducer multiplying exposure through many identities.
+
+Exit criteria:
+
+- an introduced node can earn its way out of probation without operator file
+  edits;
+- revocation stops new contracts but does not destroy live leases early;
+- direct observations override recommendations.
+
+
+## Milestone 7: N-party and erasure-code experiments
+
+Only after production measurements from Milestones 1-6:
+
+- compare whole-copy replication with `k-of-n` shares;
+- model repair traffic, correlated churn, and small-friendnet sizes;
+- decide whether non-bilateral settlement is worth the complexity;
+- write PEP-12 with measured parameters before implementation.
+
+
+# Cross-milestone test matrix
+
+Every milestone which changes lifecycle or accounting is tested against:
+
+- owner offline before, during, and after initial sync;
+- provider restart and crash during every state transition;
+- network partition and asymmetric connectivity;
+- stale LWWRef/RefLog followed by catch-up;
+- corrupt, absent, and slow blocks;
+- repository growth across its signed limit;
+- NCQ3 garbage collection and compaction;
+- shared blocks across multiple contracts;
+- lease renewal, graceful termination, hard expiry, and clock skew;
+- disk full and reduced operator budget;
+- encrypted repository storage without decryption authority;
+- multiple peer identities on one failure domain;
+- old protocol peers which ignore the new ProtocolIds.
+
+
+# Operational interface sketch
+
+Names are non-normative, but the supported operations are not:
+
+```
+hbs2-peer barter budget show|set
+hbs2-peer barter offer|accept|decline
+hbs2-peer barter lease list|show|terminate
+hbs2-peer barter audit show
+hbs2-peer barter credit show
+hbs2-peer barter replicas <repo-key>
+```
+
+hbs2-hub should render repository-level outcomes rather than a mysterious
+global score:
+
+- complete replicas and their snapshot age;
+- target versus current replica count/availability;
+- jointly unavailable windows;
+- failure-domain warnings;
+- active repair and at-risk state;
+- local donated, reserved, and effective capacity.
+
+
+# Open questions
+
+1. **Canonical inventory.**  Can all public and encrypted repository graphs be
+   traversed and sized without repository decryption authority, or does the
+   publisher need to supply a signed inventory tree?
+
+2. **Retention modes.**  Current snapshot only, a time window, tagged history,
+   and full RefLog retention have very different costs and recovery semantics.
+
+3. **Witnesses.**  Bilateral probes measure availability while the observer is
+   online.  Which existing hubs or introduced peers may witness public
+   availability without becoming trusted authorities?
+
+4. **Advert routing.**  Bounded gossip, a repository RefChan, PEX metadata, and
+   hub indexes have different privacy and scaling properties.  PEP-10 must
+   choose and measure at least one path.
+
+5. **Failure-domain evidence.**  Which hints are useful without pretending that
+   IP address, ASN, site, or operator declarations are Sybil-proof?
+
+6. **Shared-block accounting.**  Full logical reservation is safe but
+   conservative.  Production data may justify a less conservative rule later,
+   provided it cannot overcommit active leases.
+
+7. **Probe parameters.**  Window length, sample count, audit frequency,
+   bandwidth ceiling, and confidence priors must come from Milestone 0 and 2
+   measurements.
+
+8. **Physical custody.**  Is timely retrieval sufficient for the friendnet, or
+   do any users require proof that every provider keeps an independent local
+   copy?  The latter needs a stronger and more expensive protocol.
+
+9. **Public versus private adverts.**  Public repositories benefit from broad
+   discovery; encrypted repositories may need scoped adverts and onion-only
+   endpoints.
+
+
+# Comparison with prior work
+
+| Approach | Relevant lesson for hbs2 |
+|---|---|
+| Samsara | Closest prior art: storage claims, periodic checks, transient-failure handling, and provider-specific replicas without money or certified identity. |
+| Proofs of Retrievability / PDP | A range hash is not a retrievability proof; strong proofs require authenticators/encoding and explicit extraction assumptions. |
+| Filecoin | Unique physical replication requires provider-specific sealing and substantially heavier machinery than this friendnet chooses. |
+| Storj | Keep online and content-audit outcomes separate; use time windows so audit frequency does not dominate uptime. |
+| IPFS Cluster | Minimum/maximum replication, expiring health metrics, balanced failure-domain allocation, and automatic repinning are useful control-plane patterns. |
+| IPFS provider records | Persistence and discoverability are separate; provider hints need expiry and periodic renewal. |
+| Tahoe-LAFS | Count independent servers/failure domains, not just copies; erasure coding is useful only with a repair and placement model. |
+| Pastiche | Content overlap can reduce transfer and physical cost, but should remain a placement optimisation rather than an entitlement. |
+| BitTorrent | Short-term tit-for-tat does not directly enforce long-term seeding and can be exploited by strategic clients. |
+
+Primary references:
+
+- Cox and Noble, *Samsara: Honor Among Thieves in Peer-to-Peer Storage*:
+  https://web.eecs.umich.edu/~zmao/eecs589/papers/samsara.pdf
+- Bowers, Juels, and Oprea, *Proofs of Retrievability: Theory and
+  Implementation*: https://eprint.iacr.org/2008/175.pdf
+- Filecoin proof-of-storage specification: https://spec.filecoin.io/
+- Storj downtime tracking with audit windows:
+  https://github.com/storj/storj/blob/c2a97aeb143791dd7edd8bea5bb43558a95b57de/docs/blueprints/storage-node-downtime-tracking-with-audits.md
+- IPFS Cluster pin allocation and replication factors:
+  https://ipfscluster.io/documentation/guides/pinning/
+- Tahoe-LAFS architecture and servers-of-happiness:
+  https://github.com/tahoe-lafs/tahoe-lafs/blob/master/docs/architecture.rst
+- Piatek et al., *Do Incentives Build Robustness in BitTorrent?*:
+  https://www.usenix.org/conference/nsdi-07/do-incentives-build-robustness-bittorrent
+
+
+# Relation to other PEPs
+
+- **PEP-05 (Tor transport).**  Contract negotiation and scoped adverts may use
+  onion transport.  The data structures must not assume an IP endpoint.
+- **PEP-02 (ACB).**  Admission policy may restrict counterparties to keys or
+  groups named by access-control blocks.
+- **PEP-17..22 (hbs2-hub).**  Hub canon and staged proposals are repository
+  data covered by retention policy.  hbs2-hub may render local replication
+  state and act as an optional advert rendezvous, but does not become a global
+  settlement or reputation authority.
+- **NCQ3 storage.**  PEP-06 needs an explicit lease pin/root set and must define
+  its interaction with sweep, compaction, recovery, and storage accounting.
+
+
+# Decision gate
+
+Implementation starts with PEP-06 and Milestone 0.  Wire-level barter offers
+must not be implemented before the repository lease, inventory, pinning, and
+crash-recovery invariants are executable locally.  Public claims that hbs2
+solves offline repository availability start only after Milestone 4 demonstrates
+a fresh clone finding a complete replica while the publisher is offline.
