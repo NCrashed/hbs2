@@ -132,6 +132,7 @@ library
       HBS2.Git3.Repo.Mailbox
       HBS2.Git3.Repo.About
       HBS2.Git3.Repo.Pin
+      HBS2.Git3.Repo.Lease
       HBS2.Git3.Repo.Types
       HBS2.Git3.Repo
       HBS2.Git3.Run
@@ -235,6 +236,5 @@ test-suite spec
   --                   , OverloadedStrings
   --                   , ScopedTypeVariables
   --                   , TypeApplications
-
 
 

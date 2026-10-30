@@ -15,10 +15,12 @@ import HBS2.Git3.Repo qualified as Repo
 import HBS2.Git3.Repo
 import HBS2.Git3.Repo.Mailbox
 import HBS2.Git3.Repo.About
+import HBS2.Git3.Repo.Lease
 import HBS2.Git3.Logger
 import HBS2.Git3.Man
 import HBS2.Net.Auth.GroupKeySymm
 import HBS2.Peer.RPC.Client.RefLog
+import HBS2.Peer.Proto.RepositoryLease
 
 import Data.Config.Suckless.Script
 import Data.Config.Suckless.Almost.RPC
@@ -782,6 +784,33 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
         manRepoRelayOnly $
           entry $ bindMatch "repo:relay-only" $ nil_ $ lift . relayOnlyRepo
 
+        brief "create or renew a durable local repository storage lease" $
+          args [ arg "bytes" "[--max-bytes N]"
+               , arg "blocks" "[--max-blocks N]"
+               , arg "seconds" "[--ttl N]"
+               , arg "repository" "repo"
+               ] $
+          entry $ bindMatch "repo:lease:add" $ nil_ $ \syn ->
+            lift $ connectedDo (addRepositoryLease syn)
+
+        brief "list durable local repository storage leases" $
+          entry $ bindMatch "repo:lease:list" $ nil_ $ const $
+            lift $ connectedDo listRepositoryLeasesCLI
+
+        brief "show a repository storage lease" $
+          entry $ bindMatch "repo:lease:show" $ nil_ $ \syn ->
+            lift $ connectedDo (showRepositoryLease syn)
+
+        entry $ bindAlias "repo:lease:status" "repo:lease:show"
+
+        brief "terminate a repository storage lease and release its pin" $
+          entry $ bindMatch "repo:lease:terminate" $ nil_ $ \syn ->
+            lift $ connectedDo (terminateRepositoryLease syn)
+
+        brief "verify and measure the canonical local repository inventory" $
+          entry $ bindMatch "repo:lease:inventory" $ nil_ $ \syn ->
+            lift $ connectedDo (inventoryRepository syn)
+
         exportEntries "reflog:"
 
         brief "purges repo and unsubscribes" $
@@ -793,6 +822,12 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
             warn "purge repo"
 
             repoKey <- getGitRepoKey >>= orThrowUser "remote not set"
+
+            activeRepositoryLease repoKey >>= mapM_ (\lease ->
+              orThrowUser
+                ("repository is protected by lease" <+> pretty (repositoryLeaseId lease)
+                  <+> "; terminate it first")
+                (Nothing :: Maybe ()))
 
             sto <- getStorage
             peerAPI <- getClientAPI @PeerAPI @UNIX
@@ -830,4 +865,3 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
               delBlock sto (coerce h)
 
             delBlock sto (coerce w)
-
