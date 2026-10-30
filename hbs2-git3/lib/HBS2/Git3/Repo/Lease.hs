@@ -9,6 +9,7 @@ module HBS2.Git3.Repo.Lease
   ) where
 
 import HBS2.Git3.Prelude
+import HBS2.Git3.Repo.Lease.Policy
 import HBS2.Git3.Repo.Tools
 import HBS2.Git3.State
 import HBS2.Peer.Proto.RepositoryLease
@@ -19,12 +20,8 @@ import Data.Config.Suckless.Script
 import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
-import Data.Word
+import Data.Word (Word64)
 import System.Random
-
-defaultLeaseMaxBytes, defaultLeaseMaxBlocks :: Word64
-defaultLeaseMaxBytes = 10 * 1024 * 1024 * 1024
-defaultLeaseMaxBlocks = 10 * 1000 * 1000
 
 addRepositoryLease :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
 addRepositoryLease syntax = do
@@ -45,25 +42,8 @@ addRepositoryLease syntax = do
   leases <- leaseList peerAPI
 
   let previous = find ((== repository) . repositoryLeaseRepository) leases
-      leaseId = maybe (makeRepositoryLeaseId repository nonce) repositoryLeaseId previous
-      createdAt = maybe now repositoryLeaseCreatedAt previous
-      previousSnapshot = previous >>= repositoryLeaseSnapshot
-      nextState = case previousSnapshot of
-        Nothing -> RepositoryLeaseSyncing
-        Just{}  -> RepositoryLeaseDegraded
-      lease = RepositoryLease
-        { repositoryLeaseVersion = 1
-        , repositoryLeaseId = leaseId
-        , repositoryLeaseRepository = repository
-        , repositoryLeaseState = nextState
-        , repositoryLeaseMaxBytes = maxBytes
-        , repositoryLeaseMaxBlocks = maxBlocks
-        , repositoryLeaseCreatedAt = createdAt
-        , repositoryLeaseUpdatedAt = now
-        , repositoryLeaseExpiresAt = (+ now) <$> ttl
-        , repositoryLeaseSnapshot = previousSnapshot
-        , repositoryLeaseLastError = Nothing
-        }
+      lease = renewRepositoryLeaseAt
+        now nonce repository maxBytes maxBlocks ttl previous
 
   callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI lease
     >>= orThrowUser "repository lease RPC timed out"
@@ -146,12 +126,9 @@ activeRepositoryLease
   => GitRepoKey
   -> Git3 m (Maybe RepositoryLease)
 activeRepositoryLease repository = do
+  now <- liftIO (floor <$> getPOSIXTime)
   peerAPI <- getClientAPI @PeerAPI @UNIX
-  find isActive <$> leaseList peerAPI
-  where
-    isActive lease =
-         repositoryLeaseRepository lease == repository
-      && repositoryLeaseState lease /= RepositoryLeaseTerminated
+  selectActiveRepositoryLeaseAt now repository <$> leaseList peerAPI
 
 resolveLease :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m RepositoryLease
 resolveLease syntax = do
@@ -182,10 +159,10 @@ optionWord name fallback options = fromMaybe fallback (optionWordMay name option
 
 optionWordMay :: Id -> [Syntax c] -> Maybe Word64
 optionWordMay name options = lastMay
-  [ fromIntegral value
+  [ parsed
   | ListVal [SymbolVal option, LitIntVal value] <- options
   , option == name
-  , value > 0
+  , Just parsed <- [positiveWord64 value]
   ]
 
 printLease :: MonadIO m => RepositoryLease -> m ()
@@ -203,11 +180,3 @@ printLease RepositoryLease{..} = liftIO $ print $ parens $
       repositoryLeaseSnapshot
   <+> maybe mempty (\problem -> parens ("error" <+> dquotes (pretty problem)))
       repositoryLeaseLastError
-
-leaseStateName :: RepositoryLeaseState -> String
-leaseStateName = \case
-  RepositoryLeaseSyncing    -> "syncing" :: String
-  RepositoryLeaseActive     -> "active"
-  RepositoryLeaseDegraded   -> "degraded"
-  RepositoryLeaseGrace      -> "grace"
-  RepositoryLeaseTerminated -> "terminated"
