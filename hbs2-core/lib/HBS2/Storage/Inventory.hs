@@ -162,22 +162,36 @@ scanBlock limits readBlock edges role href firstVisit bytes walk =
   case bytes of
     Nothing -> scanNext limits readBlock edges walk
       { walkMissing = Set.insert href (walkMissing walk) }
-    Just value
-      | hashObject @HbSync value /= fromHashRef href ->
-          scanNext limits readBlock edges walk
-            { walkCorrupt = Set.insert href (walkCorrupt walk) }
-      | firstVisit && size > inventoryMaxBytes limits - walkTotalBytes walk ->
-          pure (finishInventory (InventoryByteLimitExceeded href) walk)
-      | otherwise ->
-          scanEdges limits readBlock edges role href value charged
-      where
-        size = fromIntegral (LBS.length value)
-        charged
-          | firstVisit = walk
-              { walkBlocks = Map.insert href size (walkBlocks walk)
-              , walkTotalBytes = walkTotalBytes walk + size
-              }
-          | otherwise = walk
+    Just value ->
+      scanStoredBlock limits readBlock edges role href firstVisit value walk
+
+scanStoredBlock
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> r
+  -> HashRef
+  -> Bool
+  -> ByteString
+  -> InventoryWalk r
+  -> m InventoryScan
+scanStoredBlock limits readBlock edges role href firstVisit value walk
+  | hashObject @HbSync value /= fromHashRef href =
+      scanNext limits readBlock edges walk
+        { walkCorrupt = Set.insert href (walkCorrupt walk) }
+  | firstVisit && size > inventoryMaxBytes limits - walkTotalBytes walk =
+      pure (finishInventory (InventoryByteLimitExceeded href) walk)
+  | otherwise =
+      scanEdges limits readBlock edges role href value charged
+  where
+    size = fromIntegral (LBS.length value)
+    charged
+      | firstVisit = walk
+          { walkBlocks = Map.insert href size (walkBlocks walk)
+          , walkTotalBytes = walkTotalBytes walk + size
+          }
+      | otherwise = walk
 
 scanEdges
   :: (Monad m, Ord r)
