@@ -1,5 +1,6 @@
 .fixme-new/refchan.local
 dist-newstyle/
+.metrics/
 # Output of scripts/bundle-darwin.sh
 dist-darwin/
 bin/

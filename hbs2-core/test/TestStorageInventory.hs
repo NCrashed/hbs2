@@ -6,6 +6,8 @@ module TestStorageInventory
   ( testInventoryDeterministic
   , testInventoryReportsBadFrontier
   , testInventoryBoundsWork
+  , testInventoryBlockLimitStartsAtZero
+  , testInventoryByteLimitIsCumulative
   , testTypedInventoryRejectsMalformedRole
   ) where
 
@@ -101,6 +103,37 @@ testInventoryBoundsWork = do
   case inventoryStatus byBytes of
     InventoryByteLimitExceeded _ -> pure ()
     other -> assertFailure ("expected byte limit, got " <> show other)
+
+-- | A zero block budget must reject the first unseen block.  This boundary is
+-- easy to lose by turning the inclusive limit check into a strict one.
+testInventoryBlockLimitStartsAtZero :: IO ()
+testInventoryBlockLimitStartsAtZero = do
+  let item@(href, _) = block "root"
+      blocks = Map.singleton href (snd item)
+
+  result <- scanInventory (InventoryLimits 0 100000)
+              (reader blocks) (const (const [])) [href]
+
+  inventoryStatus result @?= InventoryBlockLimitExceeded href
+  inventoryBlocks result @?= Map.empty
+
+-- | A block which exactly fills the byte budget is admitted, but the next
+-- block is rejected against the remaining budget rather than the original
+-- total.
+testInventoryByteLimitIsCumulative :: IO ()
+testInventoryByteLimitIsCumulative = do
+  let root@(rootHash, rootBytes) = block "root"
+      child@(childHash, _) = block "child"
+      blocks = Map.fromList [root, child]
+      graph = Map.singleton rootHash [childHash]
+
+  result <- scanInventory
+              (InventoryLimits 2 (fromIntegral (LBS.length rootBytes)))
+              (reader blocks) (decoder graph) [rootHash]
+
+  inventoryStatus result @?= InventoryByteLimitExceeded childHash
+  inventoryBlocks result @?=
+    Map.singleton rootHash (fromIntegral (LBS.length rootBytes))
 
 data Role = Tree | Opaque
   deriving stock (Eq, Ord, Show)

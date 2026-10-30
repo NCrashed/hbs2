@@ -41,6 +41,10 @@ main =
               testInventoryReportsBadFrontier
           , testCase "stops explicitly at configured work bounds"
               testInventoryBoundsWork
+          , testCase "rejects the first block when its budget is zero"
+              testInventoryBlockLimitStartsAtZero
+          , testCase "charges byte limits cumulatively at the exact boundary"
+              testInventoryByteLimitIsCumulative
           , testCase "does not guess a block into the wrong protocol role"
               testTypedInventoryRejectsMalformedRole
           ]

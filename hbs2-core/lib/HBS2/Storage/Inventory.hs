@@ -49,6 +49,17 @@ data InventoryScan = InventoryScan
   }
   deriving stock (Eq, Show)
 
+data InventoryWalk r = InventoryWalk
+  { walkSeen       :: Set HashRef
+  , walkExpanded   :: Set (r, HashRef)
+  , walkPending    :: Set (r, HashRef)
+  , walkBlocks     :: Map HashRef Word64
+  , walkMissing    :: Set HashRef
+  , walkCorrupt    :: Set HashRef
+  , walkMalformed  :: Set HashRef
+  , walkTotalBytes :: Word64
+  }
+
 -- | Walk a content-addressed graph once per distinct hash.
 --
 -- The edge decoder is deliberately supplied by the protocol which owns the
@@ -87,69 +98,110 @@ scanInventoryTyped
   -> [(r, HashRef)]
   -> m InventoryScan
 scanInventoryTyped limits readBlock edges roots =
-  go Set.empty Set.empty (Set.fromList roots) Map.empty Set.empty Set.empty Set.empty 0
+  scanNext limits readBlock edges InventoryWalk
+    { walkSeen = Set.empty
+    , walkExpanded = Set.empty
+    , walkPending = Set.fromList roots
+    , walkBlocks = Map.empty
+    , walkMissing = Set.empty
+    , walkCorrupt = Set.empty
+    , walkMalformed = Set.empty
+    , walkTotalBytes = 0
+    }
+
+scanNext
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> InventoryWalk r
+  -> m InventoryScan
+scanNext limits readBlock edges walk =
+  case Set.minView (walkPending walk) of
+    Nothing -> pure (finishInventory InventoryTraversalComplete walk)
+    Just (node, pending) -> scanNode limits readBlock edges node pending walk
+
+scanNode
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> (r, HashRef)
+  -> Set (r, HashRef)
+  -> InventoryWalk r
+  -> m InventoryScan
+scanNode limits readBlock edges node@(role, href) pending walk
+  | Set.member node (walkExpanded walk) =
+      scanNext limits readBlock edges walk { walkPending = pending }
+  | firstVisit && blockLimitReached =
+      pure (finishInventory (InventoryBlockLimitExceeded href) walk)
+  | otherwise = do
+      bytes <- readBlock href
+      scanBlock limits readBlock edges role href firstVisit bytes walk
+        { walkSeen = Set.insert href (walkSeen walk)
+        , walkExpanded = Set.insert node (walkExpanded walk)
+        , walkPending = pending
+        }
   where
-    go seen expanded pending blocks missing corrupt malformed total =
-      case Set.minView pending of
-        Nothing -> pure InventoryScan
-          { inventoryStatus = InventoryTraversalComplete
-          , inventoryBlocks = blocks
-          , inventoryMissing = missing
-          , inventoryCorrupt = corrupt
-          , inventoryMalformed = malformed
-          , inventoryLogicalBytes = total
-          }
+    firstVisit = Set.notMember href (walkSeen walk)
+    blockLimitReached =
+      fromIntegral (Set.size (walkSeen walk)) >= inventoryMaxBlocks limits
 
-        Just (node@(_role, href), pending')
-          | Set.member node expanded ->
-              go seen expanded pending' blocks missing corrupt malformed total
+scanBlock
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> r
+  -> HashRef
+  -> Bool
+  -> Maybe ByteString
+  -> InventoryWalk r
+  -> m InventoryScan
+scanBlock limits readBlock edges role href firstVisit bytes walk =
+  case bytes of
+    Nothing -> scanNext limits readBlock edges walk
+      { walkMissing = Set.insert href (walkMissing walk) }
+    Just value
+      | hashObject @HbSync value /= fromHashRef href ->
+          scanNext limits readBlock edges walk
+            { walkCorrupt = Set.insert href (walkCorrupt walk) }
+      | firstVisit && size > inventoryMaxBytes limits - walkTotalBytes walk ->
+          pure (finishInventory (InventoryByteLimitExceeded href) walk)
+      | otherwise ->
+          scanEdges limits readBlock edges role href value charged
+      where
+        size = fromIntegral (LBS.length value)
+        charged
+          | firstVisit = walk
+              { walkBlocks = Map.insert href size (walkBlocks walk)
+              , walkTotalBytes = walkTotalBytes walk + size
+              }
+          | otherwise = walk
 
-          | Set.notMember href seen
-          , fromIntegral (Set.size seen) >= inventoryMaxBlocks limits ->
-              pure InventoryScan
-                { inventoryStatus = InventoryBlockLimitExceeded href
-                , inventoryBlocks = blocks
-                , inventoryMissing = missing
-                , inventoryCorrupt = corrupt
-                , inventoryMalformed = malformed
-                , inventoryLogicalBytes = total
-                }
+scanEdges
+  :: (Monad m, Ord r)
+  => InventoryLimits
+  -> (HashRef -> m (Maybe ByteString))
+  -> (r -> HashRef -> ByteString -> Either String [(r, HashRef)])
+  -> r
+  -> HashRef
+  -> ByteString
+  -> InventoryWalk r
+  -> m InventoryScan
+scanEdges limits readBlock edges role href bytes walk =
+  case edges role href bytes of
+    Left{} -> scanNext limits readBlock edges walk
+      { walkMalformed = Set.insert href (walkMalformed walk) }
+    Right children -> scanNext limits readBlock edges walk
+      { walkPending = Set.union (walkPending walk) (Set.fromList children) }
 
-          | otherwise -> do
-              let seen' = Set.insert href seen
-                  expanded' = Set.insert node expanded
-              readBlock href >>= \case
-                Nothing ->
-                  go seen' expanded' pending' blocks (Set.insert href missing)
-                    corrupt malformed total
-
-                Just bytes
-                  | hashObject @HbSync bytes /= fromHashRef href ->
-                      go seen' expanded' pending' blocks missing
-                        (Set.insert href corrupt) malformed total
-
-                  | Set.notMember href seen
-                  , size > inventoryMaxBytes limits - total ->
-                      pure InventoryScan
-                        { inventoryStatus = InventoryByteLimitExceeded href
-                        , inventoryBlocks = blocks
-                        , inventoryMissing = missing
-                        , inventoryCorrupt = corrupt
-                        , inventoryMalformed = malformed
-                        , inventoryLogicalBytes = total
-                        }
-
-                  | otherwise -> case edges _role href bytes of
-                      Left{} ->
-                        go seen' expanded' pending' blocks' missing corrupt
-                          (Set.insert href malformed) total'
-
-                      Right children ->
-                        let pending'' = Set.union pending' (Set.fromList children)
-                        in go seen' expanded' pending'' blocks' missing corrupt
-                             malformed total'
-                  where
-                    size = fromIntegral (LBS.length bytes)
-                    firstVisit = Set.notMember href seen
-                    blocks' = if firstVisit then Map.insert href size blocks else blocks
-                    total' = if firstVisit then total + size else total
+finishInventory :: InventoryStatus -> InventoryWalk r -> InventoryScan
+finishInventory status walk = InventoryScan
+  { inventoryStatus = status
+  , inventoryBlocks = walkBlocks walk
+  , inventoryMissing = walkMissing walk
+  , inventoryCorrupt = walkCorrupt walk
+  , inventoryMalformed = walkMalformed walk
+  , inventoryLogicalBytes = walkTotalBytes walk
+  }
