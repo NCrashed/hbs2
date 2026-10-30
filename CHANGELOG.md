@@ -1,3 +1,14 @@
+# Unreleased
+
+## Fixed
+
+  - **`accept-block-announce *` accepts announcements from contributors that
+    are not configured as known peers.** The wildcard previously performed a
+    mandatory `KnownPeerKey` lookup before checking the policy, so a public
+    relay silently ignored the exact first-contact announcement that `*` was
+    configured to allow. Explicit key allow-lists and bans on known peers keep
+    their existing behaviour.
+
 # 0.26.0.4  2026-10-31
 
 Sigils created by hbs2-hub setup now reach relay peers, so a fresh

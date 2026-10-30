@@ -222,9 +222,11 @@ test-suite test
         MailboxPolicyCacheSpec
         MessageParts
         HttpListen
-        -- from app/: HttpListen exercises the config resolution the peer
-        -- itself uses, so it reads the real module rather than a copy.
+        BlockAnnouncePolicySpec
+        -- from app/: these exercise the config and policy the peer itself
+        -- uses, so the tests read the real modules rather than copies.
         PeerConfig
+        BlockAnnouncePolicy
         PeerMetaAnnounce
         PeerLogger
 
@@ -290,6 +292,7 @@ executable hbs2-peer
                     , PeerMetaAnnounce
                     , SendBlockAnnounce
                     , CheckBlockAnnounce
+                    , BlockAnnouncePolicy
                     , CheckPeer
                     , Fetch
                     , Log
