@@ -11,18 +11,27 @@ module HBS2.Peer.CLI.Doctor
   , DoctorBootstrap(..)
   , DoctorConfiguredPeer(..)
   , DoctorConfiguredPeers(..)
+  , DoctorPeerMetadata(..)
+  , DoctorPeerMetadataStatus(..)
   , DoctorFacts(..)
   , DoctorReport(..)
   , diagnose
+  , doctorPeerMetadataFacts
   , doctorPassed
   , doctorJSON
   , renderDoctor
   ) where
 
 import Data.Aeson (Value, object, (.=))
-import Data.Maybe (fromMaybe)
+import HBS2.Net.Proto.Types (L4Proto, PeerAddr)
+import HBS2.Peer.Proto.PeerMeta
+import HBS2.Prelude.Plated (fromStringMay)
+
+import Control.Monad (guard)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Word (Word8, Word16)
 
 data CheckStatus
   = CheckOK
@@ -60,6 +69,78 @@ data DoctorConfiguredPeers
   | DoctorConfiguredPeersChecked [DoctorConfiguredPeer]
   deriving stock (Eq, Show)
 
+-- | Signed handshake routes and the last peer-meta announcement observed for
+-- one connected peer. The executable validates untrusted metadata at the RPC
+-- boundary; diagnosis only decides how that evidence affects user health.
+data DoctorPeerMetadata = DoctorPeerMetadata
+  { doctorMetadataIdentity :: Text
+  , doctorMetadataAddress :: Text
+  , doctorMetadataNetworkClasses :: [Text]
+  , doctorMetadataObserved :: Bool
+  , doctorMetadataTCPPort :: Maybe Int
+  , doctorMetadataHTTPPort :: Maybe Int
+  , doctorMetadataPublicAddress :: Maybe Text
+  , doctorMetadataMailboxPoW :: Maybe Int
+  , doctorMetadataInvalid :: [Text]
+  }
+  deriving stock (Eq, Show)
+
+data DoctorPeerMetadataStatus
+  = DoctorPeerMetadataUnavailable
+  | DoctorPeerMetadataChecked [DoctorPeerMetadata]
+  deriving stock (Eq, Show)
+
+-- | Validate the untrusted association list once, at the RPC boundary. A
+-- present-but-invalid value is different evidence from an optional key that a
+-- peer did not advertise.
+doctorPeerMetadataFacts
+  :: Text
+  -> Text
+  -> [Text]
+  -> Maybe PeerMeta
+  -> DoctorPeerMetadata
+doctorPeerMetadataFacts identity address networkClasses metadata = DoctorPeerMetadata
+  { doctorMetadataIdentity = identity
+  , doctorMetadataAddress = address
+  , doctorMetadataNetworkClasses = networkClasses
+  , doctorMetadataObserved = isJust metadata
+  , doctorMetadataTCPPort = fromIntegral <$> (metadata >>= tcpPort)
+  , doctorMetadataHTTPPort = fromIntegral <$> (metadata >>= httpPort)
+  , doctorMetadataPublicAddress = metadata >>= publicAddress
+  , doctorMetadataMailboxPoW = fromIntegral <$> (metadata >>= mailboxPoW)
+  , doctorMetadataInvalid = maybe [] invalidMetadata metadata
+  }
+
+tcpPort :: PeerMeta -> Maybe Word16
+tcpPort = peerMetaNat "listen-tcp"
+
+httpPort :: PeerMeta -> Maybe Word16
+httpPort = peerMetaNat "http-port"
+
+mailboxPoW :: PeerMeta -> Maybe Word8
+mailboxPoW = peerMetaNat "mailbox-pow-min"
+
+publicAddress :: PeerMeta -> Maybe Text
+publicAddress peerMetadata = do
+  rawAddress <- peerMetaValue @String "public-address" peerMetadata
+  guard (isJust (fromStringMay @(PeerAddr L4Proto) rawAddress))
+  pure (Text.pack rawAddress)
+
+invalidMetadata :: PeerMeta -> [Text]
+invalidMetadata peerMetadata =
+  invalidField peerMetadata "listen-tcp" (tcpPort peerMetadata) <>
+  invalidField peerMetadata "http-port" (httpPort peerMetadata) <>
+  invalidField peerMetadata "public-address" (publicAddress peerMetadata) <>
+  invalidField peerMetadata "mailbox-pow-min" (mailboxPoW peerMetadata)
+
+invalidField :: PeerMeta -> Text -> Maybe a -> [Text]
+invalidField peerMetadata field parsed =
+  maybe [] (const (invalidParsed field parsed))
+    (lookup field (unPeerMeta peerMetadata))
+
+invalidParsed :: Text -> Maybe a -> [Text]
+invalidParsed field = maybe [field] (const [])
+
 data DoctorFacts = DoctorFacts
   { doctorCLIVersion :: Text
   , doctorConfigPath :: FilePath
@@ -69,6 +150,7 @@ data DoctorFacts = DoctorFacts
   , doctorPeerCount :: Maybe Int
   , doctorBootstrap :: DoctorBootstrap
   , doctorConfiguredPeers :: DoctorConfiguredPeers
+  , doctorPeerMetadata :: DoctorPeerMetadataStatus
   }
   deriving stock (Eq, Show)
 
@@ -85,6 +167,7 @@ diagnose facts = DoctorReport
   , peersCheck facts
   , bootstrapCheck facts
   , configuredPeersCheck facts
+  , peerMetadataCheck facts
   ]
 
 doctorPassed :: DoctorReport -> Bool
@@ -210,6 +293,61 @@ configuredPeersResult probes
     unidentified = [address | DoctorPeerReachable address Nothing <- probes]
     identified = [(address, identity) | DoctorPeerReachable address (Just identity) <- probes]
     describe (address, identity) = address <> " as " <> identity
+
+peerMetadataCheck :: DoctorFacts -> DoctorCheck
+peerMetadataCheck = peerMetadataStatusCheck . doctorPeerMetadata
+
+peerMetadataStatusCheck :: DoctorPeerMetadataStatus -> DoctorCheck
+peerMetadataStatusCheck DoctorPeerMetadataUnavailable =
+  skipped "peer-metadata" "not checked because peer diagnostics RPC is unavailable"
+peerMetadataStatusCheck (DoctorPeerMetadataChecked peers) = peerMetadataResult peers
+
+peerMetadataResult :: [DoctorPeerMetadata] -> DoctorCheck
+peerMetadataResult peers = if null peers
+  then skipped "peer-metadata" "no connected peers have metadata"
+  else peerMetadataPresent peers (concatMap metadataProblems peers)
+
+peerMetadataPresent :: [DoctorPeerMetadata] -> [Text] -> DoctorCheck
+peerMetadataPresent peers problems = if null problems
+  then mkCheck "peer-metadata" CheckOK
+      (names (fmap describeMetadata peers)) Nothing
+  else mkCheck "peer-metadata" CheckWarning
+      (names problems)
+      (Just "run doctor again; if this persists, inspect the peer configuration and logs")
+
+metadataProblems :: DoctorPeerMetadata -> [Text]
+metadataProblems peer =
+  metadataPendingProblem peer <>
+  networkClassesProblem peer <>
+  invalidMetadataProblem peer
+
+metadataPendingProblem :: DoctorPeerMetadata -> [Text]
+metadataPendingProblem peer =
+  [doctorMetadataIdentity peer <> ": peer metadata has not been observed"
+  | not (doctorMetadataObserved peer)]
+
+networkClassesProblem :: DoctorPeerMetadata -> [Text]
+networkClassesProblem peer =
+  [doctorMetadataIdentity peer <> ": signed network classes are empty"
+  | null (doctorMetadataNetworkClasses peer)]
+
+invalidMetadataProblem :: DoctorPeerMetadata -> [Text]
+invalidMetadataProblem peer =
+  [doctorMetadataIdentity peer <> ": invalid " <> names (doctorMetadataInvalid peer)
+  | not (null (doctorMetadataInvalid peer))]
+
+describeMetadata :: DoctorPeerMetadata -> Text
+describeMetadata peer = doctorMetadataIdentity peer <> " at "
+  <> doctorMetadataAddress peer <> ": "
+  <> names (doctorMetadataNetworkClasses peer) <> "; "
+  <> port "listen TCP" (doctorMetadataTCPPort peer) <> "; "
+  <> port "HTTP" (doctorMetadataHTTPPort peer) <> "; "
+  <> publicAddress <> "; mailbox PoW "
+  <> maybe "0" tshow (doctorMetadataMailboxPoW peer)
+  where
+    port label = maybe (label <> " not advertised") (\value -> label <> " " <> tshow value)
+    publicAddress = maybe "public address not advertised"
+      ("public " <>) (doctorMetadataPublicAddress peer)
 
 mkCheck :: Text -> CheckStatus -> Text -> Maybe Text -> DoctorCheck
 mkCheck = DoctorCheck
