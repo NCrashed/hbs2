@@ -442,6 +442,21 @@ node_env B hbs2-git3 repo:lease:receipt "$KEY" >"$T/B/receipt.out" 2>"$T/B/recei
 grep -q '(replica-receipt-v1 ' "$T/B/receipt.out" || fail "node B: malformed receipt output"
 ok "B holds a complete, pinned, receipted replica"
 
+node_env B timeout 30 hbs2-hub lease status --json \
+  >"$T/B/lease-status.json" 2>"$T/B/lease-status.err" || {
+    cat "$T/B/lease-status.json" "$T/B/lease-status.err" >&2
+    fail "node B: hbs2-hub lease status"
+  }
+grep -Eq '"contracts"[[:space:]]*:[[:space:]]*1' "$T/B/lease-status.json" || {
+  cat "$T/B/lease-status.json" >&2
+  fail "node B: hub lease status did not report its reserved contract"
+}
+grep -Eq '"state"[[:space:]]*:[[:space:]]*"active"' "$T/B/lease-status.json" || {
+  cat "$T/B/lease-status.json" >&2
+  fail "node B: hub lease status did not report the active lease"
+}
+ok "hub operator status exposes donated capacity and the active lease"
+
 # Eliminate both direct retrieval and accidental prefetch: A is dead before
 # C's peer process has ever run.
 stop_peer A

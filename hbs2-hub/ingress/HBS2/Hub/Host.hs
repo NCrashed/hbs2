@@ -147,6 +147,7 @@ newHub hc = do
                                                  <> "`git config --global hbs2-hub." <> key <> ".clone"
                                                  <> " <path>`; writes do not go to the cache" ))
               (Nothing, Reads) -> fmap Just <$> cacheClone progress key
+              (Nothing, LocalReads) -> fmap Just <$> cacheClone progress key
         case dir of
           Left (meaning, why) -> bad Null meaning why
           Right d -> do

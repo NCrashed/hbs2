@@ -139,7 +139,7 @@ protocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 -- a read-only server must not offer. The descriptions say which of those each
 -- one is, because the difference between them is the difference between a
 -- local mistake and a public one.
-data Access = Reads | Writes
+data Access = Reads | LocalReads | Writes
   deriving stock (Eq,Show)
 
 data Tool = Tool
@@ -184,7 +184,7 @@ data Action
 -- | Every tool, read-only server or not.
 tools :: [Tool]
 tools =
-  [ tStatus, tWhoami
+  [ tStatus, tLeaseStatus, tWhoami
   , tList "issue", tList "pr", tShow "issue", tShow "pr"
   , tLog, tVerify
   , tInboxList, tInboxShow, tInboxWait
@@ -397,6 +397,21 @@ tStatus = Tool
       pure $ RunVerb (Run (["status", flag "repo" r] <> flagM "remote" (rm `orElse` mcRemote cfg)
                              <> ["--json"] <> switch "local" local)
                           Nothing AsJson)
+  }
+
+-- Provider capacity and lease records reveal local operating policy and repo
+-- keys, so this read is offered only by a local server.  Public read-only mode
+-- still offers ordinary repository Reads, but not LocalReads.
+tLeaseStatus :: Tool
+tLeaseStatus = Tool
+  { toolName = "lease_status", toolTitle = "Donated storage and active leases"
+  , toolDesc = "Provider-local donated byte/contract capacity and durable repository "
+      <> "leases. A silent peer is reported as unknown, never as zero. Local-only: "
+      <> "public read-only servers do not expose operator capacity or leased repository keys."
+  , toolProps = []
+  , toolRequired = []
+  , toolAccess = LocalReads, toolOpenWorld = False, toolVerb = ["lease","status"]
+  , toolPlan = \_ _ -> pure $ RunVerb (Run ["lease","status","--json"] Nothing AsJson)
   }
 
 tWhoami :: Tool
@@ -1560,9 +1575,9 @@ toolJson t = object
       , "additionalProperties" .= False ]
   , "annotations" .= object
       [ "title" .= toolTitle t
-      , "readOnlyHint" .= (toolAccess t == Reads)
+      , "readOnlyHint" .= (toolAccess t /= Writes)
       , "destructiveHint" .= (toolAccess t == Writes && toolName t /= "sync")
-      , "idempotentHint" .= (toolAccess t == Reads)
+      , "idempotentHint" .= (toolAccess t /= Writes)
       , "openWorldHint" .= toolOpenWorld t ]
   ]
 

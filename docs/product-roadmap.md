@@ -110,6 +110,8 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   clone-path consumption completed 2026-10-31; external owner/provider/relay/
   client acceptance completed 2026-10-31; `hbs2-hub status` replica floor,
   advert freshness and at-risk contract plus the browser repository badge
+  completed 2026-10-31; local-only `hbs2-hub lease status` donated/reserved/
+  available capacity and durable lease contract plus browser operator UI
   completed 2026-10-31);
 - prove repository-key-only discovery in the external multi-process
   offline-owner acceptance scenario (completed 2026-10-31: C knows only an

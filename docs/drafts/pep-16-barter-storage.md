@@ -742,8 +742,8 @@ test rejects a C configuration which names B, requires clone output to report a
 selected advert provider, and verifies the cloned branch, payload, and tag.
 The earlier `repository-lease-three-node.sh` remains the direct-provider M1
 scenario; both entry points share one harness. The remaining M4 delivery work
-is the operator-facing capacity/lease UI and the later target and observed-
-availability inputs described below.
+was the operator-facing capacity/lease UI. Replication target and observed-
+availability remain later M5 policy and M2 evidence inputs described below.
 
 The first hub UX slice is implemented on 2026-10-31. `hbs2-hub status` now
 performs the same bounded authenticated provider lookup and adds a stable
@@ -759,6 +759,19 @@ ready/at-risk/unknown badge and preserves those future fields without
 inventing values. The four-process offline-owner harness also checks the live
 hub JSON seam after the clone, so UI status and clone discovery cannot drift
 into two meanings of availability.
+
+The provider/operator UX slice is implemented on 2026-10-31. `hbs2-hub lease
+status` reads the existing peer admission-capacity and durable-lease RPCs and
+returns a stable text or JSON report: donated, reserved, and available bytes;
+used and configured contract slots; every lease's repository, state, limits,
+expiry, error, and complete snapshot. A peer timeout remains an explicit
+unknown rather than becoming zero capacity or an empty lease list. The report
+names the already-supported `barter-budget-bytes` and
+`barter-max-contracts` peer configuration clauses. The local hbs2-hub browser
+home consumes the same contract; public read-only servers do not expose this
+operator policy or their leased repository keys. The external direct and relay
+acceptance modes both verify that B's live report includes its reserved
+contract and active lease before A is stopped.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -856,7 +869,9 @@ Deliverables:
   observed availability, and at-risk state (lower bound, freshness, and
   at-risk status complete; target and observed availability remain null until
   their M5 and M2 inputs exist);
-- operator UI/config for donated capacity and active leases.
+- operator UI/config for donated capacity and active leases (complete:
+  effective peer configuration, capacity, and durable lease state are exposed
+  locally; public servers omit operator metadata).
 
 Exit criteria:
 
