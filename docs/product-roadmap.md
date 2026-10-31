@@ -87,18 +87,19 @@ A mismatched daemon names both versions. A missing RPC peer names the socket
 and the command that starts it. See [`doctor.md`](doctor.md) for the user guide.
 
 Repository failures name the first unmet boundary rather than surfacing as a
-later missing block. D3 proves completeness on the selected peer; signed
-remote provider advertisements and provider lookup remain the next durable
-availability milestone. The hub-level D4 report extends those checks through
-forge and mailbox boundaries. It deliberately calls a sent-log row a local
-handoff rather than delivery; the intermediate network states still require
-the signed receipts described below.
+later missing block. D3 proves completeness on the selected peer. Signed
+remote provider advertisement, relay lookup, authenticated provider selection,
+and offline-owner clone are implemented and covered by the external acceptance
+scenario below. The hub-level D4 report extends those checks through forge and
+mailbox boundaries. It deliberately calls a sent-log row a local handoff rather
+than delivery; the intermediate network states still require the signed
+receipts described below.
 
 #### 2. Durable repository availability
 
 Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 
-- complete the three-node offline-owner M1 scenario;
+- complete the three-node offline-owner M1 scenario (completed 2026-10-31);
 - freeze and test the snapshot/inventory/receipt encodings (completed
   2026-10-31 for the provider-local v1 wire types);
 - publish and retrieve signed replica advertisements (wire type, verified
@@ -108,7 +109,9 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   fan-out completed 2026-10-31; authenticated provider selection and
   clone-path consumption completed 2026-10-31);
 - prove repository-key-only discovery in the external multi-process
-  offline-owner acceptance scenario;
+  offline-owner acceptance scenario (completed 2026-10-31: C knows only an
+  advert relay, discovers and authenticates B from its signed advert, and
+  clones after A is offline);
 - maintain a replica target with make-before-break replacement.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts

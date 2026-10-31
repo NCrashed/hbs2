@@ -691,9 +691,9 @@ it for retrieval. M1 is therefore complete for a manually configured known
 provider. On 2026-10-31 the provider-local inventory-entry, snapshot, and
 receipt encodings were made explicit without changing their 0.26 bytes and
 were pinned by deterministic golden vectors. The remaining M0 graph fixtures,
-independent verifier, and measurements are still open; replica advertisement
-and automatic provider discovery remain M4 work. M2 and later are otherwise
-unchanged.
+independent verifier, and measurements are still open. Replica advertisement
+and automatic provider discovery are delivered by the M4 implementation below.
+M2 and later are otherwise unchanged.
 
 The first M4 artifact and relay slices are also implemented on 2026-10-31.
 `ReplicaAdvertV1` has an explicit golden-tested CBOR encoding and binds the
@@ -725,17 +725,20 @@ query id is live and only from a peer included in that fan-out. Query sessions
 are limited to 128 entries and expire after 30 seconds; the first answer does
 not consume a session, so independent providers can all respond.
 
-Provider selection and clone-path consumption are implemented on 2026-10-31.
-Before starting the normal mutable-root polling loop, `hbs2-git3` asks its local
-peer for a provider by repository key. The peer collects verified live adverts,
-tries only adverts which claim block service, tries each advertised endpoint,
-and accepts an endpoint only after the transport session authenticates as the
-provider key which signed the advert. A deterministic three-role test covers an
-offline owner, an advert-holding relay, and a clean clone which accepts only a
-query-bound relay result before selecting the authenticated provider. The
-remaining M4 delivery work is the external multi-process acceptance scenario
-and hub UX; the existing executable M1 scenario still configures the provider
-directly.
+Provider selection, clone-path consumption, and the external multi-process
+acceptance scenario are implemented on 2026-10-31. While waiting for the normal
+mutable root, `hbs2-git3` repeatedly asks its local peer for a provider by
+repository key with bounded backoff; this avoids a startup race in which the
+RPC socket is ready before the configured relay authenticates. The peer
+collects verified live adverts, tries only adverts which claim block service,
+tries each advertised endpoint, and accepts an endpoint only after the
+transport session authenticates as the provider key which signed the advert.
+A deterministic protocol test covers query binding and selection. The
+executable external scenario then runs owner A, provider B, advert-only relay R,
+and a clean C in separate processes: after B reaches `Active` and publishes its
+advert, A stops; C starts knowing only R, discovers and authenticates B from the
+signed advert, and clones the complete branch and tag. Remaining M4 work is hub
+replication UX and operator configuration.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -824,10 +827,11 @@ Exit criteria:
 Deliverables:
 
 - signed, expiring replica adverts and withdrawals (wire type, local lifecycle,
-  and worker renewal complete; network delivery open);
-- bounded lookup by repository key;
-- at least one decentralized delivery path and optional hbs2-hub indexing;
-- clone path which tries verified live providers;
+  worker renewal, and network delivery complete);
+- bounded lookup by repository key (complete);
+- at least one decentralized delivery path (complete) and optional hbs2-hub
+  indexing;
+- clone path which tries verified live providers (complete);
 - hub UI for replication target, complete replicas, freshness, observed
   availability, and at-risk state;
 - operator UI/config for donated capacity and active leases.
@@ -835,7 +839,8 @@ Deliverables:
 Exit criteria:
 
 - a fresh node which knows only the repo key and normal bootstrap peers can
-  find B and clone while owner A is offline;
+  find B and clone while owner A is offline (covered by the external scenario
+  with an explicitly configured advert relay standing in for bootstrap);
 - incomplete, expired, and withdrawn adverts are not returned as live;
 - a malicious advert causes a failed attempt but cannot forge repository data
   or become durable state without verification.

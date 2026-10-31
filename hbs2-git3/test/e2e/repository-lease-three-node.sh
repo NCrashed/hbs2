@@ -3,9 +3,11 @@
 # owner goes offline.
 #
 # Node A publishes a repository. Node B knows A, accepts a repository lease,
-# and must reach Active with a verifiable receipt. A is then stopped. Only
-# after that do we start a clean node C, whose sole known peer is B, and clone
-# the repository. C therefore cannot have prefetched from A or contact it.
+# and must reach Active with a verifiable receipt. B publishes its signed
+# replica advert to relay R. A is then stopped. Only after that do we start a
+# clean node C, whose sole known peer is R, and clone the repository. C must
+# therefore discover and authenticate B from the advert; it cannot have
+# prefetched from A, contact A, or succeed merely because B was configured.
 #
 # Usage, after `cabal build all`:
 #   BIN=$(for b in hbs2-peer hbs2-cli hbs2-keyman hbs2-git3:exe:hbs2-git3 git-remote-hbs23; do
@@ -23,8 +25,10 @@ A_UDP_PORT=${A_UDP_PORT:-27351}
 A_TCP_PORT=${A_TCP_PORT:-27361}
 B_UDP_PORT=${B_UDP_PORT:-27352}
 B_TCP_PORT=${B_TCP_PORT:-27362}
-C_UDP_PORT=${C_UDP_PORT:-27353}
-C_TCP_PORT=${C_TCP_PORT:-27363}
+R_UDP_PORT=${R_UDP_PORT:-27353}
+R_TCP_PORT=${R_TCP_PORT:-27363}
+C_UDP_PORT=${C_UDP_PORT:-27354}
+C_TCP_PORT=${C_TCP_PORT:-27364}
 WAIT=${HBS2_GIT_REPO_WAIT:-12}
 LEASE_WAIT=${LEASE_WAIT:-180}
 CLONE_TIMEOUT=${CLONE_TIMEOUT:-120}
@@ -94,6 +98,7 @@ stop_peer() {
 cleanup() {
   stop_peer A
   stop_peer B
+  stop_peer R
   stop_peer C
   if [ "${KEEP:-}" = 1 ]; then
     echo "kept $T"
@@ -107,7 +112,7 @@ write_peer_config() {
   local node=$1
   local udp_port=$2
   local tcp_port=$3
-  local known_port=${4:-}
+  shift 3
   local home="$T/$node/home"
   local config_dir="$home/.config/hbs2-peer"
 
@@ -124,9 +129,9 @@ write_peer_config() {
     echo 'bootstrap off'
     echo "storage \"$T/$node/storage\""
     echo 'key "./default.key"'
-    if [ -n "$known_port" ]; then
+    for known_port in "$@"; do
       echo "known-peer \"127.0.0.1:$known_port\""
-    fi
+    done
   } > "$config_dir/config"
 
   node_env "$node" hbs2-keyman update >/dev/null 2>&1 || true
@@ -135,6 +140,31 @@ write_peer_config() {
   node_env "$node" git config --global commit.gpgsign false
   node_env "$node" git config --global tag.gpgsign false
   node_env "$node" git config --global init.defaultBranch master
+}
+
+peer_key() {
+  local node=$1
+  node_env "$node" hbs2-peer poke |
+    sed -n 's/^peer-key: "\([^"]*\)"/\1/p'
+}
+
+wait_for_authenticated_peer() {
+  local node=$1
+  local peer_key=$2
+  local deadline=$((SECONDS + 30))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if node_env "$node" hbs2-peer peers 2>/dev/null |
+         grep -q "^$peer_key "; then
+      return 0
+    fi
+    kill -0 "${PEER_PID[$node]}" 2>/dev/null ||
+      fail "node $node exited before authenticating $peer_key"
+    sleep 0.2
+  done
+
+  tail -60 "$T/$node/peer.log" >&2 || true
+  fail "node $node did not authenticate $peer_key"
 }
 
 start_peer() {
@@ -200,16 +230,27 @@ wait_for_active_lease() {
   fail "node B did not reach an active lease within ${LEASE_WAIT}s"
 }
 
-# A and B start together. C is configured now but remains entirely offline
-# until A has stopped. A can discover B and B can fetch the repository from A.
+# A, B, and the advert relay R start together. C is configured now but remains
+# entirely offline until A has stopped. C knows only R; R does not store the
+# repository, and B is absent from C's configuration.
 write_peer_config A "$A_UDP_PORT" "$A_TCP_PORT" "$B_UDP_PORT"
-write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "$A_UDP_PORT"
-write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "$B_UDP_PORT"
+write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "$A_UDP_PORT" "$R_UDP_PORT"
+echo "peer-public-address \"tcp://127.0.0.1:$B_TCP_PORT\"" >> \
+  "$T/B/home/.config/hbs2-peer/config"
+write_peer_config R "$R_UDP_PORT" "$R_TCP_PORT" "$B_UDP_PORT"
+write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "$R_UDP_PORT"
 
 start_peer A
 start_peer B
+start_peer R
 wait_for_lease_rpc
-ok "owner A and provider B are running"
+B_KEY=$(peer_key B)
+R_KEY=$(peer_key R)
+[ -n "$B_KEY" ] || fail "node B: poke returned no peer key"
+[ -n "$R_KEY" ] || fail "node R: poke returned no peer key"
+wait_for_authenticated_peer B "$R_KEY"
+wait_for_authenticated_peer R "$B_KEY"
+ok "owner A, provider B, and advert relay R are running"
 
 # Publish a repository with both a branch and a tag on A.
 mkdir "$T/work"
@@ -263,12 +304,17 @@ if node_env A hbs2-peer poke >/dev/null 2>&1; then
   fail "node A still answers after shutdown"
 fi
 start_peer C
-ok "A is offline and clean node C knows only B"
+ok "A is offline and clean node C knows only advert relay R"
 
 node_env C timeout "$CLONE_TIMEOUT" git clone -q "$URL" "$T/clone" 2>"$T/C/clone.err" || {
   cat "$T/C/clone.err" >&2
-  tail -n 80 -- "$T/B/peer.log" "$T/C/peer.log" >&2 || true
-  fail "node C could not clone from B while A was offline"
+  tail -n 80 -- "$T/B/peer.log" "$T/R/peer.log" "$T/C/peer.log" >&2 || true
+  fail "node C could not discover and clone from B while A was offline"
+}
+
+grep -q "repository provider $B_KEY" "$T/C/clone.err" || {
+  cat "$T/C/clone.err" >&2
+  fail "node C cloned without reporting the signed advert for provider B"
 }
 
 [ "$(node_env C git -C "$T/clone" log -1 --format=%s)" = one ] || fail "clone has the wrong head"
@@ -276,6 +322,6 @@ node_env C timeout "$CLONE_TIMEOUT" git clone -q "$URL" "$T/clone" 2>"$T/C/clone
 node_env C git -C "$T/clone" rev-parse -q --verify refs/tags/v1 >/dev/null || fail "clone has no v1 tag"
 kill -0 "${PEER_PID[B]}" 2>/dev/null || fail "provider B exited during clone"
 node_env B hbs2-git3 repo:lease:show "$KEY" | grep -q '(state active)' || fail "B lease is no longer active"
-ok "C cloned the complete repository from B while A was offline"
+ok "C discovered B through R and cloned the complete repository while A was offline"
 
 echo "PASS: $PASS checks"

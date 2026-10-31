@@ -423,11 +423,13 @@ The first executable vertical slice is now present:
    `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
    by a non-terminated lease.
 8. `hbs2-git3/test/e2e/repository-lease-three-node.sh` exercises the complete
-   provider-local path: A publishes, B reaches `Active` with a durable pin and
-   valid receipt, A stops, and a previously offline C clones the branch and tag
-   from B as its only known peer. The scenario also covers an importer edge
-   case found by the test: a missing Merkle node in a checkpoint walk must be
-   enqueued for fetch, not merely named and retried.
+   provider-local and discovery path: A publishes, B reaches `Active` with a
+   durable pin and valid receipt, and B publishes a signed advert through relay
+   R. A stops before a clean C starts; C knows only R, discovers and
+   authenticates B from the advert, then clones the branch and tag. The
+   scenario also covers an importer edge case found by the test: a missing
+   Merkle node in a checkpoint walk must be enqueued for fetch, not merely
+   named and retried.
 
 `repo:lease:add` accepts `--max-bytes`, `--max-blocks`,
 `--max-update-lag`, optional `--ttl`, and `--grace`. Both time limits are
@@ -437,9 +439,9 @@ restores immediate degradation on the first incomplete update. Durable record
 version 3 stores the lag limit and the first observed incomplete-update time.
 Versions 1 and 2 remain readable and use zero lag, preserving their previous
 immediate-degrade behaviour; version 1 also uses zero grace. The provider-local
-default limits are 10 GiB and 10,000,000 blocks. This slice does not publish a
-replica advertisement: knowing the provider remains necessary until PEP-10 is
-implemented.
+default limits are 10 GiB and 10,000,000 blocks. The provider-local contract
+does not itself publish a replica advertisement; the implemented PEP-16/M4
+layer publishes and discovers signed adverts without changing that contract.
 
 Update lag is measured from observed divergence, not from snapshot age. A
 repository which has not changed therefore never becomes stale merely because
@@ -495,6 +497,7 @@ PEP-06 is ready for wire implementation when:
 
 The encoding-vector and three-node complete-replica criteria are covered by
 the test suite and executable e2e scenario above. The remaining criteria in
-this section are still gates for the complete M0 fixture corpus; the
-provider-local test does not imply replica advertisement or automatic provider
-discovery.
+this section are still gates for the complete M0 fixture corpus. Advertisement
+and automatic provider discovery are separate PEP-16/M4 behaviour, now covered
+by the same executable scenario rather than implied by the provider-local
+contract.

@@ -282,11 +282,20 @@ waitRepo timeout repoKey = do
 
         status "wait for peer"
 
-        provider <- lift $ callRpcWaitMay @RpcRepositoryAdvertFind
-          (TimeoutSec 3) peerAPI repoKey
-        for_ (join provider) $ \advert ->
-          status $ "repository provider" <+>
-            pretty (AsBase58 (replicaAdvertProvider advert))
+        -- A fresh peer often reaches its RPC socket before it has authenticated
+        -- its configured relay.  One lookup at that instant sees no peers and
+        -- permanently misses an otherwise live replica advert.  Keep discovery
+        -- beside the ordinary LWWRef polling until one provider authenticates or
+        -- this wait finishes; the ContT scope cancels the worker on every exit.
+        _ <- ContT $ withAsync $ flip fix 1 \next delay -> do
+          provider <- callRpcWaitMay @RpcRepositoryAdvertFind
+            (TimeoutSec 3) peerAPI repoKey
+          case join provider of
+            Just advert -> status $ "repository provider" <+>
+              pretty (AsBase58 (replicaAdvertProvider advert))
+            Nothing -> do
+              pause @'Seconds delay
+              next (min 10 (delay * 2))
 
         void $ lift (pollUntil limit (callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repoKey, "lwwref", 31)))
                  >>= orThrow (RepoPeerNotAnswering limit)
