@@ -474,6 +474,9 @@ tests = testGroup "repository lease"
         length results @?= 1
       lookupRepositoryAdvertsAt 120 cache repository maxBound >>= \results ->
         length results @?= 2
+      lookupRepositoryReplicaAdvertsAt 120 cache repository maxBound
+        >>= \adverts ->
+          fmap replicaAdvertRepository adverts @?= replicate 2 repository
       repositoryAdvertCacheSizeAt 169 cache >>= (@?= 2)
       repositoryAdvertCacheSizeAt 170 cache >>= (@?= 1)
       repositoryAdvertCacheSizeAt 180 cache >>= (@?= 0)
@@ -522,6 +525,52 @@ tests = testGroup "repository lease"
       insertRepositoryAdvertAt 100 cache
         (signedAdvertBytes provider (last repositories) 100 160)
           >>= (@?= Left RepositoryAdvertCacheFull)
+
+  , testCase "repository advert results are bound to a live query and peer" $ do
+      repository <- newRepositoryKey
+      wrongRepository <- newRepositoryKey
+      queries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let query = RepositoryAdvertQueryId "query-01"
+      registerRepositoryAdvertQueryAt
+        100 queries query repository [1, 2] >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 1 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 2 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 3 query repository >>= (@?= False)
+      acceptRepositoryAdvertQueryAt
+        100 queries 1 query wrongRepository >>= (@?= False)
+      acceptRepositoryAdvertQueryAt
+        129 queries 1 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        130 queries 1 query repository >>= (@?= False)
+      repositoryAdvertPendingQueryCountAt 130 queries >>= (@?= 0)
+      let futureQuery = RepositoryAdvertQueryId "query-future"
+      registerRepositoryAdvertQueryAt
+        200 queries futureQuery repository [1] >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        199 queries 1 futureQuery repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        169 queries 1 futureQuery repository >>= (@?= False)
+
+  , testCase "repository advert pending queries are bounded" $ do
+      repository <- newRepositoryKey
+      queries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let queryIds = RepositoryAdvertQueryId . B8.pack . ("query-" <>) . show
+            <$> [1 .. repositoryAdvertMaxPendingQueries + 1]
+      for_ (take repositoryAdvertMaxPendingQueries queryIds) $ \query ->
+        registerRepositoryAdvertQueryAt
+          100 queries query repository [1] >>= (@?= True)
+      repositoryAdvertPendingQueryCountAt 100 queries
+        >>= (@?= repositoryAdvertMaxPendingQueries)
+      registerRepositoryAdvertQueryAt
+        100 queries (last queryIds) repository [1] >>= (@?= False)
+      freshQuery <- newRepositoryAdvertQueryId
+      case freshQuery of
+        RepositoryAdvertQueryId bytes -> B8.length bytes @?= 24
 
   , testCase "the worker advert maintainer renews only at its boundary" $
       withRepository $ \Fixture{..} -> do

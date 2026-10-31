@@ -91,8 +91,8 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 - publish and retrieve signed replica advertisements (wire type, verified
   provider-local lifecycle, and worker renewal completed 2026-10-31; network
   lookup envelope, authenticated handler, signature-verifying TTL relay cache,
-  bounded gossip, and periodic publication completed 2026-10-31; client query
-  fan-out and clone-path consumption remain open);
+  bounded gossip, periodic publication, and peer-bound expiring client query
+  fan-out completed 2026-10-31; clone-path consumption remains open);
 - find a complete provider from the repository key;
 - maintain a replica target with make-before-break replacement.
 

@@ -719,9 +719,13 @@ every provider signature and advert lifetime before storing the opaque box,
 relays only new or renewed adverts, and answers from an in-memory cache bounded
 to 1,024 repository keys and eight providers per key. Expired entries are
 removed on cache access; forged, future, stale, identity-mismatched, oversized,
-and unsolicited cross-repository results are discarded. The remaining M4
-delivery work is query-session binding and client fan-out, provider selection
-and dialing from the clone path, the three-node discovery scenario, and hub UX.
+and unsolicited results are discarded. Client lookup now fans a bounded query
+out to authenticated known peers and accepts each result only while its random
+query id is live and only from a peer included in that fan-out. Query sessions
+are limited to 128 entries and expire after 30 seconds; the first answer does
+not consume a session, so independent providers can all respond. The remaining
+M4 delivery work is provider selection and dialing from the clone path, the
+three-node discovery scenario, and hub UX.
 
 
 ## Milestone 0: Measurement and design fixtures

@@ -9,6 +9,16 @@ module HBS2.Peer.RepositoryLease.Discovery
   , repositoryAdvertCacheSizeAt
   , repositoryAdvertCacheMaxRepositories
   , repositoryAdvertCacheMaxProviders
+  , RepositoryAdvertQueries
+  , newRepositoryAdvertQueries
+  , newRepositoryAdvertQueryId
+  , registerRepositoryAdvertQueryAt
+  , acceptRepositoryAdvertQueryAt
+  , repositoryAdvertPendingQueryCountAt
+  , repositoryAdvertQueryTTL
+  , repositoryAdvertMaxPendingQueries
+  , requestRepositoryAdverts
+  , lookupRepositoryReplicaAdvertsAt
   , repositoryAdvertProto
   ) where
 
@@ -23,8 +33,11 @@ import HBS2.Peer.RepositoryLease
 import HBS2.Prelude.Plated
 
 import Control.Concurrent.STM
+import Crypto.Saltine.Core.Utils (randomByteString)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
+import Data.HashSet (HashSet)
+import Data.HashSet qualified as HashSet
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
@@ -55,6 +68,15 @@ type RepositoryAdvertCacheState =
 newtype RepositoryAdvertCache = RepositoryAdvertCache
   (TVar RepositoryAdvertCacheState)
 
+data PendingRepositoryAdvertQuery peer = PendingRepositoryAdvertQuery
+  { pendingRepositoryAdvertRepository :: PubKey 'Sign 'HBS2Basic
+  , pendingRepositoryAdvertPeers      :: HashSet peer
+  , pendingRepositoryAdvertIssuedAt   :: Word64
+  }
+
+newtype RepositoryAdvertQueries peer = RepositoryAdvertQueries
+  (TVar (Map RepositoryAdvertQueryId (PendingRepositoryAdvertQuery peer)))
+
 repositoryAdvertCacheMaxRepositories :: Int
 repositoryAdvertCacheMaxRepositories = 1024
 
@@ -62,8 +84,90 @@ repositoryAdvertCacheMaxProviders :: Int
 repositoryAdvertCacheMaxProviders =
   fromIntegral repositoryAdvertMaxResults
 
+repositoryAdvertQueryTTL :: Word64
+repositoryAdvertQueryTTL = 30
+
+repositoryAdvertMaxPendingQueries :: Int
+repositoryAdvertMaxPendingQueries = 128
+
 newRepositoryAdvertCache :: IO RepositoryAdvertCache
 newRepositoryAdvertCache = RepositoryAdvertCache <$> newTVarIO Map.empty
+
+newRepositoryAdvertQueries :: IO (RepositoryAdvertQueries peer)
+newRepositoryAdvertQueries = RepositoryAdvertQueries <$> newTVarIO Map.empty
+
+newRepositoryAdvertQueryId :: IO RepositoryAdvertQueryId
+newRepositoryAdvertQueryId =
+  RepositoryAdvertQueryId <$> randomByteString 24
+
+registerRepositoryAdvertQueryAt
+  :: (Eq peer, Hashable peer)
+  => Word64
+  -> RepositoryAdvertQueries peer
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> [peer]
+  -> IO Bool
+registerRepositoryAdvertQueryAt
+  now (RepositoryAdvertQueries queriesVar) query repository peers = atomically do
+    queries <- pruneRepositoryAdvertQueriesAt now <$> readTVar queriesVar
+    let expectedPeers = HashSet.fromList peers
+        canRegister = not (HashSet.null expectedPeers)
+          && Map.notMember query queries
+          && Map.size queries < repositoryAdvertMaxPendingQueries
+        next
+          | canRegister = Map.insert query
+              PendingRepositoryAdvertQuery
+                { pendingRepositoryAdvertRepository = repository
+                , pendingRepositoryAdvertPeers = expectedPeers
+                , pendingRepositoryAdvertIssuedAt = now
+                }
+              queries
+          | otherwise = queries
+    writeTVar queriesVar next
+    pure canRegister
+
+acceptRepositoryAdvertQueryAt
+  :: (Eq peer, Hashable peer)
+  => Word64
+  -> RepositoryAdvertQueries peer
+  -> peer
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> IO Bool
+acceptRepositoryAdvertQueryAt
+  now (RepositoryAdvertQueries queriesVar) peer query repository = atomically do
+    queries <- pruneRepositoryAdvertQueriesAt now <$> readTVar queriesVar
+    writeTVar queriesVar queries
+    pure $ case Map.lookup query queries of
+      Nothing -> False
+      Just pending ->
+           pendingRepositoryAdvertRepository pending == repository
+        && peer `HashSet.member` pendingRepositoryAdvertPeers pending
+
+repositoryAdvertPendingQueryCountAt
+  :: Word64
+  -> RepositoryAdvertQueries peer
+  -> IO Int
+repositoryAdvertPendingQueryCountAt
+  now (RepositoryAdvertQueries queriesVar) = atomically do
+    queries <- pruneRepositoryAdvertQueriesAt now <$> readTVar queriesVar
+    writeTVar queriesVar queries
+    pure (Map.size queries)
+
+pruneRepositoryAdvertQueriesAt
+  :: Word64
+  -> Map RepositoryAdvertQueryId (PendingRepositoryAdvertQuery peer)
+  -> Map RepositoryAdvertQueryId (PendingRepositoryAdvertQuery peer)
+pruneRepositoryAdvertQueriesAt now =
+  Map.filter $ \pending ->
+    repositoryAdvertQueryAge
+      now (pendingRepositoryAdvertIssuedAt pending) < repositoryAdvertQueryTTL
+
+repositoryAdvertQueryAge :: Word64 -> Word64 -> Word64
+repositoryAdvertQueryAge now issuedAt
+  | now >= issuedAt = now - issuedAt
+  | otherwise = issuedAt - now
 
 insertRepositoryAdvertAt
   :: Word64
@@ -130,13 +234,34 @@ lookupRepositoryAdvertsAt
   -> PubKey 'Sign 'HBS2Basic
   -> Word16
   -> IO [ByteString]
-lookupRepositoryAdvertsAt now (RepositoryAdvertCache cacheVar) repository requested =
-  atomically do
+lookupRepositoryAdvertsAt now cache repository requested =
+  fmap cachedRepositoryAdvertBytes <$>
+    lookupRepositoryAdvertEntriesAt now cache repository requested
+
+lookupRepositoryReplicaAdvertsAt
+  :: Word64
+  -> RepositoryAdvertCache
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> IO [ReplicaAdvertV1]
+lookupRepositoryReplicaAdvertsAt
+  now cache repository requested =
+    fmap cachedRepositoryAdvertPayload <$>
+      lookupRepositoryAdvertEntriesAt now cache repository requested
+
+lookupRepositoryAdvertEntriesAt
+  :: Word64
+  -> RepositoryAdvertCache
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> IO [CachedRepositoryAdvert]
+lookupRepositoryAdvertEntriesAt
+  now (RepositoryAdvertCache cacheVar) repository requested = atomically do
     state <- pruneRepositoryAdvertCacheStateAt now <$> readTVar cacheVar
     writeTVar cacheVar state
     let resultLimit = fromIntegral (min requested repositoryAdvertMaxResults)
     pure $ take resultLimit $
-      cachedRepositoryAdvertBytes <$> Map.elems
+      Map.elems
         (Map.findWithDefault Map.empty repository state)
 
 pruneRepositoryAdvertCacheAt
@@ -168,6 +293,56 @@ pruneRepositoryAdvertCacheStateAt now =
       | Map.null providers = Nothing
       | otherwise = Just providers
 
+requestRepositoryAdverts
+  :: ( MonadIO m
+     , Request L4Proto RepositoryAdvertMessage m
+     , HasPeerLocator L4Proto m
+     , Sessions L4Proto (KnownPeer L4Proto) m
+     )
+  => RepositoryAdvertQueries (Peer L4Proto)
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> m (Maybe RepositoryAdvertQueryId)
+requestRepositoryAdverts queries repository requested = do
+  locator <- getPeerLocator @L4Proto
+  locatedPeers <- knownPeers @L4Proto locator
+  peers <- filterM
+    (\peer -> find (KnownPeerKey peer) id <&> isJust)
+    locatedPeers
+  requestRepositoryAdvertsFromPeers
+    queries repository requested peers
+
+requestRepositoryAdvertsFromPeers
+  :: (MonadIO m, Request L4Proto RepositoryAdvertMessage m)
+  => RepositoryAdvertQueries (Peer L4Proto)
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> [Peer L4Proto]
+  -> m (Maybe RepositoryAdvertQueryId)
+requestRepositoryAdvertsFromPeers _ _ _ [] = pure Nothing
+requestRepositoryAdvertsFromPeers queries repository requested peers = do
+  query <- liftIO newRepositoryAdvertQueryId
+  now <- liftIO currentTimestamp
+  registered <- liftIO $ registerRepositoryAdvertQueryAt
+    now queries query repository peers
+  sendRepositoryAdvertQuery
+    registered peers query repository requested
+
+sendRepositoryAdvertQuery
+  :: (Monad m, Request L4Proto RepositoryAdvertMessage m)
+  => Bool
+  -> [Peer L4Proto]
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> m (Maybe RepositoryAdvertQueryId)
+sendRepositoryAdvertQuery False _ _ _ _ = pure Nothing
+sendRepositoryAdvertQuery True peers query repository requested = do
+  let resultLimit = min requested repositoryAdvertMaxResults
+  for_ peers $ \peer -> request @L4Proto peer $
+    RepositoryAdvertLookup query repository resultLimit
+  pure (Just query)
+
 repositoryAdvertProto
   :: forall m
    . ( MonadIO m
@@ -181,42 +356,110 @@ repositoryAdvertProto
      , HasTimeLimits L4Proto RepositoryAdvertMessage m
      )
   => RepositoryAdvertCache
+  -> RepositoryAdvertQueries (Peer L4Proto)
   -> RepositoryAdvertMessage
   -> m ()
-repositoryAdvertProto cache = \case
-  RepositoryAdvertPublish bytes -> do
-    source <- thatPeer @RepositoryAdvertMessage
-    updateResult <- liftIO $ currentTimestamp >>= \now ->
-      insertRepositoryAdvertAt now cache bytes
-    when (updateResult `elem`
-      [ Right RepositoryAdvertCacheInserted
-      , Right RepositoryAdvertCacheReplaced
-      ]) $
-        relayRepositoryAdvert source bytes
+repositoryAdvertProto cache queries = \case
+  RepositoryAdvertPublish bytes ->
+    acceptRepositoryAdvertPublication cache bytes
+  RepositoryAdvertLookup query repository requested ->
+    answerRepositoryAdvertLookup cache query repository requested
+  RepositoryAdvertResults query repository adverts ->
+    acceptRepositoryAdvertResults cache queries query repository adverts
 
-  RepositoryAdvertLookup query repository requested -> deferred @RepositoryAdvertMessage do
+acceptRepositoryAdvertPublication
+  :: ( MonadIO m
+     , Request L4Proto RepositoryAdvertMessage m
+     , HasPeerLocator L4Proto m
+     , Sessions L4Proto (KnownPeer L4Proto) m
+     , Response L4Proto RepositoryAdvertMessage m
+     )
+  => RepositoryAdvertCache
+  -> ByteString
+  -> m ()
+acceptRepositoryAdvertPublication cache bytes = do
+  source <- thatPeer @RepositoryAdvertMessage
+  updateResult <- liftIO $ currentTimestamp >>= \now ->
+    insertRepositoryAdvertAt now cache bytes
+  when (updateResult `elem`
+    [ Right RepositoryAdvertCacheInserted
+    , Right RepositoryAdvertCacheReplaced
+    ]) $
+      relayRepositoryAdvert source bytes
+
+answerRepositoryAdvertLookup
+  :: ( MonadIO m
+     , Response L4Proto RepositoryAdvertMessage m
+     , HasDeferred RepositoryAdvertMessage L4Proto m
+     )
+  => RepositoryAdvertCache
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word16
+  -> m ()
+answerRepositoryAdvertLookup cache query repository requested =
+  deferred @RepositoryAdvertMessage do
     now <- liftIO currentTimestamp
     adverts <- liftIO $
       lookupRepositoryAdvertsAt now cache repository requested
     response $ RepositoryAdvertResults query repository adverts
 
-  RepositoryAdvertResults _ repository adverts -> do
-    now <- liftIO currentTimestamp
-    for_ adverts $ \bytes -> liftIO do
-      decoded <- decodeRepositoryReplicaAdvertAt now (LBS.fromStrict bytes)
-      case decoded of
-        Right (_, advert)
-          | replicaAdvertRepository advert == repository ->
-              void (insertRepositoryAdvertAt now cache bytes)
-        _ -> pure ()
-  where
-    relayRepositoryAdvert source bytes = do
-      locator <- getPeerLocator @L4Proto
-      peers <- knownPeers @L4Proto locator
-      for_ peers $ \peer -> when (peer /= source) do
-        authenticated <- find (KnownPeerKey peer) id <&> isJust
-        when authenticated $
-          request @L4Proto peer (RepositoryAdvertPublish bytes)
+acceptRepositoryAdvertResults
+  :: (MonadIO m, Response L4Proto RepositoryAdvertMessage m)
+  => RepositoryAdvertCache
+  -> RepositoryAdvertQueries (Peer L4Proto)
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> [ByteString]
+  -> m ()
+acceptRepositoryAdvertResults cache queries query repository adverts = do
+  source <- thatPeer @RepositoryAdvertMessage
+  now <- liftIO currentTimestamp
+  expected <- liftIO $ acceptRepositoryAdvertQueryAt
+    now queries source query repository
+  when expected $
+    for_ adverts $ \bytes -> liftIO $
+      cacheMatchingRepositoryAdvertAt now cache repository bytes
+
+cacheMatchingRepositoryAdvertAt
+  :: Word64
+  -> RepositoryAdvertCache
+  -> PubKey 'Sign 'HBS2Basic
+  -> ByteString
+  -> IO ()
+cacheMatchingRepositoryAdvertAt now cache repository bytes = do
+  decoded <- decodeRepositoryReplicaAdvertAt now (LBS.fromStrict bytes)
+  let matches = either (const False)
+        ((== repository) . replicaAdvertRepository . snd) decoded
+  when matches $
+    void (insertRepositoryAdvertAt now cache bytes)
+
+relayRepositoryAdvert
+  :: ( MonadIO m
+     , Request L4Proto RepositoryAdvertMessage m
+     , HasPeerLocator L4Proto m
+     , Sessions L4Proto (KnownPeer L4Proto) m
+     )
+  => Peer L4Proto
+  -> ByteString
+  -> m ()
+relayRepositoryAdvert source bytes = do
+  locator <- getPeerLocator @L4Proto
+  peers <- knownPeers @L4Proto locator
+  for_ peers $ \peer -> when (peer /= source) $
+    relayRepositoryAdvertToPeer peer bytes
+
+relayRepositoryAdvertToPeer
+  :: ( Request L4Proto RepositoryAdvertMessage m
+     , Sessions L4Proto (KnownPeer L4Proto) m
+     )
+  => Peer L4Proto
+  -> ByteString
+  -> m ()
+relayRepositoryAdvertToPeer peer bytes = do
+  authenticated <- find (KnownPeerKey peer) id <&> isJust
+  when authenticated $
+    request @L4Proto peer (RepositoryAdvertPublish bytes)
 
 currentTimestamp :: IO Word64
 currentTimestamp = floor <$> getPOSIXTime

@@ -1018,6 +1018,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   penv <- newPeerEnv pl (AnyStorage s) (Fabriq byPass) peerSelf
   repositoryAdvertCache <- liftIO newRepositoryAdvertCache
+  repositoryAdvertQueries <- liftIO newRepositoryAdvertQueries
   do
     probe <- newSimpleProbe "PeerEnv_Main"
     addProbe probe
@@ -1376,7 +1377,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     -- TODO: change-all-to-authorized
                     , makeResponse ((authorized . subscribed (SomeBrains brains)) lwwRefProtoA)
                     , makeResponse ((authorized . mailboxProto False) mailboxWorker)
-                    , makeResponse (authorized (repositoryAdvertProto repositoryAdvertCache))
+                    , makeResponse (authorized
+                        (repositoryAdvertProto
+                          repositoryAdvertCache repositoryAdvertQueries))
                     ]
 
 
