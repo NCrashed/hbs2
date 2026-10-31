@@ -14,11 +14,13 @@ module HBS2.Peer.RepositoryLease.Discovery
   , newRepositoryAdvertQueryId
   , registerRepositoryAdvertQueryAt
   , acceptRepositoryAdvertQueryAt
+  , acceptRepositoryAdvertResultsAt
   , repositoryAdvertPendingQueryCountAt
   , repositoryAdvertQueryTTL
   , repositoryAdvertMaxPendingQueries
   , requestRepositoryAdverts
   , lookupRepositoryReplicaAdvertsAt
+  , findRepositoryAdvertProvider
   , repositoryAdvertProto
   ) where
 
@@ -249,6 +251,30 @@ lookupRepositoryReplicaAdvertsAt
     fmap cachedRepositoryAdvertPayload <$>
       lookupRepositoryAdvertEntriesAt now cache repository requested
 
+-- | Try only providers which claim the ordinary block-download capability.
+-- Every advertised address is attempted, but an advert is accepted only when
+-- the caller confirms that the endpoint authenticated as the signed provider.
+findRepositoryAdvertProvider
+  :: Monad m
+  => (PubKey 'Sign 'HBS2Basic -> PeerAddr L4Proto -> m Bool)
+  -> [ReplicaAdvertV1]
+  -> m (Maybe ReplicaAdvertV1)
+findRepositoryAdvertProvider dial = go
+  where
+    go [] = pure Nothing
+    go (advert : rest)
+      | not (replicaAdvertCanServeBlocks advert) = go rest
+      | otherwise = do
+          connected <- anyM
+            (dial (replicaAdvertProvider advert))
+            (replicaAdvertReachableVia advert)
+          if connected then pure (Just advert) else go rest
+
+    anyM _ [] = pure False
+    anyM predicate (value : values) = do
+      matched <- predicate value
+      if matched then pure True else anyM predicate values
+
 lookupRepositoryAdvertEntriesAt
   :: Word64
   -> RepositoryAdvertCache
@@ -415,11 +441,26 @@ acceptRepositoryAdvertResults
 acceptRepositoryAdvertResults cache queries query repository adverts = do
   source <- thatPeer @RepositoryAdvertMessage
   now <- liftIO currentTimestamp
-  expected <- liftIO $ acceptRepositoryAdvertQueryAt
-    now queries source query repository
-  when expected $
-    for_ adverts $ \bytes -> liftIO $
-      cacheMatchingRepositoryAdvertAt now cache repository bytes
+  void $ liftIO $ acceptRepositoryAdvertResultsAt
+    now cache queries source query repository adverts
+
+acceptRepositoryAdvertResultsAt
+  :: (Eq peer, Hashable peer)
+  => Word64
+  -> RepositoryAdvertCache
+  -> RepositoryAdvertQueries peer
+  -> peer
+  -> RepositoryAdvertQueryId
+  -> PubKey 'Sign 'HBS2Basic
+  -> [ByteString]
+  -> IO Bool
+acceptRepositoryAdvertResultsAt
+  now cache queries source query repository adverts = do
+    expected <- acceptRepositoryAdvertQueryAt
+      now queries source query repository
+    when expected $
+      for_ adverts $ cacheMatchingRepositoryAdvertAt now cache repository
+    pure expected
 
 cacheMatchingRepositoryAdvertAt
   :: Word64

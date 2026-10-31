@@ -30,6 +30,7 @@ import HBS2.Peer.RPC.API.Storage
 import HBS2.Peer.RPC.Client.StorageClient
 import HBS2.System.Dir
 import HBS2.Peer.CLI.Detect
+import HBS2.Peer.Proto.RepositoryLease (replicaAdvertProvider)
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet (HashSet)
@@ -280,6 +281,12 @@ waitRepo timeout repoKey = do
         when (rlv && rlog) $ done ()
 
         status "wait for peer"
+
+        provider <- lift $ callRpcWaitMay @RpcRepositoryAdvertFind
+          (TimeoutSec 3) peerAPI repoKey
+        for_ (join provider) $ \advert ->
+          status $ "repository provider" <+>
+            pretty (AsBase58 (replicaAdvertProvider advert))
 
         void $ lift (pollUntil limit (callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repoKey, "lwwref", 31)))
                  >>= orThrow (RepoPeerNotAnswering limit)

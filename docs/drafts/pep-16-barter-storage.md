@@ -723,9 +723,19 @@ and unsolicited results are discarded. Client lookup now fans a bounded query
 out to authenticated known peers and accepts each result only while its random
 query id is live and only from a peer included in that fan-out. Query sessions
 are limited to 128 entries and expire after 30 seconds; the first answer does
-not consume a session, so independent providers can all respond. The remaining
-M4 delivery work is provider selection and dialing from the clone path, the
-three-node discovery scenario, and hub UX.
+not consume a session, so independent providers can all respond.
+
+Provider selection and clone-path consumption are implemented on 2026-10-31.
+Before starting the normal mutable-root polling loop, `hbs2-git3` asks its local
+peer for a provider by repository key. The peer collects verified live adverts,
+tries only adverts which claim block service, tries each advertised endpoint,
+and accepts an endpoint only after the transport session authenticates as the
+provider key which signed the advert. A deterministic three-role test covers an
+offline owner, an advert-holding relay, and a clean clone which accepts only a
+query-bound relay result before selecting the authenticated provider. The
+remaining M4 delivery work is the external multi-process acceptance scenario
+and hub UX; the existing executable M1 scenario still configures the provider
+directly.
 
 
 ## Milestone 0: Measurement and design fixtures

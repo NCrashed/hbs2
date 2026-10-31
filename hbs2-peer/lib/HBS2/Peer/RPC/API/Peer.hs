@@ -46,6 +46,7 @@ data RpcRepositoryLeasePut
 data RpcRepositoryLeaseGet
 data RpcRepositoryLeaseList
 data RpcRepositoryLeaseCapacity
+data RpcRepositoryAdvertFind
 
 type PeerAPI = '[ RpcPoke
                 , RpcPing
@@ -69,6 +70,7 @@ type PeerAPI = '[ RpcPoke
                 , RpcRepositoryLeaseGet
                 , RpcRepositoryLeaseList
                 , RpcRepositoryLeaseCapacity
+                , RpcRepositoryAdvertFind
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -148,6 +150,9 @@ type instance Output RpcRepositoryLeaseList = [RepositoryLease]
 
 type instance Input RpcRepositoryLeaseCapacity = ()
 type instance Output RpcRepositoryLeaseCapacity = RepositoryLeaseCapacity
+
+type instance Input RpcRepositoryAdvertFind = PubKey 'Sign 'HBS2Basic
+type instance Output RpcRepositoryAdvertFind = Maybe ReplicaAdvertV1
 
 data SetLogging =
     DebugOn Bool

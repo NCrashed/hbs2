@@ -92,8 +92,10 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   provider-local lifecycle, and worker renewal completed 2026-10-31; network
   lookup envelope, authenticated handler, signature-verifying TTL relay cache,
   bounded gossip, periodic publication, and peer-bound expiring client query
-  fan-out completed 2026-10-31; clone-path consumption remains open);
-- find a complete provider from the repository key;
+  fan-out completed 2026-10-31; authenticated provider selection and
+  clone-path consumption completed 2026-10-31);
+- prove repository-key-only discovery in the external multi-process
+  offline-owner acceptance scenario;
 - maintain a replica target with make-before-break replacement.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts

@@ -1471,6 +1471,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                            , rpcDoRefChanNotify = refChanNotifyAction
                            , rpcMailboxService = AnyMailboxService @s mailboxWorker
                            , rpcMailboxAdapter  = AnyMailboxAdapter @s mailboxWorker
+                           , rpcRepositoryAdvertCache = repositoryAdvertCache
+                           , rpcRepositoryAdvertQueries = repositoryAdvertQueries
                            }
 
   m1 <- liftIO $ asyncLinked $ runMessagingUnix rpcmsg

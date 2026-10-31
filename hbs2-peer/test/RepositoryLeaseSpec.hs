@@ -33,7 +33,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Either (isLeft, isRight)
 import Data.Word (Word16, Word64)
 import Lens.Micro.Platform
@@ -571,6 +571,59 @@ tests = testGroup "repository lease"
       freshQuery <- newRepositoryAdvertQueryId
       case freshQuery of
         RepositoryAdvertQueryId bytes -> B8.length bytes @?= 24
+
+  , testCase "repository advert provider selection verifies a reachable endpoint" $ do
+      secondProvider <- newRepositoryKey
+      attempts <- newIORef []
+      let firstAddress = "tcp://127.0.0.1:10351"
+          secondAddress = "tcp://127.0.0.1:10352"
+          unavailable = goldenAdvert
+            { replicaAdvertReachableVia = [firstAddress]
+            , replicaAdvertCapabilities = 0
+            }
+          noEndpoint = goldenAdvert
+            { replicaAdvertReachableVia = [] }
+          reachable = goldenAdvert
+            { replicaAdvertProvider = secondProvider
+            , replicaAdvertReachableVia = [firstAddress, secondAddress]
+            }
+          dial provider address = do
+            modifyIORef' attempts (<> [(provider, address)])
+            pure (provider == secondProvider && address == secondAddress)
+      findRepositoryAdvertProvider dial [unavailable, noEndpoint, reachable]
+        >>= (@?= Just reachable)
+      readIORef attempts >>= (@?=
+        [ (secondProvider, firstAddress)
+        , (secondProvider, secondAddress)
+        ])
+
+  , testCase "three nodes discover a leased repository while its owner is offline" $ do
+      repository <- newRepositoryKey
+      providerCredentials <- newCredentials @'HBS2Basic
+      relayCache <- newRepositoryAdvertCache
+      cloneCache <- newRepositoryAdvertCache
+      cloneQueries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let relayPeer = 2
+          query = RepositoryAdvertQueryId "clone-query"
+          advertBytes = signedAdvertBytes
+            providerCredentials repository 100 160
+          provider = view peerSignPk providerCredentials
+      insertRepositoryAdvertAt 100 relayCache advertBytes
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      registerRepositoryAdvertQueryAt
+        100 cloneQueries query repository [relayPeer] >>= (@?= True)
+      relayResults <- lookupRepositoryAdvertsAt
+        100 relayCache repository repositoryAdvertMaxResults
+      acceptRepositoryAdvertResultsAt
+        100 cloneCache cloneQueries relayPeer query repository relayResults
+        >>= (@?= True)
+      cloneAdverts <- lookupRepositoryReplicaAdvertsAt
+        100 cloneCache repository repositoryAdvertMaxResults
+      findRepositoryAdvertProvider
+        (\expected _ -> pure (expected == provider))
+        cloneAdverts
+        >>= (@?= listToMaybe cloneAdverts)
 
   , testCase "the worker advert maintainer renews only at its boundary" $
       withRepository $ \Fixture{..} -> do
