@@ -447,6 +447,21 @@ address is live and that somebody read it.
 
 ## Where you stand
 
+To diagnose the whole path from the local peer through repository discovery,
+forge policy, contributor identity, and the latest known contribution state:
+
+```
+hbs2-hub doctor --repo <repo-key> [--author <key>] [--sender <sigil>]
+```
+
+The command is read-only. It first runs the peer and repository doctor, then
+checks the repository's default hub mailbox, current policy and PoW,
+contributor signing/reply readiness, and the strongest evidence for the latest
+locally recorded letter. A sent-log row is printed as `local-peer handoff`, not
+delivery; only canon evidence is reported as `canon-published`. The missing
+intermediate states need signed mailbox receipts before the tool can claim
+them. See [Diagnose a local peer](doctor.md) for the checks and common remedies.
+
 ```
 hbs2-hub status --repo <repo-key> [--remote <name>]
 ```
@@ -715,6 +730,7 @@ hbs2-hub inbox      --mailbox <mailbox-key> [--repo <key>] --json
 hbs2-hub log        <repo-key> [<number>] --json
 hbs2-hub maintainer list --repo <repo-key> --json
 hbs2-hub status     --repo <repo-key> --json
+hbs2-hub doctor     --repo <repo-key> --json
 hbs2-hub sent       [--repo <repo-key>] --json
 hbs2-hub updates    --mailbox <your-mailbox> --repo <repo-key> --json
 ```
@@ -728,6 +744,7 @@ hbs2-hub updates    --mailbox <your-mailbox> --repo <repo-key> --json
 | `inbox show` | `letter` | a mailbox read |
 | `updates` | `updates` | a mailbox read |
 | `status` | `status` | canon, the remotes, the peer |
+| `doctor` | `doctor` | local peer, repository, forge, sent log |
 | `sent` | `sent` | this node's own log |
 
 Only the canon ones are the same bytes in every clone. The others are

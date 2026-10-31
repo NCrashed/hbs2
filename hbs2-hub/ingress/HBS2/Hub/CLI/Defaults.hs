@@ -105,6 +105,7 @@ wantsOf v
   | v == "hub:maintainer:use" = [WRepo, WSelf]
   | v == "hub:sync"          = [WRepo, WRemote]
   | v == "hub:publish"       = [WRemote]
+  | v == "hub:doctor"        = [WRepo, WAuthor, WSender]
   | v == "hub:pr:land"       = [WRepo, WRemote]
   | v `elem` byRepo          = [WRepo]
   | otherwise                = []
