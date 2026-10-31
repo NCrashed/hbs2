@@ -293,6 +293,8 @@ runCLI = do
         conf <- peerConfigReadOnly configArg
         let socketPath = fromMaybe (getRpcSocketName conf) (view rpcOptAddr rpc)
 
+        bootstrap <- bootstrapDnsProbe conf
+
         runtime <- Exception.try @SomeException $
           withRPC2 @PeerAPI @UNIX socketPath $ \caller -> do
             poke <- callRpcWaitRetry @RpcPoke (TimeoutSec 0.5) 2 caller ()
@@ -309,6 +311,7 @@ runCLI = do
               , doctorRPCSocket = socketPath
               , doctorPoke = poke
               , doctorPeerCount = peers
+              , doctorBootstrap = maybe DoctorBootstrapDisabled DoctorBootstrapChecked bootstrap
               }
 
         if json

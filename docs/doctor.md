@@ -6,12 +6,20 @@ Run the doctor from the same user account and environment as the peer:
 hbs2-peer doctor
 ```
 
-The command is read-only. It checks the local peer boundary in four steps:
+The command does not change peer state. It checks the local peer and its DNS
+bootstrap boundary in five steps:
 
 - `config` — which configuration file was selected and whether it exists;
 - `rpc` — which Unix socket was selected and whether the daemon answers;
 - `version` — whether the CLI and the running daemon have the same version;
-- `peers` — how many network peers the daemon currently sees.
+- `peers` — how many network peers the daemon currently sees;
+- `bootstrap` — whether each configured bootstrap DNS name returns at least
+  one usable peer address.
+
+The bootstrap check makes bounded DNS TXT queries. It uses the same
+`bootstrap-dns` entries and built-in `bootstrap.hbs2.app` name as the peer,
+and counts only records that parse as supported peer addresses. With
+`bootstrap off`, it makes no bootstrap query and reports the check as skipped.
 
 A healthy local peer prints one line per check and ends with `doctor: OK`.
 Every failed check prints a `remedy:` line. A warning, such as having no
@@ -80,11 +88,15 @@ optional remedy.
 - `no network peers are connected` — the local process works, but it currently
   has no network path. Check `hbs2-peer peers`, `known-peer`/`bootstrap-dns`
   configuration, and firewall reachability.
+- `no usable peer addresses resolved` — DNS failed, returned no TXT records,
+  or returned records that are not supported peer addresses. Check the named
+  DNS record or add a reachable `known-peer` entry. If DNS discovery was
+  intentionally disabled for this peer, set `bootstrap off` in its config.
 
 ## Current scope
 
-The current doctor implements the local-runtime slice only. It does **not**
-yet accept `--repo` and does not prove repository availability, relay
-reachability, sigil propagation, or mailbox delivery. Those network,
-repository, and forge checks are tracked as D2-D4 in the
-[product-readiness roadmap](product-roadmap.md).
+The current doctor implements the local-runtime slice and bootstrap resolution
+from the network slice. It does **not** yet accept `--repo` and does not prove
+relay reachability, repository availability, sigil propagation, or mailbox
+delivery. The remaining network, repository, and forge checks are tracked as
+D2-D4 in the [product-readiness roadmap](product-roadmap.md).

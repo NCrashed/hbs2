@@ -8,6 +8,7 @@
 module HBS2.Peer.CLI.Doctor
   ( CheckStatus(..)
   , DoctorCheck(..)
+  , DoctorBootstrap(..)
   , DoctorFacts(..)
   , DoctorReport(..)
   , diagnose
@@ -36,6 +37,14 @@ data DoctorCheck = DoctorCheck
   }
   deriving stock (Eq, Show)
 
+-- | The bounded DNS discovery probe performed by the executable. Counts are
+-- usable peer addresses, not raw TXT records: a DNS name that answers only
+-- with malformed or unsupported transports is not a route into the network.
+data DoctorBootstrap
+  = DoctorBootstrapDisabled
+  | DoctorBootstrapChecked [(Text, Int)]
+  deriving stock (Eq, Show)
+
 data DoctorFacts = DoctorFacts
   { doctorCLIVersion :: Text
   , doctorConfigPath :: FilePath
@@ -43,6 +52,7 @@ data DoctorFacts = DoctorFacts
   , doctorRPCSocket :: FilePath
   , doctorPoke :: Maybe Text
   , doctorPeerCount :: Maybe Int
+  , doctorBootstrap :: DoctorBootstrap
   }
   deriving stock (Eq, Show)
 
@@ -57,6 +67,7 @@ diagnose facts = DoctorReport
   , rpcCheck facts
   , versionCheck facts
   , peersCheck facts
+  , bootstrapCheck facts
   ]
 
 doctorPassed :: DoctorReport -> Bool
@@ -130,6 +141,25 @@ peersCheck facts = case doctorPoke facts of
       (Just "check bootstrap DNS, known-peer entries, and firewall reachability")
     Just n -> mkCheck "peers" CheckOK (tshow n <> " network peer(s) connected") Nothing
 
+bootstrapCheck :: DoctorFacts -> DoctorCheck
+bootstrapCheck facts = case doctorBootstrap facts of
+  DoctorBootstrapDisabled ->
+    skipped "bootstrap" "DNS bootstrap is disabled in the selected configuration"
+  DoctorBootstrapChecked results
+    | null working -> mkCheck "bootstrap" CheckFailure
+        ("no usable peer addresses resolved from " <> names (fmap fst results))
+        (Just "check DNS, or add a reachable `known-peer` entry to the peer config")
+    | null failed -> mkCheck "bootstrap" CheckOK
+        ("resolved " <> tshow (sum (fmap snd working)) <> " usable peer address(es) from "
+          <> names (fmap fst working)) Nothing
+    | otherwise -> mkCheck "bootstrap" CheckWarning
+        ("some bootstrap names resolved; no usable peer address from "
+          <> names (fmap fst failed))
+        (Just "check those bootstrap-dns records, or remove names this peer should not use")
+    where
+      working = filter ((> 0) . snd) results
+      failed = filter ((== 0) . snd) results
+
 mkCheck :: Text -> CheckStatus -> Text -> Maybe Text -> DoctorCheck
 mkCheck = DoctorCheck
 
@@ -166,6 +196,9 @@ statusText = \case
 
 pathText :: FilePath -> Text
 pathText = Text.pack
+
+names :: [Text] -> Text
+names = Text.intercalate ", "
 
 tshow :: Show a => a -> Text
 tshow = Text.pack . show

@@ -20,6 +20,7 @@ tests = testGroup "doctor"
       statusOf "rpc" report @?= Just CheckOK
       statusOf "version" report @?= Just CheckOK
       statusOf "peers" report @?= Just CheckOK
+      statusOf "bootstrap" report @?= Just CheckOK
 
   , testCase "version skew names both versions and fails" do
       let report = diagnose healthy
@@ -44,6 +45,34 @@ tests = testGroup "doctor"
       let report = diagnose healthy { doctorPeerCount = Just 0 }
       doctorPassed report @?= True
       statusOf "peers" report @?= Just CheckWarning
+
+  , testCase "bootstrap DNS with no usable records fails with a remedy" do
+      let report = diagnose healthy
+            { doctorBootstrap = DoctorBootstrapChecked
+                [("bootstrap.hbs2.app", 0)] }
+          bootstrapCheck = checkNamed "bootstrap" report
+      doctorPassed report @?= False
+      doctorCheckStatus bootstrapCheck @?= CheckFailure
+      assertBool "the failed name is visible"
+        ("bootstrap.hbs2.app" `Text.isInfixOf` doctorCheckMessage bootstrapCheck)
+      assertBool "the remedy says how to bypass DNS discovery"
+        (maybe False (Text.isInfixOf "known-peer") (doctorCheckRemedy bootstrapCheck))
+
+  , testCase "a partial bootstrap result is an actionable warning" do
+      let report = diagnose healthy
+            { doctorBootstrap = DoctorBootstrapChecked
+                [("bootstrap.hbs2.app", 2), ("relay.example", 0)] }
+          bootstrapCheck = checkNamed "bootstrap" report
+      doctorPassed report @?= True
+      doctorCheckStatus bootstrapCheck @?= CheckWarning
+      assertBool "the unresolved name is visible"
+        ("relay.example" `Text.isInfixOf` doctorCheckMessage bootstrapCheck)
+
+  , testCase "an explicitly disabled bootstrap is skipped" do
+      let report = diagnose healthy
+            { doctorBootstrap = DoctorBootstrapDisabled }
+      doctorPassed report @?= True
+      statusOf "bootstrap" report @?= Just CheckSkipped
 
   , testCase "an old daemon without a version fails explicitly" do
       let report = diagnose healthy
@@ -71,6 +100,7 @@ healthy = DoctorFacts
   , doctorRPCSocket = "/tmp/hbs2-rpc.socket"
   , doctorPoke = Just (poke "0.26.0.6")
   , doctorPeerCount = Just 2
+  , doctorBootstrap = DoctorBootstrapChecked [("bootstrap.hbs2.app", 1)]
   }
 
 poke :: Text.Text -> Text.Text
