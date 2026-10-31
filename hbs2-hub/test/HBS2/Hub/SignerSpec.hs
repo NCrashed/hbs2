@@ -154,7 +154,8 @@ spec = do
           { stRepo = repo, stCanSign = True, stSigner = s, stMaintains = maint
           , stCanon = Just "cafe1234", stThreads = 1, stEvents = 1, stKeys = 2
           , stPublished = Right [("origin", Level)], stMailbox = Nothing
-          , stWaiting = Right 0, stReplication = ReplicationAtRisk }
+          , stWaiting = Right 0, stReplicationTarget = Nothing
+          , stReplication = ReplicationAtRisk }
 
     it "status names the key and where it came from" $ do
       [r, c] <- sequence [aKey, aKey]

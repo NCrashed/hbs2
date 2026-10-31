@@ -753,10 +753,11 @@ usable advert rather than enumerating the network, the report calls the value
 distinguishes a completed lookup with no provider (`at_risk: true`) from a
 silent local peer (`at_risk: null`), and reports the selected provider,
 snapshot, endpoints, and signed advert issue/expiry times. Replication target
-and observed availability remain explicit nulls until M5 policy and M2 evidence
-exist. The hbs2-hub browser repository page consumes this contract as a
-ready/at-risk/unknown badge and preserves those future fields without
-inventing values. The four-process offline-owner harness also checks the live
+comes from the signed M5 manifest policy when declared and remains null when
+unmanaged; observed availability remains null until M2 evidence exists. The
+hbs2-hub browser repository page consumes this contract as a
+ready/at-risk/unknown badge without inventing values. The four-process
+offline-owner harness also checks the live
 hub JSON seam after the clone, so UI status and clone discovery cannot drift
 into two meanings of availability.
 
@@ -772,6 +773,21 @@ home consumes the same contract; public read-only servers do not expose this
 operator policy or their leased repository keys. The external direct and relay
 acceptance modes both verify that B's live report includes its reserved
 contract and active lease before A is stopped.
+
+The first M5 policy slice is implemented on 2026-10-31. A repository owner can
+publish `(replication (minimum N))` in the signed repository manifest with
+`hbs2-git3 repo:replication --minimum N <repo>`, where `N` is a bounded 0..32
+count of complete external replicas and absence remains distinct from an
+explicit zero. The nested clause deliberately leaves room for later
+availability and failure-domain fields. `hbs2-hub status` reads that same
+manifest revision as the mailbox, exposes the target, and conservatively marks
+the repository at risk whenever its proved complete-replica floor is below the
+target; a silent peer remains unknown. The browser already consumes these
+target and at-risk fields. The external relay acceptance scenario publishes a
+target of one and proves that a fresh clone reads it and observes the complete
+provider while the owner is offline. Provider selection, remote contract
+negotiation, multiple-advert enumeration, and make-before-break repair remain
+the next M5 slices.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -890,7 +906,9 @@ this PEP.
 
 Deliverables:
 
-- minimum replica count and availability targets;
+- minimum replica count and availability targets (signed minimum-replica
+  manifest policy and target/deficit status complete; availability target and
+  scheduler consumption remain);
 - time-profile and failure-domain-aware provider selection;
 - health monitor and make-before-break replacement;
 - renewal throttling and safe expiry under disk pressure;

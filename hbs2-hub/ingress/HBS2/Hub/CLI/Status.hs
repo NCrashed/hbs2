@@ -35,7 +35,8 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold (FoldResult(..),frMaintainers)
 import HBS2.Hub.Repo.Git (withGitCanon)
 import HBS2.Hub.Repo.GitBundle (remoteCanon,remoteNames)
-import HBS2.Hub.Repo.Manifest (mailboxFor)
+import HBS2.Hub.Repo.Manifest (readManifest,mailboxOf)
+import HBS2.Hub.Manifest (replicationMinimum)
 import HBS2.Hub.Ingress
 import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagMaybe,flagText,flagSwitch
                          ,repoFlags,flagRepo)
@@ -131,6 +132,7 @@ data Standing = Standing
     -- PEP-18 allows; 'Left' means the read failed and carries what to say.
   , stMailbox   :: Maybe HubKey
   , stWaiting   :: Either Text Int
+  , stReplicationTarget :: Maybe Word64
   , stReplication :: Replication
   }
   deriving stock (Eq,Show)
@@ -211,15 +213,24 @@ statusDoc st =
              Right n -> [ "        " <+> pretty n <+> "letter(s) waiting"
                             <+> parens "hbs2-hub inbox" ]
 
-    replicationLines = case stReplication st of
+    targetLine = case stReplicationTarget st of
+      Nothing -> "replication target not declared"
+      Just n  -> "replication target" <+> pretty n <+> "complete external replica(s)"
+
+    replicationLines = targetLine : case stReplication st of
       ReplicationUnknown e ->
         [ "replication unknown: the local peer did not answer"
         , "            " <> pretty (safeText e)
         ]
-      ReplicationAtRisk ->
-        [ "replication at risk: no reachable verified replica advert was found" ]
+      ReplicationAtRisk
+        | stReplicationTarget st == Just 0 ->
+            [ "replication target satisfied: no external replica is required" ]
+        | otherwise ->
+            [ "replication at risk: no reachable verified replica advert was found" ]
       ReplicationReady{..} ->
-        [ "replication at least 1 verified complete replica"
+        [ if maybe False (> 1) (stReplicationTarget st)
+            then "replication at risk: at least 1 verified complete replica, below target"
+            else "replication at least 1 verified complete replica"
         , "            provider" <+> keyDoc replicationProvider
         , "            advert valid from" <+> pretty replicationIssuedAt
             <+> "until" <+> pretty replicationExpiresAt
@@ -274,7 +285,7 @@ statusContract st = object
           (Just _, Left e) -> Just e
           _                -> Nothing
       ]
-  , "replication" .= replicationContract (stReplication st)
+  , "replication" .= replicationContract (stReplicationTarget st) (stReplication st)
   ]
   where
     sourceName :: SignerSource -> Text
@@ -290,13 +301,14 @@ statusContract st = object
       Level          -> [ "state" .= ("level" :: Text),  "remote_canon" .= stCanon st, "error" .= Null ]
       Diverged theirs -> [ "state" .= ("diverged" :: Text), "remote_canon" .= theirs, "error" .= Null ]
 
-    replicationContract replication =
+    replicationContract target replication =
       let (minimumReplica, provider, snapshot, issued, expires, endpoints, atRisk, failure) =
             case replication of
               ReplicationUnknown e ->
                 (Null, Null, Null, Null, Null, [], Null, toJSON e)
               ReplicationAtRisk ->
-                (toJSON (0 :: Int), Null, Null, Null, Null, [], Bool True, Null)
+                (toJSON (0 :: Int), Null, Null, Null, Null, []
+                , Bool (maybe True (> 0) target), Null)
               ReplicationReady{..} ->
                 ( toJSON (1 :: Int)
                 , toJSON (key58 replicationProvider)
@@ -304,11 +316,11 @@ statusContract st = object
                 , toJSON replicationIssuedAt
                 , toJSON replicationExpiresAt
                 , fmap toJSON replicationReachableVia
-                , Bool False
+                , Bool (maybe False (> 1) target)
                 , Null
                 )
       in object
-        [ "target" .= Null
+        [ "target" .= target
         , "complete_replicas_minimum" .= minimumReplica
         , "provider" .= provider
         , "snapshot" .= snapshot
@@ -424,12 +436,17 @@ statusEntries = do
         Just _ | saLocal sa -> pure (Left "not asked (--local)")
         Just c  -> remotes >>= traverse (traverse (\r -> (r,) <$> probe c r))
 
+      -- The mailbox and placement target are signed clauses in the same
+      -- manifest. Read it once: apart from avoiding a duplicate network read,
+      -- this keeps status from showing fields from two different revisions.
+      manifest <- readManifest repo
+      let mbox = either (const Nothing) mailboxOf manifest
+          replicationTarget = either (const Nothing) replicationMinimum manifest
+
       -- The mailbox the repository declares, and then the queue in it. Both
       -- can fail on their own and each failure is its own sentence: a
       -- repository that declares no mailbox is a state PEP-18 allows, and a
       -- peer that will not answer is a different thing entirely.
-      mbox <- mailboxFor Nothing repo <&> either (const Nothing) Just
-
       waiting <- case mbox of
         Nothing -> pure (Right 0)
         Just k -> do
@@ -469,6 +486,7 @@ statusEntries = do
               , stPublished = published
               , stMailbox = mbox
               , stWaiting = waiting
+              , stReplicationTarget = replicationTarget
               , stReplication = replication
               }
 

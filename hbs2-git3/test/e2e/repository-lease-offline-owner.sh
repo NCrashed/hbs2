@@ -410,6 +410,17 @@ URL=$(node_env A git remote get-url "$REMOTE")
 KEY=${URL#hbs23://}
 [ -n "$KEY" ] && [ "$KEY" != "$URL" ] || fail "node A: no hbs23 remote after init: $URL"
 
+node_env A hbs2-git3 repo:replication --minimum 1 "$KEY" \
+  >"$T/A/replication.out" 2>"$T/A/replication.err" || {
+    cat "$T/A/replication.out" "$T/A/replication.err" >&2
+    fail "node A: could not publish the minimum replica target"
+  }
+grep -q '1 complete external replica' "$T/A/replication.out" || {
+  cat "$T/A/replication.out" >&2
+  fail "node A: repo:replication did not report the declared target"
+}
+ok "A declared one complete external replica in the signed manifest"
+
 node_env A git push -q "$REMOTE" --all 2>"$T/A/push.err" || {
   cat "$T/A/push.err" >&2
   fail "node A: branch push"
@@ -514,6 +525,10 @@ if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
   grep -Eq '"complete_replicas_minimum"[[:space:]]*:[[:space:]]*1' "$T/C/hub-status.json" || {
     cat "$T/C/hub-status.json" >&2
     fail "node C: hub status did not report the proved replica floor"
+  }
+  grep -Eq '"target"[[:space:]]*:[[:space:]]*1' "$T/C/hub-status.json" || {
+    cat "$T/C/hub-status.json" >&2
+    fail "node C: hub status did not read the signed replica target"
   }
   grep -Eq '"at_risk"[[:space:]]*:[[:space:]]*false' "$T/C/hub-status.json" || {
     cat "$T/C/hub-status.json" >&2

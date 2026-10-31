@@ -131,6 +131,7 @@ library
       HBS2.Git3.Repo.Tools
       HBS2.Git3.Repo.Mailbox
       HBS2.Git3.Repo.About
+      HBS2.Git3.Repo.Replication
       HBS2.Git3.Repo.Pin
       HBS2.Git3.Repo.Lease
       HBS2.Git3.Repo.Lease.Policy
@@ -202,6 +203,7 @@ test-suite spec
   other-modules:
       HBS2.Git3.Repo.MailboxSpec
       HBS2.Git3.Repo.AboutSpec
+      HBS2.Git3.Repo.ReplicationSpec
       HBS2.Git3.Repo.PinSpec
       HBS2.Git3.Repo.InitSpec
       HBS2.Git3.Repo.LeaseSpec

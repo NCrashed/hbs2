@@ -118,6 +118,9 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   advert relay, discovers and authenticates B from its signed advert, and
   clones after A is offline);
 - maintain a replica target with make-before-break replacement.
+  The signed `(replication (minimum N))` repository policy, its CLI, status/UI
+  target and conservative deficit alert are complete as the first M5 slice;
+  provider selection and the make-before-break repair worker remain.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts
 down, and a clean C discovers B and clones the complete repository using only
