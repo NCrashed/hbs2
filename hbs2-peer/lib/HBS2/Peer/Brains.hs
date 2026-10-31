@@ -8,8 +8,10 @@ import HBS2.Net.Proto
 import HBS2.Hash
 
 import Data.Word
+import Data.Either (isRight)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 
 import Data.Time.Clock (NominalDiffTime)
 
@@ -192,6 +194,18 @@ class HasBrains e a where
   listRepositoryLeases :: MonadIO m => a -> m [RepositoryLease]
   listRepositoryLeases _ = pure []
 
+  admitRepositoryLease :: MonadIO m
+                       => a
+                       -> Word64
+                       -> RepositoryLeaseAdmissionPolicy
+                       -> RepositoryLease
+                       -> m (Either RepositoryLeaseAdmissionError RepositoryLeaseCapacity)
+  admitRepositoryLease brains now policy lease = do
+    leases <- listRepositoryLeases @e brains
+    let result = admitRepositoryLeaseAt now policy lease leases
+    when (isRight result) (putRepositoryLease @e brains lease)
+    pure result
+
 type NoBrains = ()
 
 instance Pretty (Peer e) => HasBrains e NoBrains  where
@@ -238,3 +252,4 @@ instance HasBrains e (SomeBrains e) where
   putRepositoryLease (SomeBrains a) = putRepositoryLease @e a
   getRepositoryLease (SomeBrains a) = getRepositoryLease @e a
   listRepositoryLeases (SomeBrains a) = listRepositoryLeases @e a
+  admitRepositoryLease (SomeBrains a) = admitRepositoryLease @e a

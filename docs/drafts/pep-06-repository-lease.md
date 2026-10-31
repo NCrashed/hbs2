@@ -1,7 +1,8 @@
 # PEP-06: repository lease, canonical inventory, and pinning
 
 Status: draft; provider-local lease MVP implemented 2026-10-30, including
-provider-signed local receipts and explicit expiry grace on 2026-10-31.
+provider-signed local receipts, explicit expiry grace, and aggregate capacity
+admission on 2026-10-31.
 Bilateral wire contracts, advertisements, and barter accounting are not part
 of this implementation.
 
@@ -414,6 +415,22 @@ version 1 records remain readable and are interpreted with zero grace. The
 provider-local default limits are 10 GiB and 10,000,000 blocks. This slice does
 not publish a replica advertisement: knowing the provider remains necessary
 until PEP-10 is implemented.
+
+Aggregate admission is enforced by the peer's durable Brains writer before a
+lease RPC succeeds. `barter-budget-bytes` is the total logical capacity donated
+to repository leases and `barter-max-contracts` bounds their count; the
+provider-local defaults are 10 GiB and 64 contracts. Every unelapsed
+non-terminated lease reserves its full `max-logical-bytes`, including leases in
+`Syncing`, `Degraded`, and `Grace`. Physical deduplication and a smaller current
+snapshot do not reduce that reservation. Renewal replaces the old reservation
+for the same repository, so only its net change needs headroom. Termination or
+the end of grace releases the reservation.
+
+Admission and the durable upsert run in one serialized SQLite savepoint. Two
+concurrent requests therefore cannot both consume the same headroom. A failed
+admission leaves the previous durable lease unchanged and reports the requested
+and available capacity. `repo:lease:capacity` prints the configured budget,
+reserved and available bytes, and contract usage.
 
 
 # Open questions

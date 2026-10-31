@@ -14,6 +14,7 @@ import HBS2.Peer.Proto.RefLog
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.Brains
 import HBS2.Peer.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 import HBS2.Peer.RepositoryLease.Worker
 import HBS2.Prelude.Plated
 import HBS2.Storage
@@ -27,6 +28,7 @@ import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.IORef
 import Data.Maybe (isJust)
+import Data.Either (isLeft, isRight)
 import Data.Word (Word16, Word64)
 import Lens.Micro.Platform
 import System.FilePath
@@ -370,6 +372,157 @@ tests = testGroup "repository lease"
       assertBool "version 2 is current" (repositoryLeaseVersionSupported 2)
       assertBool "version 0 is unsupported" (not (repositoryLeaseVersionSupported 0))
       assertBool "version 3 is unsupported" (not (repositoryLeaseVersionSupported 3))
+
+  , testCase "capacity reserves contract limits until termination or elapsed grace" $ do
+      syncingRepository <- newRepositoryKey
+      activeRepository <- newRepositoryKey
+      degradedRepository <- newRepositoryKey
+      graceRepository <- newRepositoryKey
+      terminatedRepository <- newRepositoryKey
+      let syncing = (admissionLease syncingRepository 1 10)
+            { repositoryLeaseState = RepositoryLeaseSyncing }
+          active = (admissionLease activeRepository 2 20)
+            { repositoryLeaseState = RepositoryLeaseActive }
+          degraded = (admissionLease degradedRepository 3 30)
+            { repositoryLeaseState = RepositoryLeaseDegraded }
+          grace = (admissionLease graceRepository 4 40)
+            { repositoryLeaseState = RepositoryLeaseGrace }
+          terminated = (admissionLease terminatedRepository 5 50)
+            { repositoryLeaseState = RepositoryLeaseTerminated }
+          expiring = grace
+            { repositoryLeaseExpiresAt = Just 90
+            , repositoryLeaseGracePeriod = 20
+            }
+          policy = RepositoryLeaseAdmissionPolicy 200 10
+      repositoryLeaseCapacityAt 100 policy
+        [syncing, active, degraded, expiring, terminated]
+        @?= RepositoryLeaseCapacity 200 100 100 4 10
+      repositoryLeaseCapacityAt 110 policy
+        [syncing, active, degraded, expiring, terminated]
+        @?= RepositoryLeaseCapacity 200 60 140 3 10
+
+  , testCase "capacity totals saturate instead of wrapping" $ do
+      firstRepository <- newRepositoryKey
+      secondRepository <- newRepositoryKey
+      let leases =
+            [ admissionLease firstRepository 1 maxBound
+            , admissionLease secondRepository 2 1
+            ]
+      repositoryLeaseReservedBytesAt 10 leases @?= maxBound
+      repositoryLeaseCapacityAt 10
+        (RepositoryLeaseAdmissionPolicy maxBound 2) leases
+        @?= RepositoryLeaseCapacity maxBound maxBound 0 2 2
+
+  , testCase "admission accounts for renewal delta and exact budget boundary" $ do
+      repository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      otherRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      let policy = RepositoryLeaseAdmissionPolicy 100 2
+          existing = admissionLease repository 1 60
+          other = admissionLease otherRepository 2 30
+          exactRenewal = admissionLease repository 1 70
+          oversizedRenewal = admissionLease repository 1 71
+      admitRepositoryLeaseAt 10 policy exactRenewal [existing, other]
+        @?= Right (RepositoryLeaseCapacity 100 100 0 2 2)
+      admitRepositoryLeaseAt 10 policy oversizedRenewal [existing, other]
+        @?= Left (RepositoryLeaseCapacityExceeded 71 70)
+
+  , testCase "contract limit refuses new leases but permits renewal and termination" $ do
+      repository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      otherRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      thirdRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      let policy = RepositoryLeaseAdmissionPolicy 1000 2
+          existing = admissionLease repository 1 100
+          other = admissionLease otherRepository 2 100
+          renewal = admissionLease repository 1 200
+          third = admissionLease thirdRepository 3 100
+          terminated = existing
+            { repositoryLeaseState = RepositoryLeaseTerminated }
+      assertBool "renewal keeps the existing contract slot" $
+        isRight (admitRepositoryLeaseAt 10 policy renewal [existing, other])
+      admitRepositoryLeaseAt 10 policy third [existing, other]
+        @?= Left (RepositoryLeaseContractLimitExceeded 2)
+      admitRepositoryLeaseAt 10 policy terminated [existing, other]
+        @?= Right (RepositoryLeaseCapacity 1000 100 900 1 2)
+
+  , testCase "admission rejects malformed or already elapsed contracts" $ do
+      repository <- newRepositoryKey
+      let policy = RepositoryLeaseAdmissionPolicy 1000 10
+          lease = admissionLease repository 1 100
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseVersion = 3 } []
+        @?= Left (RepositoryLeaseUnsupportedVersion 3)
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseMaxBytes = 0 } []
+        @?= Left RepositoryLeaseInvalidLimit
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseMaxBlocks = 0 } []
+        @?= Left RepositoryLeaseInvalidLimit
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseExpiresAt = Just 10 } []
+        @?= Left RepositoryLeaseAlreadyElapsed
+      admitRepositoryLeaseAt 10
+        (RepositoryLeaseAdmissionPolicy 1000 0) lease []
+        @?= Left (RepositoryLeaseContractLimitExceeded 0)
+
+  , testCase "admission errors explain the rejected boundary" $ do
+      map repositoryLeaseAdmissionErrorMessage
+        [ RepositoryLeaseCapacityExceeded 11 10
+        , RepositoryLeaseContractLimitExceeded 2
+        , RepositoryLeaseUnsupportedVersion 3
+        , RepositoryLeaseInvalidLimit
+        , RepositoryLeaseAlreadyElapsed
+        , RepositoryLeaseAdmissionStorageFailure
+        ] @?=
+        [ "repository lease capacity exceeded: requested 11 bytes, available 10"
+        , "repository lease contract limit exceeded: 2"
+        , "unsupported repository lease version: 3"
+        , "repository lease byte and block limits must be positive"
+        , "repository lease already elapsed"
+        , "repository lease admission could not be stored"
+        ]
+
+  , testCase "peer config supplies finite aggregate lease limits" $ do
+      forms <- either (assertFailure . show) pure $ parseTop $ unlines
+        [ "barter-budget-bytes 4096"
+        , "barter-max-contracts 7"
+        ]
+      repositoryLeaseAdmissionPolicy (PeerConfig forms)
+        @?= RepositoryLeaseAdmissionPolicy 4096 7
+      repositoryLeaseAdmissionPolicy mempty
+        @?= RepositoryLeaseAdmissionPolicy
+              defaultRepositoryLeaseBudgetBytes
+              defaultRepositoryLeaseMaxContracts
+      zeroForms <- either (assertFailure . show) pure $ parseTop $ unlines
+        [ "barter-budget-bytes 0"
+        , "barter-max-contracts 0"
+        ]
+      repositoryLeaseAdmissionPolicy (PeerConfig zeroForms)
+        @?= RepositoryLeaseAdmissionPolicy 0 0
+
+  , testCase "concurrent admission cannot overcommit the durable budget" $
+      withSystemTempDirectory "hbs2-repository-lease-admission" $ \directory -> do
+        firstRepository <- newRepositoryKey
+        secondRepository <- newRepositoryKey
+        let firstLease = admissionLease firstRepository 1 60
+            secondLease = admissionLease secondRepository 2 60
+            policy = RepositoryLeaseAdmissionPolicy 100 10
+            stateFile = directory </> "state.db"
+            source = "brains-db \"" <> stateFile <> "\""
+        forms <- either (assertFailure . show) pure (parseTop source)
+        let config = PeerConfig forms
+        brains <- DB.newBasicBrains @L4Proto config
+        runner <- async (DB.runBasicBrains config brains)
+        (firstResult, secondResult) <- concurrently
+          (admitRepositoryLease @L4Proto brains 10 policy firstLease)
+          (admitRepositoryLease @L4Proto brains 10 policy secondLease)
+        assertBool "one admission succeeds" $
+          length (filter isRight [firstResult, secondResult]) == 1
+        assertBool "one admission is refused" $
+          length (filter isLeft [firstResult, secondResult]) == 1
+        durable <- listRepositoryLeases @L4Proto brains
+        length durable @?= 1
+        repositoryLeaseReservedBytesAt 10 durable @?= 60
+        cancel runner
   ]
   where
     generous = InventoryLimits 1000 (1024 * 1024)
@@ -447,3 +600,15 @@ repositoryLeaseFixture leaseId repository = RepositoryLease
   , repositoryLeaseSnapshot = Nothing
   , repositoryLeaseLastError = Nothing
   }
+
+admissionLease
+  :: PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> RepositoryLease
+admissionLease repository nonce maxBytes =
+  (repositoryLeaseFixture (makeRepositoryLeaseId repository nonce) repository)
+    { repositoryLeaseMaxBytes = maxBytes }
+
+newRepositoryKey :: IO (PubKey 'Sign 'HBS2Basic)
+newRepositoryKey = view peerSignPk <$> newCredentials @'HBS2Basic

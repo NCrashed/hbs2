@@ -3,6 +3,7 @@ module HBS2.Git3.Repo.Lease
   , listRepositoryLeasesCLI
   , showRepositoryLease
   , showRepositoryLeaseReceipt
+  , showRepositoryLeaseCapacity
   , terminateRepositoryLease
   , inventoryRepository
   , activeRepositoryLease
@@ -14,6 +15,7 @@ import HBS2.Git3.Repo.Tools
 import HBS2.Git3.State
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 import HBS2.Storage.Inventory
 
 import Data.Config.Suckless.Script
@@ -47,11 +49,11 @@ addRepositoryLease syntax = do
       lease = renewRepositoryLeaseAt
         now nonce repository maxBytes maxBlocks ttl grace previous
 
-  callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI lease
-    >>= orThrowUser "repository lease RPC timed out"
+  capacity <- putLease peerAPI lease
   callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repository, "lwwref", 1)
     >>= orThrowUser "repository polling RPC timed out"
   printLease lease
+  printCapacity capacity
 
 listRepositoryLeasesCLI :: forall m . HBS2GitPerks m => Git3 m ()
 listRepositoryLeasesCLI = do
@@ -85,6 +87,14 @@ showRepositoryLeaseReceipt syntax = do
     <+> parens ("completed-at" <+> pretty replicaReceiptCompletedAt)
     <+> parens ("issued-at" <+> pretty replicaReceiptIssuedAt)
 
+showRepositoryLeaseCapacity :: forall m . HBS2GitPerks m => Git3 m ()
+showRepositoryLeaseCapacity = do
+  peerAPI <- getClientAPI @PeerAPI @UNIX
+  capacity <- callRpcWaitMay @RpcRepositoryLeaseCapacity
+    (TimeoutSec 2) peerAPI ()
+      >>= orThrowUser "repository lease capacity RPC timed out"
+  printCapacity capacity
+
 terminateRepositoryLease :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
 terminateRepositoryLease syntax = do
   lease <- resolveLease syntax
@@ -96,11 +106,11 @@ terminateRepositoryLease syntax = do
         , repositoryLeaseUpdatedAt = now
         , repositoryLeaseLastError = Nothing
         }
-  callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI terminated
-    >>= orThrowUser "repository lease RPC timed out"
+  capacity <- putLease peerAPI terminated
   liftIO $ releaseRepositoryLeasePin storage (repositoryLeaseId lease)
   liftIO $ releaseRepositoryReplicaReceipt storage (repositoryLeaseId lease)
   printLease terminated
+  printCapacity capacity
 
 inventoryRepository :: forall m . HBS2GitPerks m => [Syntax C] -> Git3 m ()
 inventoryRepository syntax = do
@@ -156,6 +166,20 @@ leaseList peerAPI =
   callRpcWaitMay @RpcRepositoryLeaseList (TimeoutSec 2) peerAPI ()
     >>= orThrowUser "repository lease RPC timed out"
 
+putLease
+  :: MonadUnliftIO m
+  => ServiceCaller PeerAPI UNIX
+  -> RepositoryLease
+  -> m RepositoryLeaseCapacity
+putLease peerAPI lease = do
+  result <- callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI lease
+    >>= orThrowUser "repository lease RPC timed out"
+  either
+    (\problem -> orThrowUser
+      (pretty (repositoryLeaseAdmissionErrorMessage problem)) Nothing)
+    pure
+    result
+
 optionWord :: Id -> Word64 -> [Syntax c] -> Word64
 optionWord name fallback options = fromMaybe fallback (optionWordMay name options)
 
@@ -186,3 +210,12 @@ printLease RepositoryLease{..} = liftIO $ print $ parens $
       repositoryLeaseSnapshot
   <+> maybe mempty (\problem -> parens ("error" <+> dquotes (pretty problem)))
       repositoryLeaseLastError
+
+printCapacity :: MonadIO m => RepositoryLeaseCapacity -> m ()
+printCapacity RepositoryLeaseCapacity{..} = liftIO $ print $ parens $
+     "repository-lease-capacity"
+  <+> parens ("budget-bytes" <+> pretty repositoryLeaseCapacityBudgetBytes)
+  <+> parens ("reserved-bytes" <+> pretty repositoryLeaseCapacityReservedBytes)
+  <+> parens ("available-bytes" <+> pretty repositoryLeaseCapacityAvailableBytes)
+  <+> parens ("contracts" <+> pretty repositoryLeaseCapacityContracts)
+  <+> parens ("max-contracts" <+> pretty repositoryLeaseCapacityMaxContracts)

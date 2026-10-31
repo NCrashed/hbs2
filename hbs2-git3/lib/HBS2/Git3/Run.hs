@@ -798,6 +798,10 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
           entry $ bindMatch "repo:lease:list" $ nil_ $ const $
             lift $ connectedDo listRepositoryLeasesCLI
 
+        brief "show aggregate repository lease capacity" $
+          entry $ bindMatch "repo:lease:capacity" $ nil_ $ const $
+            lift $ connectedDo showRepositoryLeaseCapacity
+
         brief "show a repository storage lease" $
           entry $ bindMatch "repo:lease:show" $ nil_ $ \syn ->
             lift $ connectedDo (showRepositoryLease syn)

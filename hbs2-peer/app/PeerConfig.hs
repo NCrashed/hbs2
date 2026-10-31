@@ -11,6 +11,7 @@ module PeerConfig
 import HBS2.Prelude.Plated
 import HBS2.Base58
 import HBS2.Net.Auth.Credentials
+import HBS2.Peer.RepositoryLease.Admission
 
 import Data.Config.Suckless.Syntax
 import Data.Config.Suckless.Parse
@@ -26,6 +27,7 @@ import System.FilePath
 import Data.Set qualified as Set
 import Data.Set (Set)
 import Data.Text qualified as Text
+import Data.Word (Word64)
 import Text.InterpolatedString.Perl6 (qc)
 
 data FeatureSwitch =
@@ -53,6 +55,8 @@ data PeerMulticastKey
 data PeerBootstrapKey
 data PeerNetworkClassKey
 data PeerPublicAddressKey
+data PeerBarterBudgetBytesKey
+data PeerBarterMaxContractsKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -109,6 +113,12 @@ instance HasCfgKey PeerNetworkClassKey (Maybe String) where
 -- a clearnet and an onion address.
 instance HasCfgKey PeerPublicAddressKey (Set String) where
   key = "peer-public-address"
+
+instance HasCfgKey PeerBarterBudgetBytesKey Integer where
+  key = "barter-budget-bytes"
+
+instance HasCfgKey PeerBarterMaxContractsKey Integer where
+  key = "barter-max-contracts"
 
 
 
@@ -213,6 +223,41 @@ newtype PeerConfig =
   PeerConfig { fromPeerConfig :: [Syntax C] }
   deriving newtype (Monoid, Semigroup, Pretty)
 
+repositoryLeaseAdmissionPolicy :: PeerConfig -> RepositoryLeaseAdmissionPolicy
+repositoryLeaseAdmissionPolicy (PeerConfig syntax) = RepositoryLeaseAdmissionPolicy
+  { repositoryLeaseBudgetBytes = configWord syntax
+      (key @PeerBarterBudgetBytesKey @Integer)
+      defaultRepositoryLeaseBudgetBytes
+  , repositoryLeaseMaxContracts = configWord syntax
+      (key @PeerBarterMaxContractsKey @Integer)
+      defaultRepositoryLeaseMaxContracts
+  }
+
+configWord :: [Syntax C] -> Id -> Word64 -> Word64
+configWord syntax name fallback = fromMaybe fallback
+  (lastMay (mapMaybe (configWordEntry name) syntax))
+
+configWordEntry :: Id -> Syntax C -> Maybe Word64
+configWordEntry name syntax = configInteger name syntax >>= word64May
+
+configInteger :: Id -> Syntax C -> Maybe Integer
+configInteger name = \case
+  ListVal (Key option [LitIntVal value]) ->
+    if option == name then Just value else Nothing
+  _ -> Nothing
+
+word64May :: Integer -> Maybe Word64
+word64May value = nonNegative value >>= withinWord64
+
+nonNegative :: Integer -> Maybe Integer
+nonNegative value = if value < 0 then Nothing else Just value
+
+withinWord64 :: Integer -> Maybe Word64
+withinWord64 value =
+  if value > fromIntegral (maxBound :: Word64)
+    then Nothing
+    else Just (fromIntegral value)
+
 
 peerConfigDefault :: MonadIO m => m FilePath
 peerConfigDefault = liftIO $
@@ -237,6 +282,10 @@ listen-tcp "0.0.0.0:10351"
 
 ; edit path to a keyring file
 ; key    "./key"
+
+; aggregate capacity reserved for repository leases
+; barter-budget-bytes 10737418240
+; barter-max-contracts 64
 |]
 
 peerConfigInit :: MonadIO m => Maybe FilePath -> m ()
@@ -344,4 +393,3 @@ peerConfigRead mbfp = do
             pure $ List @C co [Symbol co k, Literal co (mkLit (Text.pack canonicalPath))]
           else pure x
       canonicalizeConfPaths _ _ x = pure x
-

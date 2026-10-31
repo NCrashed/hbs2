@@ -11,6 +11,7 @@ import HBS2.Net.Messaging.Encrypted.ByPass(ByPassStat)
 
 import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 
 import Control.Monad.Reader
 import Data.ByteString.Lazy (ByteString)
@@ -44,6 +45,7 @@ data RpcRunScript
 data RpcRepositoryLeasePut
 data RpcRepositoryLeaseGet
 data RpcRepositoryLeaseList
+data RpcRepositoryLeaseCapacity
 
 type PeerAPI = '[ RpcPoke
                 , RpcPing
@@ -66,6 +68,7 @@ type PeerAPI = '[ RpcPoke
                 , RpcRepositoryLeasePut
                 , RpcRepositoryLeaseGet
                 , RpcRepositoryLeaseList
+                , RpcRepositoryLeaseCapacity
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -134,13 +137,17 @@ type instance Input  RpcRunScript = Text
 type instance Output RpcRunScript = Text
 
 type instance Input RpcRepositoryLeasePut = RepositoryLease
-type instance Output RpcRepositoryLeasePut = ()
+type instance Output RpcRepositoryLeasePut =
+  Either RepositoryLeaseAdmissionError RepositoryLeaseCapacity
 
 type instance Input RpcRepositoryLeaseGet = RepositoryLeaseId
 type instance Output RpcRepositoryLeaseGet = Maybe RepositoryLease
 
 type instance Input RpcRepositoryLeaseList = ()
 type instance Output RpcRepositoryLeaseList = [RepositoryLease]
+
+type instance Input RpcRepositoryLeaseCapacity = ()
+type instance Output RpcRepositoryLeaseCapacity = RepositoryLeaseCapacity
 
 data SetLogging =
     DebugOn Bool

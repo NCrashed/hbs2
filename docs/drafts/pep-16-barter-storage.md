@@ -400,6 +400,13 @@ The budget is donated capacity, not a function of how much content the
 operator owns.  Requiring "own signed content" is not an anti-Sybil mechanism:
 arbitrary signed bytes are cheap to generate.
 
+Provider-local M1 admission reads `barter-budget-bytes` and
+`barter-max-contracts` from peer configuration (currently defaulting to 10 GiB
+and 64). It reserves the declared logical byte limit of every unelapsed contract,
+not its current physical footprint. Admission and durable lease replacement
+are serialized by the Brains writer, so concurrent offers cannot overcommit the
+same headroom. `repo:lease:capacity` exposes the resulting local totals.
+
 Admission considers:
 
 - currently reserved capacity and headroom for updates;
@@ -662,10 +669,12 @@ are now required, together with the durable pin, before a lease can be
 `Active`; they can be verified with `repo:lease:receipt`. Explicit grace was
 also implemented: expiry enters `Grace`, preserves the pin and receipt through
 the configured interval, and only then releases them; old durable records
-decode with zero grace. M1 is not yet complete by the exit criteria below:
-explicit update-lag and aggregate capacity admission, plus the three-node
-offline-owner clone scenario remain. The receipt encoding stays provider-local
-until the M0 golden-vector gate is complete. M2 and later are unchanged.
+decode with zero grace. Aggregate capacity admission is now enforced against
+operator byte and contract budgets, including renewal deltas and concurrent
+requests. M1 is not yet complete by the exit criteria below: explicit
+update-lag and the three-node offline-owner clone scenario remain. The receipt
+encoding stays provider-local until the M0 golden-vector gate is complete. M2
+and later are unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

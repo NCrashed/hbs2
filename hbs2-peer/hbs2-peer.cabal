@@ -144,6 +144,7 @@ library
       HBS2.Peer.Prelude
       HBS2.Peer.Brains
       HBS2.Peer.RepositoryLease
+      HBS2.Peer.RepositoryLease.Admission
       HBS2.Peer.RepositoryLease.Worker
       HBS2.Peer.Notify
       HBS2.Peer.RefChanNotifyLog

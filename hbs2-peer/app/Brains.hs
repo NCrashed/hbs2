@@ -19,6 +19,7 @@ import HBS2.Net.IP.Addr
 
 import HBS2.Peer.Brains
 import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 
 import HBS2.Misc.PrettyStuff
 
@@ -43,6 +44,7 @@ import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
+import Data.IORef
 import Data.List qualified as List
 import Data.Maybe
 import Data.Text qualified as Text
@@ -78,6 +80,11 @@ instance HasCfgKey PeerBrainsDb (Maybe String) where
 
 newtype CommitCmd = CommitCmd { onCommited :: IO () }
 
+data BrainsUpdate = BrainsUpdate
+  { runBrainsUpdate :: IO ()
+  , completeBrainsUpdate :: Bool -> IO ()
+  }
+
 data BasicBrains e =
   BasicBrains
   { _brainsPeers        :: TVar (HashSet (Peer e))
@@ -85,7 +92,7 @@ data BasicBrains e =
   , _brainsExpire       :: Cache (Hash HbSync) ()
   , _brainsRemoved      :: Cache HashRef ()
   , _brainsDb           :: Connection
-  , _brainsPipeline     :: TQueue (IO ())
+  , _brainsPipeline     :: TQueue BrainsUpdate
   , _brainsCommit       :: TQueue CommitCmd
   , _brainsDelDownload  :: TQueue (Hash HbSync)
   , _brainsSizeCache    :: Cache (Peer e, Hash HbSync) Integer
@@ -365,6 +372,22 @@ instance ( Hashable (Peer e)
 
   listRepositoryLeases = liftIO . selectRepositoryLeases
 
+  admitRepositoryLease brains now policy lease = do
+    answer <- liftIO newEmptyTMVarIO
+    resultRef <- liftIO $ newIORef (Left RepositoryLeaseAdmissionStorageFailure)
+    updateOPAfter brains (do
+      leases <- selectRepositoryLeases brains
+      let result = admitRepositoryLeaseAt now policy lease leases
+      when (isRight result) (insertRepositoryLease brains lease)
+      writeIORef resultRef result)
+      (\success -> do
+        result <- if success
+          then readIORef resultRef
+          else pure (Left RepositoryLeaseAdmissionStorageFailure)
+        atomically (putTMVar answer result))
+    commitNow brains False
+    liftIO $ atomically (takeTMVar answer)
+
 commitNow :: forall e m . MonadIO m
           => BasicBrains e
           -> Bool
@@ -384,9 +407,18 @@ commitNow br doWait = do
       readTQueue w >> flushTQueue w
 
 updateOP :: forall e m . MonadIO m => BasicBrains e -> IO () -> m ()
-updateOP br op = do
+updateOP br op = updateOPAfter br op (const none)
+
+updateOPAfter
+  :: forall e m
+   . MonadIO m
+  => BasicBrains e
+  -> IO ()
+  -> (Bool -> IO ())
+  -> m ()
+updateOPAfter br op complete = do
   let pip = view brainsPipeline br
-  liftIO $ atomically $ writeTQueue pip (liftIO op)
+  liftIO $ atomically $ writeTQueue pip (BrainsUpdate (liftIO op) complete)
 
 insertRepositoryLease :: BasicBrains e -> RepositoryLease -> IO ()
 insertRepositoryLease brains lease = do
@@ -746,18 +778,26 @@ RELEASE SAVEPOINT zzz1;
     Left (e :: SomeException) -> err $ "BRAINS: " <+> viaShow e
 
 transactional :: BasicBrains e -> IO () -> IO ()
-transactional brains action = do
+transactional brains = void . transactionalResult brains
+
+transactionalResult :: BasicBrains e -> IO () -> IO Bool
+transactionalResult brains action = do
   n <- randomRIO @Word16 (1, maxBound)
   let sp = [qc|sp{n}|] :: String
   let conn = view brainsDb brains
   execute_ conn [qc|SAVEPOINT {sp}|]
-  try action >>= \case
-    Right{} -> do
-      execute_ conn [qc|RELEASE SAVEPOINT {sp}|]
+  outcome <- try @SomeException action
+  finishTransaction conn sp outcome
 
-    Left ( e :: SomeException ) -> do
-      err $ "BRAINS: " <+> viaShow e
-      execute_ conn [qc|ROLLBACK TO SAVEPOINT {sp}|]
+finishTransaction :: Connection -> String -> Either SomeException () -> IO Bool
+finishTransaction conn sp = \case
+  Right{} -> do
+    execute_ conn [qc|RELEASE SAVEPOINT {sp}|]
+    pure True
+  Left exception -> do
+    err $ "BRAINS: " <+> viaShow exception
+    execute_ conn [qc|ROLLBACK TO SAVEPOINT {sp}|]
+    pure False
 
 ---
 
@@ -1112,8 +1152,9 @@ runBasicBrains cfg brains@BasicBrains{..} = do
 
       w  <- atomically $ readTQueue pip
       ws <- atomically $ flushTQueue pip
-
-      transactional brains (sequence_ (w:ws))
+      let updates = w : ws
+      success <- transactionalResult brains (mapM_ runBrainsUpdate updates)
+      mapM_ (\update -> completeBrainsUpdate update success) updates
       sequence_ waiters
 
     void $ ContT $ withAsync $ forever do
@@ -1181,5 +1222,3 @@ runBasicBrains cfg brains@BasicBrains{..} = do
       del <- liftIO $ atomically $ flushTQueue _brainsDelDownload
       for_ del $ \d -> do
         delDownload @e brains (HashRef d)
-
-

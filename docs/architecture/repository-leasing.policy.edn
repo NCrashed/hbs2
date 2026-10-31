@@ -6,7 +6,11 @@
  :sources [{:lang :haskell :root "hbs2-core/lib/HBS2/Storage/Inventory.hs"}
            {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/Proto/RepositoryLease.hs"}
            {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/RepositoryLease.hs"}
+           {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/RepositoryLease/Admission.hs"}
            {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/RepositoryLease/Worker.hs"}
+           {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/Brains.hs"}
+           {:lang :haskell :root "hbs2-peer/lib/HBS2/Peer/RPC/API/Peer.hs"}
+           {:lang :haskell :root "hbs2-peer/app/RPC2/RepositoryLease.hs"}
            {:lang :haskell :root "hbs2-git3/lib/HBS2/Git3/Repo/Lease.hs"}
            {:lang :haskell :root "hbs2-git3/lib/HBS2/Git3/Repo/Lease/Policy.hs"}]
  :foreign [Control Data Lens System]
