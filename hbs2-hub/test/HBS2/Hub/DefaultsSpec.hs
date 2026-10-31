@@ -29,6 +29,10 @@ spec = describe "hub defaults from the clone" $ do
     fill "hub:issue:new" ["--title", "t", "--body", "-"]
       `shouldBe` ["--title", "t", "--body", "-", "--repo", repo, "--author", author, "--sender", sender]
 
+  it "diagnoses the clone with its contributor identity" $
+    fill "hub:doctor" ["--json"]
+      `shouldBe` ["--json", "--repo", repo, "--author", author, "--sender", sender]
+
   it "never touches a flag given by hand, in either spelling" $ do
     fill "hub:issue:close" ["--repo", "X", "--number", "1"]
       `shouldBe` ["--repo", "X", "--number", "1"]

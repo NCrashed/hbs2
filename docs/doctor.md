@@ -57,6 +57,18 @@ the selected peer, so that peer is a complete local provider. The sigil check
 then verifies that every declared mailbox has a declared sigil, its complete
 bytes are present, its signature is valid, and it names that mailbox.
 
+For the complete contribution path, run the product-level doctor from a clone:
+
+```text
+hbs2-hub doctor --repo <repository-key>
+```
+
+It runs the same D1-D3 peer and repository checks, then adds four ordered forge
+checks: `forge-mailbox`, `forge-policy`, `forge-sender`, and
+`forge-delivery`. `--author` and `--sender` can select another contributor
+identity; otherwise the command uses the same repository and identity defaults
+as `hbs2-hub issue new` and `hbs2-hub pr new`.
+
 A healthy local peer prints one line per check and ends with `doctor: OK`.
 Every failed check prints a `remedy:` line. A warning, such as having no
 connected peers yet, keeps a successful exit status; a failure makes the
@@ -107,6 +119,7 @@ For scripts and support reports, request the stable JSON document:
 
 ```text
 hbs2-peer doctor --json
+hbs2-hub doctor --repo <repository-key> --json
 ```
 
 The document has `contract: 1`, `document: "doctor"`, an overall `ok` value,
@@ -154,14 +167,30 @@ optional remedy.
 - a failure under `repository-sigils` — the manifest's collaboration address
   is incomplete, absent, malformed, or names a different mailbox. The owner
   must publish and announce the corrected sigil.
+- `the repository declares no ... hub ingress` — the repository owner must
+  publish a hub mailbox and its sigil in the manifest.
+- `current mailbox policy is not observable` — the local peer can discover the
+  mailbox but cannot currently read its policy. This remains a warning because
+  it is an observation gap, not proof that the policy is absent.
+- a failure under `forge-sender` — initialise or select a signing identity and
+  reply mailbox with `hbs2-hub identity init`, then run the doctor again.
+- `local-peer handoff ... this is not delivery` — this node recorded that it
+  handed a letter to its local peer. Use `hbs2-hub updates` for later
+  acknowledgements; no signed network receipt exists for the intermediate
+  delivery states yet.
+- `canon-published` — the latest locally recorded letter is now represented by
+  an admitted, honoured, or origin event in the clone's canon. This is stronger
+  evidence than a local handoff.
 
 ## Current scope
 
-The current doctor implements D1-D3: local runtime, network reachability and
+`hbs2-peer doctor` implements D1-D3: local runtime, network reachability and
 metadata, plus repository discovery, local snapshot completeness, and required
-sigils. A complete local snapshot is useful provider evidence, but it is not a
-signed remote availability receipt; provider advertisements and key-only
-remote lookup remain part of the repository-leasing work. The doctor does not
-yet inspect forge policy, local sender readiness, or mailbox delivery state;
-those are tracked as D4 in the
+sigils. `hbs2-hub doctor` consumes that stable report and implements D4 over
+forge policy, local sender readiness, and the strongest delivery evidence this
+node can prove. A complete local snapshot is useful provider evidence, but it
+is not a signed remote availability receipt; provider advertisements and
+key-only remote lookup remain part of the repository-leasing work. Likewise,
+relay-stored and mailbox-accepted cannot be reported as facts until the network
+has signed delivery receipts. See the
 [product-readiness roadmap](product-roadmap.md).
