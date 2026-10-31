@@ -9,6 +9,8 @@ module HBS2.Peer.CLI.Doctor
   ( CheckStatus(..)
   , DoctorCheck(..)
   , DoctorBootstrap(..)
+  , DoctorConfiguredPeer(..)
+  , DoctorConfiguredPeers(..)
   , DoctorFacts(..)
   , DoctorReport(..)
   , diagnose
@@ -45,6 +47,19 @@ data DoctorBootstrap
   | DoctorBootstrapChecked [(Text, Int)]
   deriving stock (Eq, Show)
 
+-- | What the daemon proved about one configured @known-peer@ address. A
+-- reachable identity comes from the signed peer handshake, not from config.
+data DoctorConfiguredPeer
+  = DoctorPeerInvalid Text
+  | DoctorPeerUnreachable Text
+  | DoctorPeerReachable Text (Maybe Text)
+  deriving stock (Eq, Show)
+
+data DoctorConfiguredPeers
+  = DoctorConfiguredPeersUnavailable
+  | DoctorConfiguredPeersChecked [DoctorConfiguredPeer]
+  deriving stock (Eq, Show)
+
 data DoctorFacts = DoctorFacts
   { doctorCLIVersion :: Text
   , doctorConfigPath :: FilePath
@@ -53,6 +68,7 @@ data DoctorFacts = DoctorFacts
   , doctorPoke :: Maybe Text
   , doctorPeerCount :: Maybe Int
   , doctorBootstrap :: DoctorBootstrap
+  , doctorConfiguredPeers :: DoctorConfiguredPeers
   }
   deriving stock (Eq, Show)
 
@@ -68,6 +84,7 @@ diagnose facts = DoctorReport
   , versionCheck facts
   , peersCheck facts
   , bootstrapCheck facts
+  , configuredPeersCheck facts
   ]
 
 doctorPassed :: DoctorReport -> Bool
@@ -159,6 +176,40 @@ bootstrapCheck facts = case doctorBootstrap facts of
     where
       working = filter ((> 0) . snd) results
       failed = filter ((== 0) . snd) results
+
+configuredPeersCheck :: DoctorFacts -> DoctorCheck
+configuredPeersCheck facts = case doctorConfiguredPeers facts of
+  DoctorConfiguredPeersUnavailable ->
+    skipped "configured-peers" "not checked because RPC is unavailable"
+  DoctorConfiguredPeersChecked probes -> configuredPeersResult probes
+
+configuredPeersResult :: [DoctorConfiguredPeer] -> DoctorCheck
+configuredPeersResult probes
+  | null probes = skipped "configured-peers" "no known-peer entries are configured"
+  | not (null invalid) = mkCheck "configured-peers" CheckFailure
+      ("invalid known-peer entries: " <> names invalid)
+      (Just "fix or remove those known-peer entries in the selected peer config")
+  | null reached = mkCheck "configured-peers" CheckFailure
+      ("no configured peer answered a signed handshake: " <> names unreachable)
+      (Just "check the peer addresses, remote service, and firewall reachability")
+  | not (null unreachable) = mkCheck "configured-peers" CheckWarning
+      ("reached " <> tshow (length reached) <> " of " <> tshow (length probes)
+        <> " configured peer(s); no answer from " <> names unreachable)
+      (Just "check the unreachable peer addresses, remote services, and firewall")
+  | not (null unidentified) = mkCheck "configured-peers" CheckWarning
+      ("all configured peers answered, but identity was unavailable for "
+        <> names unidentified)
+      (Just "run doctor again; if this persists, inspect `hbs2-peer peers`")
+  | otherwise = mkCheck "configured-peers" CheckOK
+      ("reached " <> tshow (length reached) <> " configured peer(s): "
+        <> names (fmap describe identified)) Nothing
+  where
+    invalid = [address | DoctorPeerInvalid address <- probes]
+    unreachable = [address | DoctorPeerUnreachable address <- probes]
+    reached = [() | DoctorPeerReachable _ _ <- probes]
+    unidentified = [address | DoctorPeerReachable address Nothing <- probes]
+    identified = [(address, identity) | DoctorPeerReachable address (Just identity) <- probes]
+    describe (address, identity) = address <> " as " <> identity
 
 mkCheck :: Text -> CheckStatus -> Text -> Maybe Text -> DoctorCheck
 mkCheck = DoctorCheck

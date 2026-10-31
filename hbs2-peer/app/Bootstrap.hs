@@ -51,6 +51,14 @@ bootstrapDnsNames (PeerConfig syn) = Set.toAscList $
   runReader (cfgValue @PeerDnsBootStrapKey) syn
     <> Set.singleton defaultBootstrapDns
 
+-- | Preserve invalid entries for diagnostics while sharing the runtime's
+-- address parser and ordering.
+knownPeerEntries :: PeerConfig -> [(Text.Text, Maybe (PeerAddr L4Proto))]
+knownPeerEntries (PeerConfig syn) =
+  [ (Text.pack entry, fromStringMay entry)
+  | entry <- Set.toAscList (runReader (cfgValue @PeerKnownPeer) syn)
+  ]
+
 bootstrapDnsProbe :: PeerConfig -> IO (Maybe [(Text.Text, Int)])
 bootstrapDnsProbe conf
   | not (bootstrapDnsEnabled conf) = pure Nothing
@@ -124,18 +132,12 @@ knownPeersPingLoop :: forall e m . ( HasPeer e
                    => PeerConfig
                    -> SomeBrains e
                    -> m ()
-knownPeersPingLoop (PeerConfig syn) brains = do
-  -- FIXME: add validation and error handling
+knownPeersPingLoop conf brains = do
   -- FIXME: tcp-addr-support-2
-  let parseKnownPeers xs = do
-        let pa = foldMap (maybeToList . fromStringMay) xs
-        mapM fromPeerAddr pa
-
-  let them = runReader (cfgValue @PeerKnownPeer) syn & Set.toList
-
   pex <- listPexInfo @e brains >>= liftIO . mapM fromPeerAddr
 
-  knownPeers' <- liftIO $ parseKnownPeers them
+  knownPeers' <- liftIO $ mapM fromPeerAddr
+    (mapMaybe snd (knownPeerEntries conf))
 
   let pips = List.nub (knownPeers' <> pex)
 
