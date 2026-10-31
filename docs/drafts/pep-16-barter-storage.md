@@ -709,6 +709,14 @@ adverts, and withdraws it as soon as the lease is no longer active. Bounded
 network lookup/indexing, clone-provider selection, and hub UX remain open M4
 work.
 
+The bounded lookup wire envelope is frozen in the same implementation series:
+protocol id `14001` carries opaque signed-advert publication, repository-key
+queries, and query-bound result sets. Results are capped at eight adverts both
+when encoded locally and before remote list elements are decoded. Query
+identifiers are capped at 32 bytes by the decoder. The network
+handler, expiring relay cache, and client fan-out still remain to complete the
+delivery path.
+
 
 ## Milestone 0: Measurement and design fixtures
 

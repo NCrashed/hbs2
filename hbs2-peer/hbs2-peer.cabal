@@ -253,6 +253,7 @@ test-suite test
         , base16-bytestring
         , bytestring
         , cache
+        , cborg
         , containers
         , db-pipe
         , directory

@@ -90,7 +90,8 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   2026-10-31 for the provider-local v1 wire types);
 - publish and retrieve signed replica advertisements (wire type, verified
   provider-local lifecycle, and worker renewal completed 2026-10-31; network
-  publication open);
+  lookup envelope is frozen and bounded, while handler/cache integration is
+  open);
 - find a complete provider from the repository key;
 - maintain a replica target with make-before-break replacement.
 

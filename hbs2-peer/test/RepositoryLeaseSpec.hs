@@ -21,7 +21,10 @@ import HBS2.Storage
 import HBS2.Storage.Inventory
 import HBS2.Storage.Simple
 
+import Codec.CBOR.Encoding (encodeListLen, encodeWord)
+import Codec.CBOR.Write (toLazyByteString)
 import Codec.Serialise (deserialiseOrFail)
+import Codec.Serialise qualified as CBOR
 import Control.Concurrent.Async
 import Data.ByteString.Base16 qualified as B16
 import Data.ByteString.Char8 qualified as B8
@@ -916,11 +919,51 @@ repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
       goldenHex goldenAdvert @?=
         "8a00018200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f382008200582057f0d6cc17bb8e77a4fe9fc5dc1334a5e6f5470abd436e015a87e3a0639138c99f83008101820082820082001a7f00000119286fff011a112233441a55667788"
 
+  , testCase "replica advert lookup encodings are frozen and bounded" $ do
+      repositoryAdvertMaxResults @?= 8
+      repositoryAdvertMaxQueryIdBytes @?= 32
+      goldenHex goldenAdvertPublish @?= "82004d7369676e65642d616476657274"
+      goldenHex goldenAdvertLookup @?=
+        "84014871756572792d30318200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf08"
+      goldenHex goldenAdvertResults @?=
+        "84024871756572792d30318200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf824d7369676e65642d6164766572744f7369676e65642d6164766572742d32"
+      deserialiseOrFail (serialise goldenAdvertPublish) @?=
+        Right goldenAdvertPublish
+      deserialiseOrFail (serialise goldenAdvertLookup) @?=
+        Right goldenAdvertLookup
+      let query = RepositoryAdvertQueryId "query-01"
+          overlong = replicate 9 "signed-advert"
+          encodedByUs = serialise $ RepositoryAdvertResults
+            query goldenRepository overlong
+      case deserialiseOrFail @RepositoryAdvertMessage encodedByUs of
+        Right (RepositoryAdvertResults _ _ adverts) -> length adverts @?= 8
+        other -> assertFailure ("expected bounded encoded results, got " <> show other)
+      let oversizedWire = toLazyByteString $
+               encodeListLen 4 <> encodeWord 2
+            <> CBOR.encode query <> CBOR.encode goldenRepository
+            <> encodeListLen 9 <> foldMap CBOR.encode overlong
+      assertBool "an oversized remote result list was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedWire)
+      let oversizedQuery = RepositoryAdvertQueryId (B8.replicate 33 'q')
+          oversizedQueryWire = serialise $
+            RepositoryAdvertLookup oversizedQuery goldenRepository 1
+      assertBool "an oversized remote query id was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedQueryWire)
+      let maximumQuery = RepositoryAdvertQueryId $
+            B8.replicate repositoryAdvertMaxQueryIdBytes 'q'
+          maximumQueryMessage = RepositoryAdvertLookup
+            maximumQuery goldenRepository 1
+      deserialiseOrFail (serialise maximumQueryMessage) @?=
+        Right maximumQueryMessage
+
   , testCase "golden lease values round-trip" $ do
       goldenRoundTrip goldenInventoryEntry
       goldenRoundTrip goldenSnapshot
       goldenRoundTrip goldenReceipt
       goldenRoundTrip goldenAdvert
+      goldenRoundTrip goldenAdvertPublish
+      goldenRoundTrip goldenAdvertLookup
+      goldenRoundTrip goldenAdvertResults
 
   , testCase "wire decoders reject the wrong record header" $ do
       let encoded = serialise goldenInventoryEntry
@@ -998,6 +1041,18 @@ goldenAdvert = ReplicaAdvertV1
   , replicaAdvertIssuedAt = 0x11223344
   , replicaAdvertExpiresAt = 0x55667788
   }
+
+goldenAdvertPublish :: RepositoryAdvertMessage
+goldenAdvertPublish = RepositoryAdvertPublish "signed-advert"
+
+goldenAdvertLookup :: RepositoryAdvertMessage
+goldenAdvertLookup = RepositoryAdvertLookup
+  (RepositoryAdvertQueryId "query-01") goldenRepository 8
+
+goldenAdvertResults :: RepositoryAdvertMessage
+goldenAdvertResults = RepositoryAdvertResults
+  (RepositoryAdvertQueryId "query-01") goldenRepository
+  ["signed-advert", "signed-advert-2"]
 
 withRepository :: (Fixture -> IO a) -> IO a
 withRepository action =

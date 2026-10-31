@@ -12,6 +12,11 @@ module HBS2.Peer.Proto.RepositoryLease
   , ReplicaReceiptV1(..)
   , RepositoryReplicaAdvert(..)
   , ReplicaAdvertV1(..)
+  , RepositoryAdvertQueryId(..)
+  , RepositoryAdvertMessage(..)
+  , repositoryAdvertMaxQueryIdBytes
+  , repositoryAdvertMaxResults
+  , boundRepositoryAdvertResults
   , replicaAdvertCapabilityBlockDownload
   , replicaAdvertCanServeBlocks
   , repositoryLeaseCurrentVersion
@@ -34,6 +39,8 @@ import Codec.CBOR.Decoding (Decoder, decodeListLen, decodeWord)
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeWord)
 import Codec.Serialise (Serialise(..), deserialiseOrFail)
 import Data.Bits ((.&.))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Word
 
 newtype RepositoryLeaseId = RepositoryLeaseId
@@ -407,6 +414,82 @@ replicaAdvertCapabilityBlockDownload = 1
 replicaAdvertCanServeBlocks :: ReplicaAdvertV1 -> Bool
 replicaAdvertCanServeBlocks advert =
   replicaAdvertCapabilities advert .&. replicaAdvertCapabilityBlockDownload /= 0
+
+-- | Opaque caller nonce which binds a bounded lookup response to its query.
+newtype RepositoryAdvertQueryId = RepositoryAdvertQueryId ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+repositoryAdvertMaxQueryIdBytes :: Int
+repositoryAdvertMaxQueryIdBytes = 32
+
+instance Serialise RepositoryAdvertQueryId where
+  encode (RepositoryAdvertQueryId queryId) = encode queryId
+  decode = do
+    queryId <- decode
+    when (BS.length queryId > repositoryAdvertMaxQueryIdBytes) $
+      fail "RepositoryAdvertQueryId: too long"
+    pure (RepositoryAdvertQueryId queryId)
+
+-- | Direct discovery wire messages.  Signed advert boxes stay opaque at this
+-- layer: relays do not need a provider key, and consumers verify each box
+-- before indexing or dialing it.
+data RepositoryAdvertMessage
+  = RepositoryAdvertPublish ByteString
+  | RepositoryAdvertLookup
+      RepositoryAdvertQueryId
+      (PubKey 'Sign 'HBS2Basic)
+      Word16
+  | RepositoryAdvertResults
+      RepositoryAdvertQueryId
+      (PubKey 'Sign 'HBS2Basic)
+      [ByteString]
+  deriving stock (Eq, Show, Generic)
+
+repositoryAdvertMaxResults :: Word16
+repositoryAdvertMaxResults = 8
+
+boundRepositoryAdvertResults :: [a] -> [a]
+boundRepositoryAdvertResults = take (fromIntegral repositoryAdvertMaxResults)
+
+-- Constructor tags are explicit from the first network release.  The encoder
+-- also caps results defensively; the decoder rejects an oversized remote list
+-- before decoding its elements.
+instance Serialise RepositoryAdvertMessage where
+  encode = \case
+    RepositoryAdvertPublish advert ->
+         encodeListLen 2
+      <> encodeWord 0
+      <> encode advert
+    RepositoryAdvertLookup query repository limit ->
+         encodeListLen 4
+      <> encodeWord 1
+      <> encode query
+      <> encode repository
+      <> encode limit
+    RepositoryAdvertResults query repository adverts ->
+         encodeListLen 4
+      <> encodeWord 2
+      <> encode query
+      <> encode repository
+      <> encodeAdvertList (boundRepositoryAdvertResults adverts)
+    where
+      encodeAdvertList adverts =
+        encodeListLen (fromIntegral (length adverts)) <> foldMap encode adverts
+
+  decode = do
+    arity <- decodeListLen
+    tag <- decodeWord
+    case (arity, tag) of
+      (2, 0) -> RepositoryAdvertPublish <$> decode
+      (4, 1) -> RepositoryAdvertLookup <$> decode <*> decode <*> decode
+      (4, 2) -> RepositoryAdvertResults <$> decode <*> decode <*> decodeAdvertList
+      _ -> fail "RepositoryAdvertMessage: invalid record header"
+    where
+      decodeAdvertList = do
+        count <- decodeListLen
+        when (count > fromIntegral repositoryAdvertMaxResults) $
+          fail "RepositoryAdvertMessage: too many results"
+        replicateM count decode
 
 -- Generic-derived product encodings begin with a list containing a zero
 -- constructor tag.  Keeping that framing makes this explicit codec compatible
