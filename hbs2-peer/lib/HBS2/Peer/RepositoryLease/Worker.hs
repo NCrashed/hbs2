@@ -49,12 +49,12 @@ refreshRepositoryLeaseAt
 refreshRepositoryLeaseAt now credentials brains storage lease
   | repositoryLeaseState lease == RepositoryLeaseTerminated =
       releaseArtifacts context $> lease
-  | repositoryLeaseVersion lease /= 1 =
+  | not (repositoryLeaseVersionSupported (repositoryLeaseVersion lease)) =
       persistIfChanged now context lease
         { repositoryLeaseState = incompleteLeaseState lease
         , repositoryLeaseLastError = Just "unsupported repository lease version"
         }
-  | otherwise = refreshUnexpired now context
+  | otherwise = refreshLifetime now context
   where
     context = LeaseRefreshContext credentials brains storage lease
 
@@ -66,22 +66,22 @@ incompleteLeaseState lease = case repositoryLeaseSnapshot lease of
   Nothing -> RepositoryLeaseSyncing
   Just{}  -> RepositoryLeaseDegraded
 
-refreshUnexpired :: Word64 -> LeaseRefreshContext -> IO RepositoryLease
-refreshUnexpired now context
-  | leaseExpired now lease = do
+refreshLifetime :: Word64 -> LeaseRefreshContext -> IO RepositoryLease
+refreshLifetime now context =
+  case repositoryLeaseLifetimeAt now lease of
+    RepositoryLeaseUnexpired -> refreshAvailableRepository now context
+    RepositoryLeaseInGrace -> persistIfChanged now context lease
+      { repositoryLeaseState = RepositoryLeaseGrace
+      , repositoryLeaseLastError = Just "lease grace period"
+      }
+    RepositoryLeaseElapsed -> do
       releaseArtifacts context
       persistIfChanged now context lease
         { repositoryLeaseState = RepositoryLeaseTerminated
         , repositoryLeaseLastError = Just "lease expired"
         }
-  | otherwise = refreshAvailableRepository now context
   where
     lease = refreshLease context
-
-leaseExpired :: Word64 -> RepositoryLease -> Bool
-leaseExpired now lease = case repositoryLeaseExpiresAt lease of
-  Just expiresAt -> now >= expiresAt
-  Nothing -> False
 
 refreshAvailableRepository :: Word64 -> LeaseRefreshContext -> IO RepositoryLease
 refreshAvailableRepository now context = do

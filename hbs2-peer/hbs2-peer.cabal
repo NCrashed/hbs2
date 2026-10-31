@@ -23,6 +23,7 @@ common common-deps
         , async
         , bytestring
         , cache
+        , cborg
         , containers
         , data-default
         , deepseq

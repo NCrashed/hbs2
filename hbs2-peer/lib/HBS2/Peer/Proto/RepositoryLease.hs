@@ -3,21 +3,28 @@
 module HBS2.Peer.Proto.RepositoryLease
   ( RepositoryLeaseId(..)
   , RepositoryLeaseState(..)
+  , RepositoryLeaseLifetime(..)
   , RepositoryInventoryEntry(..)
   , RepositorySnapshot(..)
   , RepositoryLease(..)
   , RepositoryLeasePin(..)
   , RepositoryLeaseReceipt(..)
   , ReplicaReceiptV1(..)
+  , repositoryLeaseCurrentVersion
+  , repositoryLeaseVersionSupported
+  , repositoryLeaseLifetimeAt
   , makeRepositoryLeaseId
   , makeRepositorySnapshotId
   ) where
 
 import HBS2.Data.Types.Refs
 import HBS2.Hash
-import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.Credentials hiding (encode)
 import HBS2.Prelude.Plated
 
+import Codec.CBOR.Term (decodeTerm, encodeTerm)
+import Codec.CBOR.Write (toLazyByteString)
+import Codec.Serialise (Serialise(..), deserialiseOrFail)
 import Data.Word
 
 newtype RepositoryLeaseId = RepositoryLeaseId
@@ -38,6 +45,12 @@ data RepositoryLeaseState
   deriving stock (Eq, Ord, Show, Generic)
 
 instance Serialise RepositoryLeaseState
+
+data RepositoryLeaseLifetime
+  = RepositoryLeaseUnexpired
+  | RepositoryLeaseInGrace
+  | RepositoryLeaseElapsed
+  deriving stock (Eq, Ord, Show)
 
 -- | Canonically ordered inventory entry committed by the snapshot.  The
 -- pin tree is separate because its leaves must remain plain HashRefs for the
@@ -80,12 +93,109 @@ data RepositoryLease = RepositoryLease
   , repositoryLeaseCreatedAt     :: Word64
   , repositoryLeaseUpdatedAt     :: Word64
   , repositoryLeaseExpiresAt     :: Maybe Word64
+  , repositoryLeaseGracePeriod   :: Word64
   , repositoryLeaseSnapshot      :: Maybe RepositorySnapshot
   , repositoryLeaseLastError     :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
 
-instance Serialise RepositoryLease
+-- Version 1 records had no grace-period field.  These private wire records
+-- deliberately use the generic codec that encoded the original durable type.
+-- Decoding through a CBOR term lets us safely try both shapes without relying
+-- on decoder backtracking.
+data RepositoryLeaseWireV1 = RepositoryLeaseWireV1
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV1
+
+data RepositoryLeaseWireV2 = RepositoryLeaseWireV2
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV2
+
+instance Serialise RepositoryLease where
+  encode = encode . repositoryLeaseToWireV2
+  decode = do
+    bytes <- toLazyByteString . encodeTerm <$> decodeTerm
+    case deserialiseOrFail @RepositoryLeaseWireV2 bytes of
+      Right wire -> pure (repositoryLeaseFromWireV2 wire)
+      Left _ -> case deserialiseOrFail @RepositoryLeaseWireV1 bytes of
+        Right wire -> pure (repositoryLeaseFromWireV1 wire)
+        Left failure -> fail (show failure)
+
+repositoryLeaseToWireV2 :: RepositoryLease -> RepositoryLeaseWireV2
+repositoryLeaseToWireV2 RepositoryLease{..} = RepositoryLeaseWireV2
+  repositoryLeaseVersion
+  repositoryLeaseId
+  repositoryLeaseRepository
+  repositoryLeaseState
+  repositoryLeaseMaxBytes
+  repositoryLeaseMaxBlocks
+  repositoryLeaseCreatedAt
+  repositoryLeaseUpdatedAt
+  repositoryLeaseExpiresAt
+  repositoryLeaseGracePeriod
+  repositoryLeaseSnapshot
+  repositoryLeaseLastError
+
+repositoryLeaseFromWireV1 :: RepositoryLeaseWireV1 -> RepositoryLease
+repositoryLeaseFromWireV1
+  (RepositoryLeaseWireV1 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt snapshot lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt 0 snapshot lastError
+
+repositoryLeaseFromWireV2 :: RepositoryLeaseWireV2 -> RepositoryLease
+repositoryLeaseFromWireV2
+  (RepositoryLeaseWireV2 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt grace snapshot lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt grace snapshot lastError
+
+repositoryLeaseCurrentVersion :: Word16
+repositoryLeaseCurrentVersion = 2
+
+repositoryLeaseVersionSupported :: Word16 -> Bool
+repositoryLeaseVersionSupported version =
+  version == 1 || version == repositoryLeaseCurrentVersion
+
+repositoryLeaseLifetimeAt
+  :: Word64
+  -> RepositoryLease
+  -> RepositoryLeaseLifetime
+repositoryLeaseLifetimeAt now lease =
+  case repositoryLeaseExpiresAt lease of
+    Nothing -> RepositoryLeaseUnexpired
+    Just expiresAt
+      | now < expiresAt -> RepositoryLeaseUnexpired
+      | now < graceDeadline -> RepositoryLeaseInGrace
+      | otherwise -> RepositoryLeaseElapsed
+      where
+        grace = repositoryLeaseGracePeriod lease
+        graceDeadline = expiresAt + min grace (maxBound - expiresAt)
 
 -- | Local mutable ref which makes the inventory tree a storage root.
 newtype RepositoryLeasePin = RepositoryLeasePin RepositoryLeaseId
@@ -164,5 +274,5 @@ makeRepositorySnapshotId repository lwwBlock lwwSeq headRoot refLog refLogRoot =
       , headRoot
       , refLog
       , refLogRoot
-      , (1 :: Word16) -- FullRefLogV1
+      , 1 :: Word16 -- FullRefLogV1
       )

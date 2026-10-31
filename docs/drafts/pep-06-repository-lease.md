@@ -1,8 +1,9 @@
 # PEP-06: repository lease, canonical inventory, and pinning
 
 Status: draft; provider-local lease MVP implemented 2026-10-30, including
-provider-signed local receipts on 2026-10-31. Bilateral wire contracts,
-advertisements, and barter accounting are not part of this implementation.
+provider-signed local receipts and explicit expiry grace on 2026-10-31.
+Bilateral wire contracts, advertisements, and barter accounting are not part
+of this implementation.
 
 Author: NCrashed (Anton Gushcha)
 
@@ -296,7 +297,9 @@ identity and stores the signed box in CAS behind the durable
 `RepositoryLeaseReceipt` root.  Recovery accepts `Active` only when the
 snapshot pin and a matching valid receipt are both present; a missing,
 corrupt, mismatched, or differently signed receipt is replaced before the
-lease can return to `Active`.  Termination and expiry remove both roots.
+lease can return to `Active`. Explicit termination removes both roots;
+expiry retains them through the configured grace interval and removes them at
+the grace deadline.
 `repo:lease:receipt` verifies and prints the local receipt.
 
 This provider-local encoding is not yet declared an interoperable wire
@@ -395,17 +398,22 @@ The first executable vertical slice is now present:
    entries and a separate Merkle pin tree over plain hashes. The lease ref
    points to the latter so a storage root walker reaches the repository data.
 6. A failed or over-limit update changes an existing lease to `Degraded` while
-   retaining its previous complete snapshot and pin. Expiry or explicit
-   termination removes the pin idempotently.
+   retaining its previous complete snapshot and pin. At TTL expiry a lease
+   enters `Grace`; its pin and receipt remain roots until
+   `expires-at + grace-period`, when the worker terminates it and removes both
+   roots idempotently. Explicit termination removes them immediately.
 7. `hbs2-git3` provides `repo:lease:add`, `repo:lease:list`,
    `repo:lease:show`/`status`, `repo:lease:terminate`, and
    `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
    by a non-terminated lease.
 
-`repo:lease:add` accepts `--max-bytes`, `--max-blocks`, and optional `--ttl`.
-The provider-local default limits are 10 GiB and 10,000,000 blocks. This slice
-does not publish a replica advertisement: knowing the provider remains
-necessary until PEP-10 is implemented.
+`repo:lease:add` accepts `--max-bytes`, `--max-blocks`, optional `--ttl`, and
+`--grace`. The grace interval is measured in seconds and defaults to zero for
+backwards-compatible immediate expiry. Durable record version 2 stores it;
+version 1 records remain readable and are interpreted with zero grace. The
+provider-local default limits are 10 GiB and 10,000,000 blocks. This slice does
+not publish a replica advertisement: knowing the provider remains necessary
+until PEP-10 is implemented.
 
 
 # Open questions

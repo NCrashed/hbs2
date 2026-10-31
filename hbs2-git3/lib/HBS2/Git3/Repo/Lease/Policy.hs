@@ -1,6 +1,7 @@
 module HBS2.Git3.Repo.Lease.Policy
   ( defaultLeaseMaxBytes
   , defaultLeaseMaxBlocks
+  , defaultLeaseGracePeriod
   , renewRepositoryLeaseAt
   , selectActiveRepositoryLeaseAt
   , leaseExpiryAt
@@ -18,6 +19,9 @@ defaultLeaseMaxBytes, defaultLeaseMaxBlocks :: Word64
 defaultLeaseMaxBytes = 10 * 1024 * 1024 * 1024
 defaultLeaseMaxBlocks = 10 * 1000 * 1000
 
+defaultLeaseGracePeriod :: Word64
+defaultLeaseGracePeriod = 0
+
 -- | Build a new lease or renew the durable lease for the same repository.
 -- Renewal preserves its identity, creation time, and last verified snapshot.
 renewRepositoryLeaseAt
@@ -27,11 +31,12 @@ renewRepositoryLeaseAt
   -> Word64
   -> Word64
   -> Maybe Word64
+  -> Word64
   -> Maybe RepositoryLease
   -> RepositoryLease
-renewRepositoryLeaseAt now nonce repository maxBytes maxBlocks ttl previous =
+renewRepositoryLeaseAt now nonce repository maxBytes maxBlocks ttl grace previous =
   RepositoryLease
-    { repositoryLeaseVersion = 1
+    { repositoryLeaseVersion = repositoryLeaseCurrentVersion
     , repositoryLeaseId = maybe
         (makeRepositoryLeaseId repository nonce)
         repositoryLeaseId
@@ -46,6 +51,7 @@ renewRepositoryLeaseAt now nonce repository maxBytes maxBlocks ttl previous =
     , repositoryLeaseCreatedAt = maybe now repositoryLeaseCreatedAt previous
     , repositoryLeaseUpdatedAt = now
     , repositoryLeaseExpiresAt = leaseExpiryAt now <$> ttl
+    , repositoryLeaseGracePeriod = grace
     , repositoryLeaseSnapshot = previousSnapshot
     , repositoryLeaseLastError = Nothing
     }
@@ -64,14 +70,12 @@ selectActiveRepositoryLeaseAt now repository = find isActive
     isActive lease =
          repositoryLeaseRepository lease == repository
       && repositoryLeaseState lease /= RepositoryLeaseTerminated
-      && maybe True (> now) (repositoryLeaseExpiresAt lease)
+      && repositoryLeaseLifetimeAt now lease /= RepositoryLeaseElapsed
 
 -- | Add a TTL without allowing Word64 wraparound to turn a long lease into an
 -- already-expired one.
 leaseExpiryAt :: Word64 -> Word64 -> Word64
-leaseExpiryAt now ttl
-  | ttl > maxBound - now = maxBound
-  | otherwise = now + ttl
+leaseExpiryAt now ttl = now + min ttl (maxBound - now)
 
 positiveWord64 :: Integer -> Maybe Word64
 positiveWord64 value

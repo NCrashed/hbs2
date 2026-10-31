@@ -659,11 +659,13 @@ durable manual leases, polling recovery, typed complete-snapshot inventory,
 make-before-break local pinning, limits, expiry, CLI lifecycle commands, and
 purge protection. Provider-signed local receipts were added on 2026-10-31 and
 are now required, together with the durable pin, before a lease can be
-`Active`; they can be verified with `repo:lease:receipt`. M1 is not yet
-complete by the exit criteria below: explicit grace/update-lag and aggregate
-capacity admission, plus the three-node offline-owner clone scenario remain.
-The receipt encoding stays provider-local until the M0 golden-vector gate is
-complete. M2 and later are unchanged.
+`Active`; they can be verified with `repo:lease:receipt`. Explicit grace was
+also implemented: expiry enters `Grace`, preserves the pin and receipt through
+the configured interval, and only then releases them; old durable records
+decode with zero grace. M1 is not yet complete by the exit criteria below:
+explicit update-lag and aggregate capacity admission, plus the three-node
+offline-owner clone scenario remain. The receipt encoding stays provider-local
+until the M0 golden-vector gate is complete. M2 and later are unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

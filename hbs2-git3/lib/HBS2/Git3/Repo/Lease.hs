@@ -29,11 +29,13 @@ addRepositoryLease syntax = do
         [ ("--max-bytes", 1)
         , ("--max-blocks", 1)
         , ("--ttl", 1)
+        , ("--grace", 1)
         ] syntax
 
       maxBytes = optionWord "--max-bytes" defaultLeaseMaxBytes options
       maxBlocks = optionWord "--max-blocks" defaultLeaseMaxBlocks options
       ttl = optionWordMay "--ttl" options
+      grace = optionWord "--grace" defaultLeaseGracePeriod options
 
   repository <- resolveRepoKeyThrow repositorySyntax
   now <- liftIO (floor <$> getPOSIXTime)
@@ -43,7 +45,7 @@ addRepositoryLease syntax = do
 
   let previous = find ((== repository) . repositoryLeaseRepository) leases
       lease = renewRepositoryLeaseAt
-        now nonce repository maxBytes maxBlocks ttl previous
+        now nonce repository maxBytes maxBlocks ttl grace previous
 
   callRpcWaitMay @RpcRepositoryLeasePut (TimeoutSec 2) peerAPI lease
     >>= orThrowUser "repository lease RPC timed out"
@@ -173,6 +175,10 @@ printLease RepositoryLease{..} = liftIO $ print $ parens $
   <+> parens ("state" <+> pretty (leaseStateName repositoryLeaseState))
   <+> parens ("max-bytes" <+> pretty repositoryLeaseMaxBytes)
   <+> parens ("max-blocks" <+> pretty repositoryLeaseMaxBlocks)
+  <+> parens ("grace" <+> pretty repositoryLeaseGracePeriod)
+  <+> maybe mempty (\expiresAt ->
+        parens ("expires-at" <+> pretty expiresAt))
+      repositoryLeaseExpiresAt
   <+> maybe mempty (\snapshot ->
         parens ("snapshot" <+> pretty (repositorySnapshotId snapshot))
         <+> parens ("bytes" <+> pretty (repositorySnapshotLogicalBytes snapshot))

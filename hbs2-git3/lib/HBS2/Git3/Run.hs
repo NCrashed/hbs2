@@ -788,6 +788,7 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
           args [ arg "bytes" "[--max-bytes N]"
                , arg "blocks" "[--max-blocks N]"
                , arg "seconds" "[--ttl N]"
+               , arg "seconds" "[--grace N]"
                , arg "repository" "repo"
                ] $
           entry $ bindMatch "repo:lease:add" $ nil_ $ \syn ->

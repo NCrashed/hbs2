@@ -26,6 +26,8 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.IORef
+import Data.Maybe (isJust)
+import Data.Word (Word16, Word64)
 import Lens.Micro.Platform
 import System.FilePath
 import System.IO.Temp
@@ -44,6 +46,24 @@ data Fixture = Fixture
   }
 
 data CountingStorage = CountingStorage AnyStorage (IORef Int)
+
+-- The shape serialised by hbs2-peer 0.26.0.x before grace periods were
+-- introduced.  This fixture guards the durable on-disk compatibility path.
+data RepositoryLeaseV1 = RepositoryLeaseV1
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseV1
 
 instance Storage CountingStorage HbSync LBS.ByteString IO where
   putBlock (CountingStorage storage writes) bytes =
@@ -251,10 +271,11 @@ tests = testGroup "repository lease"
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
         getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
-  , testCase "expiry is inclusive and releases the replica artifacts" $
+  , testCase "expiry keeps the replica pinned through its grace period" $
       withRepository $ \Fixture{..} -> do
         let leaseId = makeRepositoryLeaseId fixtureRepository 4
-            initial = repositoryLeaseFixture leaseId fixtureRepository
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseGracePeriod = 10 }
         providerCredentials <- newCredentials @'HBS2Basic
         leaseRef <- newIORef initial
         pollsRef <- newIORef []
@@ -265,11 +286,27 @@ tests = testGroup "repository lease"
         let expiring = active { repositoryLeaseExpiresAt = Just 42 }
         writeIORef leaseRef expiring
 
-        expiredLease <- refreshRepositoryLeaseAt 42
+        graceLease <- refreshRepositoryLeaseAt 42
           providerCredentials someBrains fixtureStorage expiring
+        repositoryLeaseState graceLease @?= RepositoryLeaseGrace
+        repositoryLeaseLastError graceLease @?= Just "lease grace period"
+        repositoryLeaseUpdatedAt graceLease @?= 42
+        assertBool "pin survives grace" . isJust =<<
+          getRef fixtureStorage (RepositoryLeasePin leaseId)
+        assertBool "receipt survives grace" . isJust =<<
+          getRef fixtureStorage (RepositoryLeaseReceipt leaseId)
+
+        lastGraceLease <- refreshRepositoryLeaseAt 51
+          providerCredentials someBrains fixtureStorage graceLease
+        repositoryLeaseState lastGraceLease @?= RepositoryLeaseGrace
+        assertBool "pin survives the last grace second" . isJust =<<
+          getRef fixtureStorage (RepositoryLeasePin leaseId)
+
+        expiredLease <- refreshRepositoryLeaseAt 52
+          providerCredentials someBrains fixtureStorage lastGraceLease
         repositoryLeaseState expiredLease @?= RepositoryLeaseTerminated
         repositoryLeaseLastError expiredLease @?= Just "lease expired"
-        repositoryLeaseUpdatedAt expiredLease @?= 42
+        repositoryLeaseUpdatedAt expiredLease @?= 52
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
         getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
@@ -278,7 +315,7 @@ tests = testGroup "repository lease"
         credentials <- newCredentials @'HBS2Basic
         let repository = view peerSignPk credentials
             lease = RepositoryLease
-              { repositoryLeaseVersion = 1
+              { repositoryLeaseVersion = repositoryLeaseCurrentVersion
               , repositoryLeaseId = makeRepositoryLeaseId repository 3
               , repositoryLeaseRepository = repository
               , repositoryLeaseState = RepositoryLeaseSyncing
@@ -287,6 +324,7 @@ tests = testGroup "repository lease"
               , repositoryLeaseCreatedAt = 1
               , repositoryLeaseUpdatedAt = 1
               , repositoryLeaseExpiresAt = Nothing
+              , repositoryLeaseGracePeriod = 0
               , repositoryLeaseSnapshot = Nothing
               , repositoryLeaseLastError = Nothing
               }
@@ -301,6 +339,37 @@ tests = testGroup "repository lease"
         reopened <- DB.newBasicBrains @L4Proto config
         listRepositoryLeases @L4Proto reopened >>= (@?= [lease])
         cancel runner
+
+  , testCase "version 1 durable leases decode with no grace period" $ do
+      credentials <- newCredentials @'HBS2Basic
+      let repository = view peerSignPk credentials
+          leaseId = makeRepositoryLeaseId repository 5
+          encoded = serialise $ RepositoryLeaseV1
+            1 leaseId repository RepositoryLeaseDegraded
+            1024 100 10 20 (Just 30) Nothing (Just "old failure")
+      decoded <- deserialiseOrFail @RepositoryLease encoded
+        & either (assertFailure . show) pure
+      decoded @?= RepositoryLease
+        { repositoryLeaseVersion = 1
+        , repositoryLeaseId = leaseId
+        , repositoryLeaseRepository = repository
+        , repositoryLeaseState = RepositoryLeaseDegraded
+        , repositoryLeaseMaxBytes = 1024
+        , repositoryLeaseMaxBlocks = 100
+        , repositoryLeaseCreatedAt = 10
+        , repositoryLeaseUpdatedAt = 20
+        , repositoryLeaseExpiresAt = Just 30
+        , repositoryLeaseGracePeriod = 0
+        , repositoryLeaseSnapshot = Nothing
+        , repositoryLeaseLastError = Just "old failure"
+        }
+
+  , testCase "only known durable lease versions are supported" $ do
+      repositoryLeaseCurrentVersion @?= 2
+      assertBool "version 1 remains readable" (repositoryLeaseVersionSupported 1)
+      assertBool "version 2 is current" (repositoryLeaseVersionSupported 2)
+      assertBool "version 0 is unsupported" (not (repositoryLeaseVersionSupported 0))
+      assertBool "version 3 is unsupported" (not (repositoryLeaseVersionSupported 3))
   ]
   where
     generous = InventoryLimits 1000 (1024 * 1024)
@@ -365,7 +434,7 @@ repositoryLeaseFixture
   -> PubKey 'Sign 'HBS2Basic
   -> RepositoryLease
 repositoryLeaseFixture leaseId repository = RepositoryLease
-  { repositoryLeaseVersion = 1
+  { repositoryLeaseVersion = repositoryLeaseCurrentVersion
   , repositoryLeaseId = leaseId
   , repositoryLeaseRepository = repository
   , repositoryLeaseState = RepositoryLeaseSyncing
@@ -374,6 +443,7 @@ repositoryLeaseFixture leaseId repository = RepositoryLease
   , repositoryLeaseCreatedAt = 1
   , repositoryLeaseUpdatedAt = 1
   , repositoryLeaseExpiresAt = Nothing
+  , repositoryLeaseGracePeriod = 0
   , repositoryLeaseSnapshot = Nothing
   , repositoryLeaseLastError = Nothing
   }
