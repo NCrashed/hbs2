@@ -167,13 +167,16 @@ Gate releases on at least three peers and cover:
 
 #### `hbs2-hub serve` UX backlog
 
-- Show proposal mergeability before the user attempts a merge. CLI proposal
-  listings/details and `serve` must distinguish `clean`, `conflicts`,
-  `checking`, `stale`, and `failed`, and a conflicting proposal must name the
-  files involved. Compute this without changing the worktree, invalidate it
-  whenever the target or proposal head changes, and always recompute against
-  the current target immediately before merge so an old green result cannot
-  authorize a conflicting merge.
+- [x] Show proposal mergeability before the user attempts a merge. CLI proposal
+  listings/details and `serve` report `clean`, `conflicts`, or an honest
+  `unknown`; a conflicting proposal names the files involved. The observation
+  carries the exact target and proposal commits so a renderer can reject a
+  stale answer. It is computed with `git merge-tree` without changing the
+  worktree, and `pr land` recomputes against the current target immediately
+  before merge, so an old green result cannot authorize a conflicting merge.
+  If this synchronous check is later cached or moved to the background, expose
+  its transient `checking`, `stale`, and `failed` states rather than presenting
+  them as clean.
 - Make inbox attention independent of opening the Inbox route. Both the
   browser extension and the standalone UI must start or subscribe to a
   lightweight mailbox-status source in the background and show an unseen-mail

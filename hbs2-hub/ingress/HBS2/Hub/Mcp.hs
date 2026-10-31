@@ -427,7 +427,8 @@ tList noun = Tool
   , toolTitle = if noun == "pr" then "List pull requests" else "List issues"
   , toolDesc = "List the repository's folded " <> what <> " by number, with status and "
       <> "labels. Read-only and needs no peer: canon is a git ref in the clone the server "
-      <> "runs in (fetch it with sync first). Filters are exact matches." <> defaultsNote
+      <> "runs in (fetch it with sync first). Pull request rows also report whether the "
+      <> "proposal merges into the target ref in that clone. Filters are exact matches." <> defaultsNote
   , toolProps = [ pRepo
                 , propEnum "status" ["open","closed","merged"] "Only threads with this status."
                 , prop "label" "Only threads carrying this applied label." ]
@@ -460,7 +461,7 @@ tShow noun = Tool
       w <- threadFlags as
       pure $ RunVerb (Run ([noun, "show", flag "repo" r] <> w <> ["--json"]) Nothing AsJson)
   }
-  where prDiff = if noun == "pr" then ", and the precomputed diff" else ""
+  where prDiff = if noun == "pr" then ", the precomputed diff, and mergeability against the target ref" else ""
 
 tLog :: Tool
 tLog = Tool

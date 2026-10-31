@@ -386,6 +386,26 @@ spec = do
       field d "truncated"    `shouldBe` A.Bool True
       field d "text"         `shouldBe` A.String "@@"
 
+    it "carries the commits and paths a mergeability check actually compared" $ do
+      k <- aKey
+      let co = PRCoords Nothing "refs/heads/t" "cafe" "refs/heads/master" "beef" Nothing
+          t = (aThread k k) { tsKind = HubPR
+                            , tsPR = Just (PRState co Nothing Nothing k k) }
+          m = field (field (threadContractChecked t Nothing
+                             (Just (MergeConflicting "dead" "cafe" ["a.md", "src/b.hs"])))
+                    "pr") "mergeability"
+      field m "state"     `shouldBe` A.String "conflicts"
+      field m "target"    `shouldBe` A.String "dead"
+      field m "head"      `shouldBe` A.String "cafe"
+      field m "conflicts" `shouldBe` A.toJSON (["a.md", "src/b.hs"] :: [Text])
+
+    it "does not invent mergeability when the caller could not check" $ do
+      k <- aKey
+      let t = (aThread k k) { tsKind = HubPR, tsPR = Just (aPR k k) }
+          m = field (field (threadContract t Nothing) "pr") "mergeability"
+      field m "state" `shouldBe` A.String "unknown"
+      field m "reason" `shouldBe` A.String "not checked"
+
     it "has no pr object on an issue" $ do
       k <- aKey
       at (threadContract (aThread k k) Nothing) "pr" `shouldBe` Nothing
