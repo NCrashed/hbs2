@@ -57,8 +57,8 @@ several programs and daemon logs.
 
 Delivery slices:
 
-- **D1, local runtime:** config path, selected RPC socket, daemon response,
-  CLI/daemon version agreement, and connected peer count.
+- **D1, local runtime (implemented):** config path, selected RPC socket,
+  daemon response, CLI/daemon version agreement, and connected peer count.
 - **D2, network:** bootstrap resolution, configured relay reachability, peer
   identity, advertised transports, and policy-relevant peer metadata.
 - **D3, repository:** LWWRef, manifest, RefLog, complete snapshot/provider, and
@@ -69,17 +69,26 @@ Delivery slices:
 Every check has a stable name, severity, explanation, remedy, and JSON form.
 Warnings do not make automation fail; failed required boundaries do.
 
-Acceptance scenario:
+Available now:
 
 ```text
 hbs2-peer doctor
 hbs2-peer doctor --json
-hbs2-peer doctor --repo <repository-key>
+hbs2-peer doctor --config <config-directory>
+hbs2-peer doctor --rpc <socket-path>
 ```
 
 A mismatched daemon names both versions. A missing RPC peer names the socket
-and the command that starts it. Repository and mailbox failures name the first
-unmet boundary rather than surfacing as a later missing block.
+and the command that starts it. See [`doctor.md`](doctor.md) for the user guide.
+
+Planned for D3-D4, and not accepted by the current CLI yet:
+
+```text
+hbs2-peer doctor --repo <repository-key>
+```
+
+Repository and mailbox failures will name the first unmet boundary rather than
+surfacing as a later missing block.
 
 #### 2. Durable repository availability
 
@@ -152,4 +161,3 @@ complete repository remains discoverable while its publisher is offline.
 - **R3, dependable collaboration:** mailbox delivery receipts, restart-safe
   queue state, retention, and end-to-end contribution status.
 - **R4, safe daily use:** encrypted/recoverable keys and qualified file sync.
-

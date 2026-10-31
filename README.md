@@ -74,6 +74,8 @@ Cabal) see [`INSTALL.md`](INSTALL.md).
   comparisons with Syncthing, Radicle, and IPFS.
 - [`docs/COOKBOOK.md`](docs/COOKBOOK.md) - working recipes for common
   tasks beyond the git path.
+- [`docs/doctor.md`](docs/doctor.md) - check the selected peer config,
+  RPC socket, CLI/daemon versions, and network connections.
 - [`docs/hub-quickstart.md`](docs/hub-quickstart.md) - the forge in
   short: what to type to contribute to a project or run one.
 - [`docs/hbs2-hub.md`](docs/hbs2-hub.md) - the forge: issues, pull
