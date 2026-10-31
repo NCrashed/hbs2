@@ -7,7 +7,7 @@ hbs2-peer doctor
 ```
 
 The command does not write configuration or stored data. It checks the local
-peer and its network boundary in seven steps:
+peer and its network boundary in seven always-on steps:
 
 - `config` — which configuration file was selected and whether it exists;
 - `rpc` — which Unix socket was selected and whether the daemon answers;
@@ -16,7 +16,7 @@ peer and its network boundary in seven steps:
 - `bootstrap` — whether each configured bootstrap DNS name returns at least
   one usable peer address;
 - `configured-peers` — whether every `known-peer` entry parses, answers a
-  signed handshake, and exposes the identity that signed it.
+  signed handshake, and exposes the identity that signed it;
 - `peer-metadata` — the signed network classes and the latest advertised TCP,
   HTTP, public-address, and relay mailbox PoW values for connected peers.
 
@@ -38,6 +38,24 @@ port, public address, or PoW floor produces a warning naming the peer and key.
 An omitted optional field is reported as not advertised; a metadata response
 that has not arrived yet is a separate warning and never masquerades as an
 empty policy.
+
+To diagnose the repository path as well, name its public key:
+
+```text
+hbs2-peer doctor --repo 9gtFy65ap1Hk9Mc71pMjc32zFsKcNZLVPWbBAbnkE4dP
+```
+
+This adds six ordered checks: `repository-key`, `repository-lwwref`,
+`repository-manifest`, `repository-reflog`, `repository-snapshot`, and
+`repository-sigils`. The first failed boundary has an actionable error; later
+boundaries are skipped instead of reporting consequences as separate causes.
+
+The repository probe is read-only. It does not fetch an LWWRef, subscribe to a
+RefLog, request missing blocks, or announce a sigil. A complete snapshot means
+that every block reachable from the current RefLog head is already present on
+the selected peer, so that peer is a complete local provider. The sigil check
+then verifies that every declared mailbox has a declared sigil, its complete
+bytes are present, its signature is valid, and it names that mailbox.
 
 A healthy local peer prints one line per check and ends with `doctor: OK`.
 Every failed check prints a `remedy:` line. A warning, such as having no
@@ -69,6 +87,7 @@ when diagnosing another instance:
 ```text
 hbs2-peer doctor --config /path/to/peer-config-directory
 hbs2-peer doctor --rpc /path/to/hbs2-rpc.socket
+hbs2-peer doctor --rpc /path/to/hbs2-rpc.socket --repo <repository-key>
 ```
 
 `--config` names the directory containing the file named `config`, not the
@@ -121,13 +140,28 @@ optional remedy.
 - `invalid ...` under `peer-metadata` — the named peer advertised a present
   value that does not parse or lies outside its protocol range. Fix the remote
   peer configuration rather than treating it as an absent default.
+- `no LWWRef value is available` — the selected daemon has not discovered the
+  repository key. Use the printed `hbs2-peer lwwref fetch` command, wait for
+  propagation, and run doctor again.
+- `manifest ... is incomplete` — the LWWRef arrived but one of the blocks that
+  names or contains its manifest has not. Fetch the first hash named by the
+  check or keep a complete repository peer online.
+- `RefLog ... has no current value` — the manifest is readable, but the
+  repository history head has not propagated to this daemon yet.
+- `block(s) ... are missing on this peer` — the current RefLog head is known,
+  but this peer cannot serve a complete clone from it. Keep a complete replica
+  online or fetch from one.
+- a failure under `repository-sigils` — the manifest's collaboration address
+  is incomplete, absent, malformed, or names a different mailbox. The owner
+  must publish and announce the corrected sigil.
 
 ## Current scope
 
-The current doctor implements the local-runtime and network slices: bootstrap
-resolution, configured-peer reachability, verified peer identity, signed
-network classes, advertised endpoints, and relay mailbox PoW metadata. It does
-**not** yet accept `--repo`, prove repository availability or sigil propagation,
-or inspect mailbox delivery. The repository and forge checks are tracked as
-D3-D4 in the
+The current doctor implements D1-D3: local runtime, network reachability and
+metadata, plus repository discovery, local snapshot completeness, and required
+sigils. A complete local snapshot is useful provider evidence, but it is not a
+signed remote availability receipt; provider advertisements and key-only
+remote lookup remain part of the repository-leasing work. The doctor does not
+yet inspect forge policy, local sender readiness, or mailbox delivery state;
+those are tracked as D4 in the
 [product-readiness roadmap](product-roadmap.md).

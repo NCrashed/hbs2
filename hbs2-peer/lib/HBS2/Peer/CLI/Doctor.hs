@@ -13,6 +13,12 @@ module HBS2.Peer.CLI.Doctor
   , DoctorConfiguredPeers(..)
   , DoctorPeerMetadata(..)
   , DoctorPeerMetadataStatus(..)
+  , DoctorRepository(..)
+  , DoctorLWWRef(..)
+  , DoctorManifest(..)
+  , DoctorRefLog(..)
+  , DoctorSnapshot(..)
+  , DoctorSigils(..)
   , DoctorFacts(..)
   , DoctorReport(..)
   , diagnose
@@ -90,6 +96,43 @@ data DoctorPeerMetadataStatus
   | DoctorPeerMetadataChecked [DoctorPeerMetadata]
   deriving stock (Eq, Show)
 
+-- | Repository discovery evidence, nested in the same order as the remote
+-- helper consumes it. A later boundary cannot exist without evidence for all
+-- earlier boundaries, so diagnosis cannot accidentally report a downstream
+-- symptom as the root cause.
+data DoctorRepository
+  = DoctorRepositoryNotRequested
+  | DoctorRepositoryInvalid Text
+  | DoctorRepositoryUnavailable Text
+  | DoctorRepositoryChecked Text DoctorLWWRef
+  deriving stock (Eq, Show)
+
+data DoctorLWWRef
+  = DoctorLWWRefMissing
+  | DoctorLWWRefFound DoctorManifest
+  deriving stock (Eq, Show)
+
+data DoctorManifest
+  = DoctorManifestMissing Text
+  | DoctorManifestMalformed Text
+  | DoctorManifestFound DoctorRefLog
+  deriving stock (Eq, Show)
+
+data DoctorRefLog
+  = DoctorRefLogMissing Text
+  | DoctorRefLogFound Text DoctorSnapshot
+  deriving stock (Eq, Show)
+
+data DoctorSnapshot
+  = DoctorSnapshotIncomplete Int
+  | DoctorSnapshotComplete DoctorSigils
+  deriving stock (Eq, Show)
+
+data DoctorSigils
+  = DoctorSigilsIncomplete [Text]
+  | DoctorSigilsComplete Int Int
+  deriving stock (Eq, Show)
+
 -- | Validate the untrusted association list once, at the RPC boundary. A
 -- present-but-invalid value is different evidence from an optional key that a
 -- peer did not advertise.
@@ -151,6 +194,7 @@ data DoctorFacts = DoctorFacts
   , doctorBootstrap :: DoctorBootstrap
   , doctorConfiguredPeers :: DoctorConfiguredPeers
   , doctorPeerMetadata :: DoctorPeerMetadataStatus
+  , doctorRepository :: DoctorRepository
   }
   deriving stock (Eq, Show)
 
@@ -160,7 +204,7 @@ newtype DoctorReport = DoctorReport
   deriving stock (Eq, Show)
 
 diagnose :: DoctorFacts -> DoctorReport
-diagnose facts = DoctorReport
+diagnose facts = DoctorReport $
   [ configCheck facts
   , rpcCheck facts
   , versionCheck facts
@@ -168,6 +212,16 @@ diagnose facts = DoctorReport
   , bootstrapCheck facts
   , configuredPeersCheck facts
   , peerMetadataCheck facts
+  ] <> repositoryChecks (doctorRepository facts)
+
+repositoryChecks :: DoctorRepository -> [DoctorCheck]
+repositoryChecks repository =
+  [ repositoryKeyCheck repository
+  , repositoryLWWRefCheck repository
+  , repositoryManifestCheck repository
+  , repositoryRefLogCheck repository
+  , repositorySnapshotCheck repository
+  , repositorySigilsCheck repository
   ]
 
 doctorPassed :: DoctorReport -> Bool
@@ -348,6 +402,103 @@ describeMetadata peer = doctorMetadataIdentity peer <> " at "
     port label = maybe (label <> " not advertised") (\value -> label <> " " <> tshow value)
     publicAddress = maybe "public address not advertised"
       ("public " <>) (doctorMetadataPublicAddress peer)
+
+repositoryKeyCheck :: DoctorRepository -> DoctorCheck
+repositoryKeyCheck = \case
+  DoctorRepositoryNotRequested -> repositoryNotRequested "repository-key"
+  DoctorRepositoryInvalid raw -> mkCheck "repository-key" CheckFailure
+    ("invalid repository key: " <> raw)
+    (Just "copy the base58 key from an `hbs23://<repository-key>` URL")
+  DoctorRepositoryUnavailable key -> repositoryKeyOK key
+  DoctorRepositoryChecked key _ -> repositoryKeyOK key
+
+repositoryKeyOK :: Text -> DoctorCheck
+repositoryKeyOK key = mkCheck "repository-key" CheckOK
+  ("checking " <> key) Nothing
+
+repositoryLWWRefCheck :: DoctorRepository -> DoctorCheck
+repositoryLWWRefCheck = \case
+  DoctorRepositoryUnavailable _ -> mkCheck "repository-lwwref" CheckFailure
+    "repository RPC services did not answer"
+    (Just "restart the selected peer daemon and make sure its version matches the CLI")
+  DoctorRepositoryChecked key DoctorLWWRefMissing -> mkCheck
+    "repository-lwwref" CheckFailure
+    ("no LWWRef value is available for " <> key)
+    (Just "run `hbs2-peer lwwref fetch <repository-key>` and try again")
+  DoctorRepositoryChecked _ (DoctorLWWRefFound _) -> repositoryLWWRefOK
+  _ -> repositoryBlocked "repository-lwwref"
+
+repositoryLWWRefOK :: DoctorCheck
+repositoryLWWRefOK = mkCheck "repository-lwwref" CheckOK
+  "the repository LWWRef resolved" Nothing
+
+repositoryManifestCheck :: DoctorRepository -> DoctorCheck
+repositoryManifestCheck = \case
+  DoctorRepositoryChecked _ (DoctorLWWRefFound manifest) -> manifestCheck manifest
+  _ -> repositoryBlocked "repository-manifest"
+
+manifestCheck :: DoctorManifest -> DoctorCheck
+manifestCheck = \case
+  DoctorManifestMissing reason -> mkCheck "repository-manifest" CheckFailure
+    reason (Just "fetch the named manifest block, then run doctor again")
+  DoctorManifestMalformed reason -> mkCheck "repository-manifest" CheckFailure
+    reason (Just "the repository owner must publish a readable manifest with a `reflog` clause")
+  DoctorManifestFound _ -> mkCheck "repository-manifest" CheckOK
+    "the manifest is complete, readable, and declares a RefLog" Nothing
+
+repositoryRefLogCheck :: DoctorRepository -> DoctorCheck
+repositoryRefLogCheck = \case
+  DoctorRepositoryChecked _ (DoctorLWWRefFound (DoctorManifestFound refLog)) ->
+    refLogCheck refLog
+  _ -> repositoryBlocked "repository-reflog"
+
+refLogCheck :: DoctorRefLog -> DoctorCheck
+refLogCheck = \case
+  DoctorRefLogMissing key -> mkCheck "repository-reflog" CheckFailure
+    ("RefLog " <> key <> " has no current value")
+    (Just "wait for RefLog propagation, then run doctor again")
+  DoctorRefLogFound root _ -> mkCheck "repository-reflog" CheckOK
+    ("RefLog head is " <> root) Nothing
+
+repositorySnapshotCheck :: DoctorRepository -> DoctorCheck
+repositorySnapshotCheck = \case
+  DoctorRepositoryChecked _
+    (DoctorLWWRefFound (DoctorManifestFound (DoctorRefLogFound root snapshot))) ->
+      snapshotCheck root snapshot
+  _ -> repositoryBlocked "repository-snapshot"
+
+snapshotCheck :: Text -> DoctorSnapshot -> DoctorCheck
+snapshotCheck root = \case
+  DoctorSnapshotIncomplete missing -> mkCheck "repository-snapshot" CheckFailure
+    (tshow missing <> " block(s) reachable from RefLog head " <> root
+      <> " are missing on this peer")
+    (Just "keep a complete replica online or fetch the repository from a complete provider")
+  DoctorSnapshotComplete _ -> mkCheck "repository-snapshot" CheckOK
+    ("RefLog head " <> root <> " is complete; this peer is a complete local provider") Nothing
+
+repositorySigilsCheck :: DoctorRepository -> DoctorCheck
+repositorySigilsCheck = \case
+  DoctorRepositoryChecked _
+    (DoctorLWWRefFound (DoctorManifestFound
+      (DoctorRefLogFound _ (DoctorSnapshotComplete sigils)))) -> sigilsCheck sigils
+  _ -> repositoryBlocked "repository-sigils"
+
+sigilsCheck :: DoctorSigils -> DoctorCheck
+sigilsCheck = \case
+  DoctorSigilsIncomplete problems -> mkCheck "repository-sigils" CheckFailure
+    (names problems)
+    (Just "publish and announce a valid sigil for every declared mailbox, then run doctor again")
+  DoctorSigilsComplete 0 _ -> skipped "repository-sigils"
+    "the manifest declares no mailboxes that require sigils"
+  DoctorSigilsComplete mailboxes sigils -> mkCheck "repository-sigils" CheckOK
+    (tshow sigils <> " required sigil(s) are complete and valid for "
+      <> tshow mailboxes <> " mailbox(es)") Nothing
+
+repositoryNotRequested :: Text -> DoctorCheck
+repositoryNotRequested name = skipped name "not checked because no --repo was requested"
+
+repositoryBlocked :: Text -> DoctorCheck
+repositoryBlocked name = skipped name "not checked because an earlier repository boundary failed"
 
 mkCheck :: Text -> CheckStatus -> Text -> Maybe Text -> DoctorCheck
 mkCheck = DoctorCheck

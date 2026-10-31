@@ -62,8 +62,8 @@ Delivery slices:
 - **D2, network (implemented):** bootstrap resolution, configured relay
   reachability, signed peer identity and network classes, advertised
   endpoints, and policy-relevant peer metadata.
-- **D3, repository:** LWWRef, manifest, RefLog, complete snapshot/provider, and
-  required sigils for a repository key.
+- **D3, repository (implemented):** LWWRef, manifest, RefLog, complete local
+  snapshot/provider evidence, and required sigils for a repository key.
 - **D4, forge:** declared mailbox, current policy version and PoW, local sender
   readiness, and the last known delivery state.
 
@@ -77,19 +77,17 @@ hbs2-peer doctor
 hbs2-peer doctor --json
 hbs2-peer doctor --config <config-directory>
 hbs2-peer doctor --rpc <socket-path>
+hbs2-peer doctor --repo <repository-key>
 ```
 
 A mismatched daemon names both versions. A missing RPC peer names the socket
 and the command that starts it. See [`doctor.md`](doctor.md) for the user guide.
 
-Planned for D3-D4, and not accepted by the current CLI yet:
-
-```text
-hbs2-peer doctor --repo <repository-key>
-```
-
-Repository and mailbox failures will name the first unmet boundary rather than
-surfacing as a later missing block.
+Repository failures name the first unmet boundary rather than surfacing as a
+later missing block. D3 proves completeness on the selected peer; signed
+remote provider advertisements and provider lookup remain the next durable
+availability milestone. D4 will extend the same ordered report through forge
+and mailbox boundaries.
 
 #### 2. Durable repository availability
 

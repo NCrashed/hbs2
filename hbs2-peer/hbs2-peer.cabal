@@ -195,6 +195,7 @@ library
       HBS2.Peer.RPC.Internal.Types
       HBS2.Peer.CLI.Detect
       HBS2.Peer.CLI.Doctor
+      HBS2.Peer.CLI.Doctor.Repository
       HBS2.Peer.NCQ3.Migrate.NCQ
 
     other-modules:
