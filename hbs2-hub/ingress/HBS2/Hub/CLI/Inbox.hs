@@ -1,7 +1,6 @@
--- 'opOf' below dispatches on every constructor of 'AuthorContent' with no
--- wildcard, on content an attacker composed, inside the triage loop. The library
--- modules set this for the same reason: a constructor added without a case here
--- is a crash in that loop rather than a build error.
+-- The rendering below dispatches on attacker-composed content inside the
+-- triage loop. A constructor added without a case is a build error rather than
+-- a crash in that loop.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- | @hub inbox@: the triage queue, rendered (PEP-22 "Maintain").
@@ -151,6 +150,11 @@ inboxEntries = do
              <> line <> "the page runs out the report prints the --after value that"
              <> line <> "continues it. --limit lowers how many are opened and cannot"
              <> line <> "raise it past what one read will take."
+             <> line
+             <> line <> "--long expands each letter into a labelled block with whole"
+             <> line <> "identifiers and, when it can be accepted, a ready-to-copy"
+             <> line <> "'hbs2-hub inbox accept --message ...' command. --json is the"
+             <> line <> "stable document form for scripts."
              <> line
              <> line <> "--follow (-f) prints the queue and keeps running. It asks"
              <> line <> "the peer for the mailbox root every few seconds, asks it to"
@@ -715,16 +719,16 @@ inboxCode r
 -- quadratic: a 48 KiB field is 0.7 s of CPU and 67 000 characters, per line, in
 -- a queue anybody can write to.
 render :: Width -> LetterView -> Doc ann
-render w lv = short (hashDoc (lvMessage lv))
-                <+> maybe "-" (short . keyDoc) (lvEnvelope lv)
-                <+> body <> copies
+render Short = renderShort
+render Long  = renderLong
+
+renderShort :: LetterView -> Doc ann
+renderShort lv = shortRow
   where
-    -- 'briefly' on the way to a terminal and never on the way to a decision:
-    -- every verb that takes one of these takes the whole value, and this is a
-    -- prefix, not a name. See 'Width'.
-    short = case w of
-      Long  -> id
-      Short -> briefly 8
+    short = briefly 8
+    shortRow = short (hashDoc (lvMessage lv))
+                 <+> maybe "-" (short . keyDoc) (lvEnvelope lv)
+                 <+> body <> copies
 
     -- SAID, not silently collapsed. A rewrap needs no key (see 'lvCopies'), so
     -- one letter can arrive under any number of envelopes, and the queue used
@@ -745,38 +749,59 @@ render w lv = short (hashDoc (lvMessage lv))
           -- why it is shown and not sorted on: sorting the queue by it would let
           -- a sender choose where in the queue they appear.
           <+> "at" <+> pretty (utcOf (authorTs content))
-          <+> opOf content
+          <+> pretty (opName content)
           <+> maybe "-" (\t -> "on" <+> short (hashDoc t)) (authorThread content)
           <+> dispOf disp
-          <> titleOf content
+          <> shortTitle content
 
-    -- THE SUBJECT, which the queue did not carry at all: it existed only inside
-    -- `hub inbox show --message <hash>`, one letter at a time, so deciding what
-    -- to look at first meant opening every letter in turn.
-    --
-    -- LAST on the row, because it is the one field of unbounded width and the
-    -- only one a stranger writes as prose: everything a maintainer compares
-    -- between rows stays in the same columns whatever the title does. Through
-    -- 'safeText' like every other stranger's text here, and bounded, because
-    -- 'maxTitleBytes' is a fold rule and not a terminal one.
-    titleOf = \case
-      AOpen _ _ t _ _ _ _ _ -> " " <> dquotes (short' (pretty (safeText t)))
-      _                     -> mempty
-      where
-        short' = case w of
-          Long  -> id
-          Short -> briefly 60
+-- | @--long@ is an inspection and copy-paste view, not the compact queue with
+-- its abbreviations removed.  Label every key: an author key and a message hash
+-- have the same base58 shape, and the old positional row invited maintainers to
+-- paste the former into @--message@.  Put the command itself in the document so
+-- the next valid action does not have to be inferred from field order.
+renderLong :: LetterView -> Doc ann
+renderLong lv = vcat (header <> copies <> details)
+  where
+    header =
+      [ "Message:" <+> hashDoc (lvMessage lv)
+      , "Envelope:" <+> maybe "-" keyDoc (lvEnvelope lv)
+      ]
+    copies = case lvCopies lv of
+      [] -> []
+      cs -> [ "Copies:" <+> pretty (length cs) <+> "under other envelopes" ]
+    details = case lvLetter lv of
+      Left e -> [ "Status: unreadable:" <+> pretty e ]
+      Right (author, content, disp) ->
+        [ "Author:" <+> keyDoc author
+        , "Event:" <+> maybe "?" hashDoc (lvEventId lv)
+        , "At:" <+> pretty (utcOf (authorTs content))
+        , "Action:" <+> pretty (opName content)
+        , "Thread:" <+> maybe "-" hashDoc (authorThread content)
+        , "Disposition:" <+> pretty (dispositionName disp)
+        ]
+        <> titleLine content
+        <> acceptLine disp
 
-    opOf = \case
-      AOpen{} -> "open"; AComment{} -> "comment"; ARevise{} -> "revise"
-      ASet{} -> "set"; AClose{} -> "close"; AReopen{} -> "reopen"
-      AMerge{} -> "merge"; ARedact{} -> "redact"
-      ADelegate{} -> "delegate"; ARevoke{} -> "revoke"
+    titleLine = \case
+      AOpen _ _ t _ _ _ _ _ -> [ "Title:" <+> dquotes (pretty (safeText t)) ]
+      _                       -> []
+    acceptLine = \case
+      OwnerNative -> []
+      _ -> [ "Accept:" <+> "hbs2-hub inbox accept --message"
+                         <+> hashDoc (lvMessage lv) ]
 
-    dispOf = \case
-      FoldsToCanon -> "(folds)"
-      RequestOnly  -> "(request)"
-      OwnerNative  -> "(owner-only: not acceptable from a letter)"
+-- THE SUBJECT, which the compact queue did not carry at all before this
+-- renderer grew it: deciding what to inspect meant opening every letter in
+-- turn.  It is last because it is the only unbounded prose field a stranger
+-- controls; every field a maintainer compares stays aligned before it.
+shortTitle :: AuthorContent -> Doc ann
+shortTitle = \case
+  AOpen _ _ t _ _ _ _ _ -> " " <> dquotes (briefly 60 (pretty (safeText t)))
+  _                       -> mempty
+
+dispOf :: Disposition -> Doc ann
+dispOf OwnerNative = "(owner-only: not acceptable from a letter)"
+dispOf d           = "(" <> pretty (dispositionName d) <> ")"
 
 -- | @--mailbox <key> [--repo <key>]@.
 --

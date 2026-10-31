@@ -118,7 +118,10 @@ spec1 = do
       -- nothing about "not a key" on the way past.
       k <- aKey
       let line = shown (render Long (view (mh "m") (Just k) (Left NotFetched)))
-      take 2 (words line) `shouldBe` [show (pretty (mh "m")), show (pretty (AsBase58 k))]
+      lines line `shouldSatisfy`
+        elem ("Message: " <> show (pretty (mh "m")))
+      lines line `shouldSatisfy`
+        elem ("Envelope: " <> show (pretty (AsBase58 k)))
       line `shouldSatisfy` isInfixOf "not fetched yet"
 
     it "names nobody when the envelope named nobody" $ do
@@ -126,7 +129,7 @@ spec1 = do
       -- have established one. Checked BY POSITION rather than by "contains a
       -- dash", which a line about anything at all would satisfy.
       let line = shown (render Long (view (mh "m") Nothing (Left BadEnvelopeSig)))
-      take 2 (words line) `shouldBe` [show (pretty (mh "m")), "-"]
+      lines line `shouldSatisfy` elem "Envelope: -"
 
     -- THE SCREEN A MAINTAINER TRIAGES FROM. A row carried four full base58
     -- values -- about 180 characters before any of the words -- and the subject
@@ -146,15 +149,21 @@ spec1 = do
       row `shouldSatisfy` (not . isInfixOf (show (pretty (mh "m"))))
       length row `shouldSatisfy` (< 120)
 
-    -- What a script pipes and what a copy-paste needs.
-    it "prints whole identifiers when asked to" $ do
+    -- What a copy-paste needs.  The old --long row had four unlabelled keys;
+    -- in particular, the author key looked like the message hash accepted by
+    -- the next command.  Make the command itself the unambiguous affordance.
+    it "labels whole identifiers and prints the accept command when asked to" $ do
       repo <- aKey
       author <- aKey
       let ac = AOpen repo HubIssue "a title" [] Nothing Nothing Nothing 5
           row = shown (render Long (view (mh "m") (Just repo)
                                       (Right (author, ac, FoldsToCanon))))
-      row `shouldSatisfy` isInfixOf (show (pretty (mh "m")))
-      row `shouldSatisfy` isInfixOf (show (pretty (AsBase58 author)))
+          message = show (pretty (mh "m"))
+      lines row `shouldSatisfy` elem ("Message: " <> message)
+      lines row `shouldSatisfy`
+        elem ("Author: " <> show (pretty (AsBase58 author)))
+      lines row `shouldSatisfy`
+        elem ("Accept: hbs2-hub inbox accept --message " <> message)
 
     -- A title is a stranger's prose, of a width only the fold bounds, on a row
     -- whose other fields a maintainer compares against the row above.
