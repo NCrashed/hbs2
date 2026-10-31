@@ -380,6 +380,16 @@ Every fixture records expected ordered hashes, block count, logical bytes,
 snapshot id, and missing/corrupt frontier.  At least two independent traversal
 paths must agree: the hbs2-git3 implementation and a small fixture verifier.
 
+The wire-stability part of M0 is complete for the provider-local slice.
+`RepositoryInventoryEntry`, `RepositorySnapshot`, and `ReplicaReceiptV1` now
+use explicit CBOR codecs which preserve the 0.26 generic encoding byte for
+byte. Deterministic golden vectors pin every field, the original constructor
+tag and record arity, and round-trip through the production decoder. A field
+addition or reorder must therefore introduce a new versioned type rather than
+silently changing existing inventory roots, stored snapshots, or signatures.
+The graph-fixture corpus, independent verifier, and measurements listed above
+remain open M0 work.
+
 
 # Provider-local implementation
 
@@ -476,13 +486,14 @@ reserved and available bytes, and contract usage.
 PEP-06 is ready for wire implementation when:
 
 - all M0 fixtures have deterministic expected inventories;
-- snapshot and entry encodings have golden vectors;
+- snapshot, inventory-entry, and receipt encodings have golden vectors;
 - public and encrypted repository scans are measured and bounded;
 - a three-node test can distinguish `Syncing` from a complete pinned replica;
 - restart and GC tests demonstrate that an active snapshot survives;
 - a repository changing during scan cannot produce a mixed-state receipt.
 
-The three-node complete-replica criterion is covered by the executable e2e
-scenario above. The remaining criteria in this section are still gates for a
-wire-stable lease protocol; the provider-local test does not imply replica
-advertisement or automatic provider discovery.
+The encoding-vector and three-node complete-replica criteria are covered by
+the test suite and executable e2e scenario above. The remaining criteria in
+this section are still gates for the complete M0 fixture corpus; the
+provider-local test does not imply replica advertisement or automatic provider
+discovery.

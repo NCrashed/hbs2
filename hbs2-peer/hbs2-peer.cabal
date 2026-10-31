@@ -250,6 +250,7 @@ test-suite test
           base, hbs2-peer, hbs2-core, hbs2-storage-simple
         , aeson
         , async
+        , base16-bytestring
         , bytestring
         , cache
         , containers

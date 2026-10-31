@@ -20,11 +20,13 @@ module HBS2.Peer.Proto.RepositoryLease
 
 import HBS2.Data.Types.Refs
 import HBS2.Hash
-import HBS2.Net.Auth.Credentials hiding (encode)
+import HBS2.Net.Auth.Credentials hiding (decode, encode)
 import HBS2.Prelude.Plated
 
 import Codec.CBOR.Term (decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toLazyByteString)
+import Codec.CBOR.Decoding (Decoder, decodeListLen, decodeWord)
+import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeWord)
 import Codec.Serialise (Serialise(..), deserialiseOrFail)
 import Data.Word
 
@@ -53,18 +55,28 @@ data RepositoryLeaseLifetime
   | RepositoryLeaseElapsed
   deriving stock (Eq, Ord, Show)
 
--- | Canonically ordered inventory entry committed by the snapshot.  The
--- pin tree is separate because its leaves must remain plain HashRefs for the
--- storage root walker.
+-- | Canonically ordered inventory entry committed by the snapshot.  Its CBOR
+-- shape is frozen because the inventory root commits to these exact bytes.
+-- The pin tree is separate because its leaves must remain plain HashRefs for
+-- the storage root walker.
 data RepositoryInventoryEntry = RepositoryInventoryEntry
   { repositoryInventoryHash   :: HashRef
   , repositoryInventoryLength :: Word64
   }
   deriving stock (Eq, Ord, Show, Generic)
 
-instance Serialise RepositoryInventoryEntry
+instance Serialise RepositoryInventoryEntry where
+  encode RepositoryInventoryEntry{..} =
+       encodeRecordHeader 3
+    <> encode repositoryInventoryHash
+    <> encode repositoryInventoryLength
+  decode = do
+    decodeRecordHeader "RepositoryInventoryEntry" 3
+    RepositoryInventoryEntry <$> decode <*> decode
 
--- | One locally verified complete repository state.
+-- | One locally verified complete repository state.  The explicit codec
+-- preserves the original generic encoding byte-for-byte; changing it requires
+-- a new snapshot type because snapshot IDs and receipts refer to this shape.
 data RepositorySnapshot = RepositorySnapshot
   { repositorySnapshotId            :: HashRef
   , repositorySnapshotLWWRefBlock   :: HashRef
@@ -80,7 +92,25 @@ data RepositorySnapshot = RepositorySnapshot
   }
   deriving stock (Eq, Show, Generic)
 
-instance Serialise RepositorySnapshot
+instance Serialise RepositorySnapshot where
+  encode RepositorySnapshot{..} =
+       encodeRecordHeader 12
+    <> encode repositorySnapshotId
+    <> encode repositorySnapshotLWWRefBlock
+    <> encode repositorySnapshotLWWSequence
+    <> encode repositorySnapshotHeadRoot
+    <> encode repositorySnapshotRefLogKey
+    <> encode repositorySnapshotRefLogRoot
+    <> encode repositorySnapshotInventoryRoot
+    <> encode repositorySnapshotPinRoot
+    <> encode repositorySnapshotBlockCount
+    <> encode repositorySnapshotLogicalBytes
+    <> encode repositorySnapshotCompletedAt
+  decode = do
+    decodeRecordHeader "RepositorySnapshot" 12
+    RepositorySnapshot
+      <$> decode <*> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode <*> decode
 
 -- | Durable local M1 lease.  Bilateral signatures and credit are added by
 -- PEP-08; this record is deliberately provider-local.
@@ -288,7 +318,37 @@ data ReplicaReceiptV1 = ReplicaReceiptV1
   }
   deriving stock (Eq, Show, Generic)
 
-instance Serialise ReplicaReceiptV1
+instance Serialise ReplicaReceiptV1 where
+  encode ReplicaReceiptV1{..} =
+       encodeRecordHeader 11
+    <> encode replicaReceiptVersion
+    <> encode replicaReceiptLeaseId
+    <> encode replicaReceiptRepository
+    <> encode replicaReceiptProvider
+    <> encode replicaReceiptSnapshotId
+    <> encode replicaReceiptInventoryRoot
+    <> encode replicaReceiptBlockCount
+    <> encode replicaReceiptLogicalBytes
+    <> encode replicaReceiptCompletedAt
+    <> encode replicaReceiptIssuedAt
+  decode = do
+    decodeRecordHeader "ReplicaReceiptV1" 11
+    ReplicaReceiptV1
+      <$> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode <*> decode
+
+-- Generic-derived product encodings begin with a list containing a zero
+-- constructor tag.  Keeping that framing makes this explicit codec compatible
+-- with every lease block already written by 0.26 while rejecting other shapes.
+encodeRecordHeader :: Word -> Encoding
+encodeRecordHeader fields = encodeListLen fields <> encodeWord 0
+
+decodeRecordHeader :: String -> Int -> Decoder s ()
+decodeRecordHeader name expectedFields = do
+  fields <- decodeListLen
+  constructorTag <- decodeWord
+  unless (fields == expectedFields && constructorTag == 0) $
+    fail (name <> ": invalid CBOR record header")
 
 makeRepositoryLeaseId
   :: PubKey 'Sign 'HBS2Basic

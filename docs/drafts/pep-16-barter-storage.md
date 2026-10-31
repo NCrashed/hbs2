@@ -688,9 +688,12 @@ lease with a valid receipt, stops A, starts a clean C which knows only B, and
 clones the complete branch and tag from B. That test exposed and fixed an
 import path which named a missing checkpoint Merkle block but never enqueued
 it for retrieval. M1 is therefore complete for a manually configured known
-provider. The receipt encoding stays provider-local until the M0 golden-vector
-gate is complete; replica advertisement and automatic provider discovery
-remain M4 work. M2 and later are otherwise unchanged.
+provider. On 2026-10-31 the provider-local inventory-entry, snapshot, and
+receipt encodings were made explicit without changing their 0.26 bytes and
+were pinned by deterministic golden vectors. The remaining M0 graph fixtures,
+independent verifier, and measurements are still open; replica advertisement
+and automatic provider discovery remain M4 work. M2 and later are otherwise
+unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

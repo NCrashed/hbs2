@@ -86,7 +86,8 @@ unmet boundary rather than surfacing as a later missing block.
 Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 
 - complete the three-node offline-owner M1 scenario;
-- freeze and test the snapshot/inventory/receipt encodings;
+- freeze and test the snapshot/inventory/receipt encodings (completed
+  2026-10-31 for the provider-local v1 wire types);
 - publish and retrieve signed replica advertisements;
 - find a complete provider from the repository key;
 - maintain a replica target with make-before-break replacement.

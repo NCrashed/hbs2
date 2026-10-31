@@ -23,11 +23,13 @@ import HBS2.Storage.Simple
 
 import Codec.Serialise (deserialiseOrFail)
 import Control.Concurrent.Async
+import Data.ByteString.Base16 qualified as B16
+import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.IORef
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Either (isLeft, isRight)
 import Data.Word (Word16, Word64)
 import Lens.Micro.Platform
@@ -126,7 +128,9 @@ instance HasBrains L4Proto TestBrains where
 
 tests :: TestTree
 tests = testGroup "repository lease"
-  [ testCase "a complete repository is inventoried and pinned" $
+  [ repositoryLeaseWireGoldenTests
+
+  , testCase "a complete repository is inventoried and pinned" $
       withRepository $ \Fixture{..} -> do
         discovered <- discoverRepositorySnapshot generous fixtureStorage fixtureRepository
                         >>= expectRight
@@ -665,6 +669,89 @@ tests = testGroup "repository lease"
   ]
   where
     generous = InventoryLimits 1000 (1024 * 1024)
+
+repositoryLeaseWireGoldenTests :: TestTree
+repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
+  [ testCase "inventory entry encoding is frozen" $
+      goldenHex goldenInventoryEntry @?=
+        "83008200820058205ab17888689036c1d81bfddd3923f98ae30269f124320e1441cde60002ca805f1b0102030405060708"
+
+  , testCase "snapshot encoding is frozen" $
+      goldenHex goldenSnapshot @?=
+        "8c00820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f382008200582016111657b67e514d835b7ff576195b388911b31b62d1770c45d29155b1df9f6b118200820058206adb65677e467d7ab300bc7f536273ab4e4441d972d7aefeb50c3caca4bfe785820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820bf05e11feca8af74e2dbcb47f64772a100037c9f134531e45abccbf64e11f30e820082005820ff01ef556abfba43e66c4092cdee8c0ad1cfc0d943b9fdac4d87a0eecf6cf45082008200582038941aa2a96ae47fe919e4de74e9541953dc19b9fb62a8cae0bcf4ea4a77460e18221933441a55667788"
+
+  , testCase "replica receipt v1 encoding is frozen" $
+      goldenHex goldenReceipt @?=
+        "8b0001820082005820bbd41f369703c8e11972458b224028470989302894eff68a143120a470c3e9af8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f3820082005820ff01ef556abfba43e66c4092cdee8c0ad1cfc0d943b9fdac4d87a0eecf6cf45018221933441a556677881a99aabbcc"
+
+  , testCase "golden lease values round-trip" $ do
+      goldenRoundTrip goldenInventoryEntry
+      goldenRoundTrip goldenSnapshot
+      goldenRoundTrip goldenReceipt
+
+  , testCase "wire decoders reject the wrong record header" $ do
+      let encoded = serialise goldenInventoryEntry
+          wrongArity = LBS.cons 0x82 (LBS.tail encoded)
+          wrongConstructor =
+            LBS.take 1 encoded <> LBS.singleton 1 <> LBS.drop 2 encoded
+      assertBool "wrong record arity was accepted" $
+        isLeft (deserialiseOrFail @RepositoryInventoryEntry wrongArity)
+      assertBool "wrong constructor tag was accepted" $
+        isLeft (deserialiseOrFail @RepositoryInventoryEntry wrongConstructor)
+  ]
+
+goldenHex :: Serialise a => a -> String
+goldenHex = B8.unpack . B16.encode . LBS.toStrict . serialise
+
+goldenRoundTrip :: (Eq a, Show a, Serialise a) => a -> Assertion
+goldenRoundTrip value =
+  deserialiseOrFail (serialise value) @?= Right value
+
+goldenHash :: B8.ByteString -> HashRef
+goldenHash = HashRef . hashObject @HbSync
+
+goldenRepository :: PubKey 'Sign 'HBS2Basic
+goldenRepository = fromMaybe (error "invalid golden repository key") $
+  fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8"
+
+goldenProvider :: PubKey 'Sign 'HBS2Basic
+goldenProvider = fromMaybe (error "invalid golden provider key") $
+  fromStringMay "BTThPdHKF8XnEq4m6wzbKHKA6geLFK4ydYhBXAqBdHSP"
+
+goldenInventoryEntry :: RepositoryInventoryEntry
+goldenInventoryEntry = RepositoryInventoryEntry
+  (goldenHash "repository-lease-golden-inventory-entry")
+  0x0102030405060708
+
+goldenSnapshot :: RepositorySnapshot
+goldenSnapshot = RepositorySnapshot
+  { repositorySnapshotId = goldenHash "repository-lease-golden-snapshot-id"
+  , repositorySnapshotLWWRefBlock = goldenHash "repository-lease-golden-lww-block"
+  , repositorySnapshotLWWSequence = 0x11
+  , repositorySnapshotHeadRoot = goldenHash "repository-lease-golden-head-root"
+  , repositorySnapshotRefLogKey = goldenProvider
+  , repositorySnapshotRefLogRoot = goldenHash "repository-lease-golden-reflog-root"
+  , repositorySnapshotInventoryRoot = goldenHash "repository-lease-golden-inventory-root"
+  , repositorySnapshotPinRoot = goldenHash "repository-lease-golden-pin-root"
+  , repositorySnapshotBlockCount = 0x22
+  , repositorySnapshotLogicalBytes = 0x3344
+  , repositorySnapshotCompletedAt = 0x55667788
+  }
+
+goldenReceipt :: ReplicaReceiptV1
+goldenReceipt = ReplicaReceiptV1
+  { replicaReceiptVersion = 1
+  , replicaReceiptLeaseId = RepositoryLeaseId $
+      goldenHash "repository-lease-golden-lease-id"
+  , replicaReceiptRepository = goldenRepository
+  , replicaReceiptProvider = goldenProvider
+  , replicaReceiptSnapshotId = repositorySnapshotId goldenSnapshot
+  , replicaReceiptInventoryRoot = repositorySnapshotInventoryRoot goldenSnapshot
+  , replicaReceiptBlockCount = repositorySnapshotBlockCount goldenSnapshot
+  , replicaReceiptLogicalBytes = repositorySnapshotLogicalBytes goldenSnapshot
+  , replicaReceiptCompletedAt = repositorySnapshotCompletedAt goldenSnapshot
+  , replicaReceiptIssuedAt = 0x99aabbcc
+  }
 
 withRepository :: (Fixture -> IO a) -> IO a
 withRepository action =
