@@ -21,6 +21,7 @@ tests = testGroup "doctor"
       statusOf "version" report @?= Just CheckOK
       statusOf "peers" report @?= Just CheckOK
       statusOf "bootstrap" report @?= Just CheckOK
+      statusOf "configured-peers" report @?= Just CheckOK
 
   , testCase "version skew names both versions and fails" do
       let report = diagnose healthy
@@ -74,6 +75,61 @@ tests = testGroup "doctor"
       doctorPassed report @?= True
       statusOf "bootstrap" report @?= Just CheckSkipped
 
+  , testCase "reachable configured peers name their verified identities" do
+      let report = diagnose healthy
+            { doctorConfiguredPeers = DoctorConfiguredPeersChecked
+                [ DoctorPeerReachable "8dePeer@udp" (Just "relay-signing-key") ] }
+          configured = checkNamed "configured-peers" report
+      doctorCheckStatus configured @?= CheckOK
+      assertBool "the verified identity is visible"
+        ("relay-signing-key" `Text.isInfixOf` doctorCheckMessage configured)
+
+  , testCase "partial configured-peer reachability is a warning" do
+      let report = diagnose healthy
+            { doctorConfiguredPeers = DoctorConfiguredPeersChecked
+                [ DoctorPeerReachable "relay-a" (Just "key-a")
+                , DoctorPeerUnreachable "relay-b"
+                ] }
+          configured = checkNamed "configured-peers" report
+      doctorPassed report @?= True
+      doctorCheckStatus configured @?= CheckWarning
+      assertBool "the unreachable address is visible"
+        ("relay-b" `Text.isInfixOf` doctorCheckMessage configured)
+
+  , testCase "no reachable configured peer is a failure" do
+      let report = diagnose healthy
+            { doctorConfiguredPeers = DoctorConfiguredPeersChecked
+                [DoctorPeerUnreachable "relay-a"] }
+          configured = checkNamed "configured-peers" report
+      doctorPassed report @?= False
+      doctorCheckStatus configured @?= CheckFailure
+      assertBool "the remedy points at the network boundary"
+        (maybe False (Text.isInfixOf "firewall") (doctorCheckRemedy configured))
+
+  , testCase "an invalid known-peer entry is a configuration failure" do
+      let report = diagnose healthy
+            { doctorConfiguredPeers = DoctorConfiguredPeersChecked
+                [DoctorPeerInvalid "not-a-peer-address"] }
+          configured = checkNamed "configured-peers" report
+      doctorPassed report @?= False
+      doctorCheckStatus configured @?= CheckFailure
+      assertBool "the invalid entry is visible"
+        ("not-a-peer-address" `Text.isInfixOf` doctorCheckMessage configured)
+
+  , testCase "no configured peers is explicitly skipped" do
+      let report = diagnose healthy
+            { doctorConfiguredPeers = DoctorConfiguredPeersChecked [] }
+      doctorPassed report @?= True
+      statusOf "configured-peers" report @?= Just CheckSkipped
+
+  , testCase "configured peers are skipped when RPC is unavailable" do
+      let report = diagnose healthy
+            { doctorPoke = Nothing
+            , doctorPeerCount = Nothing
+            , doctorConfiguredPeers = DoctorConfiguredPeersUnavailable
+            }
+      statusOf "configured-peers" report @?= Just CheckSkipped
+
   , testCase "an old daemon without a version fails explicitly" do
       let report = diagnose healthy
             { doctorPoke = Just "peer-key: \"peer\"\nrpc: \"/tmp/hbs2-rpc.socket\"\n" }
@@ -101,6 +157,8 @@ healthy = DoctorFacts
   , doctorPoke = Just (poke "0.26.0.6")
   , doctorPeerCount = Just 2
   , doctorBootstrap = DoctorBootstrapChecked [("bootstrap.hbs2.app", 1)]
+  , doctorConfiguredPeers = DoctorConfiguredPeersChecked
+      [DoctorPeerReachable "8dePeer@udp" (Just "relay-signing-key")]
   }
 
 poke :: Text.Text -> Text.Text

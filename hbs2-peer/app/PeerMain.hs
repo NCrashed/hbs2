@@ -198,6 +198,52 @@ data GOpts =
   , goTrace :: Bool
   }
 
+doctorRuntimeProbe
+  :: FilePath
+  -> [(Text.Text, Maybe (PeerAddr L4Proto))]
+  -> IO (Maybe Text.Text, Maybe Int, DoctorConfiguredPeers)
+doctorRuntimeProbe socketPath configuredEntries = do
+  runtime <- Exception.try @SomeException $
+    withRPC2 @PeerAPI @UNIX socketPath $ \caller -> do
+      poke <- callRpcWaitRetry @RpcPoke (TimeoutSec 0.5) 2 caller ()
+      case poke of
+        Nothing -> pure (Nothing, Nothing, DoctorConfiguredPeersUnavailable)
+        Just answer -> do
+          probed <- forM configuredEntries $ \(label, parsed) -> case parsed of
+            Nothing -> pure (label, Nothing, False)
+            Just address -> do
+              reached <- fromMaybe False
+                <$> callRpcWaitRetry @RpcPing (TimeoutSec 2) 1 caller address
+              pure (label, Just address, reached)
+
+          peerList <- callRpcWaitRetry @RpcPeers (TimeoutSec 1) 2 caller ()
+          pure
+            ( Just (Text.pack answer)
+            , fmap length peerList
+            , configuredPeerFacts probed (fromMaybe [] peerList)
+            )
+
+  pure $ fromRight
+    (Nothing, Nothing, DoctorConfiguredPeersUnavailable) runtime
+
+configuredPeerFacts
+  :: [(Text.Text, Maybe (PeerAddr L4Proto), Bool)]
+  -> [(PubKey 'Sign 'HBS2Basic, PeerAddr L4Proto)]
+  -> DoctorConfiguredPeers
+configuredPeerFacts probed peerList = DoctorConfiguredPeersChecked
+  [ case parsed of
+      Nothing -> DoctorPeerInvalid label
+      Just address
+        | reached -> DoctorPeerReachable label (identityFor address)
+        | otherwise -> DoctorPeerUnreachable label
+  | (label, parsed, reached) <- probed
+  ]
+  where
+    identityFor address =
+      Text.pack . show . pretty . AsBase58
+        <$> lookup address
+          [(peerAddress, signingKey) | (signingKey, peerAddress) <- peerList]
+
 runCLI :: IO ()
 runCLI = do
 
@@ -294,16 +340,10 @@ runCLI = do
         let socketPath = fromMaybe (getRpcSocketName conf) (view rpcOptAddr rpc)
 
         bootstrap <- bootstrapDnsProbe conf
+        let configuredEntries = knownPeerEntries conf
 
-        runtime <- Exception.try @SomeException $
-          withRPC2 @PeerAPI @UNIX socketPath $ \caller -> do
-            poke <- callRpcWaitRetry @RpcPoke (TimeoutSec 0.5) 2 caller ()
-            peers <- case poke of
-              Nothing -> pure Nothing
-              Just _ -> fmap length <$> callRpcWaitRetry @RpcPeers (TimeoutSec 1) 2 caller ()
-            pure (Text.pack <$> poke, peers)
-
-        let (poke, peers) = fromRight (Nothing, Nothing) runtime
+        (poke, peers, configured) <- doctorRuntimeProbe socketPath configuredEntries
+        let
             report = diagnose DoctorFacts
               { doctorCLIVersion = Text.pack (showVersion Pkg.version)
               , doctorConfigPath = configPath
@@ -312,6 +352,7 @@ runCLI = do
               , doctorPoke = poke
               , doctorPeerCount = peers
               , doctorBootstrap = maybe DoctorBootstrapDisabled DoctorBootstrapChecked bootstrap
+              , doctorConfiguredPeers = configured
               }
 
         if json

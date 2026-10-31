@@ -59,9 +59,9 @@ Delivery slices:
 
 - **D1, local runtime (implemented):** config path, selected RPC socket,
   daemon response, CLI/daemon version agreement, and connected peer count.
-- **D2, network:** bootstrap resolution (implemented), configured relay
-  reachability, peer identity, advertised transports, and policy-relevant peer
-  metadata.
+- **D2, network:** bootstrap resolution, configured relay reachability, and
+  signed peer identity (implemented); advertised transports and
+  policy-relevant peer metadata remain.
 - **D3, repository:** LWWRef, manifest, RefLog, complete snapshot/provider, and
   required sigils for a repository key.
 - **D4, forge:** declared mailbox, current policy version and PoW, local sender

@@ -6,20 +6,28 @@ Run the doctor from the same user account and environment as the peer:
 hbs2-peer doctor
 ```
 
-The command does not change peer state. It checks the local peer and its DNS
-bootstrap boundary in five steps:
+The command does not write configuration or stored data. It checks the local
+peer and its network boundary in six steps:
 
 - `config` — which configuration file was selected and whether it exists;
 - `rpc` — which Unix socket was selected and whether the daemon answers;
 - `version` — whether the CLI and the running daemon have the same version;
 - `peers` — how many network peers the daemon currently sees;
 - `bootstrap` — whether each configured bootstrap DNS name returns at least
-  one usable peer address.
+  one usable peer address;
+- `configured-peers` — whether every `known-peer` entry parses, answers a
+  signed handshake, and exposes the identity that signed it.
 
 The bootstrap check makes bounded DNS TXT queries. It uses the same
 `bootstrap-dns` entries and built-in `bootstrap.hbs2.app` name as the peer,
 and counts only records that parse as supported peer addresses. With
 `bootstrap off`, it makes no bootstrap query and reports the check as skipped.
+
+The configured-peer check sends a bounded diagnostic handshake probe to each
+`known-peer`. A successful result names both the configured address and the
+verified signing key. This can refresh the daemon's in-memory known-peer state,
+but does not rewrite its config or persistent storage. With no `known-peer`
+entries, the check is skipped.
 
 A healthy local peer prints one line per check and ends with `doctor: OK`.
 Every failed check prints a `remedy:` line. A warning, such as having no
@@ -92,11 +100,18 @@ optional remedy.
   or returned records that are not supported peer addresses. Check the named
   DNS record or add a reachable `known-peer` entry. If DNS discovery was
   intentionally disabled for this peer, set `bootstrap off` in its config.
+- `no configured peer answered a signed handshake` — all configured addresses
+  were syntactically valid, but none completed the peer handshake. Check the
+  addresses, the remote services, and firewall reachability.
+- `invalid known-peer entries` — fix or remove the named entries. Invalid
+  addresses are not silently counted as unreachable peers.
 
 ## Current scope
 
-The current doctor implements the local-runtime slice and bootstrap resolution
-from the network slice. It does **not** yet accept `--repo` and does not prove
-relay reachability, repository availability, sigil propagation, or mailbox
-delivery. The remaining network, repository, and forge checks are tracked as
-D2-D4 in the [product-readiness roadmap](product-roadmap.md).
+The current doctor implements the local-runtime slice plus bootstrap resolution,
+configured-peer reachability, and verified peer identity from the network
+slice. It does **not** yet accept `--repo` and does not inspect advertised
+transports or peer metadata, or prove repository availability, sigil
+propagation, or mailbox delivery. The remaining network, repository, and forge
+checks are tracked as D2-D4 in the
+[product-readiness roadmap](product-roadmap.md).
