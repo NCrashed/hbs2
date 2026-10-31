@@ -208,6 +208,7 @@ test-suite spec
       HBS2.Git3.Repo.InitSpec
       HBS2.Git3.Repo.LeaseSpec
       HBS2.Git3.State.WaitSpec
+      HBS2.Git3.ExportSpec
       -- HBS2.Git3.Git.PackSpec
       -- Data.Config.Suckless.KeyValueSpec
       -- Data.Config.Suckless.AesonSpec
