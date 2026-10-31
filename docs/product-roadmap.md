@@ -88,7 +88,8 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 - complete the three-node offline-owner M1 scenario;
 - freeze and test the snapshot/inventory/receipt encodings (completed
   2026-10-31 for the provider-local v1 wire types);
-- publish and retrieve signed replica advertisements;
+- publish and retrieve signed replica advertisements (wire type and verified
+  provider-local lifecycle completed 2026-10-31; network publication open);
 - find a complete provider from the repository key;
 - maintain a replica target with make-before-break replacement.
 

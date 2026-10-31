@@ -10,6 +10,10 @@ module HBS2.Peer.Proto.RepositoryLease
   , RepositoryLeasePin(..)
   , RepositoryLeaseReceipt(..)
   , ReplicaReceiptV1(..)
+  , RepositoryReplicaAdvert(..)
+  , ReplicaAdvertV1(..)
+  , replicaAdvertCapabilityBlockDownload
+  , replicaAdvertCanServeBlocks
   , repositoryLeaseCurrentVersion
   , repositoryLeaseVersionSupported
   , repositoryLeaseLifetimeAt
@@ -19,6 +23,7 @@ module HBS2.Peer.Proto.RepositoryLease
   ) where
 
 import HBS2.Data.Types.Refs
+import HBS2.Base58 (AsBase58(..))
 import HBS2.Hash
 import HBS2.Net.Auth.Credentials hiding (decode, encode)
 import HBS2.Prelude.Plated
@@ -28,6 +33,7 @@ import Codec.CBOR.Write (toLazyByteString)
 import Codec.CBOR.Decoding (Decoder, decodeListLen, decodeWord)
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeWord)
 import Codec.Serialise (Serialise(..), deserialiseOrFail)
+import Data.Bits ((.&.))
 import Data.Word
 
 newtype RepositoryLeaseId = RepositoryLeaseId
@@ -336,6 +342,71 @@ instance Serialise ReplicaReceiptV1 where
     ReplicaReceiptV1
       <$> decode <*> decode <*> decode <*> decode <*> decode
       <*> decode <*> decode <*> decode <*> decode <*> decode
+
+-- | Provider-owned ref for its current advertisement of one repository.
+-- Deleting this ref is the local withdrawal operation; remote copies remain
+-- harmless because every advertisement has a short signed expiry.
+data RepositoryReplicaAdvert = RepositoryReplicaAdvert
+  (PubKey 'Sign 'HBS2Basic)
+  (PubKey 'Sign 'HBS2Basic)
+  deriving stock (Eq, Ord, Generic)
+
+instance RefMetaData RepositoryReplicaAdvert where
+  refMetaData _ = [("kind", "repository-replica-advert")]
+
+instance Hashed HbSync RepositoryReplicaAdvert where
+  hashObject (RepositoryReplicaAdvert repository provider) =
+    hashObject
+      ("hbs2-repository-replica-advert-v1\0"
+        <> serialise (repository, provider))
+
+instance Pretty RepositoryReplicaAdvert where
+  pretty (RepositoryReplicaAdvert repository provider) =
+    "repository-replica-advert:"
+      <> pretty (AsBase58 repository) <> ":" <> pretty (AsBase58 provider)
+
+-- | Short-lived provider statement used by replica lookup.  The receipt hash
+-- binds the discovery hint to independently verifiable evidence, while the
+-- endpoint list tells a fresh node how to reach the ordinary block plane.
+data ReplicaAdvertV1 = ReplicaAdvertV1
+  { replicaAdvertVersion       :: Word16
+  , replicaAdvertRepository    :: PubKey 'Sign 'HBS2Basic
+  , replicaAdvertProvider      :: PubKey 'Sign 'HBS2Basic
+  , replicaAdvertSnapshotId    :: HashRef
+  , replicaAdvertReceipt       :: HashRef
+  , replicaAdvertReachableVia  :: [PeerAddr L4Proto]
+  , replicaAdvertCapabilities  :: Word64
+  , replicaAdvertIssuedAt      :: Word64
+  , replicaAdvertExpiresAt     :: Word64
+  }
+  deriving stock (Eq, Show, Generic)
+
+-- Keep this codec explicit from its first release: repository lookup nodes
+-- must be able to relay the signed bytes without silently changing the shape.
+instance Serialise ReplicaAdvertV1 where
+  encode ReplicaAdvertV1{..} =
+       encodeRecordHeader 10
+    <> encode replicaAdvertVersion
+    <> encode replicaAdvertRepository
+    <> encode replicaAdvertProvider
+    <> encode replicaAdvertSnapshotId
+    <> encode replicaAdvertReceipt
+    <> encode replicaAdvertReachableVia
+    <> encode replicaAdvertCapabilities
+    <> encode replicaAdvertIssuedAt
+    <> encode replicaAdvertExpiresAt
+  decode = do
+    decodeRecordHeader "ReplicaAdvertV1" 10
+    ReplicaAdvertV1
+      <$> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode
+
+replicaAdvertCapabilityBlockDownload :: Word64
+replicaAdvertCapabilityBlockDownload = 1
+
+replicaAdvertCanServeBlocks :: ReplicaAdvertV1 -> Bool
+replicaAdvertCanServeBlocks advert =
+  replicaAdvertCapabilities advert .&. replicaAdvertCapabilityBlockDownload /= 0
 
 -- Generic-derived product encodings begin with a list containing a zero
 -- constructor tag.  Keeping that framing makes this explicit codec compatible

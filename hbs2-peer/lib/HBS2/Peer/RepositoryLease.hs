@@ -2,13 +2,17 @@ module HBS2.Peer.RepositoryLease
   ( RepositoryBlockRole(..)
   , RepositorySnapshotCandidate(..)
   , RepositorySnapshotError(..)
+  , RepositoryAdvertError(..)
   , discoverRepositoryRefLogKey
   , discoverRepositorySnapshot
   , sealRepositorySnapshot
   , issueRepositoryReplicaReceipt
   , readRepositoryReplicaReceipt
+  , issueRepositoryReplicaAdvertAt
+  , readRepositoryReplicaAdvertAt
   , releaseRepositoryLeasePin
   , releaseRepositoryReplicaReceipt
+  , releaseRepositoryReplicaAdvert
   ) where
 
 import HBS2.Data.Types.Refs
@@ -30,6 +34,7 @@ import HBS2.Storage.Operations.ByteString
 import Codec.Serialise
 import Control.Exception (SomeException, try)
 import Control.Monad.Except
+import Data.Bits ((.&.))
 import Data.ByteString.Lazy (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Config.Suckless.Script
@@ -91,6 +96,23 @@ data RepositorySnapshotError
   | RepositoryReceiptMismatch
   deriving stock (Eq, Show)
 
+data RepositoryAdvertError
+  = RepositoryAdvertLeaseInactive
+  | RepositoryAdvertSnapshotMismatch
+  | RepositoryAdvertReceiptMismatch
+  | RepositoryAdvertInvalidLifetime
+  | RepositoryAdvertNoReachableAddress
+  | RepositoryAdvertCannotServeBlocks
+  | RepositoryAdvertStoreFailed
+  | RepositoryAdvertMissing
+  | RepositoryAdvertBlockMissing HashRef
+  | RepositoryAdvertMalformed HashRef
+  | RepositoryAdvertInvalid HashRef
+  | RepositoryAdvertMismatch
+  | RepositoryAdvertNotYetValid
+  | RepositoryAdvertExpired
+  deriving stock (Eq, Show)
+
 discoverRepositorySnapshot
   :: InventoryLimits
   -> AnyStorage
@@ -104,7 +126,7 @@ discoverRepositorySnapshot limits sto repository = runExceptT do
                   >>= note RepositoryRefLogMissing . fmap HashRef
 
   updateHashes <- readLogOr (RepositoryRefLogIncomplete refLogRoot) refLogRoot
-  txRoots <- fmap concat $ forM updateHashes (readUpdate refLogKey)
+  txRoots <- concat <$> forM updateHashes (readUpdate refLogKey)
 
   groupJournal <- fmap concat $ forM (drop 1 headItems) $ \root -> do
     refs <- readLogOr (RepositoryHeadIncomplete root) root
@@ -441,3 +463,154 @@ readRepositoryReplicaReceipt sto leaseId = runExceptT do
 
 releaseRepositoryReplicaReceipt :: AnyStorage -> RepositoryLeaseId -> IO ()
 releaseRepositoryReplicaReceipt sto = delRef sto . RepositoryLeaseReceipt
+
+-- | Create the provider's short-lived discovery hint only from an already
+-- active lease and its verified receipt.  The lifetime is deliberately capped
+-- so a lost withdrawal cannot leave a long-lived stale provider behind.
+issueRepositoryReplicaAdvertAt
+  :: Word64
+  -> Word64
+  -> [PeerAddr L4Proto]
+  -> Word64
+  -> AnyStorage
+  -> PeerCredentials 'HBS2Basic
+  -> RepositoryLease
+  -> RepositorySnapshot
+  -> IO (Either RepositoryAdvertError (HashRef, ReplicaAdvertV1))
+issueRepositoryReplicaAdvertAt now lifetime reachable capabilities
+  sto credentials lease snapshot = runExceptT do
+    unless (repositoryLeaseState lease == RepositoryLeaseActive) $
+      throwError RepositoryAdvertLeaseInactive
+    unless (repositoryLeaseSnapshot lease == Just snapshot) $
+      throwError RepositoryAdvertSnapshotMismatch
+    unless (now < maxBound && lifetime > 0
+            && lifetime <= maxReplicaAdvertLifetime) $
+      throwError RepositoryAdvertInvalidLifetime
+    when (null reachable) $
+      throwError RepositoryAdvertNoReachableAddress
+    unless (capabilities .&. replicaAdvertCapabilityBlockDownload /= 0) $
+      throwError RepositoryAdvertCannotServeBlocks
+
+    (receiptHash, receiptSigner, receipt) <-
+      liftIO (readRepositoryReplicaReceipt sto (repositoryLeaseId lease))
+        >>= either (const (throwError RepositoryAdvertReceiptMismatch)) pure
+
+    let provider = view peerSignPk credentials
+    unless (receiptSigner == provider
+            && receiptMatchesAdvert provider lease snapshot receipt) $
+      throwError RepositoryAdvertReceiptMismatch
+
+    let expiresAt = now + min lifetime (maxBound - now)
+        payload = ReplicaAdvertV1
+          { replicaAdvertVersion = 1
+          , replicaAdvertRepository = repositoryLeaseRepository lease
+          , replicaAdvertProvider = provider
+          , replicaAdvertSnapshotId = repositorySnapshotId snapshot
+          , replicaAdvertReceipt = receiptHash
+          , replicaAdvertReachableVia = reachable
+          , replicaAdvertCapabilities = capabilities
+          , replicaAdvertIssuedAt = now
+          , replicaAdvertExpiresAt = expiresAt
+          }
+        box = makeSignedBox @'HBS2Basic provider
+                (view peerSignSk credentials) payload
+        advertRef = RepositoryReplicaAdvert
+          (repositoryLeaseRepository lease) provider
+
+    advertHash <- putBlock sto (serialise box)
+      >>= maybe (throwError RepositoryAdvertStoreFailed) (pure . HashRef)
+    updateRef sto advertRef (fromHashRef advertHash)
+
+    (storedHash, signer, storedPayload) <-
+      liftIO (readRepositoryReplicaAdvertAt now sto
+        (repositoryLeaseRepository lease) provider)
+        >>= either throwError pure
+    unless (storedHash == advertHash && signer == provider
+            && storedPayload == payload) $
+      throwError RepositoryAdvertMismatch
+
+    pure (advertHash, payload)
+
+-- | Read through the provider-owned ref and reject malformed, forged, future,
+-- expired, or identity-mismatched hints before lookup code can return them.
+readRepositoryReplicaAdvertAt
+  :: Word64
+  -> AnyStorage
+  -> PubKey 'Sign 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> IO (Either RepositoryAdvertError
+          (HashRef, PubKey 'Sign 'HBS2Basic, ReplicaAdvertV1))
+readRepositoryReplicaAdvertAt now sto repository provider = runExceptT do
+  advertHash <- getRef sto (RepositoryReplicaAdvert repository provider)
+    >>= maybe (throwError RepositoryAdvertMissing) (pure . HashRef)
+  bytes <- getBlock sto (fromHashRef advertHash)
+    >>= maybe (throwError (RepositoryAdvertBlockMissing advertHash)) pure
+  box <- either (const (throwError (RepositoryAdvertMalformed advertHash))) pure $
+    deserialiseOrFail @(SignedBox ReplicaAdvertV1 'HBS2Basic) bytes
+  (signer, payload) <- maybe
+    (throwError (RepositoryAdvertInvalid advertHash))
+    pure
+    (unboxSignedBox0 box)
+  let actualIdentity =
+        ( replicaAdvertVersion payload
+        , signer
+        , replicaAdvertProvider payload
+        , replicaAdvertRepository payload
+        )
+      expectedIdentity = (1, provider, provider, repository)
+      validShape = and
+        [ actualIdentity == expectedIdentity
+        , replicaAdvertIssuedAt payload < replicaAdvertExpiresAt payload
+        , not (null (replicaAdvertReachableVia payload))
+        , replicaAdvertCanServeBlocks payload
+        ]
+  unless validShape $
+    throwError RepositoryAdvertMismatch
+  when (now < replicaAdvertIssuedAt payload) $
+    throwError RepositoryAdvertNotYetValid
+  when (now >= replicaAdvertExpiresAt payload) $
+    throwError RepositoryAdvertExpired
+  pure (advertHash, signer, payload)
+
+releaseRepositoryReplicaAdvert
+  :: AnyStorage
+  -> PubKey 'Sign 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> IO ()
+releaseRepositoryReplicaAdvert sto repository provider =
+  delRef sto (RepositoryReplicaAdvert repository provider)
+
+maxReplicaAdvertLifetime :: Word64
+maxReplicaAdvertLifetime = 15 * 60
+
+receiptMatchesAdvert
+  :: PubKey 'Sign 'HBS2Basic
+  -> RepositoryLease
+  -> RepositorySnapshot
+  -> ReplicaReceiptV1
+  -> Bool
+receiptMatchesAdvert provider lease snapshot receipt =
+  actual == expected
+  where
+    actual =
+      ( replicaReceiptVersion receipt
+      , replicaReceiptLeaseId receipt
+      , replicaReceiptRepository receipt
+      , replicaReceiptProvider receipt
+      , replicaReceiptSnapshotId receipt
+      , replicaReceiptInventoryRoot receipt
+      , replicaReceiptBlockCount receipt
+      , replicaReceiptLogicalBytes receipt
+      , replicaReceiptCompletedAt receipt
+      )
+    expected =
+      ( 1
+      , repositoryLeaseId lease
+      , repositoryLeaseRepository lease
+      , provider
+      , repositorySnapshotId snapshot
+      , repositorySnapshotInventoryRoot snapshot
+      , repositorySnapshotBlockCount snapshot
+      , repositorySnapshotLogicalBytes snapshot
+      , repositorySnapshotCompletedAt snapshot
+      )

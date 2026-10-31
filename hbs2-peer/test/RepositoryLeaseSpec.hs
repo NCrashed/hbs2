@@ -295,6 +295,143 @@ tests = testGroup "repository lease"
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
         getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
+  , testCase "a complete receipt produces a signed expiring replica advert" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 3
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+            reachable = ["tcp://127.0.0.1:10351"]
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+
+        active <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage initial
+        snapshot <- repositoryLeaseSnapshot active
+          & maybe (assertFailure "active lease has no snapshot") pure
+
+        issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials initial snapshot >>= \case
+            Left RepositoryAdvertLeaseInactive -> pure ()
+            other -> assertFailure ("expected an inactive lease refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 0 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected a zero TTL refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 901 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected an excessive TTL refusal, got " <> show other)
+        assertBool "the maximum advert TTL was refused" . isRight =<<
+          issueRepositoryReplicaAdvertAt
+            100 900 reachable replicaAdvertCapabilityBlockDownload
+            fixtureStorage providerCredentials active snapshot
+        issueRepositoryReplicaAdvertAt
+          maxBound 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected a saturated clock refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 60 [] replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertNoReachableAddress -> pure ()
+            other -> assertFailure ("expected an empty endpoint refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 60 reachable 0
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertCannotServeBlocks -> pure ()
+            other -> assertFailure ("expected a capability refusal, got " <> show other)
+
+        (advertHash, advert) <- issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= expectRight
+        replicaAdvertRepository advert @?= fixtureRepository
+        replicaAdvertProvider advert @?= view peerSignPk providerCredentials
+        replicaAdvertSnapshotId advert @?= repositorySnapshotId snapshot
+        replicaAdvertReachableVia advert @?= reachable
+        replicaAdvertIssuedAt advert @?= 100
+        replicaAdvertExpiresAt advert @?= 160
+
+        (storedHash, signer, storedAdvert) <- readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository (view peerSignPk providerCredentials)
+          >>= expectRight
+        storedHash @?= advertHash
+        signer @?= view peerSignPk providerCredentials
+        storedAdvert @?= advert
+
+        let wrongRepository = advert
+              { replicaAdvertRepository = goldenRepository }
+            wrongRepositoryBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) wrongRepository
+        wrongRepositoryHash <- put fixtureStorage (serialise wrongRepositoryBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) wrongRepositoryHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertMismatch -> pure ()
+            other -> assertFailure ("expected an identity mismatch, got " <> show other)
+
+        let futureAdvert = advert
+              { replicaAdvertIssuedAt = 120
+              , replicaAdvertExpiresAt = 180
+              }
+            futureAdvertBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) futureAdvert
+        futureAdvertHash <- put fixtureStorage (serialise futureAdvertBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) futureAdvertHash
+        readRepositoryReplicaAdvertAt
+          119 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertNotYetValid -> pure ()
+            other -> assertFailure ("expected a future advert refusal, got " <> show other)
+
+        let invalidInterval = advert
+              { replicaAdvertIssuedAt = replicaAdvertExpiresAt advert }
+            invalidIntervalBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) invalidInterval
+        invalidIntervalHash <- put fixtureStorage (serialise invalidIntervalBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) invalidIntervalHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertMismatch -> pure ()
+            other -> assertFailure ("expected an invalid advert interval, got " <> show other)
+
+        advertBytes <- getBlock fixtureStorage (fromHashRef advertHash)
+          >>= orThrowUser "advert block disappeared"
+        advertBox <- deserialiseOrFail
+          @(SignedBox ReplicaAdvertV1 'HBS2Basic) advertBytes
+          & either (assertFailure . show) pure
+        let forgedSignature :: SignedBox ReplicaAdvertV1 'HBS2Basic
+            forgedSignature = case advertBox of
+              SignedBox signerKey body signature ->
+                SignedBox signerKey (body <> "tampered") signature
+        forgedHash <- put fixtureStorage (serialise forgedSignature)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) forgedHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertInvalid{} -> pure ()
+            other -> assertFailure ("expected an invalid advert signature, got " <> show other)
+
+        _ <- issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= expectRight
+
+        readRepositoryReplicaAdvertAt 160 fixtureStorage fixtureRepository signer
+          >>= \case
+            Left RepositoryAdvertExpired -> pure ()
+            other -> assertFailure ("expected an expired advert, got " <> show other)
+
+        releaseRepositoryReplicaAdvert fixtureStorage fixtureRepository signer
+        readRepositoryReplicaAdvertAt 159 fixtureStorage fixtureRepository signer
+          >>= \case
+            Left RepositoryAdvertMissing -> pure ()
+            other -> assertFailure ("expected a withdrawn advert, got " <> show other)
+
   , testCase "expiry keeps the replica pinned through its grace period" $
       withRepository $ \Fixture{..} -> do
         let leaseId = makeRepositoryLeaseId fixtureRepository 4
@@ -684,10 +821,15 @@ repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
       goldenHex goldenReceipt @?=
         "8b0001820082005820bbd41f369703c8e11972458b224028470989302894eff68a143120a470c3e9af8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f3820082005820ff01ef556abfba43e66c4092cdee8c0ad1cfc0d943b9fdac4d87a0eecf6cf45018221933441a556677881a99aabbcc"
 
+  , testCase "replica advert v1 encoding is frozen" $
+      goldenHex goldenAdvert @?=
+        "8a00018200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f382008200582057f0d6cc17bb8e77a4fe9fc5dc1334a5e6f5470abd436e015a87e3a0639138c99f83008101820082820082001a7f00000119286fff011a112233441a55667788"
+
   , testCase "golden lease values round-trip" $ do
       goldenRoundTrip goldenInventoryEntry
       goldenRoundTrip goldenSnapshot
       goldenRoundTrip goldenReceipt
+      goldenRoundTrip goldenAdvert
 
   , testCase "wire decoders reject the wrong record header" $ do
       let encoded = serialise goldenInventoryEntry
@@ -751,6 +893,19 @@ goldenReceipt = ReplicaReceiptV1
   , replicaReceiptLogicalBytes = repositorySnapshotLogicalBytes goldenSnapshot
   , replicaReceiptCompletedAt = repositorySnapshotCompletedAt goldenSnapshot
   , replicaReceiptIssuedAt = 0x99aabbcc
+  }
+
+goldenAdvert :: ReplicaAdvertV1
+goldenAdvert = ReplicaAdvertV1
+  { replicaAdvertVersion = 1
+  , replicaAdvertRepository = goldenRepository
+  , replicaAdvertProvider = goldenProvider
+  , replicaAdvertSnapshotId = repositorySnapshotId goldenSnapshot
+  , replicaAdvertReceipt = goldenHash "repository-lease-golden-receipt"
+  , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+  , replicaAdvertCapabilities = replicaAdvertCapabilityBlockDownload
+  , replicaAdvertIssuedAt = 0x11223344
+  , replicaAdvertExpiresAt = 0x55667788
   }
 
 withRepository :: (Fixture -> IO a) -> IO a
