@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               hbs2-peer
-version:            0.26.0.3
+version:            0.26.0.6
 -- synopsis:
 -- description:
 license:            BSD-3-Clause
@@ -194,6 +194,7 @@ library
       HBS2.Peer.RPC.Internal.Storage
       HBS2.Peer.RPC.Internal.Types
       HBS2.Peer.CLI.Detect
+      HBS2.Peer.CLI.Doctor
       HBS2.Peer.NCQ3.Migrate.NCQ
 
     other-modules:
@@ -222,9 +223,14 @@ test-suite test
         MailboxPolicyCacheSpec
         MessageParts
         HttpListen
-        -- from app/: HttpListen exercises the config resolution the peer
-        -- itself uses, so it reads the real module rather than a copy.
+        BlockAnnouncePolicySpec
+        BlockSizeCacheStateSpec
+        DoctorSpec
+        -- from app/: these exercise the config and policy the peer itself
+        -- uses, so the tests read the real modules rather than copies.
         PeerConfig
+        BlockAnnouncePolicy
+        BlockSizeCacheState
         PeerMetaAnnounce
         PeerLogger
 
@@ -235,6 +241,7 @@ test-suite test
     main-is:          TestSuite.hs
     build-depends:
           base, hbs2-peer, hbs2-core, hbs2-storage-simple
+        , aeson
         , async
         , bytestring
         , cache
@@ -281,6 +288,7 @@ executable hbs2-peer
 
     other-modules:
                       BlockDownloadNew
+                    , BlockSizeCacheState
                     , BrainyPeerLocator
                     , ByPassWorker
                     , DownloadMon
@@ -290,6 +298,7 @@ executable hbs2-peer
                     , PeerMetaAnnounce
                     , SendBlockAnnounce
                     , CheckBlockAnnounce
+                    , BlockAnnouncePolicy
                     , CheckPeer
                     , Fetch
                     , Log
@@ -345,5 +354,3 @@ executable hbs2-peer
     hs-source-dirs:   app
 
     default-language: Haskell2010
-
-

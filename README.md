@@ -78,6 +78,8 @@ Cabal) see [`INSTALL.md`](INSTALL.md).
   short: what to type to contribute to a project or run one.
 - [`docs/hbs2-hub.md`](docs/hbs2-hub.md) - the forge: issues, pull
   requests and triage, and what is not built yet.
+- [`docs/product-roadmap.md`](docs/product-roadmap.md) - product-readiness
+  review, priorities, and verifiable release outcomes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) - how to build, test, and
   submit changes.
 - [`HISTORY.md`](HISTORY.md) - origin of the project.

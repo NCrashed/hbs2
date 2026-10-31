@@ -2,13 +2,19 @@ module HBS2.Hub.ManifestSpec (spec) where
 
 import HBS2.Hub.Types
 import HBS2.Hub.Manifest
-import HBS2.Hub.Repo.Manifest (ManifestGone(..),sigilTrouble,byHandOr,mailboxOf,sigilOf)
+import HBS2.Hub.Repo.Manifest (ManifestGone(..),sigilTrouble,byHandOr,mailboxOf,sigilOf,announceSigil)
 import HBS2.Net.Auth.Credentials.Sigil (makeSigilFromCredentials)
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Prelude.Plated (pretty,fromStringMay)
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Net.Messaging.Unix (UNIX)
+import HBS2.Net.Proto.Service
+import HBS2.Peer.RPC.API.Peer (PeerAPI,RpcAnnounce)
+import HBS2.Peer.RPC.Client (HasClientAPI(..))
+import Codec.Serialise (deserialise,serialise)
+import Control.Monad.Reader (ReaderT,ask,runReaderT)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Function ((&))
 import Data.Maybe (fromMaybe)
@@ -19,6 +25,17 @@ import Data.Text qualified as Text
 import Data.List (isInfixOf)
 import Data.IORef
 import Test.Hspec
+import UnliftIO (MonadIO,MonadUnliftIO)
+import UnliftIO.Async (withAsync,wait)
+
+newtype AnnounceM a = AnnounceM { fromAnnounceM :: ReaderT (ServiceCaller PeerAPI UNIX) IO a }
+  deriving newtype (Functor,Applicative,Monad,MonadIO,MonadUnliftIO)
+
+instance HasClientAPI PeerAPI UNIX AnnounceM where
+  getClientAPI = AnnounceM ask
+
+runAnnounceM :: ServiceCaller PeerAPI UNIX -> AnnounceM a -> IO a
+runAnnounceM caller = flip runReaderT caller . fromAnnounceM
 
 kp :: IO HubKey
 kp = _peerSignPk <$> newCredentials @'HBS2Basic
@@ -30,7 +47,7 @@ clauseOf :: HubMailbox -> Syntax C
 clauseOf = either (error . Text.unpack) id . mailboxClause
 
 spec :: Spec
-spec = resolution >> do
+spec = announce >> resolution >> do
 
   describe "PEP-18 manifest clauses" $ do
 
@@ -276,6 +293,21 @@ spec = resolution >> do
       mbox <- kp
       let h = aHash "sigil"
       sigilTrouble repo mbox h Nothing `shouldBe` Right h
+
+announce :: Spec
+announce = describe "sigil publication" $ do
+  it "asks the peer to announce the exact stored block" $ do
+    let href = HashRef (hashObject ("the sigil block" :: LBS.ByteString))
+    caller <- makeServiceCaller @PeerAPI @UNIX "unused"
+    withAsync (runAnnounceM caller (announceSigil href)) $ \announcing -> do
+      getRequest caller >>= \case
+        ServiceRequest n raw -> do
+          let (method, encodedHref) = deserialise raw :: (Int, LBS.ByteString)
+          method `shouldBe` fromInteger (findMethodIndex @RpcAnnounce @PeerAPI)
+          deserialise encodedHref `shouldBe` href
+          notifyServiceCaller caller (ServiceResponse n (Right (serialise ())))
+        other -> expectationFailure ("expected an announce request, got " <> show other)
+      wait announcing `shouldReturn` True
 
 aHash :: String -> HashRef
 aHash = HashRef . hashObject . LBS.pack
