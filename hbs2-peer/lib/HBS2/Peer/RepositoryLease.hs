@@ -9,7 +9,9 @@ module HBS2.Peer.RepositoryLease
   , issueRepositoryReplicaReceipt
   , readRepositoryReplicaReceipt
   , issueRepositoryReplicaAdvertAt
+  , decodeRepositoryReplicaAdvertAt
   , readRepositoryReplicaAdvertAt
+  , maxReplicaAdvertAddresses
   , maxReplicaAdvertLifetime
   , releaseRepositoryLeasePin
   , releaseRepositoryReplicaReceipt
@@ -103,12 +105,16 @@ data RepositoryAdvertError
   | RepositoryAdvertReceiptMismatch
   | RepositoryAdvertInvalidLifetime
   | RepositoryAdvertNoReachableAddress
+  | RepositoryAdvertTooManyAddresses
+  | RepositoryAdvertTooLarge
   | RepositoryAdvertCannotServeBlocks
   | RepositoryAdvertStoreFailed
   | RepositoryAdvertMissing
   | RepositoryAdvertBlockMissing HashRef
   | RepositoryAdvertMalformed HashRef
   | RepositoryAdvertInvalid HashRef
+  | RepositoryAdvertWireMalformed
+  | RepositoryAdvertWireInvalid
   | RepositoryAdvertMismatch
   | RepositoryAdvertNotYetValid
   | RepositoryAdvertExpired
@@ -311,6 +317,13 @@ repositoryEdges RepositoryMerkleLog href bytes =
     Left e -> Left ("malformed Merkle log " <> show href <> ": " <> show e)
     Right tree -> Right (treeEdges RepositoryMerkleLog RepositoryOpaque tree)
 repositoryEdges RepositoryContentTree href bytes =
+  contentTreeEdges href bytes
+
+contentTreeEdges
+  :: HashRef
+  -> ByteString
+  -> Either String [(RepositoryBlockRole, HashRef)]
+contentTreeEdges href bytes =
   case deserialiseOrFail @(MTreeAnn [HashRef]) bytes of
     Right MTreeAnn{..} -> Right $
          annotationEdges _mtaMeta
@@ -489,6 +502,8 @@ issueRepositoryReplicaAdvertAt now lifetime reachable capabilities
       throwError RepositoryAdvertInvalidLifetime
     when (null reachable) $
       throwError RepositoryAdvertNoReachableAddress
+    when (length reachable > maxReplicaAdvertAddresses) $
+      throwError RepositoryAdvertTooManyAddresses
     unless (capabilities .&. replicaAdvertCapabilityBlockDownload /= 0) $
       throwError RepositoryAdvertCannotServeBlocks
 
@@ -515,10 +530,14 @@ issueRepositoryReplicaAdvertAt now lifetime reachable capabilities
           }
         box = makeSignedBox @'HBS2Basic provider
                 (view peerSignSk credentials) payload
+        boxBytes = serialise box
         advertRef = RepositoryReplicaAdvert
           (repositoryLeaseRepository lease) provider
 
-    advertHash <- putBlock sto (serialise box)
+    when (LBS.length boxBytes > fromIntegral repositoryAdvertMaxBoxBytes) $
+      throwError RepositoryAdvertTooLarge
+
+    advertHash <- putBlock sto boxBytes
       >>= maybe (throwError RepositoryAdvertStoreFailed) (pure . HashRef)
     updateRef sto advertRef (fromHashRef advertHash)
 
@@ -546,32 +565,56 @@ readRepositoryReplicaAdvertAt now sto repository provider = runExceptT do
     >>= maybe (throwError RepositoryAdvertMissing) (pure . HashRef)
   bytes <- getBlock sto (fromHashRef advertHash)
     >>= maybe (throwError (RepositoryAdvertBlockMissing advertHash)) pure
-  box <- either (const (throwError (RepositoryAdvertMalformed advertHash))) pure $
+  (signer, payload) <- liftIO (decodeRepositoryReplicaAdvertAt now bytes)
+    >>= either (throwError . localAdvertError advertHash) pure
+  unless (signer == provider
+          && replicaAdvertProvider payload == provider
+          && replicaAdvertRepository payload == repository) $
+    throwError RepositoryAdvertMismatch
+  pure (advertHash, signer, payload)
+
+-- | Verify an opaque network advert without trusting the relay which carried
+-- it.  Receipt availability is checked later by the retrieval path; discovery
+-- accepts only a provider-signed, short-lived and usable hint.
+decodeRepositoryReplicaAdvertAt
+  :: Word64
+  -> ByteString
+  -> IO (Either RepositoryAdvertError
+          (PubKey 'Sign 'HBS2Basic, ReplicaAdvertV1))
+decodeRepositoryReplicaAdvertAt now bytes = runExceptT do
+  when (LBS.length bytes > fromIntegral repositoryAdvertMaxBoxBytes) $
+    throwError RepositoryAdvertTooLarge
+  box <- either (const (throwError RepositoryAdvertWireMalformed)) pure $
     deserialiseOrFail @(SignedBox ReplicaAdvertV1 'HBS2Basic) bytes
   (signer, payload) <- maybe
-    (throwError (RepositoryAdvertInvalid advertHash))
+    (throwError RepositoryAdvertWireInvalid)
     pure
     (unboxSignedBox0 box)
-  let actualIdentity =
-        ( replicaAdvertVersion payload
-        , signer
-        , replicaAdvertProvider payload
-        , replicaAdvertRepository payload
-        )
-      expectedIdentity = (1, provider, provider, repository)
+  let issuedAt = replicaAdvertIssuedAt payload
+      expiresAt = replicaAdvertExpiresAt payload
+      reachable = replicaAdvertReachableVia payload
       validShape = and
-        [ actualIdentity == expectedIdentity
-        , replicaAdvertIssuedAt payload < replicaAdvertExpiresAt payload
-        , not (null (replicaAdvertReachableVia payload))
+        [ replicaAdvertVersion payload == 1
+        , signer == replicaAdvertProvider payload
+        , issuedAt < expiresAt
+        , expiresAt - issuedAt <= maxReplicaAdvertLifetime
+        , not (null reachable)
+        , length reachable <= maxReplicaAdvertAddresses
         , replicaAdvertCanServeBlocks payload
         ]
   unless validShape $
     throwError RepositoryAdvertMismatch
-  when (now < replicaAdvertIssuedAt payload) $
+  when (now < issuedAt) $
     throwError RepositoryAdvertNotYetValid
-  when (now >= replicaAdvertExpiresAt payload) $
+  when (now >= expiresAt) $
     throwError RepositoryAdvertExpired
-  pure (advertHash, signer, payload)
+  pure (signer, payload)
+
+localAdvertError :: HashRef -> RepositoryAdvertError -> RepositoryAdvertError
+localAdvertError advertHash = \case
+  RepositoryAdvertWireMalformed -> RepositoryAdvertMalformed advertHash
+  RepositoryAdvertWireInvalid -> RepositoryAdvertInvalid advertHash
+  other -> other
 
 releaseRepositoryReplicaAdvert
   :: AnyStorage
@@ -583,6 +626,9 @@ releaseRepositoryReplicaAdvert sto repository provider =
 
 maxReplicaAdvertLifetime :: Word64
 maxReplicaAdvertLifetime = 15 * 60
+
+maxReplicaAdvertAddresses :: Int
+maxReplicaAdvertAddresses = 8
 
 receiptMatchesAdvert
   :: PubKey 'Sign 'HBS2Basic

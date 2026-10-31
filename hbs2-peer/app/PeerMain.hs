@@ -87,6 +87,7 @@ import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.Notify
 import HBS2.Peer.CLI.Doctor
+import HBS2.Peer.RepositoryLease.Discovery
 import HBS2.Peer.RPC.Client.Unix (withRPC2)
 import HBS2.Peer.RPC.Client.StorageClient
 
@@ -1016,6 +1017,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   byPassMessagingSetProbe byPass byPassProbe
 
   penv <- newPeerEnv pl (AnyStorage s) (Fabriq byPass) peerSelf
+  repositoryAdvertCache <- liftIO newRepositoryAdvertCache
   do
     probe <- newSimpleProbe "PeerEnv_Main"
     addProbe probe
@@ -1129,6 +1131,12 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
               let hshakeAdapter = PeerHandshakeAdapter addNewRtt ownReachableVia
 
               env <- ask
+
+              let publishRepositoryAdvert bytes = withPeerM env do
+                    now <- liftIO getPOSIXTime <&> floor
+                    void $ liftIO $ insertRepositoryAdvertAt
+                      now repositoryAdvertCache bytes
+                    broadCastMessage @e (RepositoryAdvertPublish bytes)
 
               pnonce <- peerNonce @e
 
@@ -1337,7 +1345,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "repositoryLeaseWorker" $
                   liftIO (repositoryLeaseWorker leaseAdvertReachable
-                    pc (SomeBrains brains) (AnyStorage s))
+                    publishRepositoryAdvert pc (SomeBrains brains) (AnyStorage s))
 
                 -- setup mailboxes stuff
                 let PeerConfig defConf = coerce conf
@@ -1368,6 +1376,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     -- TODO: change-all-to-authorized
                     , makeResponse ((authorized . subscribed (SomeBrains brains)) lwwRefProtoA)
                     , makeResponse ((authorized . mailboxProto False) mailboxWorker)
+                    , makeResponse (authorized (repositoryAdvertProto repositoryAdvertCache))
                     ]
 
 

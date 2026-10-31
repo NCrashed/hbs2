@@ -3,8 +3,9 @@
 Status: draft; provider-local lease MVP implemented 2026-10-30, including
 provider-signed local receipts, explicit expiry grace, and aggregate capacity
 admission on 2026-10-31. Durable update-lag tracking was added on 2026-10-31.
-Bilateral wire contracts, advertisements, and barter accounting are not part
-of this implementation.
+Signed replica advert publication and relay discovery are implemented by the
+PEP-16/M4 layer above this provider-local contract. Bilateral wire contracts
+and barter accounting are not part of this implementation.
 
 Author: NCrashed (Anton Gushcha)
 

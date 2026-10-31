@@ -15,6 +15,7 @@ import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.Brains
 import HBS2.Peer.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Peer.RepositoryLease.Discovery
 import HBS2.Peer.RepositoryLease.Worker
 import HBS2.Prelude.Plated
 import HBS2.Storage
@@ -343,6 +344,20 @@ tests = testGroup "repository lease"
             Left RepositoryAdvertNoReachableAddress -> pure ()
             other -> assertFailure ("expected an empty endpoint refusal, got " <> show other)
         issueRepositoryReplicaAdvertAt
+          100 60 (replicate 9 "tcp://127.0.0.1:10351")
+          replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertTooManyAddresses -> pure ()
+            other -> assertFailure ("expected an endpoint limit refusal, got " <> show other)
+        let oversizedAddress = fromString $
+              "tcp://" <> replicate repositoryAdvertMaxBoxBytes 'a' <> ":10351"
+        issueRepositoryReplicaAdvertAt
+          100 60 [oversizedAddress]
+          replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertTooLarge -> pure ()
+            other -> assertFailure ("expected an advert size refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
           100 60 reachable 0
           fixtureStorage providerCredentials active snapshot >>= \case
             Left RepositoryAdvertCannotServeBlocks -> pure ()
@@ -435,6 +450,79 @@ tests = testGroup "repository lease"
             Left RepositoryAdvertMissing -> pure ()
             other -> assertFailure ("expected a withdrawn advert, got " <> show other)
 
+  , testCase "the relay cache verifies, bounds, renews, and expires adverts" $ do
+      repository <- newRepositoryKey
+      firstProvider <- newCredentials @'HBS2Basic
+      secondProvider <- newCredentials @'HBS2Basic
+      cache <- newRepositoryAdvertCache
+      let first = signedAdvertBytes firstProvider repository 100 160
+          stale = signedAdvertBytes firstProvider repository 90 150
+          renewed = signedAdvertBytes firstProvider repository 120 180
+          second = signedAdvertBytes secondProvider repository 100 170
+      insertRepositoryAdvertAt 100 cache first
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      insertRepositoryAdvertAt 100 cache first
+        >>= (@?= Right RepositoryAdvertCacheUnchanged)
+      insertRepositoryAdvertAt 100 cache stale
+        >>= (@?= Right RepositoryAdvertCacheStale)
+      lookupRepositoryAdvertsAt 100 cache repository 8 >>= (@?= [first])
+      insertRepositoryAdvertAt 120 cache renewed
+        >>= (@?= Right RepositoryAdvertCacheReplaced)
+      insertRepositoryAdvertAt 120 cache second
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      lookupRepositoryAdvertsAt 120 cache repository 1 >>= \results ->
+        length results @?= 1
+      lookupRepositoryAdvertsAt 120 cache repository maxBound >>= \results ->
+        length results @?= 2
+      repositoryAdvertCacheSizeAt 169 cache >>= (@?= 2)
+      repositoryAdvertCacheSizeAt 170 cache >>= (@?= 1)
+      repositoryAdvertCacheSizeAt 180 cache >>= (@?= 0)
+
+  , testCase "the relay cache rejects invalid and excess providers" $ do
+      repository <- newRepositoryKey
+      cache <- newRepositoryAdvertCache
+      credentials <- replicateM
+        (repositoryAdvertCacheMaxProviders + 1)
+        (newCredentials @'HBS2Basic)
+      for_ (zip [1 :: Word64 ..] (take repositoryAdvertCacheMaxProviders credentials)) $
+        \(offset, provider) ->
+          insertRepositoryAdvertAt 110 cache
+            (signedAdvertBytes provider repository (100 + offset) (160 + offset))
+              >>= (@?= Right RepositoryAdvertCacheInserted)
+      insertRepositoryAdvertAt 110 cache
+        (signedAdvertBytes (last credentials) repository 110 170)
+          >>= (@?= Left RepositoryAdvertCacheFull)
+      let signer = head credentials
+          wrongProvider = view peerSignPk (credentials !! 1)
+          invalidPayload = (networkAdvertPayload signer repository 100 160)
+            { replicaAdvertProvider = wrongProvider }
+          invalidBox = makeSignedBox @'HBS2Basic
+            (view peerSignPk signer) (view peerSignSk signer) invalidPayload
+      insertRepositoryAdvertAt 110 cache
+        (LBS.toStrict (serialise invalidBox)) >>= \case
+          Left (RepositoryAdvertCacheInvalid RepositoryAdvertMismatch) -> pure ()
+          other -> assertFailure ("expected an invalid signed identity, got " <> show other)
+      insertRepositoryAdvertAt 110 cache
+        (B8.replicate (repositoryAdvertMaxBoxBytes + 1) 'x') >>= \case
+          Left (RepositoryAdvertCacheInvalid RepositoryAdvertTooLarge) -> pure ()
+          other -> assertFailure ("expected an oversized advert refusal, got " <> show other)
+
+  , testCase "the relay cache admits exactly its repository limit" $ do
+      provider <- newCredentials @'HBS2Basic
+      repositories <- replicateM
+        (repositoryAdvertCacheMaxRepositories + 1)
+        newRepositoryKey
+      cache <- newRepositoryAdvertCache
+      for_ (take repositoryAdvertCacheMaxRepositories repositories) $ \repository ->
+        insertRepositoryAdvertAt 100 cache
+          (signedAdvertBytes provider repository 100 160)
+            >>= (@?= Right RepositoryAdvertCacheInserted)
+      repositoryAdvertCacheSizeAt 100 cache
+        >>= (@?= repositoryAdvertCacheMaxRepositories)
+      insertRepositoryAdvertAt 100 cache
+        (signedAdvertBytes provider (last repositories) 100 160)
+          >>= (@?= Left RepositoryAdvertCacheFull)
+
   , testCase "the worker advert maintainer renews only at its boundary" $
       withRepository $ \Fixture{..} -> do
         let leaseId = makeRepositoryLeaseId fixtureRepository 5
@@ -495,6 +583,8 @@ tests = testGroup "repository lease"
               getRef fixtureStorage advertRef >>= (@?= Nothing)
         assertPolicyWithdrawal RepositoryAdvertNoReachableAddress
           policy { advertPolicyReachableVia = [] } active
+        assertPolicyWithdrawal RepositoryAdvertTooManyAddresses
+          policy { advertPolicyReachableVia = replicate 9 "tcp://127.0.0.1:10351" } active
         assertPolicyWithdrawal RepositoryAdvertCannotServeBlocks
           policy { advertPolicyCapabilities = 0 } active
         assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
@@ -922,6 +1012,7 @@ repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
   , testCase "replica advert lookup encodings are frozen and bounded" $ do
       repositoryAdvertMaxResults @?= 8
       repositoryAdvertMaxQueryIdBytes @?= 32
+      repositoryAdvertMaxBoxBytes @?= 16 * 1024
       goldenHex goldenAdvertPublish @?= "82004d7369676e65642d616476657274"
       goldenHex goldenAdvertLookup @?=
         "84014871756572792d30318200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf08"
@@ -949,6 +1040,11 @@ repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
             RepositoryAdvertLookup oversizedQuery goldenRepository 1
       assertBool "an oversized remote query id was accepted" $
         isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedQueryWire)
+      let oversizedAdvertWire = serialise $
+            RepositoryAdvertPublish (B8.replicate
+              (repositoryAdvertMaxBoxBytes + 1) 'a')
+      assertBool "an oversized signed advert box was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedAdvertWire)
       let maximumQuery = RepositoryAdvertQueryId $
             B8.replicate repositoryAdvertMaxQueryIdBytes 'q'
           maximumQueryMessage = RepositoryAdvertLookup
@@ -1041,6 +1137,32 @@ goldenAdvert = ReplicaAdvertV1
   , replicaAdvertIssuedAt = 0x11223344
   , replicaAdvertExpiresAt = 0x55667788
   }
+
+networkAdvertPayload
+  :: PeerCredentials 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> ReplicaAdvertV1
+networkAdvertPayload credentials repository issuedAt expiresAt = goldenAdvert
+  { replicaAdvertRepository = repository
+  , replicaAdvertProvider = view peerSignPk credentials
+  , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+  , replicaAdvertIssuedAt = issuedAt
+  , replicaAdvertExpiresAt = expiresAt
+  }
+
+signedAdvertBytes
+  :: PeerCredentials 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> B8.ByteString
+signedAdvertBytes credentials repository issuedAt expiresAt =
+  LBS.toStrict $ serialise $ makeSignedBox @'HBS2Basic
+    (view peerSignPk credentials)
+    (view peerSignSk credentials)
+    (networkAdvertPayload credentials repository issuedAt expiresAt)
 
 goldenAdvertPublish :: RepositoryAdvertMessage
 goldenAdvertPublish = RepositoryAdvertPublish "signed-advert"

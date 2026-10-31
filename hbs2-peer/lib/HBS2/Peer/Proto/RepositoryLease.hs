@@ -15,6 +15,7 @@ module HBS2.Peer.Proto.RepositoryLease
   , RepositoryAdvertQueryId(..)
   , RepositoryAdvertMessage(..)
   , repositoryAdvertMaxQueryIdBytes
+  , repositoryAdvertMaxBoxBytes
   , repositoryAdvertMaxResults
   , boundRepositoryAdvertResults
   , replicaAdvertCapabilityBlockDownload
@@ -422,6 +423,9 @@ newtype RepositoryAdvertQueryId = RepositoryAdvertQueryId ByteString
 repositoryAdvertMaxQueryIdBytes :: Int
 repositoryAdvertMaxQueryIdBytes = 32
 
+repositoryAdvertMaxBoxBytes :: Int
+repositoryAdvertMaxBoxBytes = 16 * 1024
+
 instance Serialise RepositoryAdvertQueryId where
   encode (RepositoryAdvertQueryId queryId) = encode queryId
   decode = do
@@ -480,7 +484,7 @@ instance Serialise RepositoryAdvertMessage where
     arity <- decodeListLen
     tag <- decodeWord
     case (arity, tag) of
-      (2, 0) -> RepositoryAdvertPublish <$> decode
+      (2, 0) -> RepositoryAdvertPublish <$> decodeAdvertBox
       (4, 1) -> RepositoryAdvertLookup <$> decode <*> decode <*> decode
       (4, 2) -> RepositoryAdvertResults <$> decode <*> decode <*> decodeAdvertList
       _ -> fail "RepositoryAdvertMessage: invalid record header"
@@ -489,7 +493,13 @@ instance Serialise RepositoryAdvertMessage where
         count <- decodeListLen
         when (count > fromIntegral repositoryAdvertMaxResults) $
           fail "RepositoryAdvertMessage: too many results"
-        replicateM count decode
+        replicateM count decodeAdvertBox
+
+      decodeAdvertBox = do
+        advert <- decode
+        when (BS.length advert > repositoryAdvertMaxBoxBytes) $
+          fail "RepositoryAdvertMessage: advert box too large"
+        pure advert
 
 -- Generic-derived product encodings begin with a list containing a zero
 -- constructor tag.  Keeping that framing makes this explicit codec compatible

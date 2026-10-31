@@ -102,6 +102,8 @@ repositoryAdvertPolicyError
 repositoryAdvertPolicyError policy
   | null (advertPolicyReachableVia policy) =
       Just RepositoryAdvertNoReachableAddress
+  | length (advertPolicyReachableVia policy) > maxReplicaAdvertAddresses =
+      Just RepositoryAdvertTooManyAddresses
   | advertPolicyCapabilities policy
       .&. replicaAdvertCapabilityBlockDownload == 0 =
       Just RepositoryAdvertCannotServeBlocks
@@ -184,9 +186,9 @@ currentTimestamp :: IO Word64
 currentTimestamp = floor <$> getPOSIXTime
 
 incompleteLeaseState :: RepositoryLease -> RepositoryLeaseState
-incompleteLeaseState lease = case repositoryLeaseSnapshot lease of
-  Nothing -> RepositoryLeaseSyncing
-  Just{}  -> RepositoryLeaseDegraded
+incompleteLeaseState =
+  maybe RepositoryLeaseSyncing (const RepositoryLeaseDegraded)
+    . repositoryLeaseSnapshot
 
 refreshLifetime :: Word64 -> LeaseRefreshContext -> IO RepositoryLease
 refreshLifetime now context =

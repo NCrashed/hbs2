@@ -695,7 +695,7 @@ independent verifier, and measurements are still open; replica advertisement
 and automatic provider discovery remain M4 work. M2 and later are otherwise
 unchanged.
 
-The first M4 artifact slice is also implemented on 2026-10-31.
+The first M4 artifact and relay slices are also implemented on 2026-10-31.
 `ReplicaAdvertV1` has an explicit golden-tested CBOR encoding and binds the
 repository, provider, snapshot, receipt, reachable addresses, capabilities,
 issue time, and expiry under the provider signature. A provider can create it
@@ -705,17 +705,23 @@ forged, future, expired, identity-mismatched, endpoint-less, and non-serving
 adverts. Advert lifetime is currently capped at 15 minutes. The lease worker
 now publishes the provider-local advert from explicit `peer-public-address`
 values, renews it during the last five minutes without rewriting stable
-adverts, and withdraws it as soon as the lease is no longer active. Bounded
-network lookup/indexing, clone-provider selection, and hub UX remain open M4
-work.
+adverts, withdraws it as soon as the lease is no longer active, publishes a new
+advert immediately, and republishes a stable advert every minute. Signed boxes
+are capped at 16 KiB and eight reachable addresses.
 
 The bounded lookup wire envelope is frozen in the same implementation series:
 protocol id `14001` carries opaque signed-advert publication, repository-key
 queries, and query-bound result sets. Results are capped at eight adverts both
 when encoded locally and before remote list elements are decoded. Query
-identifiers are capped at 32 bytes by the decoder. The network
-handler, expiring relay cache, and client fan-out still remain to complete the
-delivery path.
+identifiers are capped at 32 bytes by the decoder. The network handler now
+accepts publication and lookup only from authenticated known peers. It verifies
+every provider signature and advert lifetime before storing the opaque box,
+relays only new or renewed adverts, and answers from an in-memory cache bounded
+to 1,024 repository keys and eight providers per key. Expired entries are
+removed on cache access; forged, future, stale, identity-mismatched, oversized,
+and unsolicited cross-repository results are discarded. The remaining M4
+delivery work is query-session binding and client fan-out, provider selection
+and dialing from the clone path, the three-node discovery scenario, and hub UX.
 
 
 ## Milestone 0: Measurement and design fixtures
