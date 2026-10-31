@@ -19,6 +19,7 @@ import HBS2.Hub.CLI.Ban
 import HBS2.Hub.CLI.Comment
 import HBS2.Hub.CLI.Compact
 import HBS2.Hub.CLI.Compose
+import HBS2.Hub.CLI.Doctor
 import HBS2.Hub.CLI.Identity
 import HBS2.Hub.CLI.Project
 import HBS2.Hub.CLI.NativeHost
@@ -74,6 +75,7 @@ hubEntries = do
   composeEntries
   sentEntries
   statusEntries
+  doctorEntries
   syncEntries
   updatesEntries
   verifyEntries
@@ -158,6 +160,7 @@ peerFulNames =
   , "hub:project:open"
   -- It reads the mailbox: see the mailbox line in its report.
   , "hub:status"
+  , "hub:doctor"
   -- It reads the manifest, for the name and the description.
   , "hub:code:refs"
   ]

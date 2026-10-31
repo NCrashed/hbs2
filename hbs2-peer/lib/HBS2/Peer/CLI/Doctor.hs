@@ -8,18 +8,36 @@
 module HBS2.Peer.CLI.Doctor
   ( CheckStatus(..)
   , DoctorCheck(..)
+  , DoctorBootstrap(..)
+  , DoctorConfiguredPeer(..)
+  , DoctorConfiguredPeers(..)
+  , DoctorPeerMetadata(..)
+  , DoctorPeerMetadataStatus(..)
+  , DoctorRepository(..)
+  , DoctorLWWRef(..)
+  , DoctorManifest(..)
+  , DoctorRefLog(..)
+  , DoctorSnapshot(..)
+  , DoctorSigils(..)
   , DoctorFacts(..)
   , DoctorReport(..)
   , diagnose
+  , doctorPeerMetadataFacts
   , doctorPassed
   , doctorJSON
   , renderDoctor
   ) where
 
 import Data.Aeson (Value, object, (.=))
-import Data.Maybe (fromMaybe)
+import HBS2.Net.Proto.Types (L4Proto, PeerAddr)
+import HBS2.Peer.Proto.PeerMeta
+import HBS2.Prelude.Plated (fromStringMay)
+
+import Control.Monad (guard)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Word (Word8, Word16)
 
 data CheckStatus
   = CheckOK
@@ -36,6 +54,136 @@ data DoctorCheck = DoctorCheck
   }
   deriving stock (Eq, Show)
 
+-- | The bounded DNS discovery probe performed by the executable. Counts are
+-- usable peer addresses, not raw TXT records: a DNS name that answers only
+-- with malformed or unsupported transports is not a route into the network.
+data DoctorBootstrap
+  = DoctorBootstrapDisabled
+  | DoctorBootstrapChecked [(Text, Int)]
+  deriving stock (Eq, Show)
+
+-- | What the daemon proved about one configured @known-peer@ address. A
+-- reachable identity comes from the signed peer handshake, not from config.
+data DoctorConfiguredPeer
+  = DoctorPeerInvalid Text
+  | DoctorPeerUnreachable Text
+  | DoctorPeerReachable Text (Maybe Text)
+  deriving stock (Eq, Show)
+
+data DoctorConfiguredPeers
+  = DoctorConfiguredPeersUnavailable
+  | DoctorConfiguredPeersChecked [DoctorConfiguredPeer]
+  deriving stock (Eq, Show)
+
+-- | Signed handshake routes and the last peer-meta announcement observed for
+-- one connected peer. The executable validates untrusted metadata at the RPC
+-- boundary; diagnosis only decides how that evidence affects user health.
+data DoctorPeerMetadata = DoctorPeerMetadata
+  { doctorMetadataIdentity :: Text
+  , doctorMetadataAddress :: Text
+  , doctorMetadataNetworkClasses :: [Text]
+  , doctorMetadataObserved :: Bool
+  , doctorMetadataTCPPort :: Maybe Int
+  , doctorMetadataHTTPPort :: Maybe Int
+  , doctorMetadataPublicAddress :: Maybe Text
+  , doctorMetadataMailboxPoW :: Maybe Int
+  , doctorMetadataInvalid :: [Text]
+  }
+  deriving stock (Eq, Show)
+
+data DoctorPeerMetadataStatus
+  = DoctorPeerMetadataUnavailable
+  | DoctorPeerMetadataChecked [DoctorPeerMetadata]
+  deriving stock (Eq, Show)
+
+-- | Repository discovery evidence, nested in the same order as the remote
+-- helper consumes it. A later boundary cannot exist without evidence for all
+-- earlier boundaries, so diagnosis cannot accidentally report a downstream
+-- symptom as the root cause.
+data DoctorRepository
+  = DoctorRepositoryNotRequested
+  | DoctorRepositoryInvalid Text
+  | DoctorRepositoryUnavailable Text
+  | DoctorRepositoryChecked Text DoctorLWWRef
+  deriving stock (Eq, Show)
+
+data DoctorLWWRef
+  = DoctorLWWRefMissing
+  | DoctorLWWRefFound DoctorManifest
+  deriving stock (Eq, Show)
+
+data DoctorManifest
+  = DoctorManifestMissing Text
+  | DoctorManifestMalformed Text
+  | DoctorManifestFound DoctorRefLog
+  deriving stock (Eq, Show)
+
+data DoctorRefLog
+  = DoctorRefLogMissing Text
+  | DoctorRefLogFound Text DoctorSnapshot
+  deriving stock (Eq, Show)
+
+data DoctorSnapshot
+  = DoctorSnapshotIncomplete Int
+  | DoctorSnapshotComplete DoctorSigils
+  deriving stock (Eq, Show)
+
+data DoctorSigils
+  = DoctorSigilsIncomplete [Text]
+  | DoctorSigilsComplete Int Int
+  deriving stock (Eq, Show)
+
+-- | Validate the untrusted association list once, at the RPC boundary. A
+-- present-but-invalid value is different evidence from an optional key that a
+-- peer did not advertise.
+doctorPeerMetadataFacts
+  :: Text
+  -> Text
+  -> [Text]
+  -> Maybe PeerMeta
+  -> DoctorPeerMetadata
+doctorPeerMetadataFacts identity address networkClasses metadata = DoctorPeerMetadata
+  { doctorMetadataIdentity = identity
+  , doctorMetadataAddress = address
+  , doctorMetadataNetworkClasses = networkClasses
+  , doctorMetadataObserved = isJust metadata
+  , doctorMetadataTCPPort = fromIntegral <$> (metadata >>= tcpPort)
+  , doctorMetadataHTTPPort = fromIntegral <$> (metadata >>= httpPort)
+  , doctorMetadataPublicAddress = metadata >>= publicAddress
+  , doctorMetadataMailboxPoW = fromIntegral <$> (metadata >>= mailboxPoW)
+  , doctorMetadataInvalid = maybe [] invalidMetadata metadata
+  }
+
+tcpPort :: PeerMeta -> Maybe Word16
+tcpPort = peerMetaNat "listen-tcp"
+
+httpPort :: PeerMeta -> Maybe Word16
+httpPort = peerMetaNat "http-port"
+
+mailboxPoW :: PeerMeta -> Maybe Word8
+mailboxPoW = peerMetaNat "mailbox-pow-min"
+
+publicAddress :: PeerMeta -> Maybe Text
+publicAddress peerMetadata = do
+  rawAddress <- peerMetaValue @String "public-address" peerMetadata
+  guard (isJust (fromStringMay @(PeerAddr L4Proto) rawAddress))
+  pure (Text.pack rawAddress)
+
+invalidMetadata :: PeerMeta -> [Text]
+invalidMetadata peerMetadata =
+  invalidField peerMetadata "listen-tcp" (tcpPort peerMetadata) <>
+  invalidField peerMetadata "http-port" (httpPort peerMetadata) <>
+  invalidField peerMetadata "public-address" (publicAddress peerMetadata) <>
+  invalidField peerMetadata "mailbox-pow-min" (mailboxPoW peerMetadata)
+
+invalidField :: PeerMeta -> Text -> Maybe a -> [Text]
+invalidField peerMetadata field parsed =
+  maybe [] (const (invalidParsed field parsed))
+    (lookup field (unPeerMeta peerMetadata))
+
+invalidParsed :: Text -> Maybe a -> [Text]
+invalidParsed field = maybe [field] (const [])
+
 data DoctorFacts = DoctorFacts
   { doctorCLIVersion :: Text
   , doctorConfigPath :: FilePath
@@ -43,6 +191,10 @@ data DoctorFacts = DoctorFacts
   , doctorRPCSocket :: FilePath
   , doctorPoke :: Maybe Text
   , doctorPeerCount :: Maybe Int
+  , doctorBootstrap :: DoctorBootstrap
+  , doctorConfiguredPeers :: DoctorConfiguredPeers
+  , doctorPeerMetadata :: DoctorPeerMetadataStatus
+  , doctorRepository :: DoctorRepository
   }
   deriving stock (Eq, Show)
 
@@ -52,11 +204,24 @@ newtype DoctorReport = DoctorReport
   deriving stock (Eq, Show)
 
 diagnose :: DoctorFacts -> DoctorReport
-diagnose facts = DoctorReport
+diagnose facts = DoctorReport $
   [ configCheck facts
   , rpcCheck facts
   , versionCheck facts
   , peersCheck facts
+  , bootstrapCheck facts
+  , configuredPeersCheck facts
+  , peerMetadataCheck facts
+  ] <> repositoryChecks (doctorRepository facts)
+
+repositoryChecks :: DoctorRepository -> [DoctorCheck]
+repositoryChecks repository =
+  [ repositoryKeyCheck repository
+  , repositoryLWWRefCheck repository
+  , repositoryManifestCheck repository
+  , repositoryRefLogCheck repository
+  , repositorySnapshotCheck repository
+  , repositorySigilsCheck repository
   ]
 
 doctorPassed :: DoctorReport -> Bool
@@ -130,6 +295,211 @@ peersCheck facts = case doctorPoke facts of
       (Just "check bootstrap DNS, known-peer entries, and firewall reachability")
     Just n -> mkCheck "peers" CheckOK (tshow n <> " network peer(s) connected") Nothing
 
+bootstrapCheck :: DoctorFacts -> DoctorCheck
+bootstrapCheck facts = case doctorBootstrap facts of
+  DoctorBootstrapDisabled ->
+    skipped "bootstrap" "DNS bootstrap is disabled in the selected configuration"
+  DoctorBootstrapChecked results
+    | null working -> mkCheck "bootstrap" CheckFailure
+        ("no usable peer addresses resolved from " <> names (fmap fst results))
+        (Just "check DNS, or add a reachable `known-peer` entry to the peer config")
+    | null failed -> mkCheck "bootstrap" CheckOK
+        ("resolved " <> tshow (sum (fmap snd working)) <> " usable peer address(es) from "
+          <> names (fmap fst working)) Nothing
+    | otherwise -> mkCheck "bootstrap" CheckWarning
+        ("some bootstrap names resolved; no usable peer address from "
+          <> names (fmap fst failed))
+        (Just "check those bootstrap-dns records, or remove names this peer should not use")
+    where
+      working = filter ((> 0) . snd) results
+      failed = filter ((== 0) . snd) results
+
+configuredPeersCheck :: DoctorFacts -> DoctorCheck
+configuredPeersCheck facts = case doctorConfiguredPeers facts of
+  DoctorConfiguredPeersUnavailable ->
+    skipped "configured-peers" "not checked because RPC is unavailable"
+  DoctorConfiguredPeersChecked probes -> configuredPeersResult probes
+
+configuredPeersResult :: [DoctorConfiguredPeer] -> DoctorCheck
+configuredPeersResult probes
+  | null probes = skipped "configured-peers" "no known-peer entries are configured"
+  | not (null invalid) = mkCheck "configured-peers" CheckFailure
+      ("invalid known-peer entries: " <> names invalid)
+      (Just "fix or remove those known-peer entries in the selected peer config")
+  | null reached = mkCheck "configured-peers" CheckFailure
+      ("no configured peer answered a signed handshake: " <> names unreachable)
+      (Just "check the peer addresses, remote service, and firewall reachability")
+  | not (null unreachable) = mkCheck "configured-peers" CheckWarning
+      ("reached " <> tshow (length reached) <> " of " <> tshow (length probes)
+        <> " configured peer(s); no answer from " <> names unreachable)
+      (Just "check the unreachable peer addresses, remote services, and firewall")
+  | not (null unidentified) = mkCheck "configured-peers" CheckWarning
+      ("all configured peers answered, but identity was unavailable for "
+        <> names unidentified)
+      (Just "run doctor again; if this persists, inspect `hbs2-peer peers`")
+  | otherwise = mkCheck "configured-peers" CheckOK
+      ("reached " <> tshow (length reached) <> " configured peer(s): "
+        <> names (fmap describe identified)) Nothing
+  where
+    invalid = [address | DoctorPeerInvalid address <- probes]
+    unreachable = [address | DoctorPeerUnreachable address <- probes]
+    reached = [() | DoctorPeerReachable _ _ <- probes]
+    unidentified = [address | DoctorPeerReachable address Nothing <- probes]
+    identified = [(address, identity) | DoctorPeerReachable address (Just identity) <- probes]
+    describe (address, identity) = address <> " as " <> identity
+
+peerMetadataCheck :: DoctorFacts -> DoctorCheck
+peerMetadataCheck = peerMetadataStatusCheck . doctorPeerMetadata
+
+peerMetadataStatusCheck :: DoctorPeerMetadataStatus -> DoctorCheck
+peerMetadataStatusCheck DoctorPeerMetadataUnavailable =
+  skipped "peer-metadata" "not checked because peer diagnostics RPC is unavailable"
+peerMetadataStatusCheck (DoctorPeerMetadataChecked peers) = peerMetadataResult peers
+
+peerMetadataResult :: [DoctorPeerMetadata] -> DoctorCheck
+peerMetadataResult peers = if null peers
+  then skipped "peer-metadata" "no connected peers have metadata"
+  else peerMetadataPresent peers (concatMap metadataProblems peers)
+
+peerMetadataPresent :: [DoctorPeerMetadata] -> [Text] -> DoctorCheck
+peerMetadataPresent peers problems = if null problems
+  then mkCheck "peer-metadata" CheckOK
+      (names (fmap describeMetadata peers)) Nothing
+  else mkCheck "peer-metadata" CheckWarning
+      (names problems)
+      (Just "run doctor again; if this persists, inspect the peer configuration and logs")
+
+metadataProblems :: DoctorPeerMetadata -> [Text]
+metadataProblems peer =
+  metadataPendingProblem peer <>
+  networkClassesProblem peer <>
+  invalidMetadataProblem peer
+
+metadataPendingProblem :: DoctorPeerMetadata -> [Text]
+metadataPendingProblem peer =
+  [doctorMetadataIdentity peer <> ": peer metadata has not been observed"
+  | not (doctorMetadataObserved peer)]
+
+networkClassesProblem :: DoctorPeerMetadata -> [Text]
+networkClassesProblem peer =
+  [doctorMetadataIdentity peer <> ": signed network classes are empty"
+  | null (doctorMetadataNetworkClasses peer)]
+
+invalidMetadataProblem :: DoctorPeerMetadata -> [Text]
+invalidMetadataProblem peer =
+  [doctorMetadataIdentity peer <> ": invalid " <> names (doctorMetadataInvalid peer)
+  | not (null (doctorMetadataInvalid peer))]
+
+describeMetadata :: DoctorPeerMetadata -> Text
+describeMetadata peer = doctorMetadataIdentity peer <> " at "
+  <> doctorMetadataAddress peer <> ": "
+  <> names (doctorMetadataNetworkClasses peer) <> "; "
+  <> port "listen TCP" (doctorMetadataTCPPort peer) <> "; "
+  <> port "HTTP" (doctorMetadataHTTPPort peer) <> "; "
+  <> publicAddress <> "; mailbox PoW "
+  <> maybe "0" tshow (doctorMetadataMailboxPoW peer)
+  where
+    port label = maybe (label <> " not advertised") (\value -> label <> " " <> tshow value)
+    publicAddress = maybe "public address not advertised"
+      ("public " <>) (doctorMetadataPublicAddress peer)
+
+repositoryKeyCheck :: DoctorRepository -> DoctorCheck
+repositoryKeyCheck = \case
+  DoctorRepositoryNotRequested -> repositoryNotRequested "repository-key"
+  DoctorRepositoryInvalid raw -> mkCheck "repository-key" CheckFailure
+    ("invalid repository key: " <> raw)
+    (Just "copy the base58 key from an `hbs23://<repository-key>` URL")
+  DoctorRepositoryUnavailable key -> repositoryKeyOK key
+  DoctorRepositoryChecked key _ -> repositoryKeyOK key
+
+repositoryKeyOK :: Text -> DoctorCheck
+repositoryKeyOK key = mkCheck "repository-key" CheckOK
+  ("checking " <> key) Nothing
+
+repositoryLWWRefCheck :: DoctorRepository -> DoctorCheck
+repositoryLWWRefCheck = \case
+  DoctorRepositoryUnavailable _ -> mkCheck "repository-lwwref" CheckFailure
+    "repository RPC services did not answer"
+    (Just "restart the selected peer daemon and make sure its version matches the CLI")
+  DoctorRepositoryChecked key DoctorLWWRefMissing -> mkCheck
+    "repository-lwwref" CheckFailure
+    ("no LWWRef value is available for " <> key)
+    (Just "run `hbs2-peer lwwref fetch <repository-key>` and try again")
+  DoctorRepositoryChecked _ (DoctorLWWRefFound _) -> repositoryLWWRefOK
+  _ -> repositoryBlocked "repository-lwwref"
+
+repositoryLWWRefOK :: DoctorCheck
+repositoryLWWRefOK = mkCheck "repository-lwwref" CheckOK
+  "the repository LWWRef resolved" Nothing
+
+repositoryManifestCheck :: DoctorRepository -> DoctorCheck
+repositoryManifestCheck = \case
+  DoctorRepositoryChecked _ (DoctorLWWRefFound manifest) -> manifestCheck manifest
+  _ -> repositoryBlocked "repository-manifest"
+
+manifestCheck :: DoctorManifest -> DoctorCheck
+manifestCheck = \case
+  DoctorManifestMissing reason -> mkCheck "repository-manifest" CheckFailure
+    reason (Just "fetch the named manifest block, then run doctor again")
+  DoctorManifestMalformed reason -> mkCheck "repository-manifest" CheckFailure
+    reason (Just "the repository owner must publish a readable manifest with a `reflog` clause")
+  DoctorManifestFound _ -> mkCheck "repository-manifest" CheckOK
+    "the manifest is complete, readable, and declares a RefLog" Nothing
+
+repositoryRefLogCheck :: DoctorRepository -> DoctorCheck
+repositoryRefLogCheck = \case
+  DoctorRepositoryChecked _ (DoctorLWWRefFound (DoctorManifestFound refLog)) ->
+    refLogCheck refLog
+  _ -> repositoryBlocked "repository-reflog"
+
+refLogCheck :: DoctorRefLog -> DoctorCheck
+refLogCheck = \case
+  DoctorRefLogMissing key -> mkCheck "repository-reflog" CheckFailure
+    ("RefLog " <> key <> " has no current value")
+    (Just "wait for RefLog propagation, then run doctor again")
+  DoctorRefLogFound root _ -> mkCheck "repository-reflog" CheckOK
+    ("RefLog head is " <> root) Nothing
+
+repositorySnapshotCheck :: DoctorRepository -> DoctorCheck
+repositorySnapshotCheck = \case
+  DoctorRepositoryChecked _
+    (DoctorLWWRefFound (DoctorManifestFound (DoctorRefLogFound root snapshot))) ->
+      snapshotCheck root snapshot
+  _ -> repositoryBlocked "repository-snapshot"
+
+snapshotCheck :: Text -> DoctorSnapshot -> DoctorCheck
+snapshotCheck root = \case
+  DoctorSnapshotIncomplete missing -> mkCheck "repository-snapshot" CheckFailure
+    (tshow missing <> " block(s) reachable from RefLog head " <> root
+      <> " are missing on this peer")
+    (Just "keep a complete replica online or fetch the repository from a complete provider")
+  DoctorSnapshotComplete _ -> mkCheck "repository-snapshot" CheckOK
+    ("RefLog head " <> root <> " is complete; this peer is a complete local provider") Nothing
+
+repositorySigilsCheck :: DoctorRepository -> DoctorCheck
+repositorySigilsCheck = \case
+  DoctorRepositoryChecked _
+    (DoctorLWWRefFound (DoctorManifestFound
+      (DoctorRefLogFound _ (DoctorSnapshotComplete sigils)))) -> sigilsCheck sigils
+  _ -> repositoryBlocked "repository-sigils"
+
+sigilsCheck :: DoctorSigils -> DoctorCheck
+sigilsCheck = \case
+  DoctorSigilsIncomplete problems -> mkCheck "repository-sigils" CheckFailure
+    (names problems)
+    (Just "publish and announce a valid sigil for every declared mailbox, then run doctor again")
+  DoctorSigilsComplete 0 _ -> skipped "repository-sigils"
+    "the manifest declares no mailboxes that require sigils"
+  DoctorSigilsComplete mailboxes sigils -> mkCheck "repository-sigils" CheckOK
+    (tshow sigils <> " required sigil(s) are complete and valid for "
+      <> tshow mailboxes <> " mailbox(es)") Nothing
+
+repositoryNotRequested :: Text -> DoctorCheck
+repositoryNotRequested name = skipped name "not checked because no --repo was requested"
+
+repositoryBlocked :: Text -> DoctorCheck
+repositoryBlocked name = skipped name "not checked because an earlier repository boundary failed"
+
 mkCheck :: Text -> CheckStatus -> Text -> Maybe Text -> DoctorCheck
 mkCheck = DoctorCheck
 
@@ -166,6 +536,9 @@ statusText = \case
 
 pathText :: FilePath -> Text
 pathText = Text.pack
+
+names :: [Text] -> Text
+names = Text.intercalate ", "
 
 tshow :: Show a => a -> Text
 tshow = Text.pack . show

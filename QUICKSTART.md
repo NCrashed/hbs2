@@ -78,6 +78,8 @@ hbs2-peer doctor
 Warnings (for example, no connected peers yet) keep a successful exit code.
 Failures include a suggested command to fix the problem. Use
 `hbs2-peer doctor --json` for a stable machine-readable report.
+For config/socket overrides, exit-status semantics, and common remedies, see
+[`docs/doctor.md`](docs/doctor.md).
 
 ## 5. Push a git repository
 

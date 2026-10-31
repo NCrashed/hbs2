@@ -8,6 +8,7 @@ import HBS2.Net.Proto.Service
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Actors.Peer
 import HBS2.Net.Messaging.Encrypted.ByPass(ByPassStat)
+import HBS2.Peer.Proto.PeerMeta (PeerMeta)
 
 import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.Proto.RepositoryLease
@@ -41,6 +42,17 @@ data RpcPerformGC
 data RpcGetProbes
 
 data RpcRunScript
+data RpcPeerDiagnostics
+
+data PeerDiagnostic = PeerDiagnostic
+  { peerDiagnosticKey :: PubKey 'Sign 'HBS2Basic
+  , peerDiagnosticAddress :: PeerAddr L4Proto
+  , peerDiagnosticNetworkClasses :: [NetworkClass]
+  , peerDiagnosticMetadata :: Maybe PeerMeta
+  }
+  deriving stock (Generic, Show)
+
+instance Serialise PeerDiagnostic
 
 data RpcRepositoryLeasePut
 data RpcRepositoryLeaseGet
@@ -66,6 +78,9 @@ type PeerAPI = '[ RpcPoke
                 , RpcPollList2
                 , RpcGetProbes
                 , RpcRunScript
+                -- Append-only: service method positions are part of the local
+                -- daemon/client wire contract. Older method indices must not move.
+                , RpcPeerDiagnostics
                 , RpcRepositoryLeasePut
                 , RpcRepositoryLeaseGet
                 , RpcRepositoryLeaseList
@@ -137,6 +152,9 @@ type instance Output RpcGetProbes = [ProbeSnapshotElement]
 
 type instance Input  RpcRunScript = Text
 type instance Output RpcRunScript = Text
+
+type instance Input RpcPeerDiagnostics = ()
+type instance Output RpcPeerDiagnostics = [PeerDiagnostic]
 
 type instance Input RpcRepositoryLeasePut = RepositoryLease
 type instance Output RpcRepositoryLeasePut =

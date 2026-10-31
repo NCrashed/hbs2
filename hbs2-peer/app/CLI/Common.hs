@@ -57,7 +57,8 @@ rpcOpt = strOption ( short 'r' <> long "rpc"
 
 -- FIXME: options-duped-with-peer-main
 confOpt :: Parser FilePath
-confOpt = strOption ( long "config"  <> short 'c' <> help "config" )
+confOpt = strOption ( long "config"  <> short 'c'
+                                <> help "peer config directory (contains the file named config)" )
 
 pRpcCommon :: Parser RPCOpt
 pRpcCommon = do
