@@ -106,14 +106,17 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   lookup envelope, authenticated handler, signature-verifying TTL relay cache,
   bounded gossip, periodic publication, and peer-bound expiring client query
   fan-out completed 2026-10-31; authenticated provider selection and
-  clone-path consumption completed 2026-10-31);
+  clone-path consumption completed 2026-10-31; external owner/provider/relay/
+  client acceptance completed 2026-10-31);
 - prove repository-key-only discovery in the external multi-process
-  offline-owner acceptance scenario;
+  offline-owner acceptance scenario (completed 2026-10-31);
 - maintain a replica target with make-before-break replacement.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts
 down, and a clean C discovers B and clones the complete repository using only
-the repository key and the normal bootstrap configuration.
+the repository key and the normal bootstrap configuration. The executable test
+uses a separate rendezvous R as C's only configured peer, so direct provider
+configuration cannot make the scenario pass without replica-advert lookup.
 
 #### 3. Mail delivery receipts
 

@@ -733,9 +733,16 @@ and accepts an endpoint only after the transport session authenticates as the
 provider key which signed the advert. A deterministic three-role test covers an
 offline owner, an advert-holding relay, and a clean clone which accepts only a
 query-bound relay result before selecting the authenticated provider. The
-remaining M4 delivery work is the external multi-process acceptance scenario
-and hub UX; the existing executable M1 scenario still configures the provider
-directly.
+external multi-process acceptance scenario is also implemented. The executable
+`hbs2-git3/test/e2e/repository-discovery-four-node.sh` uses four processes so
+that discovery cannot be bypassed accidentally: A owns the repository, B holds
+the active receipted lease and publishes a signed advert, R is the only
+configured peer of the clean client C, and A is stopped before C starts. The
+test rejects a C configuration which names B, requires clone output to report a
+selected advert provider, and verifies the cloned branch, payload, and tag.
+The earlier `repository-lease-three-node.sh` remains the direct-provider M1
+scenario; both entry points share one harness. The remaining M4 delivery work
+is hub UX.
 
 
 ## Milestone 0: Measurement and design fixtures
