@@ -52,6 +52,13 @@ writeAsGitPack dir href = do
 
   sto <- getStorage
 
+  -- getTreeContents reports a generic read failure, which loses the hash of
+  -- an absent node below this pack root.  Preserve that boundary here: the
+  -- importer catches MissedBlockErrorAt and asks the selected replica for the
+  -- exact block instead of retrying an empty download queue.
+  missed <- findMissedBlocks sto href
+  for_ (headMay missed) (throwIO . MissedBlockErrorAt)
+
   file <- liftIO $ Temp.emptyTempFile dir (show (pretty href) <> ".pack")
 
   no_ <- newTVarIO 0

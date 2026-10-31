@@ -734,11 +734,15 @@ collects verified live adverts, tries only adverts which claim block service,
 tries each advertised endpoint, and accepts an endpoint only after the
 transport session authenticates as the provider key which signed the advert.
 A deterministic protocol test covers query binding and selection. The
-executable external scenario then runs owner A, provider B, advert-only relay R,
-and a clean C in separate processes: after B reaches `Active` and publishes its
-advert, A stops; C starts knowing only R, discovers and authenticates B from the
-signed advert, and clones the complete branch and tag. Remaining M4 work is hub
-replication UX and operator configuration.
+executable `hbs2-git3/test/e2e/repository-discovery-four-node.sh` uses four
+processes so discovery cannot be bypassed accidentally: A owns the repository,
+B holds the active receipted lease and publishes a signed advert, R is the only
+configured peer of the clean client C, and A is stopped before C starts. The
+test rejects a C configuration which names B, requires clone output to report a
+selected advert provider, and verifies the cloned branch, payload, and tag.
+The earlier `repository-lease-three-node.sh` remains the direct-provider M1
+scenario; both entry points share one harness. The remaining M4 delivery work
+is hub replication UX and operator configuration.
 
 
 ## Milestone 0: Measurement and design fixtures

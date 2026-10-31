@@ -423,13 +423,14 @@ The first executable vertical slice is now present:
    `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
    by a non-terminated lease.
 8. `hbs2-git3/test/e2e/repository-lease-three-node.sh` exercises the complete
-   provider-local and discovery path: A publishes, B reaches `Active` with a
-   durable pin and valid receipt, and B publishes a signed advert through relay
-   R. A stops before a clean C starts; C knows only R, discovers and
-   authenticates B from the advert, then clones the branch and tag. The
-   scenario also covers an importer edge case found by the test: a missing
-   Merkle node in a checkpoint walk must be enqueued for fetch, not merely
-   named and retried.
+   provider-local path: A publishes, B reaches `Active` with a durable pin and
+   valid receipt, A stops, and a previously offline C clones the branch and tag
+   from B as its only known peer. The companion
+   `repository-discovery-four-node.sh` exercises PEP-16/M4 discovery: C knows
+   only advert relay R and authenticates B from its signed advert after A
+   stops. Both entry points share one harness. The scenarios also cover an
+   importer edge case found by the test: a missing Merkle node in a checkpoint
+   walk must be enqueued for fetch, not merely named and retried.
 
 `repo:lease:add` accepts `--max-bytes`, `--max-blocks`,
 `--max-update-lag`, optional `--ttl`, and `--grace`. Both time limits are
@@ -498,6 +499,6 @@ PEP-06 is ready for wire implementation when:
 The encoding-vector and three-node complete-replica criteria are covered by
 the test suite and executable e2e scenario above. The remaining criteria in
 this section are still gates for the complete M0 fixture corpus. Advertisement
-and automatic provider discovery are separate PEP-16/M4 behaviour, now covered
-by the same executable scenario rather than implied by the provider-local
+and automatic provider discovery are separate PEP-16/M4 behaviour, covered by
+the companion four-process scenario rather than implied by the provider-local
 contract.

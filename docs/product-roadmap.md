@@ -107,7 +107,8 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   lookup envelope, authenticated handler, signature-verifying TTL relay cache,
   bounded gossip, periodic publication, and peer-bound expiring client query
   fan-out completed 2026-10-31; authenticated provider selection and
-  clone-path consumption completed 2026-10-31);
+  clone-path consumption completed 2026-10-31; external owner/provider/relay/
+  client acceptance completed 2026-10-31);
 - prove repository-key-only discovery in the external multi-process
   offline-owner acceptance scenario (completed 2026-10-31: C knows only an
   advert relay, discovers and authenticates B from its signed advert, and
@@ -116,7 +117,9 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts
 down, and a clean C discovers B and clones the complete repository using only
-the repository key and the normal bootstrap configuration.
+the repository key and the normal bootstrap configuration. The executable test
+uses a separate rendezvous R as C's only configured peer, so direct provider
+configuration cannot make the scenario pass without replica-advert lookup.
 
 #### 3. Mail delivery receipts
 
@@ -162,6 +165,13 @@ Gate releases on at least three peers and cover:
 
 #### `hbs2-hub serve` UX backlog
 
+- Show proposal mergeability before the user attempts a merge. CLI proposal
+  listings/details and `serve` must distinguish `clean`, `conflicts`,
+  `checking`, `stale`, and `failed`, and a conflicting proposal must name the
+  files involved. Compute this without changing the worktree, invalidate it
+  whenever the target or proposal head changes, and always recompute against
+  the current target immediately before merge so an old green result cannot
+  authorize a conflicting merge.
 - Make inbox attention independent of opening the Inbox route. Both the
   browser extension and the standalone UI must start or subscribe to a
   lightweight mailbox-status source in the background and show an unseen-mail
