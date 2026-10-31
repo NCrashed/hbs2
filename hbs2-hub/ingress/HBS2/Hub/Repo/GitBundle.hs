@@ -353,14 +353,23 @@ acceptBundle cwd bytes ref signedTip base = runExceptT do
         walled = [ ("GIT_OBJECT_DIRECTORY", quarantine)
                  , ("GIT_ALTERNATE_OBJECT_DIRECTORIES", Text.unpack objects)
                  ]
-        fetch env = callWith env cwd bundleSeconds "fetch"
-                      [ "-c", "transfer.fsckObjects=true"
-                      , "-c", "fetch.fsckObjects=true"
-                      , "fetch", path, Text.unpack ref ]
+        fetch refetch env = callWith env cwd bundleSeconds "fetch"
+                      ( [ "-c", "transfer.fsckObjects=true"
+                        , "-c", "fetch.fsckObjects=true"
+                        , "fetch" ]
+                     <> [ "--refetch" | refetch ]
+                     <> [ path, Text.unpack ref ] )
 
     liftIO (createDirectoryIfMissing True quarantine)
 
-    _ <- ExceptT (fetch walled)
+    -- Fetch the bundle's pack even when this repository already has its
+    -- objects through another ref or a linked worktree.  Without --refetch,
+    -- git optimises those objects away against the alternate above and the
+    -- quarantine looks empty: a valid proposal then becomes impossible to
+    -- accept from the clone where it was prepared.  The check below still asks
+    -- the quarantine ALONE, so a header-only bundle naming a local object does
+    -- not pass.
+    _ <- ExceptT (fetch True walled)
 
     -- WHAT THE BUNDLE RECORDS, read out of the file itself.
     --
@@ -432,7 +441,7 @@ acceptBundle cwd bytes ref signedTip base = runExceptT do
     unless anc $ throwError (BundleNotAncestor base signedTip)
 
     -- Only now, into the repository proper.
-    _ <- ExceptT (fetch [])
+    _ <- ExceptT (fetch False [])
     pure got
 
 -- | Where two refs forked, which is the @base@ a PR is a delta against.
