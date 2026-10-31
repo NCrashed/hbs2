@@ -5,6 +5,8 @@
 {-# Language RecordWildCards #-}
 module BlockDownloadNew where
 
+import BlockSizeCacheState
+
 import HBS2.Prelude.Plated
 import HBS2.OrDie
 import HBS2.Data.Detect
@@ -575,10 +577,14 @@ data DCB =
   , dcbParent     :: !(Maybe HashRef)
   , dcbBusy       :: !(TVar Int)
   , dcbDownloaded :: !(TVar Bool)
+  , dcbRevision   :: !(TVar Integer)
   }
 
 newDcbSTM :: TimeSpec -> Maybe HashRef -> STM DCB
-newDcbSTM ts parent = DCB ts parent <$> newTVar 0 <*> newTVar False
+newDcbSTM ts parent = DCB ts parent
+  <$> newTVar 0
+  <*> newTVar False
+  <*> newTVar 0
 
 
 data DownloadSweepOnIdle =
@@ -590,7 +596,7 @@ instance Exception DownloadSweepOnIdle
 data PSt =
     PChoose
   | PInit         HashRef DCB
-  | PQuerySize    HashRef DCB
+  | PQuerySize    HashRef DCB Integer
   | PFetchBlock   HashRef DCB Integer
   | PReleaseBlock HashRef DCB Bool
 
@@ -614,10 +620,12 @@ downloadDispatcher probe brains env = do
 
       insertNewDownloadSTM :: TimeSpec -> HashRef -> STM ()
       insertNewDownloadSTM now ha = do
-        already <- readTVar wip <&> HM.member ha
-        unless already do
-          dcb <- newDcbSTM now mzero
-          modifyTVar wip  (HM.insert ha dcb)
+        current <- readTVar wip <&> HM.lookup ha
+        case current of
+          Just dcb -> modifyTVar (dcbRevision dcb) succ
+          Nothing -> do
+            dcb <- newDcbSTM now mzero
+            modifyTVar wip (HM.insert ha dcb)
 
       insertNewDownload :: forall m1 . MonadIO m1 => HashRef -> m1 ()
       insertNewDownload  ha = do
@@ -775,7 +783,7 @@ downloadDispatcher probe brains env = do
       _avg <- newTVarIO 600
       _blknum <- newTVarIO 0
 
-      _sizeCache <- newTVarIO ( mempty :: HashMap HashRef (Maybe Integer) )
+      _sizeCache <- newTVarIO ( mempty :: HashMap HashRef (Integer, Maybe Integer) )
 
 
  -- pure (ConstBurstMachine 256) -- newBurstMachine 60 256 (Just 256) 0.20 0.10
@@ -866,7 +874,9 @@ downloadDispatcher probe brains env = do
 
                  busy   <- readTVar dcbBusy
                  down   <- readTVar dcbDownloaded
-                 absent <- readTVar _sizeCache <&> (== Just Nothing) . HM.lookup h
+                 revision <- readTVar dcbRevision
+                 absent <- readTVar _sizeCache
+                   <&> (== BlockSizeAbsent) . lookupBlockSize revision . HM.lookup h
 
                  if busy > trsh || down || absent then
                    retry
@@ -888,31 +898,33 @@ downloadDispatcher probe brains env = do
 
             trace $ yellow "Block choosen" <+> pretty p <+> pretty hx
 
-            hereSize <- readTVarIO _sizeCache <&> HM.lookup hx
+            revision <- readTVarIO (dcbRevision dcb)
+            hereSize <- readTVarIO _sizeCache
+              <&> lookupBlockSize revision . HM.lookup hx
 
             case hereSize of
-              Just (Just size) -> do
+              BlockSizeKnown size -> do
                 go (PFetchBlock hx dcb size)
 
-              Just Nothing -> do
+              BlockSizeAbsent -> do
                 debug $ blue "Release block" <+> pretty p <+> pretty hx
                 go (PReleaseBlock hx dcb False)
 
-              Nothing -> do
+              BlockSizeUnknown -> do
                 trace $ blue "Query size" <+> pretty p <+> pretty hx
-                go (PQuerySize hx dcb)
+                go (PQuerySize hx dcb revision)
 
-          PQuerySize hx dcb -> do
+          PQuerySize hx dcb revision -> do
             s <- queryBlockSizeFromPeer brains env (coerce hx) p
             case s of
               Right (Just size) -> do
                 trace $ green "HAS BLOCK" <+> pretty p <+> pretty hx <+> pretty size
-                atomically $ modifyTVar _sizeCache (HM.insert hx (Just size))
+                atomically $ modifyTVar _sizeCache (HM.insert hx (revision, Just size))
                 go (PFetchBlock hx dcb size)
 
               Right Nothing -> do
                 trace $ red "HAS NO BLOCK" <+> pretty p <+> pretty hx
-                atomically $ modifyTVar _sizeCache (HM.insert hx Nothing)
+                atomically $ modifyTVar _sizeCache (HM.insert hx (revision, Nothing))
                 go (PReleaseBlock hx dcb False)
 
               Left{} -> do
@@ -969,4 +981,3 @@ downloadDispatcher probe brains env = do
         debug $ yellow "I'm thread" <+> pretty p
 
       void $ waitAnyCatchCancel [bmt,bs,twork,tstat,tsweep,tpinfo]
-

@@ -1,3 +1,50 @@
+# 0.26.0.6  2026-10-31
+
+Peers now retry a block after a fresh announcement, even when an earlier
+request cached that the announcing peer did not have it yet.
+
+## Fixed
+
+  - **A new `BlockAnnounce` invalidates a cached negative block-size answer.**
+    A relay can first announce a referenced hash before it has fetched the
+    block, then announce it again after acquiring it. The downloader used to
+    retain the first "not found" answer for the lifetime of the pending
+    download and would never ask that relay again. Negative answers are now
+    scoped to an announcement revision, so the later announcement triggers a
+    new size query and download.
+
+# 0.26.0.5  2026-10-31
+
+Public relays configured to accept block announcements now accept the first
+contact from a repository contributor, completing the sigil publication path
+added in 0.26.0.4.
+
+## Fixed
+
+  - **`accept-block-announce *` accepts announcements from contributors that
+    are not configured as known peers.** The wildcard previously performed a
+    mandatory `KnownPeerKey` lookup before checking the policy, so a public
+    relay silently ignored the exact first-contact announcement that `*` was
+    configured to allow. Explicit key allow-lists and bans on known peers keep
+    their existing behaviour.
+
+# 0.26.0.4  2026-10-31
+
+Sigils created by hbs2-hub setup now reach relay peers, so a fresh
+contributor can file the first issue or pull request using only the repository
+key, and acknowledgements can find the contributor's reply sigil.
+
+## Fixed
+
+  - **`hbs2-hub project open` and `identity init` announce the sigils they
+    store.** A repository manifest names a sigil by hash, but that text is not
+    a Merkle edge: a relay polling the repository learned the hash and never
+    fetched the block, so a fresh contributor with only the repository key
+    could not seal the first issue or pull request. The same omission kept an
+    acknowledgement from finding a contributor's reply sigil. Both setup
+    commands now emit `BlockAnnounce`; an accepting relay fetches and retains
+    the block while its owner is online.
+
 # 0.26.0.3  2026-10-28
 
 hbs2-hub on the web, without GitHub (PEP-25): `hbs2-hub serve` shows a

@@ -23,6 +23,9 @@ import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 import PeerMetaSpec (peerMetaTests)
 import RepositoryLeaseSpec qualified
+import BlockAnnouncePolicySpec qualified
+import BlockSizeCacheStateSpec qualified
+import DoctorSpec qualified
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -161,6 +164,9 @@ main = do
       , httpListenTests
       , peerMetaTests
       , RepositoryLeaseSpec.tests
+      , BlockAnnouncePolicySpec.tests
+      , BlockSizeCacheStateSpec.tests
+      , DoctorSpec.tests
       , messagePartsTests
       , mailboxPoWTests
       , mailboxConfigTests
@@ -170,5 +176,3 @@ main = do
       , PingNonceSpec.tests
       , MailboxPolicyCacheSpec.tests
       ]
-
-

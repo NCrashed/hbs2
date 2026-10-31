@@ -338,16 +338,24 @@ getRpcSocketNameM = do
 getRpcSocketName :: PeerConfig -> FilePath
 getRpcSocketName = runReader getRpcSocketNameM
 
+peerConfigPath :: MonadIO m => Maybe FilePath -> m FilePath
+peerConfigPath mbfp = do
+  xdg <- peerConfigDefault
+  pure $ maybe xdg (</> cfgName) mbfp
+
 peerConfigRead :: MonadIO m => Maybe FilePath -> m PeerConfig
 peerConfigRead mbfp = do
-
   peerConfigInit mbfp
+  peerConfigReadOnly mbfp
 
-  debug $ "peerConfigRead" <+> pretty mbfp
+-- | Read configuration without creating it. Diagnostics must not repair the
+-- state they are trying to report.
+peerConfigReadOnly :: MonadIO m => Maybe FilePath -> m PeerConfig
+peerConfigReadOnly mbfp = do
 
-  xdg <- peerConfigDefault
+  debug $ "peerConfigReadOnly" <+> pretty mbfp
 
-  let cfgPath = maybe xdg (</> cfgName) mbfp
+  cfgPath <- peerConfigPath mbfp
   let dir = takeDirectory cfgPath
 
   debug $ "searching config" <+> pretty cfgPath

@@ -70,6 +70,15 @@ hbs2-peer run
 The peer starts up, opens its listening sockets, and waits. Leave it
 running.
 
+In terminal 2, check that the local configuration, RPC endpoint, daemon
+version, and network peers agree:
+```
+hbs2-peer doctor
+```
+Warnings (for example, no connected peers yet) keep a successful exit code.
+Failures include a suggested command to fix the problem. Use
+`hbs2-peer doctor --json` for a stable machine-readable report.
+
 ## 5. Push a git repository
 
 A hbs2 git repository is identified by a public signing key. You do
