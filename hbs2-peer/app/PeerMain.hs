@@ -201,13 +201,18 @@ data GOpts =
 doctorRuntimeProbe
   :: FilePath
   -> [(Text.Text, Maybe (PeerAddr L4Proto))]
-  -> IO (Maybe Text.Text, Maybe Int, DoctorConfiguredPeers)
+  -> IO (Maybe Text.Text, Maybe Int, DoctorConfiguredPeers, DoctorPeerMetadataStatus)
 doctorRuntimeProbe socketPath configuredEntries = do
   runtime <- Exception.try @SomeException $
     withRPC2 @PeerAPI @UNIX socketPath $ \caller -> do
       poke <- callRpcWaitRetry @RpcPoke (TimeoutSec 0.5) 2 caller ()
       case poke of
-        Nothing -> pure (Nothing, Nothing, DoctorConfiguredPeersUnavailable)
+        Nothing -> pure
+          ( Nothing
+          , Nothing
+          , DoctorConfiguredPeersUnavailable
+          , DoctorPeerMetadataUnavailable
+          )
         Just answer -> do
           probed <- forM configuredEntries $ \(label, parsed) -> case parsed of
             Nothing -> pure (label, Nothing, False)
@@ -217,14 +222,23 @@ doctorRuntimeProbe socketPath configuredEntries = do
               pure (label, Just address, reached)
 
           peerList <- callRpcWaitRetry @RpcPeers (TimeoutSec 1) 2 caller ()
+          peerDiagnostics <- callRpcWaitRetry @RpcPeerDiagnostics
+            (TimeoutSec 1) 1 caller ()
           pure
             ( Just (Text.pack answer)
             , fmap length peerList
             , configuredPeerFacts probed (fromMaybe [] peerList)
+            , maybe DoctorPeerMetadataUnavailable
+                (DoctorPeerMetadataChecked . fmap peerMetadataFacts)
+                peerDiagnostics
             )
 
   pure $ fromRight
-    (Nothing, Nothing, DoctorConfiguredPeersUnavailable) runtime
+    ( Nothing
+    , Nothing
+    , DoctorConfiguredPeersUnavailable
+    , DoctorPeerMetadataUnavailable
+    ) runtime
 
 configuredPeerFacts
   :: [(Text.Text, Maybe (PeerAddr L4Proto), Bool)]
@@ -243,6 +257,13 @@ configuredPeerFacts probed peerList = DoctorConfiguredPeersChecked
       Text.pack . show . pretty . AsBase58
         <$> lookup address
           [(peerAddress, signingKey) | (signingKey, peerAddress) <- peerList]
+
+peerMetadataFacts :: PeerDiagnostic -> DoctorPeerMetadata
+peerMetadataFacts PeerDiagnostic{..} = doctorPeerMetadataFacts
+  (Text.pack . show . pretty . AsBase58 $ peerDiagnosticKey)
+  (Text.pack . show . pretty $ peerDiagnosticAddress)
+  (fmap (Text.pack . show) peerDiagnosticNetworkClasses)
+  peerDiagnosticMetadata
 
 runCLI :: IO ()
 runCLI = do
@@ -342,7 +363,8 @@ runCLI = do
         bootstrap <- bootstrapDnsProbe conf
         let configuredEntries = knownPeerEntries conf
 
-        (poke, peers, configured) <- doctorRuntimeProbe socketPath configuredEntries
+        (poke, peers, configured, peerMetadata) <-
+          doctorRuntimeProbe socketPath configuredEntries
         let
             report = diagnose DoctorFacts
               { doctorCLIVersion = Text.pack (showVersion Pkg.version)
@@ -353,6 +375,7 @@ runCLI = do
               , doctorPeerCount = peers
               , doctorBootstrap = maybe DoctorBootstrapDisabled DoctorBootstrapChecked bootstrap
               , doctorConfiguredPeers = configured
+              , doctorPeerMetadata = peerMetadata
               }
 
         if json

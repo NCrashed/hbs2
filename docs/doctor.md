@@ -7,7 +7,7 @@ hbs2-peer doctor
 ```
 
 The command does not write configuration or stored data. It checks the local
-peer and its network boundary in six steps:
+peer and its network boundary in seven steps:
 
 - `config` — which configuration file was selected and whether it exists;
 - `rpc` — which Unix socket was selected and whether the daemon answers;
@@ -17,6 +17,8 @@ peer and its network boundary in six steps:
   one usable peer address;
 - `configured-peers` — whether every `known-peer` entry parses, answers a
   signed handshake, and exposes the identity that signed it.
+- `peer-metadata` — the signed network classes and the latest advertised TCP,
+  HTTP, public-address, and relay mailbox PoW values for connected peers.
 
 The bootstrap check makes bounded DNS TXT queries. It uses the same
 `bootstrap-dns` entries and built-in `bootstrap.hbs2.app` name as the peer,
@@ -28,6 +30,14 @@ The configured-peer check sends a bounded diagnostic handshake probe to each
 verified signing key. This can refresh the daemon's in-memory known-peer state,
 but does not rewrite its config or persistent storage. With no `known-peer`
 entries, the check is skipped.
+
+The peer-metadata check reads a snapshot from the running daemon. Network
+classes come from the signed handshake. The remaining fields come from the
+latest peer-meta announcement and are treated as untrusted input: a malformed
+port, public address, or PoW floor produces a warning naming the peer and key.
+An omitted optional field is reported as not advertised; a metadata response
+that has not arrived yet is a separate warning and never masquerades as an
+empty policy.
 
 A healthy local peer prints one line per check and ends with `doctor: OK`.
 Every failed check prints a `remedy:` line. A warning, such as having no
@@ -105,13 +115,19 @@ optional remedy.
   addresses, the remote services, and firewall reachability.
 - `invalid known-peer entries` — fix or remove the named entries. Invalid
   addresses are not silently counted as unreachable peers.
+- `peer metadata has not been observed` — the handshake completed before the
+  asynchronous metadata exchange. Run doctor again; if it persists, inspect
+  the peer logs and the remote peer's metadata protocol support.
+- `invalid ...` under `peer-metadata` — the named peer advertised a present
+  value that does not parse or lies outside its protocol range. Fix the remote
+  peer configuration rather than treating it as an absent default.
 
 ## Current scope
 
-The current doctor implements the local-runtime slice plus bootstrap resolution,
-configured-peer reachability, and verified peer identity from the network
-slice. It does **not** yet accept `--repo` and does not inspect advertised
-transports or peer metadata, or prove repository availability, sigil
-propagation, or mailbox delivery. The remaining network, repository, and forge
-checks are tracked as D2-D4 in the
+The current doctor implements the local-runtime and network slices: bootstrap
+resolution, configured-peer reachability, verified peer identity, signed
+network classes, advertised endpoints, and relay mailbox PoW metadata. It does
+**not** yet accept `--repo`, prove repository availability or sigil propagation,
+or inspect mailbox delivery. The repository and forge checks are tracked as
+D3-D4 in the
 [product-readiness roadmap](product-roadmap.md).

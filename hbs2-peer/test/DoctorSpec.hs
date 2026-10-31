@@ -3,6 +3,7 @@
 module DoctorSpec (tests) where
 
 import HBS2.Peer.CLI.Doctor
+import HBS2.Peer.Proto.PeerMeta (PeerMeta(..))
 
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types qualified as AesonTypes
@@ -22,6 +23,7 @@ tests = testGroup "doctor"
       statusOf "peers" report @?= Just CheckOK
       statusOf "bootstrap" report @?= Just CheckOK
       statusOf "configured-peers" report @?= Just CheckOK
+      statusOf "peer-metadata" report @?= Just CheckOK
 
   , testCase "version skew names both versions and fails" do
       let report = diagnose healthy
@@ -130,6 +132,73 @@ tests = testGroup "doctor"
             }
       statusOf "configured-peers" report @?= Just CheckSkipped
 
+  , testCase "peer metadata reports advertised routes and relay policy" do
+      let metadata = checkNamed "peer-metadata" (diagnose healthy)
+      doctorCheckStatus metadata @?= CheckOK
+      assertBool "the signed network class is visible"
+        ("Clearnet" `Text.isInfixOf` doctorCheckMessage metadata)
+      assertBool "the advertised TCP listener is visible"
+        ("listen TCP 7351" `Text.isInfixOf` doctorCheckMessage metadata)
+      assertBool "the relay mailbox floor is visible"
+        ("mailbox PoW 18" `Text.isInfixOf` doctorCheckMessage metadata)
+
+  , testCase "malformed peer metadata is an actionable warning" do
+      let report = diagnose healthy
+            { doctorPeerMetadata = DoctorPeerMetadataChecked
+                [ healthyPeerMetadata
+                    { doctorMetadataIdentity = "bad-relay"
+                    , doctorMetadataInvalid = ["listen-tcp", "mailbox-pow-min"]
+                    }
+                ]
+            }
+          metadata = checkNamed "peer-metadata" report
+      doctorPassed report @?= True
+      doctorCheckStatus metadata @?= CheckWarning
+      assertBool "the peer identity is visible"
+        ("bad-relay" `Text.isInfixOf` doctorCheckMessage metadata)
+      assertBool "the malformed keys are visible"
+        ("listen-tcp" `Text.isInfixOf` doctorCheckMessage metadata
+          && "mailbox-pow-min" `Text.isInfixOf` doctorCheckMessage metadata)
+
+  , testCase "metadata still in flight is not mistaken for an empty policy" do
+      let report = diagnose healthy
+            { doctorPeerMetadata = DoctorPeerMetadataChecked
+                [healthyPeerMetadata { doctorMetadataObserved = False }] }
+          metadata = checkNamed "peer-metadata" report
+      doctorCheckStatus metadata @?= CheckWarning
+      assertBool "the remedy asks for another observation"
+        (maybe False (Text.isInfixOf "again") (doctorCheckRemedy metadata))
+
+  , testCase "missing signed network classes is a warning" do
+      let report = diagnose healthy
+            { doctorPeerMetadata = DoctorPeerMetadataChecked
+                [healthyPeerMetadata { doctorMetadataNetworkClasses = [] }] }
+          metadata = checkNamed "peer-metadata" report
+      doctorCheckStatus metadata @?= CheckWarning
+      assertBool "the identity with the bad handshake is visible"
+        ("relay-signing-key" `Text.isInfixOf` doctorCheckMessage metadata)
+
+  , testCase "peer metadata is skipped when its RPC is unavailable" do
+      let report = diagnose healthy
+            { doctorPeerMetadata = DoctorPeerMetadataUnavailable }
+      doctorPassed report @?= True
+      statusOf "peer-metadata" report @?= Just CheckSkipped
+
+  , testCase "untrusted peer metadata is validated at the boundary" do
+      let facts = doctorPeerMetadataFacts "relay" "relay:7351" ["Clearnet"] . Just $
+            PeerMeta
+              [ ("listen-tcp", "-1")
+              , ("http-port", "70000")
+              , ("public-address", "\"not an address\"")
+              , ("mailbox-pow-min", "300")
+              ]
+      doctorMetadataTCPPort facts @?= Nothing
+      doctorMetadataHTTPPort facts @?= Nothing
+      doctorMetadataPublicAddress facts @?= Nothing
+      doctorMetadataMailboxPoW facts @?= Nothing
+      doctorMetadataInvalid facts @?=
+        ["listen-tcp", "http-port", "public-address", "mailbox-pow-min"]
+
   , testCase "an old daemon without a version fails explicitly" do
       let report = diagnose healthy
             { doctorPoke = Just "peer-key: \"peer\"\nrpc: \"/tmp/hbs2-rpc.socket\"\n" }
@@ -159,6 +228,20 @@ healthy = DoctorFacts
   , doctorBootstrap = DoctorBootstrapChecked [("bootstrap.hbs2.app", 1)]
   , doctorConfiguredPeers = DoctorConfiguredPeersChecked
       [DoctorPeerReachable "8dePeer@udp" (Just "relay-signing-key")]
+  , doctorPeerMetadata = DoctorPeerMetadataChecked [healthyPeerMetadata]
+  }
+
+healthyPeerMetadata :: DoctorPeerMetadata
+healthyPeerMetadata = DoctorPeerMetadata
+  { doctorMetadataIdentity = "relay-signing-key"
+  , doctorMetadataAddress = "8dePeer@udp"
+  , doctorMetadataNetworkClasses = ["Clearnet"]
+  , doctorMetadataObserved = True
+  , doctorMetadataTCPPort = Just 7351
+  , doctorMetadataHTTPPort = Nothing
+  , doctorMetadataPublicAddress = Just "81.88.219.217:7351"
+  , doctorMetadataMailboxPoW = Just 18
+  , doctorMetadataInvalid = []
   }
 
 poke :: Text.Text -> Text.Text
