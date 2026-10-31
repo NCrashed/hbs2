@@ -146,6 +146,29 @@ Gate releases on at least three peers and cover:
 - automatic canon synchronization/publication policies;
 - release-versioned documentation and generated CLI reference.
 
+#### `hbs2-hub serve` UX backlog
+
+- Render the supported safe Markdown consistently, including GitHub-style
+  tables, build-status badges, and ordinary external images. Unsupported or
+  blocked content must keep its alt text and an explicit placeholder instead
+  of disappearing.
+- Treat every external image as a privacy boundary. The first page that wants
+  one asks before making any request; the initial state is therefore blocked,
+  not an implicit opt-in. The prompt offers to load external images or keep
+  them blocked and persists the chosen default.
+- Add a Settings page where that decision can be changed later. Keep a global
+  default of `ask`, `allow`, or `block`, with per-origin exceptions so that
+  trusting a badge host does not silently trust every image host.
+- External resources are data only, never remote code. Fetch them without
+  credentials or a referrer, enforce content-type and size limits, and make
+  the blocked origin visible before the user grants access.
+
+Acceptance scenario: open a README or thread containing a Markdown table, a
+build badge, and an external image in a fresh browser profile. The table is
+readable immediately, no request reaches either image host before consent,
+the selected policy survives restart, and changing it on the Settings page
+changes subsequent rendering.
+
 ## Explicit non-priorities
 
 A global DHT is not required for the supported small-peer-set model. Barter,
