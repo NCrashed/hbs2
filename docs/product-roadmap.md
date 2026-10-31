@@ -149,6 +149,38 @@ Gate releases on at least three peers and cover:
 
 #### `hbs2-hub serve` UX backlog
 
+- Make inbox attention independent of opening the Inbox route. Both the
+  browser extension and the standalone UI must start or subscribe to a
+  lightweight mailbox-status source in the background and show an unseen-mail
+  badge in their persistent chrome. A user who never opens Inbox must still
+  learn that a letter arrived.
+- Define `unseen` as a persisted, mailbox-scoped cursor rather than the number
+  returned by the last Inbox page load. Opening the list may advance that
+  cursor, but merely refreshing application data must not silently mark mail
+  seen. Distinguish a confirmed zero from `checking`, `stale`, and `failed`,
+  and expose the last successful check so an offline client never looks
+  deceptively empty.
+- Let the extension update its toolbar badge from its background worker, and
+  let the standalone navigation update before the Inbox view mounts. Poll or
+  subscribe with bounded backoff instead of issuing network work on every
+  render. Desktop notifications are a separate opt-in; the in-product badge
+  is the default attention mechanism.
+- Add a standalone activity dashboard for recent user-relevant events:
+  incoming letters, accepted or folded proposals, canon sync/publication,
+  and failed operations that need attention. Each item shows time, repository
+  or mailbox, outcome, and a direct action. Persist a bounded, deduplicated
+  history and give loading, empty, stale, and error states explicit UI.
+- Back both surfaces with the same inbox-status and activity-event model so
+  the extension badge, standalone badge, Inbox list, and dashboard cannot
+  invent conflicting meanings for the same event.
+
+Acceptance scenario: with neither Inbox view open, deliver a letter while the
+extension and standalone UI are running. Both surfaces show an unseen badge;
+opening Inbox clears it according to the same persisted cursor. After restart
+the state remains consistent. If mailbox refresh fails, both surfaces show a
+stale/error state rather than zero. The standalone dashboard retains one
+deduplicated arrival event and links it to the letter.
+
 - Render the supported safe Markdown consistently, including GitHub-style
   tables, build-status badges, and ordinary external images. Unsupported or
   blocked content must keep its alt text and an explicit placeholder instead
