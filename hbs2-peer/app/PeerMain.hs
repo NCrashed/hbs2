@@ -822,6 +822,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                           _             -> Set.fromList [Clearnet]
   let helpFetchKeys   = runReader (cfgValue @PeerProxyFetchKey) syn & toKeys
   let tcpListen       = runReader (cfgValue @PeerListenTCPKey) syn & fromMaybe ""
+  let leaseAdvertReachable = runReader (cfgValue @PeerPublicAddressKey) syn
+        & Set.toList
+        & mapMaybe (fromStringMay @(PeerAddr L4Proto))
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
                           & fromInteger @(Timeout 'Seconds) . fromMaybe 300
 
@@ -1333,7 +1336,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 peerThread "lwwRefWorker" (lwwRefWorker @e conf (SomeBrains brains))
 
                 peerThread "repositoryLeaseWorker" $
-                  liftIO (repositoryLeaseWorker pc (SomeBrains brains) (AnyStorage s))
+                  liftIO (repositoryLeaseWorker leaseAdvertReachable
+                    pc (SomeBrains brains) (AnyStorage s))
 
                 -- setup mailboxes stuff
                 let PeerConfig defConf = coerce conf

@@ -277,6 +277,9 @@ defConfigData = [qc|
 listen "0.0.0.0:7351"
 listen-tcp "0.0.0.0:10351"
 
+; public dialable addresses used by peer-meta and repository replica adverts
+; peer-public-address "tcp://example.org:10351"
+
 ; default storage is $HOME/.local/share/hbs2
 ; storage "./storage"
 

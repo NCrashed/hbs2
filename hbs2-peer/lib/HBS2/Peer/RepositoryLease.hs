@@ -10,6 +10,7 @@ module HBS2.Peer.RepositoryLease
   , readRepositoryReplicaReceipt
   , issueRepositoryReplicaAdvertAt
   , readRepositoryReplicaAdvertAt
+  , maxReplicaAdvertLifetime
   , releaseRepositoryLeasePin
   , releaseRepositoryReplicaReceipt
   , releaseRepositoryReplicaAdvert

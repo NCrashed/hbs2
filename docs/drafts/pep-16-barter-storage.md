@@ -702,9 +702,12 @@ issue time, and expiry under the provider signature. A provider can create it
 only from an active lease and matching verified receipt. Its provider-owned
 local ref supports idempotent renewal and withdrawal; readers reject malformed,
 forged, future, expired, identity-mismatched, endpoint-less, and non-serving
-adverts. Advert lifetime is currently capped at 15 minutes. Automatic worker
-renewal, bounded network lookup/indexing, clone-provider selection, and hub UX
-remain open M4 work.
+adverts. Advert lifetime is currently capped at 15 minutes. The lease worker
+now publishes the provider-local advert from explicit `peer-public-address`
+values, renews it during the last five minutes without rewriting stable
+adverts, and withdraws it as soon as the lease is no longer active. Bounded
+network lookup/indexing, clone-provider selection, and hub UX remain open M4
+work.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -792,8 +795,8 @@ Exit criteria:
 
 Deliverables:
 
-- signed, expiring replica adverts and withdrawals (wire type and local
-  lifecycle complete; automatic publication and network delivery open);
+- signed, expiring replica adverts and withdrawals (wire type, local lifecycle,
+  and worker renewal complete; network delivery open);
 - bounded lookup by repository key;
 - at least one decentralized delivery path and optional hbs2-hub indexing;
 - clone path which tries verified live providers;

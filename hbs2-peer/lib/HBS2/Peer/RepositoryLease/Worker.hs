@@ -1,5 +1,9 @@
 module HBS2.Peer.RepositoryLease.Worker
-  ( refreshRepositoryLease
+  ( RepositoryAdvertPolicy(..)
+  , defaultRepositoryAdvertPolicy
+  , maintainRepositoryReplicaAdvert
+  , maintainRepositoryReplicaAdvertAt
+  , refreshRepositoryLease
   , refreshRepositoryLeaseAt
   ) where
 
@@ -15,6 +19,7 @@ import HBS2.Storage
 import HBS2.Storage.Inventory
 
 import Control.Applicative ((<|>))
+import Data.Bits ((.&.))
 import Data.Functor (($>))
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
@@ -34,6 +39,120 @@ type RefreshRepositoryLease =
   -> AnyStorage
   -> RepositoryLease
   -> IO RepositoryLease
+
+-- | Local policy for the provider's short-lived discovery statement.  Public
+-- endpoints are injected by the executable because the library cannot infer
+-- a routable address from a bind socket such as @0.0.0.0@.
+data RepositoryAdvertPolicy = RepositoryAdvertPolicy
+  { advertPolicyReachableVia :: [PeerAddr L4Proto]
+  , advertPolicyCapabilities :: Word64
+  , advertPolicyLifetime     :: Word64
+  , advertPolicyRenewBefore  :: Word64
+  }
+  deriving stock (Eq, Show)
+
+defaultRepositoryAdvertPolicy
+  :: [PeerAddr L4Proto]
+  -> RepositoryAdvertPolicy
+defaultRepositoryAdvertPolicy reachable = RepositoryAdvertPolicy
+  { advertPolicyReachableVia = reachable
+  , advertPolicyCapabilities = replicaAdvertCapabilityBlockDownload
+  , advertPolicyLifetime = maxReplicaAdvertLifetime
+  , advertPolicyRenewBefore = 5 * 60
+  }
+
+maintainRepositoryReplicaAdvert
+  :: RepositoryAdvertPolicy
+  -> AnyStorage
+  -> PeerCredentials 'HBS2Basic
+  -> RepositoryLease
+  -> IO (Either RepositoryAdvertError (Maybe (HashRef, ReplicaAdvertV1)))
+maintainRepositoryReplicaAdvert policy storage credentials lease = do
+  now <- currentTimestamp
+  maintainRepositoryReplicaAdvertAt now policy storage credentials lease
+
+-- | Keep one provider-local advert present while the lease is active.  A
+-- matching advert is reused until its renewal boundary; inactive leases and
+-- unusable policies withdraw the ref immediately.  Expired or malformed
+-- adverts are replaced from the verified receipt rather than trusted.
+maintainRepositoryReplicaAdvertAt
+  :: Word64
+  -> RepositoryAdvertPolicy
+  -> AnyStorage
+  -> PeerCredentials 'HBS2Basic
+  -> RepositoryLease
+  -> IO (Either RepositoryAdvertError (Maybe (HashRef, ReplicaAdvertV1)))
+maintainRepositoryReplicaAdvertAt now policy storage credentials lease
+  | repositoryLeaseState lease /= RepositoryLeaseActive =
+      withdraw $> Right Nothing
+  | Just problem <- repositoryAdvertPolicyError policy =
+      withdraw $> Left problem
+  | otherwise = case repositoryLeaseSnapshot lease of
+      Nothing -> withdraw $> Left RepositoryAdvertSnapshotMismatch
+      Just snapshot -> maintainActiveRepositoryReplicaAdvertAt
+        now policy storage credentials lease snapshot
+  where
+    repository = repositoryLeaseRepository lease
+    provider = view peerSignPk credentials
+    withdraw = releaseRepositoryReplicaAdvert storage repository provider
+
+repositoryAdvertPolicyError
+  :: RepositoryAdvertPolicy
+  -> Maybe RepositoryAdvertError
+repositoryAdvertPolicyError policy
+  | null (advertPolicyReachableVia policy) =
+      Just RepositoryAdvertNoReachableAddress
+  | advertPolicyCapabilities policy
+      .&. replicaAdvertCapabilityBlockDownload == 0 =
+      Just RepositoryAdvertCannotServeBlocks
+  | advertPolicyLifetime policy == 0 =
+      Just RepositoryAdvertInvalidLifetime
+  | advertPolicyLifetime policy > maxReplicaAdvertLifetime =
+      Just RepositoryAdvertInvalidLifetime
+  | advertPolicyRenewBefore policy >= advertPolicyLifetime policy =
+      Just RepositoryAdvertInvalidLifetime
+  | otherwise = Nothing
+
+maintainActiveRepositoryReplicaAdvertAt
+  :: Word64
+  -> RepositoryAdvertPolicy
+  -> AnyStorage
+  -> PeerCredentials 'HBS2Basic
+  -> RepositoryLease
+  -> RepositorySnapshot
+  -> IO (Either RepositoryAdvertError (Maybe (HashRef, ReplicaAdvertV1)))
+maintainActiveRepositoryReplicaAdvertAt
+  now policy storage credentials lease snapshot = do
+    current <- readRepositoryReplicaAdvertAt now storage repository provider
+    receipt <- readRepositoryReplicaReceipt storage (repositoryLeaseId lease)
+    case (current, receipt) of
+      ( Right (advertHash, _, advert)
+        , Right (receiptHash, _, _)
+        ) | repositoryAdvertReusableAt now policy snapshot receiptHash advert ->
+              pure (Right (Just (advertHash, advert)))
+      _ -> fmap Just <$> issueRepositoryReplicaAdvertAt
+        now (advertPolicyLifetime policy)
+        (advertPolicyReachableVia policy)
+        (advertPolicyCapabilities policy)
+        storage credentials lease snapshot
+  where
+    repository = repositoryLeaseRepository lease
+    provider = view peerSignPk credentials
+
+repositoryAdvertReusableAt
+  :: Word64
+  -> RepositoryAdvertPolicy
+  -> RepositorySnapshot
+  -> HashRef
+  -> ReplicaAdvertV1
+  -> Bool
+repositoryAdvertReusableAt now policy snapshot receiptHash advert = and
+  [ replicaAdvertSnapshotId advert == repositorySnapshotId snapshot
+  , replicaAdvertReceipt advert == receiptHash
+  , replicaAdvertReachableVia advert == advertPolicyReachableVia policy
+  , replicaAdvertCapabilities advert == advertPolicyCapabilities policy
+  , replicaAdvertExpiresAt advert - now > advertPolicyRenewBefore policy
+  ]
 
 -- | Reconcile one durable lease with the blocks currently present in storage.
 -- Fetching is delegated to the existing LWWRef and RefLog pollers.  A lease is
@@ -324,6 +443,9 @@ releaseArtifacts :: LeaseRefreshContext -> IO ()
 releaseArtifacts context = do
   releaseRepositoryLeasePin storage (repositoryLeaseId lease)
   releaseRepositoryReplicaReceipt storage (repositoryLeaseId lease)
+  releaseRepositoryReplicaAdvert storage
+    (repositoryLeaseRepository lease)
+    (view peerSignPk (refreshCredentials context))
   where
     lease = refreshLease context
     storage = refreshStorage context

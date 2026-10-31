@@ -432,6 +432,97 @@ tests = testGroup "repository lease"
             Left RepositoryAdvertMissing -> pure ()
             other -> assertFailure ("expected a withdrawn advert, got " <> show other)
 
+  , testCase "the worker advert maintainer renews only at its boundary" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 5
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+            reachable = ["tcp://127.0.0.1:10351"]
+            policy = RepositoryAdvertPolicy
+              { advertPolicyReachableVia = reachable
+              , advertPolicyCapabilities = replicaAdvertCapabilityBlockDownload
+              , advertPolicyLifetime = 60
+              , advertPolicyRenewBefore = 20
+              }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+            provider = view peerSignPk providerCredentials
+
+        active <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage initial
+        (firstHash, firstAdvert) <- maintainRepositoryReplicaAdvertAt
+          100 policy fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "active lease did not produce an advert") pure
+        replicaAdvertExpiresAt firstAdvert @?= 160
+
+        writesBeforeStableRefresh <- readIORef fixtureStorageWrites
+        stable <- maintainRepositoryReplicaAdvertAt
+          139 policy fixtureStorage providerCredentials active >>= expectRight
+        fmap fst stable @?= Just firstHash
+        readIORef fixtureStorageWrites >>= (@?= writesBeforeStableRefresh)
+
+        (renewedHash, renewedAdvert) <- maintainRepositoryReplicaAdvertAt
+          140 policy fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "advert was withdrawn instead of renewed") pure
+        assertBool "renewal created a new advert block" (renewedHash /= firstHash)
+        replicaAdvertIssuedAt renewedAdvert @?= 140
+        replicaAdvertExpiresAt renewedAdvert @?= 200
+
+        let degraded = active { repositoryLeaseState = RepositoryLeaseDegraded }
+        maintainRepositoryReplicaAdvertAt
+          141 policy fixtureStorage providerCredentials degraded
+          >>= expectRight >>= (@?= Nothing)
+        readRepositoryReplicaAdvertAt
+          141 fixtureStorage fixtureRepository provider >>= \case
+            Left RepositoryAdvertMissing -> pure ()
+            other -> assertFailure ("expected a withdrawn degraded advert, got " <> show other)
+
+        let advertRef = RepositoryReplicaAdvert fixtureRepository provider
+            assertPolicyWithdrawal expected invalidPolicy invalidLease = do
+              maintainRepositoryReplicaAdvertAt
+                141 policy fixtureStorage providerCredentials active
+                >>= expectRight
+                >>= maybe (assertFailure "failed to restore an advert") pure
+              maintainRepositoryReplicaAdvertAt
+                141 invalidPolicy fixtureStorage providerCredentials invalidLease
+                >>= (@?= Left expected)
+              getRef fixtureStorage advertRef >>= (@?= Nothing)
+        assertPolicyWithdrawal RepositoryAdvertNoReachableAddress
+          policy { advertPolicyReachableVia = [] } active
+        assertPolicyWithdrawal RepositoryAdvertCannotServeBlocks
+          policy { advertPolicyCapabilities = 0 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyLifetime = 0 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyLifetime = 901 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyRenewBefore = 60 } active
+        assertPolicyWithdrawal RepositoryAdvertSnapshotMismatch
+          policy active { repositoryLeaseSnapshot = Nothing }
+
+        (_, shortestAdvert) <- maintainRepositoryReplicaAdvertAt
+          141 policy
+            { advertPolicyLifetime = 1
+            , advertPolicyRenewBefore = 0
+            }
+          fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "the shortest valid TTL was refused") pure
+        replicaAdvertExpiresAt shortestAdvert @?= 142
+
+        (_, longestAdvert) <- maintainRepositoryReplicaAdvertAt
+          141 policy
+            { advertPolicyLifetime = 900
+            , advertPolicyRenewBefore = 899
+            }
+          fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "the longest valid TTL was refused") pure
+        replicaAdvertExpiresAt longestAdvert @?= 1041
+
   , testCase "expiry keeps the replica pinned through its grace period" $
       withRepository $ \Fixture{..} -> do
         let leaseId = makeRepositoryLeaseId fixtureRepository 4
