@@ -2,9 +2,11 @@
 -- | @hub issue list@, @hub issue show@, @hub pr list@, @hub pr show@ and
 -- @hub log@ (PEP-22 "Read").
 --
--- The read side of the tracker. Everything here is a function of one
+-- The read side of the tracker. Thread content is a function of one
 -- 'FoldResult', so none of it needs a peer, a key or a network: canon is a git
--- ref in this repository and the fold over it is what these print.
+-- ref in this repository and the fold over it is what these print. Pull request
+-- rows also carry a read-only observation of the ordinary git refs in this
+-- clone: whether the folded proposal tip merges into its target as they stand.
 --
 -- Everything that DECIDES something is exported and pure, the way
 -- "HBS2.Hub.CLI.Verify" exports 'reportDoc' and "HBS2.Hub.CLI.Inbox" exports
@@ -35,7 +37,9 @@ module HBS2.Hub.CLI.Read
   , threadsOf
   , emptyListing
   , listDoc
+  , listDocChecked
   , showDoc
+  , showDocChecked
   , logDoc
   , logContract
   , logOrder
@@ -43,6 +47,8 @@ module HBS2.Hub.CLI.Read
   , listArgs
   , listJsonArgs
   , indexContract
+  , indexContractChecked
+  , mergeabilityOf
   , showArgs
   , logArgs
   , Which(..)
@@ -59,12 +65,11 @@ import HBS2.Hub.Render
 import HBS2.Hub.Fold
 import HBS2.Hub.Repo
 import HBS2.Hub.Repo.Git (withGitCanon,gitRun,GitTrouble(..))
-import HBS2.Hub.Canon (utf8Length,takeBytes)
-import HBS2.Hub.Repo.GitBundle (validSha)
-import HBS2.Hub.CLI.Argv (badArgs,flagsOf,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
+import HBS2.Hub.Canon (takeBytes)
+import HBS2.Hub.Repo.GitBundle (refTip,mergeTree,Merged(..))
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagSwitch,flagMaybe,flagText,flagWord
                          ,repoFlags,flagRepo,repoAndFlags)
 import HBS2.Hub.CLI.Common (withCanon,OnMissing(..),refuse,saying,utcOf)
-import HBS2.Hub.CLI.Verify (codeOf, refusalDoc)
 
 import HBS2.CLI.Prelude hiding (null)
 import HBS2.CLI.Run.Internal
@@ -85,7 +90,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Text.Encoding.Error qualified as Text
 import Data.Word (Word64)
-import System.Exit (die,exitWith,ExitCode(..))
+import System.Exit (exitWith,ExitCode(..))
 
 -- | Asked for a thread canon does not hold.
 --
@@ -278,12 +283,19 @@ emptyListing kind f fr
 -- key is forty-odd columns and would push every title off the line, and
 -- @issue show@ prints it.
 listDoc :: [ThreadState] -> [Doc ann]
-listDoc ts =
+listDoc = listDocChecked . fmap (, Nothing)
+
+-- | One line per thread, including the result of the read-only merge check
+-- when the caller made one.  The short state belongs in the list; the paths
+-- belong in 'showDocChecked', where they do not turn one row into a page.
+listDocChecked :: [(ThreadState, Maybe PRMergeability)] -> [Doc ann]
+listDocChecked ts =
   [ hsep [ num (tsNumber t)
          , fill 6 (statusDoc t)
          , title t
-         , labels t ]
-  | t <- ts ]
+         , labels t
+         , mergeState m ]
+  | (t, m) <- ts ]
   where
     num = fill 5 . maybe "-" (("#" <>) . pretty)
 
@@ -295,6 +307,12 @@ listDoc ts =
     labels t = case labelsOf t of
       [] -> mempty
       ls -> brackets (hsep (punctuate comma (fmap (pretty . safeText) ls)))
+
+    mergeState = \case
+      Just MergeClean{}       -> "[mergeable]"
+      Just MergeConflicting{} -> "[conflicts]"
+      Just MergeUnknown{}     -> "[mergeability unknown]"
+      Nothing                 -> mempty
 
 -- | One thread, with its comments.
 showDoc :: ThreadState -> [Doc ann]
@@ -381,6 +399,27 @@ showDoc t =
       -- withheld. The JSON contract hides it; two renderers disagreeing about
       -- what a redaction covers is the same defect twice.
       <> [ "body-part" <+> hashDoc h | not (cRedacted c), Just h <- [cBodyPart c] ]
+
+-- | One thread and the mergeability observation made for it. Conflict paths
+-- are stranger-controlled git paths, so they pass through 'safeText'. Kept as
+-- a small overlay on the established renderer: adding a git observation does
+-- not give the thread's canon-derived projection a second implementation.
+showDocChecked :: ThreadState -> Maybe PRMergeability -> [Doc ann]
+showDocChecked t mmerge = showDoc t <> mergeabilityDocs mmerge
+
+mergeabilityDocs :: Maybe PRMergeability -> [Doc ann]
+mergeabilityDocs = \case
+  Nothing -> []
+  Just (MergeClean target head') ->
+    [ "mergeability clean"
+    , "checked-target" <+> pretty target
+    , "checked-head" <+> pretty head' ]
+  Just (MergeConflicting target head' paths) ->
+    [ "mergeability conflicts"
+    , "checked-target" <+> pretty target
+    , "checked-head" <+> pretty head'
+    , "conflicting-paths" <> line <> indent 2 (vcat (fmap (pretty . safeText) paths)) ]
+  Just (MergeUnknown why) -> ["mergeability unknown:" <+> pretty (safeText why)]
 
 -- | The surviving events, oldest first.
 --
@@ -499,6 +538,10 @@ readEntries = do
                  <> line <> "over a materialized cache, and this build folds canon in"
                  <> line <> "memory and has no cache."
                  <> line
+                 <> line <> "Open pull requests are checked against their current target"
+                 <> line <> "without changing the worktree. A list checks at most 64; a"
+                 <> line <> "row past that says not checked, and `pr show` checks it."
+                 <> line
                  <> line <> "A label here is one an owner APPLIED. What an author asked"
                  <> line <> "for on open is shown by 'show' and never counted as a"
                  <> line <> "label: applying one is an owner-signed event (PEP-19), so"
@@ -507,16 +550,18 @@ readEntries = do
                  <> line
                  <> line <> "--json prints one `index` document (contract 1, PEP-24):"
                  <> line <> "per thread its number, kind, id, title, status, applied"
-                 <> line <> "labels, author, comment count and folded times. A redacted"
+                 <> line <> "labels, author, comment count, folded times and, for an open"
+                 <> line <> "pull request, mergeability against this clone's target. A redacted"
                  <> line <> "thread keeps its row with a null title." )
         $ entry $ bindMatch name $ nil_ \case
             (listJsonArgs -> Just ((repo, f), asJson)) ->
               lift $ withFold repo \fr -> do
                 let ts = threadsOf kind f fr
+                checked <- checkListing ts
                 if asJson
-                  then emit (renderDocument indexOrder (indexContract repo kind f ts))
+                  then emit (renderDocument indexOrder (indexContractChecked repo kind f checked))
                   else do
-                    out (listDoc ts)
+                    out (listDocChecked checked)
                     -- On stderr and exit 0: an empty answer to a well-formed
                     -- question is an answer, and this is advice about it.
                     when (List.null ts) $
@@ -545,7 +590,8 @@ readEntries = do
                  <> line <> "a web layer or any other renderer reads without touching"
                  <> line <> "hbs2, crypto or the event log. There is no diff in it"
                  <> line <> "here, and it says so ('unavailable'), because building"
-                 <> line <> "one needs git and this verb needs nothing." )
+                 <> line <> "one needs git. For an open pull request it also reports the"
+                 <> line <> "read-only mergeability check against this clone's target." )
         $ entry $ bindMatch name $ nil_ \case
             (showArgs -> Just (repo, which, asJson)) ->
               lift (withFold repo (pick kind (if asJson then AsJson else AsDoc)
@@ -564,11 +610,13 @@ readEntries = do
     spelled n = fmap (\c -> if c == ':' then ' ' else c) (drop 4 (show (pretty n)))
 
     pick kind how p fr = case [ t | t <- HM.elems (frThreads fr), p t, tsKind t == kind ] of
-      (t:_) -> case how of
-                 AsDoc  -> out (showDoc t)
+      (t:_) -> do
+               m <- mergeabilityOf Nothing t
+               case how of
+                 AsDoc  -> out (showDocChecked t m)
                  AsJson -> do
                    d <- diffOf t
-                   liftIO (LBS.putStr (renderContract (threadContract t d)))
+                   liftIO (LBS.putStr (renderContract (threadContractChecked t d m)))
       -- Not an empty page. A thread that is not there and a thread with
       -- nothing in it are different answers, and only one of them is worth
       -- retrying.
@@ -632,6 +680,26 @@ readEntries = do
     maxDiffBytes :: Int
     maxDiffBytes = 256 * 1024
 
+    -- A canon may hold hundreds of thousands of threads. One git child per
+    -- open proposal without a ceiling would turn a read into an unbounded
+    -- process factory; rows past the ceiling say they were not checked and a
+    -- detail view still checks that proposal on its own.
+    checkListing = go (0 :: Int)
+      where
+        go _ [] = pure []
+        go n (t:rest)
+          | checkable t && n >= maxListMergeChecks =
+              ((t, Just (MergeUnknown "not checked in this listing; open the pull request to check it")) :)
+                <$> go n rest
+          | otherwise = do
+              m <- mergeabilityOf Nothing t
+              let n' = if isJust m then n + 1 else n
+              ((t, m) :) <$> go n' rest
+
+        checkable t = tsKind t == HubPR && not (tsRedacted t) && statusOf t == "open"
+
+    maxListMergeChecks = 64
+
     -- Canon, or the same refusal and the same exit code `hub verify` gives.
     -- One table, so a script branches on one set of numbers whichever read
     -- verb it ran.
@@ -654,6 +722,39 @@ readEntries = do
       (\e -> if isResourceVanishedError e then Just () else Nothing)
       (\_ -> exitWith (ExitFailure 141))
       (LBS.putStr bs)
+
+-- | Read-only mergeability at the two commits this clone currently has.
+-- Nothing means "not an open, visible pull request"; failures are data rather
+-- than refusals because a list must still show the proposal whose objects or
+-- target have not arrived yet.  @hub pr land@ repeats the same plumbing before
+-- any write, so this is a preview and never an authorization decision.
+mergeabilityOf :: MonadUnliftIO m
+               => Maybe FilePath -> ThreadState -> m (Maybe PRMergeability)
+mergeabilityOf cwd t
+  | tsKind t /= HubPR || tsRedacted t || statusOf t /= "open" = pure Nothing
+  | otherwise = traverse (checkMergeability cwd . psCoords) (tsPR t)
+
+checkMergeability :: MonadUnliftIO m
+                  => Maybe FilePath -> PRCoords -> m PRMergeability
+checkMergeability cwd co = do
+  let head' = prSourceTip co
+      targetRef = targetBranch (prOnto co)
+  refTip cwd targetRef >>= \case
+    Left _ -> pure (MergeUnknown "target ref could not be read")
+    Right Nothing -> pure (MergeUnknown ("target ref is missing: " <> targetRef))
+    Right (Just target) -> checkedMerge cwd target head'
+
+targetBranch :: Text -> Text
+targetBranch ref
+  | "refs/heads/" `Text.isPrefixOf` ref = ref
+  | otherwise = "refs/heads/" <> ref
+
+checkedMerge :: MonadUnliftIO m
+             => Maybe FilePath -> Text -> Text -> m PRMergeability
+checkedMerge cwd target head' = mergeTree cwd target head' <&> \case
+  Right (MergedTree _)      -> MergeClean target head'
+  Right (MergeConflicts ps) -> MergeConflicting target head' ps
+  Left _                    -> MergeUnknown "git could not compare the target and proposal"
 
 -- | The repository key, then the two flags, in any order.
 --
@@ -829,7 +930,12 @@ listJsonArgs syn = (, asJson) <$> listArgs rest
 -- times in milliseconds, and a redacted thread keeps its row with a null title,
 -- for the reason 'listDoc' keeps it.
 indexContract :: RepoRef -> HubKind -> Filter -> [ThreadState] -> Value
-indexContract repo kind f ts = object
+indexContract repo kind f = indexContractChecked repo kind f . fmap (, Nothing)
+
+-- | The index with mergeability observations made against this clone's refs.
+indexContractChecked :: RepoRef -> HubKind -> Filter
+                     -> [(ThreadState, Maybe PRMergeability)] -> Value
+indexContractChecked repo kind f ts = object
   [ "contract" .= contractVersion
   , "document" .= ("index" :: Text)
   , "repo"     .= key58 repo
@@ -841,7 +947,7 @@ indexContract repo kind f ts = object
   , "cursor"   .= (Nothing :: Maybe Text)
   ]
   where
-    one t = object
+    one (t, mmerge) = object $
       [ "number"     .= tsNumber t
       , "kind"       .= kindOf (tsKind t)
       , "thread_id"  .= b58 (tsId t)
@@ -854,6 +960,7 @@ indexContract repo kind f ts = object
       , "updated_at" .= tsUpdated t
       , "redacted"   .= tsRedacted t
       ]
+      <> [ "mergeability" .= mergeabilityContract mmerge | tsKind t == HubPR ]
 
 indexOrder :: [Text]
 indexOrder =
@@ -863,3 +970,4 @@ indexOrder =
   [ "repo", "number", "kind", "filter", "threads", "cursor"
   , "thread_id", "title", "status", "label", "labels", "author", "comments"
   , "created_at", "updated_at", "redacted" ]
+  <> ["mergeability", "state", "target", "head", "conflicts", "reason"]
