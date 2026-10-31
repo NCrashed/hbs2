@@ -85,6 +85,8 @@ import HBS2.Peer.RPC.API.RefChan
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.Notify
+import HBS2.Peer.CLI.Doctor
+import HBS2.Peer.RPC.Client.Unix (withRPC2)
 import HBS2.Peer.RPC.Client.StorageClient
 
 import HBS2.Peer.Proto.LWWRef.Internal
@@ -121,11 +123,13 @@ import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
 import Data.Time.Clock.POSIX
 import Data.Time.Format
+import Data.Version (showVersion)
 import Lens.Micro.Platform as Lens
 import Network.Socket
 import Options.Applicative
 import Prettyprinter.Render.Terminal
 import System.Directory
+import System.Directory qualified as Directory
 import System.Environment
 import System.Exit
 import System.IO
@@ -220,6 +224,7 @@ runCLI = do
                 <> command "run"       (info pRun  (progDesc "run peer"))
                 <> command "start"     (info pRunStart  (progDesc "run peer"))
                 <> command "poke"      (info pPoke (progDesc "poke peer by rpc"))
+                <> command "doctor"    (info pDoctor (progDesc "diagnose local peer health"))
                 <> command "die"       (info pDie (progDesc "die cmd"))
                 <> command "announce"  (info pAnnounce (progDesc "announce block"))
                 <> command "ping"      (info pPing (progDesc "ping another peer"))
@@ -271,6 +276,46 @@ runCLI = do
 
     pVersion = pure do
         LBS.putStr $ Aeson.encode $(inlineBuildVersion Pkg.version)
+
+    pDoctor = do
+      rpc <- pRpcCommon
+      json <- switch (long "json" <> help "print a stable JSON report")
+      pure do
+        when json do
+          setLogging @INFO   (logPrefix "" . toStderr)
+          setLogging @ERROR  (errorPrefix . toStderr)
+          setLogging @WARN   (warnPrefix . toStderr)
+          setLogging @NOTICE (noticePrefix . toStderr)
+
+        let configArg = view rpcOptConf rpc
+        configPath <- peerConfigPath configArg
+        configPresent <- Directory.doesFileExist configPath
+        conf <- peerConfigReadOnly configArg
+        let socketPath = fromMaybe (getRpcSocketName conf) (view rpcOptAddr rpc)
+
+        runtime <- Exception.try @SomeException $
+          withRPC2 @PeerAPI @UNIX socketPath $ \caller -> do
+            poke <- callRpcWaitRetry @RpcPoke (TimeoutSec 0.5) 2 caller ()
+            peers <- case poke of
+              Nothing -> pure Nothing
+              Just _ -> fmap length <$> callRpcWaitRetry @RpcPeers (TimeoutSec 1) 2 caller ()
+            pure (Text.pack <$> poke, peers)
+
+        let (poke, peers) = fromRight (Nothing, Nothing) runtime
+            report = diagnose DoctorFacts
+              { doctorCLIVersion = Text.pack (showVersion Pkg.version)
+              , doctorConfigPath = configPath
+              , doctorConfigPresent = configPresent
+              , doctorRPCSocket = socketPath
+              , doctorPoke = poke
+              , doctorPeerCount = peers
+              }
+
+        if json
+          then LBS.putStr (Aeson.encode (doctorJSON report))
+          else Text.putStr (renderDoctor report)
+
+        unless (doctorPassed report) exitFailure
 
     pPubKeySign = maybeReader (fromStringMay @(PubKey 'Sign 'HBS2Basic))
 
@@ -1367,6 +1412,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
 
   let pokeAnsw = show $ vcat [ "peer-key:" <+> dquotes (pretty (AsBase58 k))
+                             , "version:" <+> dquotes (pretty (showVersion Pkg.version))
                              , "udp:" <+> dquotes (pretty (fst . snd <$> udpPoint))
                              , "tcp:" <+> dquotes (pretty (fst . snd <$> tcpPoint))
                              , "local-multicast:" <+> dquotes (pretty localMulticast)
@@ -1485,5 +1531,3 @@ checkMigration prefix  = flip runContT pure $ callCC \exit -> do
     liftIO exitFailure
 
   liftIO exitFailure
-
-

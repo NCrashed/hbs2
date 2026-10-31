@@ -194,6 +194,7 @@ library
       HBS2.Peer.RPC.Internal.Storage
       HBS2.Peer.RPC.Internal.Types
       HBS2.Peer.CLI.Detect
+      HBS2.Peer.CLI.Doctor
       HBS2.Peer.NCQ3.Migrate.NCQ
 
     other-modules:
@@ -224,6 +225,7 @@ test-suite test
         HttpListen
         BlockAnnouncePolicySpec
         BlockSizeCacheStateSpec
+        DoctorSpec
         -- from app/: these exercise the config and policy the peer itself
         -- uses, so the tests read the real modules rather than copies.
         PeerConfig
@@ -239,6 +241,7 @@ test-suite test
     main-is:          TestSuite.hs
     build-depends:
           base, hbs2-peer, hbs2-core, hbs2-storage-simple
+        , aeson
         , async
         , bytestring
         , cache
