@@ -787,6 +787,7 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
         brief "create or renew a durable local repository storage lease" $
           args [ arg "bytes" "[--max-bytes N]"
                , arg "blocks" "[--max-blocks N]"
+               , arg "seconds" "[--max-update-lag N]"
                , arg "seconds" "[--ttl N]"
                , arg "seconds" "[--grace N]"
                , arg "repository" "repo"

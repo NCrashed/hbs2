@@ -15,13 +15,15 @@ spec :: Spec
 spec = describe "repository lease policy" $ do
   it "creates a syncing lease with bounded expiry" $ do
     repository <- view peerSignPk <$> newCredentials @'HBS2Basic
-    let lease = renewRepositoryLeaseAt 100 7 repository 200 300 (Just 20) 5 Nothing
+    let lease = renewRepositoryLeaseAt 100 7 repository 200 300 60 (Just 20) 5 Nothing
     repositoryLeaseId lease `shouldBe` makeRepositoryLeaseId repository 7
     repositoryLeaseState lease `shouldBe` RepositoryLeaseSyncing
     repositoryLeaseCreatedAt lease `shouldBe` 100
     repositoryLeaseUpdatedAt lease `shouldBe` 100
     repositoryLeaseExpiresAt lease `shouldBe` Just 120
     repositoryLeaseGracePeriod lease `shouldBe` 5
+    repositoryLeaseMaxUpdateLag lease `shouldBe` 60
+    repositoryLeaseUpdateStartedAt lease `shouldBe` Nothing
     repositoryLeaseSnapshot lease `shouldBe` Nothing
 
   it "renews the durable identity and last verified snapshot" $ do
@@ -41,24 +43,28 @@ spec = describe "repository lease policy" $ do
           , repositorySnapshotLogicalBytes = 34
           , repositorySnapshotCompletedAt = 56
           }
-        previous = (renewRepositoryLeaseAt 100 7 repository 200 300 Nothing 5 Nothing)
+        previous = (renewRepositoryLeaseAt 100 7 repository 200 300 60 Nothing 5 Nothing)
           { repositoryLeaseState = RepositoryLeaseActive
+          , repositoryLeaseUpdateStartedAt = Just 150
           , repositoryLeaseSnapshot = Just snapshot
           , repositoryLeaseLastError = Just "old failure"
           }
-        renewed = renewRepositoryLeaseAt 200 8 repository 400 500 Nothing 10
+        renewed = renewRepositoryLeaseAt 200 8 repository 400 500 120 Nothing 10
           (Just previous)
     repositoryLeaseId renewed `shouldBe` repositoryLeaseId previous
     repositoryLeaseCreatedAt renewed `shouldBe` 100
     repositoryLeaseState renewed `shouldBe` RepositoryLeaseDegraded
     repositoryLeaseSnapshot renewed `shouldBe` Just snapshot
     repositoryLeaseGracePeriod renewed `shouldBe` 10
+    repositoryLeaseMaxUpdateLag renewed `shouldBe` 120
+    repositoryLeaseUpdateStartedAt renewed `shouldBe` Just 150
     repositoryLeaseLastError renewed `shouldBe` Nothing
 
   it "publishes finite defaults" $ do
     defaultLeaseMaxBytes `shouldBe` 10 * 1024 * 1024 * 1024
     defaultLeaseMaxBlocks `shouldBe` 10 * 1000 * 1000
     defaultLeaseGracePeriod `shouldBe` 0
+    defaultLeaseMaxUpdateLag `shouldBe` 300
 
   it "saturates TTL arithmetic instead of wrapping it" $ do
     leaseExpiryAt (maxBound - 2) 2 `shouldBe` (maxBound :: Word64)
@@ -71,11 +77,18 @@ spec = describe "repository lease policy" $ do
     positiveWord64 (-1) `shouldBe` Nothing
     positiveWord64 (fromIntegral (maxBound :: Word64) + 1) `shouldBe` Nothing
 
+  it "accepts zero for non-negative time limits" $ do
+    nonNegativeWord64 0 `shouldBe` Just 0
+    nonNegativeWord64 1 `shouldBe` Just 1
+    nonNegativeWord64 (fromIntegral (maxBound :: Word64)) `shouldBe` Just maxBound
+    nonNegativeWord64 (-1) `shouldBe` Nothing
+    nonNegativeWord64 (fromIntegral (maxBound :: Word64) + 1) `shouldBe` Nothing
+
   it "protects leases through grace and excludes elapsed or terminated leases" $ do
     repository <- view peerSignPk <$> newCredentials @'HBS2Basic
     otherRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
-    let lease = renewRepositoryLeaseAt 10 7 repository 200 300 (Just 10) 5 Nothing
-        other = renewRepositoryLeaseAt 10 8 otherRepository 200 300 Nothing 0 Nothing
+    let lease = renewRepositoryLeaseAt 10 7 repository 200 300 60 (Just 10) 5 Nothing
+        other = renewRepositoryLeaseAt 10 8 otherRepository 200 300 60 Nothing 0 Nothing
     selectActiveRepositoryLeaseAt 19 repository [other, lease]
       `shouldBe` Just lease
     selectActiveRepositoryLeaseAt 20 repository [lease]
@@ -91,7 +104,7 @@ spec = describe "repository lease policy" $ do
   it "classifies lease lifetime without overflowing the grace deadline" $ do
     repository <- view peerSignPk <$> newCredentials @'HBS2Basic
     let lease = renewRepositoryLeaseAt
-          (maxBound - 2) 7 repository 200 300 (Just 1) 10 Nothing
+          (maxBound - 2) 7 repository 200 300 60 (Just 1) 10 Nothing
     repositoryLeaseLifetimeAt (maxBound - 2) lease
       `shouldBe` RepositoryLeaseUnexpired
     repositoryLeaseLifetimeAt (maxBound - 1) lease
@@ -101,8 +114,9 @@ spec = describe "repository lease policy" $ do
 
   it "supports the durable lease versions known by this node" $ do
     repositoryLeaseVersionSupported 1 `shouldBe` True
+    repositoryLeaseVersionSupported 2 `shouldBe` True
     repositoryLeaseVersionSupported repositoryLeaseCurrentVersion `shouldBe` True
-    repositoryLeaseVersionSupported 3 `shouldBe` False
+    repositoryLeaseVersionSupported 4 `shouldBe` False
 
   it "names every externally visible state" $ do
     map leaseStateName

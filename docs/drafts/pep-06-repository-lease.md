@@ -2,7 +2,7 @@
 
 Status: draft; provider-local lease MVP implemented 2026-10-30, including
 provider-signed local receipts, explicit expiry grace, and aggregate capacity
-admission on 2026-10-31.
+admission on 2026-10-31. Durable update-lag tracking was added on 2026-10-31.
 Bilateral wire contracts, advertisements, and barter accounting are not part
 of this implementation.
 
@@ -398,8 +398,12 @@ The first executable vertical slice is now present:
 5. Sealing writes a canonical Merkle commitment over ordered `(hash,length)`
    entries and a separate Merkle pin tree over plain hashes. The lease ref
    points to the latter so a storage root walker reaches the repository data.
-6. A failed or over-limit update changes an existing lease to `Degraded` while
-   retaining its previous complete snapshot and pin. At TTL expiry a lease
+6. A newly observed LWWRef or RefLog root starts the durable update-lag clock.
+   While the update is incomplete but still inside the contract limit, the
+   previous complete snapshot remains `Active`, pinned, receipted, and
+   cloneable. At the exact `max-update-lag` boundary it becomes `Degraded`;
+   completing the update clears the clock. A failure against unchanged roots
+   is an integrity failure and degrades immediately. At TTL expiry a lease
    enters `Grace`; its pin and receipt remain roots until
    `expires-at + grace-period`, when the worker terminates it and removes both
    roots idempotently. Explicit termination removes them immediately.
@@ -408,13 +412,24 @@ The first executable vertical slice is now present:
    `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
    by a non-terminated lease.
 
-`repo:lease:add` accepts `--max-bytes`, `--max-blocks`, optional `--ttl`, and
-`--grace`. The grace interval is measured in seconds and defaults to zero for
-backwards-compatible immediate expiry. Durable record version 2 stores it;
-version 1 records remain readable and are interpreted with zero grace. The
-provider-local default limits are 10 GiB and 10,000,000 blocks. This slice does
-not publish a replica advertisement: knowing the provider remains necessary
-until PEP-10 is implemented.
+`repo:lease:add` accepts `--max-bytes`, `--max-blocks`,
+`--max-update-lag`, optional `--ttl`, and `--grace`. Both time limits are
+measured in seconds. Update lag defaults to 300 seconds; grace defaults to zero
+for backwards-compatible immediate expiry. An explicit update lag of zero
+restores immediate degradation on the first incomplete update. Durable record
+version 3 stores the lag limit and the first observed incomplete-update time.
+Versions 1 and 2 remain readable and use zero lag, preserving their previous
+immediate-degrade behaviour; version 1 also uses zero grace. The provider-local
+default limits are 10 GiB and 10,000,000 blocks. This slice does not publish a
+replica advertisement: knowing the provider remains necessary until PEP-10 is
+implemented.
+
+Update lag is measured from observed divergence, not from snapshot age. A
+repository which has not changed therefore never becomes stale merely because
+its last complete snapshot is old. The worker compares the current local
+LWWRef and RefLog roots with the active snapshot before treating an incomplete
+scan as an update. The deadline uses saturating arithmetic and is inclusive:
+an update first observed at `t` is stale when `now >= t + max-update-lag`.
 
 Aggregate admission is enforced by the peer's durable Brains writer before a
 lease RPC succeeds. `barter-budget-bytes` is the total logical capacity donated

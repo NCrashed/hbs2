@@ -7,11 +7,14 @@ import HBS2.Data.Types.Refs
 import HBS2.Net.Auth.Credentials
 import HBS2.Peer.Brains
 import HBS2.Peer.Prelude
+import HBS2.Peer.Proto.LWWRef
+import HBS2.Peer.Proto.RefLog
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease
 import HBS2.Storage
 import HBS2.Storage.Inventory
 
+import Control.Applicative ((<|>))
 import Data.Functor (($>))
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as Text
@@ -72,12 +75,14 @@ refreshLifetime now context =
     RepositoryLeaseUnexpired -> refreshAvailableRepository now context
     RepositoryLeaseInGrace -> persistIfChanged now context lease
       { repositoryLeaseState = RepositoryLeaseGrace
+      , repositoryLeaseUpdateStartedAt = Nothing
       , repositoryLeaseLastError = Just "lease grace period"
       }
     RepositoryLeaseElapsed -> do
       releaseArtifacts context
       persistIfChanged now context lease
         { repositoryLeaseState = RepositoryLeaseTerminated
+        , repositoryLeaseUpdateStartedAt = Nothing
         , repositoryLeaseLastError = Just "lease expired"
         }
   where
@@ -118,13 +123,53 @@ persistProblem
   -> LeaseRefreshContext
   -> RepositorySnapshotError
   -> IO RepositoryLease
-persistProblem now context problem =
-  persistIfChanged now context lease
-    { repositoryLeaseState = incompleteLeaseState lease
+persistProblem now context problem = case repositoryLeaseSnapshot lease of
+  Nothing -> persistIfChanged now context lease
+    { repositoryLeaseState = RepositoryLeaseSyncing
+    , repositoryLeaseUpdateStartedAt = Nothing
     , repositoryLeaseLastError = Just (Text.pack (show problem))
     }
+  Just snapshot -> do
+    updateObserved <- repositoryUpdateObserved context snapshot
+    persistIfChanged now context
+      (leaseAfterProblem now updateObserved problem lease)
   where
     lease = refreshLease context
+
+leaseAfterProblem
+  :: Word64
+  -> Bool
+  -> RepositorySnapshotError
+  -> RepositoryLease
+  -> RepositoryLease
+leaseAfterProblem now updateObserved problem lease = updated
+  where
+    startedAt = repositoryLeaseUpdateStartedAt lease <|> Just now
+    withTracking = lease { repositoryLeaseUpdateStartedAt = startedAt }
+    nextState
+      | updateObserved && not (repositoryLeaseUpdateOverdueAt now withTracking) =
+          RepositoryLeaseActive
+      | otherwise = RepositoryLeaseDegraded
+    updated = lease
+      { repositoryLeaseState = nextState
+      , repositoryLeaseUpdateStartedAt =
+          if updateObserved then startedAt else Nothing
+      , repositoryLeaseLastError = Just (Text.pack (show problem))
+      }
+
+repositoryUpdateObserved :: LeaseRefreshContext -> RepositorySnapshot -> IO Bool
+repositoryUpdateObserved context snapshot = do
+  currentLww <- fmap HashRef <$> getRef storage
+    (LWWRefKey @'HBS2Basic (repositoryLeaseRepository lease))
+  currentRefLog <- fmap HashRef <$> getRef storage
+    (RefLogKey @'HBS2Basic (repositorySnapshotRefLogKey snapshot))
+  pure $ changed currentLww (repositorySnapshotLWWRefBlock snapshot)
+      || changed currentRefLog (repositorySnapshotRefLogRoot snapshot)
+  where
+    lease = refreshLease context
+    storage = refreshStorage context
+    changed Nothing _ = False
+    changed (Just current) expected = current /= expected
 
 activateCandidate
   :: Word64
@@ -214,6 +259,7 @@ persistActive
   -> IO RepositoryLease
 persistActive now context lease = persistIfChanged now context lease
   { repositoryLeaseState = RepositoryLeaseActive
+  , repositoryLeaseUpdateStartedAt = Nothing
   , repositoryLeaseLastError = Nothing
   }
 

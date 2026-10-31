@@ -2,10 +2,12 @@ module HBS2.Git3.Repo.Lease.Policy
   ( defaultLeaseMaxBytes
   , defaultLeaseMaxBlocks
   , defaultLeaseGracePeriod
+  , defaultLeaseMaxUpdateLag
   , renewRepositoryLeaseAt
   , selectActiveRepositoryLeaseAt
   , leaseExpiryAt
   , positiveWord64
+  , nonNegativeWord64
   , leaseStateName
   ) where
 
@@ -22,6 +24,9 @@ defaultLeaseMaxBlocks = 10 * 1000 * 1000
 defaultLeaseGracePeriod :: Word64
 defaultLeaseGracePeriod = 0
 
+defaultLeaseMaxUpdateLag :: Word64
+defaultLeaseMaxUpdateLag = 5 * 60
+
 -- | Build a new lease or renew the durable lease for the same repository.
 -- Renewal preserves its identity, creation time, and last verified snapshot.
 renewRepositoryLeaseAt
@@ -30,11 +35,13 @@ renewRepositoryLeaseAt
   -> GitRepoKey
   -> Word64
   -> Word64
+  -> Word64
   -> Maybe Word64
   -> Word64
   -> Maybe RepositoryLease
   -> RepositoryLease
-renewRepositoryLeaseAt now nonce repository maxBytes maxBlocks ttl grace previous =
+renewRepositoryLeaseAt
+  now nonce repository maxBytes maxBlocks maxUpdateLag ttl grace previous =
   RepositoryLease
     { repositoryLeaseVersion = repositoryLeaseCurrentVersion
     , repositoryLeaseId = maybe
@@ -52,6 +59,9 @@ renewRepositoryLeaseAt now nonce repository maxBytes maxBlocks ttl grace previou
     , repositoryLeaseUpdatedAt = now
     , repositoryLeaseExpiresAt = leaseExpiryAt now <$> ttl
     , repositoryLeaseGracePeriod = grace
+    , repositoryLeaseMaxUpdateLag = maxUpdateLag
+    , repositoryLeaseUpdateStartedAt =
+        previous >>= repositoryLeaseUpdateStartedAt
     , repositoryLeaseSnapshot = previousSnapshot
     , repositoryLeaseLastError = Nothing
     }
@@ -80,6 +90,12 @@ leaseExpiryAt now ttl = now + min ttl (maxBound - now)
 positiveWord64 :: Integer -> Maybe Word64
 positiveWord64 value
   | value > 0 && value <= fromIntegral (maxBound :: Word64) =
+      Just (fromIntegral value)
+  | otherwise = Nothing
+
+nonNegativeWord64 :: Integer -> Maybe Word64
+nonNegativeWord64 value
+  | value >= 0 && value <= fromIntegral (maxBound :: Word64) =
       Just (fromIntegral value)
   | otherwise = Nothing
 

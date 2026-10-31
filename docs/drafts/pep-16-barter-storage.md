@@ -213,6 +213,16 @@ An update which exceeds the limit is not partially accepted.  The provider
 keeps serving the previous complete snapshot, marks the lease `Degraded`, and
 requests a larger limit or a replacement provider.
 
+`max-update-lag` starts when the provider first observes a newer LWWRef block
+or RefLog root which it cannot yet seal as a complete snapshot. Snapshot age
+alone does not start the clock: an unchanged repository remains fresh. The
+last complete snapshot remains active and cloneable inside the interval. At
+the inclusive deadline the lease becomes `Degraded`; a complete catch-up
+atomically replaces the snapshot and clears the clock. Missing or corrupt data
+under unchanged roots is an integrity failure and degrades immediately rather
+than receiving an update allowance. A zero limit requests this same immediate
+degradation for every incomplete update.
+
 
 # Lease state machine
 
@@ -671,10 +681,11 @@ also implemented: expiry enters `Grace`, preserves the pin and receipt through
 the configured interval, and only then releases them; old durable records
 decode with zero grace. Aggregate capacity admission is now enforced against
 operator byte and contract budgets, including renewal deltas and concurrent
-requests. M1 is not yet complete by the exit criteria below: explicit
-update-lag and the three-node offline-owner clone scenario remain. The receipt
-encoding stays provider-local until the M0 golden-vector gate is complete. M2
-and later are unchanged.
+requests. Explicit update-lag is now durable and enforced at the exact
+contracted boundary. M1 is not yet complete by the exit criteria below: the
+three-node offline-owner clone scenario remains. The receipt encoding stays
+provider-local until the M0 golden-vector gate is complete. M2 and later are
+unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

@@ -13,6 +13,7 @@ module HBS2.Peer.Proto.RepositoryLease
   , repositoryLeaseCurrentVersion
   , repositoryLeaseVersionSupported
   , repositoryLeaseLifetimeAt
+  , repositoryLeaseUpdateOverdueAt
   , makeRepositoryLeaseId
   , makeRepositorySnapshotId
   ) where
@@ -94,6 +95,8 @@ data RepositoryLease = RepositoryLease
   , repositoryLeaseUpdatedAt     :: Word64
   , repositoryLeaseExpiresAt     :: Maybe Word64
   , repositoryLeaseGracePeriod   :: Word64
+  , repositoryLeaseMaxUpdateLag  :: Word64
+  , repositoryLeaseUpdateStartedAt :: Maybe Word64
   , repositoryLeaseSnapshot      :: Maybe RepositorySnapshot
   , repositoryLeaseLastError     :: Maybe Text
   }
@@ -136,18 +139,39 @@ data RepositoryLeaseWireV2 = RepositoryLeaseWireV2
 
 instance Serialise RepositoryLeaseWireV2
 
+data RepositoryLeaseWireV3 = RepositoryLeaseWireV3
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV3
+
 instance Serialise RepositoryLease where
-  encode = encode . repositoryLeaseToWireV2
+  encode = encode . repositoryLeaseToWireV3
   decode = do
     bytes <- toLazyByteString . encodeTerm <$> decodeTerm
-    case deserialiseOrFail @RepositoryLeaseWireV2 bytes of
-      Right wire -> pure (repositoryLeaseFromWireV2 wire)
-      Left _ -> case deserialiseOrFail @RepositoryLeaseWireV1 bytes of
-        Right wire -> pure (repositoryLeaseFromWireV1 wire)
-        Left failure -> fail (show failure)
+    case deserialiseOrFail @RepositoryLeaseWireV3 bytes of
+      Right wire -> pure (repositoryLeaseFromWireV3 wire)
+      Left _ -> case deserialiseOrFail @RepositoryLeaseWireV2 bytes of
+        Right wire -> pure (repositoryLeaseFromWireV2 wire)
+        Left _ -> case deserialiseOrFail @RepositoryLeaseWireV1 bytes of
+          Right wire -> pure (repositoryLeaseFromWireV1 wire)
+          Left failure -> fail (show failure)
 
-repositoryLeaseToWireV2 :: RepositoryLease -> RepositoryLeaseWireV2
-repositoryLeaseToWireV2 RepositoryLease{..} = RepositoryLeaseWireV2
+repositoryLeaseToWireV3 :: RepositoryLease -> RepositoryLeaseWireV3
+repositoryLeaseToWireV3 RepositoryLease{..} = RepositoryLeaseWireV3
   repositoryLeaseVersion
   repositoryLeaseId
   repositoryLeaseRepository
@@ -158,6 +182,8 @@ repositoryLeaseToWireV2 RepositoryLease{..} = RepositoryLeaseWireV2
   repositoryLeaseUpdatedAt
   repositoryLeaseExpiresAt
   repositoryLeaseGracePeriod
+  repositoryLeaseMaxUpdateLag
+  repositoryLeaseUpdateStartedAt
   repositoryLeaseSnapshot
   repositoryLeaseLastError
 
@@ -166,21 +192,29 @@ repositoryLeaseFromWireV1
   (RepositoryLeaseWireV1 version leaseId repository state maxBytes maxBlocks
     createdAt updatedAt expiresAt snapshot lastError) = RepositoryLease
       version leaseId repository state maxBytes maxBlocks createdAt updatedAt
-      expiresAt 0 snapshot lastError
+      expiresAt 0 0 Nothing snapshot lastError
 
 repositoryLeaseFromWireV2 :: RepositoryLeaseWireV2 -> RepositoryLease
 repositoryLeaseFromWireV2
   (RepositoryLeaseWireV2 version leaseId repository state maxBytes maxBlocks
     createdAt updatedAt expiresAt grace snapshot lastError) = RepositoryLease
       version leaseId repository state maxBytes maxBlocks createdAt updatedAt
-      expiresAt grace snapshot lastError
+      expiresAt grace 0 Nothing snapshot lastError
+
+repositoryLeaseFromWireV3 :: RepositoryLeaseWireV3 -> RepositoryLease
+repositoryLeaseFromWireV3
+  (RepositoryLeaseWireV3 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt grace maxUpdateLag updateStartedAt snapshot
+    lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt grace maxUpdateLag updateStartedAt snapshot lastError
 
 repositoryLeaseCurrentVersion :: Word16
-repositoryLeaseCurrentVersion = 2
+repositoryLeaseCurrentVersion = 3
 
 repositoryLeaseVersionSupported :: Word16 -> Bool
 repositoryLeaseVersionSupported version =
-  version == 1 || version == repositoryLeaseCurrentVersion
+  version == 1 || version == 2 || version == repositoryLeaseCurrentVersion
 
 repositoryLeaseLifetimeAt
   :: Word64
@@ -196,6 +230,15 @@ repositoryLeaseLifetimeAt now lease =
       where
         grace = repositoryLeaseGracePeriod lease
         graceDeadline = expiresAt + min grace (maxBound - expiresAt)
+
+repositoryLeaseUpdateOverdueAt :: Word64 -> RepositoryLease -> Bool
+repositoryLeaseUpdateOverdueAt now lease =
+  case repositoryLeaseUpdateStartedAt lease of
+    Nothing -> False
+    Just startedAt -> now >= updateDeadline
+      where
+        lag = repositoryLeaseMaxUpdateLag lease
+        updateDeadline = startedAt + min lag (maxBound - startedAt)
 
 -- | Local mutable ref which makes the inventory tree a storage root.
 newtype RepositoryLeasePin = RepositoryLeasePin RepositoryLeaseId

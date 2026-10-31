@@ -67,6 +67,24 @@ data RepositoryLeaseV1 = RepositoryLeaseV1
 
 instance Serialise RepositoryLeaseV1
 
+-- The durable shape used after grace periods and before update-lag tracking.
+data RepositoryLeaseV2 = RepositoryLeaseV2
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseV2
+
 instance Storage CountingStorage HbSync LBS.ByteString IO where
   putBlock (CountingStorage storage writes) bytes =
     countWrite writes (putBlock storage bytes)
@@ -312,6 +330,86 @@ tests = testGroup "repository lease"
         getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
         getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
 
+  , testCase "update lag keeps the last complete snapshot until its boundary" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 6
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+        snapshot <- repositoryLeaseSnapshot active
+          & maybe (assertFailure "active lease has no snapshot") pure
+        let missingHead = hashObject @HbSync
+              ("pending-repository-update" :: LBS.ByteString)
+        updateRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+          missingHead
+
+        pending <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState pending @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt pending @?= Just 100
+        repositoryLeaseSnapshot pending @?= Just snapshot
+        assertBool "the old snapshot remains pinned while the update is fresh" . isJust
+          =<< getRef fixtureStorage (RepositoryLeasePin leaseId)
+
+        lastFresh <- refreshRepositoryLeaseAt 109
+          providerCredentials someBrains fixtureStorage pending
+        repositoryLeaseState lastFresh @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt lastFresh @?= Just 100
+
+        stale <- refreshRepositoryLeaseAt 110
+          providerCredentials someBrains fixtureStorage lastFresh
+        repositoryLeaseState stale @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt stale @?= Just 100
+        repositoryLeaseSnapshot stale @?= Just snapshot
+
+        updateRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+          (fromHashRef (repositorySnapshotLWWRefBlock snapshot))
+        caughtUp <- refreshRepositoryLeaseAt 111
+          providerCredentials someBrains fixtureStorage stale
+        repositoryLeaseState caughtUp @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt caughtUp @?= Nothing
+
+  , testCase "unchanged or missing mutable roots do not receive update lag" $ do
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 9
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+
+        delBlock fixtureStorage fixturePayloadBlock
+        degraded <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState degraded @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt degraded @?= Nothing
+
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 10
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+
+        delRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+        degraded <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState degraded @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt degraded @?= Nothing
+
   , testCase "a durable lease is visible after Brains is reopened" $
       withSystemTempDirectory "hbs2-repository-lease-brains" $ \directory -> do
         credentials <- newCredentials @'HBS2Basic
@@ -327,6 +425,8 @@ tests = testGroup "repository lease"
               , repositoryLeaseUpdatedAt = 1
               , repositoryLeaseExpiresAt = Nothing
               , repositoryLeaseGracePeriod = 0
+              , repositoryLeaseMaxUpdateLag = 60
+              , repositoryLeaseUpdateStartedAt = Nothing
               , repositoryLeaseSnapshot = Nothing
               , repositoryLeaseLastError = Nothing
               }
@@ -362,16 +462,55 @@ tests = testGroup "repository lease"
         , repositoryLeaseUpdatedAt = 20
         , repositoryLeaseExpiresAt = Just 30
         , repositoryLeaseGracePeriod = 0
+        , repositoryLeaseMaxUpdateLag = 0
+        , repositoryLeaseUpdateStartedAt = Nothing
         , repositoryLeaseSnapshot = Nothing
         , repositoryLeaseLastError = Just "old failure"
         }
 
+  , testCase "version 2 durable leases decode with immediate update lag" $ do
+      credentials <- newCredentials @'HBS2Basic
+      let repository = view peerSignPk credentials
+          leaseId = makeRepositoryLeaseId repository 7
+          encoded = serialise $ RepositoryLeaseV2
+            2 leaseId repository RepositoryLeaseDegraded
+            1024 100 10 20 (Just 30) 9 Nothing (Just "old failure")
+      decoded <- deserialiseOrFail @RepositoryLease encoded
+        & either (assertFailure . show) pure
+      repositoryLeaseGracePeriod decoded @?= 9
+      repositoryLeaseMaxUpdateLag decoded @?= 0
+      repositoryLeaseUpdateStartedAt decoded @?= Nothing
+
+  , testCase "update lag boundary saturates instead of wrapping" $ do
+      repository <- newRepositoryKey
+      let lease = (admissionLease repository 8 100)
+            { repositoryLeaseMaxUpdateLag = 10
+            , repositoryLeaseUpdateStartedAt = Just (maxBound - 2)
+            }
+      assertBool "the final representable second is the stale boundary"
+        (repositoryLeaseUpdateOverdueAt maxBound lease)
+      assertBool "a pending update before the saturated boundary remains fresh"
+        (not (repositoryLeaseUpdateOverdueAt (maxBound - 1) lease))
+      assertBool "a lease without a pending update is never stale"
+        (not (repositoryLeaseUpdateOverdueAt maxBound
+          (lease { repositoryLeaseUpdateStartedAt = Nothing })))
+
+  , testCase "grace boundary saturates instead of wrapping" $ do
+      repository <- newRepositoryKey
+      let lease = (admissionLease repository 11 100)
+            { repositoryLeaseExpiresAt = Just (maxBound - 2)
+            , repositoryLeaseGracePeriod = 10
+            }
+      repositoryLeaseLifetimeAt (maxBound - 1) lease @?= RepositoryLeaseInGrace
+      repositoryLeaseLifetimeAt maxBound lease @?= RepositoryLeaseElapsed
+
   , testCase "only known durable lease versions are supported" $ do
-      repositoryLeaseCurrentVersion @?= 2
+      repositoryLeaseCurrentVersion @?= 3
       assertBool "version 1 remains readable" (repositoryLeaseVersionSupported 1)
-      assertBool "version 2 is current" (repositoryLeaseVersionSupported 2)
+      assertBool "version 2 remains readable" (repositoryLeaseVersionSupported 2)
+      assertBool "version 3 is current" (repositoryLeaseVersionSupported 3)
       assertBool "version 0 is unsupported" (not (repositoryLeaseVersionSupported 0))
-      assertBool "version 3 is unsupported" (not (repositoryLeaseVersionSupported 3))
+      assertBool "version 4 is unsupported" (not (repositoryLeaseVersionSupported 4))
 
   , testCase "capacity reserves contract limits until termination or elapsed grace" $ do
       syncingRepository <- newRepositoryKey
@@ -449,8 +588,8 @@ tests = testGroup "repository lease"
       let policy = RepositoryLeaseAdmissionPolicy 1000 10
           lease = admissionLease repository 1 100
       admitRepositoryLeaseAt 10 policy
-        lease { repositoryLeaseVersion = 3 } []
-        @?= Left (RepositoryLeaseUnsupportedVersion 3)
+        lease { repositoryLeaseVersion = 4 } []
+        @?= Left (RepositoryLeaseUnsupportedVersion 4)
       admitRepositoryLeaseAt 10 policy
         lease { repositoryLeaseMaxBytes = 0 } []
         @?= Left RepositoryLeaseInvalidLimit
@@ -597,6 +736,8 @@ repositoryLeaseFixture leaseId repository = RepositoryLease
   , repositoryLeaseUpdatedAt = 1
   , repositoryLeaseExpiresAt = Nothing
   , repositoryLeaseGracePeriod = 0
+  , repositoryLeaseMaxUpdateLag = 0
+  , repositoryLeaseUpdateStartedAt = Nothing
   , repositoryLeaseSnapshot = Nothing
   , repositoryLeaseLastError = Nothing
   }

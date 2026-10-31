@@ -30,14 +30,17 @@ addRepositoryLease syntax = do
   let (options, repositorySyntax) = splitOpts
         [ ("--max-bytes", 1)
         , ("--max-blocks", 1)
+        , ("--max-update-lag", 1)
         , ("--ttl", 1)
         , ("--grace", 1)
         ] syntax
 
       maxBytes = optionWord "--max-bytes" defaultLeaseMaxBytes options
       maxBlocks = optionWord "--max-blocks" defaultLeaseMaxBlocks options
+      maxUpdateLag = optionNonNegativeWord
+        "--max-update-lag" defaultLeaseMaxUpdateLag options
       ttl = optionWordMay "--ttl" options
-      grace = optionWord "--grace" defaultLeaseGracePeriod options
+      grace = optionNonNegativeWord "--grace" defaultLeaseGracePeriod options
 
   repository <- resolveRepoKeyThrow repositorySyntax
   now <- liftIO (floor <$> getPOSIXTime)
@@ -47,7 +50,7 @@ addRepositoryLease syntax = do
 
   let previous = find ((== repository) . repositoryLeaseRepository) leases
       lease = renewRepositoryLeaseAt
-        now nonce repository maxBytes maxBlocks ttl grace previous
+        now nonce repository maxBytes maxBlocks maxUpdateLag ttl grace previous
 
   capacity <- putLease peerAPI lease
   callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repository, "lwwref", 1)
@@ -104,6 +107,7 @@ terminateRepositoryLease syntax = do
   let terminated = lease
         { repositoryLeaseState = RepositoryLeaseTerminated
         , repositoryLeaseUpdatedAt = now
+        , repositoryLeaseUpdateStartedAt = Nothing
         , repositoryLeaseLastError = Nothing
         }
   capacity <- putLease peerAPI terminated
@@ -184,11 +188,22 @@ optionWord :: Id -> Word64 -> [Syntax c] -> Word64
 optionWord name fallback options = fromMaybe fallback (optionWordMay name options)
 
 optionWordMay :: Id -> [Syntax c] -> Maybe Word64
-optionWordMay name options = lastMay
+optionWordMay = optionWordMayWith positiveWord64
+
+optionNonNegativeWord :: Id -> Word64 -> [Syntax c] -> Word64
+optionNonNegativeWord name fallback options =
+  fromMaybe fallback (optionWordMayWith nonNegativeWord64 name options)
+
+optionWordMayWith
+  :: (Integer -> Maybe Word64)
+  -> Id
+  -> [Syntax c]
+  -> Maybe Word64
+optionWordMayWith parseValue name options = lastMay
   [ parsed
   | ListVal [SymbolVal option, LitIntVal value] <- options
   , option == name
-  , Just parsed <- [positiveWord64 value]
+  , Just parsed <- [parseValue value]
   ]
 
 printLease :: MonadIO m => RepositoryLease -> m ()
@@ -199,7 +214,11 @@ printLease RepositoryLease{..} = liftIO $ print $ parens $
   <+> parens ("state" <+> pretty (leaseStateName repositoryLeaseState))
   <+> parens ("max-bytes" <+> pretty repositoryLeaseMaxBytes)
   <+> parens ("max-blocks" <+> pretty repositoryLeaseMaxBlocks)
+  <+> parens ("max-update-lag" <+> pretty repositoryLeaseMaxUpdateLag)
   <+> parens ("grace" <+> pretty repositoryLeaseGracePeriod)
+  <+> maybe mempty (\startedAt ->
+        parens ("update-started-at" <+> pretty startedAt))
+      repositoryLeaseUpdateStartedAt
   <+> maybe mempty (\expiresAt ->
         parens ("expires-at" <+> pretty expiresAt))
       repositoryLeaseExpiresAt
