@@ -86,6 +86,7 @@ import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.Notify
 import HBS2.Peer.CLI.Doctor
+import HBS2.Peer.CLI.Doctor.Repository
 import HBS2.Peer.RPC.Client.Unix (withRPC2)
 import HBS2.Peer.RPC.Client.StorageClient
 
@@ -347,6 +348,9 @@ runCLI = do
     pDoctor = do
       rpc <- pRpcCommon
       json <- switch (long "json" <> help "print a stable JSON report")
+      repo <- optional (strOption
+        (long "repo" <> metavar "REPOSITORY-KEY"
+          <> help "diagnose repository discovery, completeness, and sigils"))
       pure do
         when json do
           setLogging @INFO   (logPrefix "" . toStderr)
@@ -365,6 +369,7 @@ runCLI = do
 
         (poke, peers, configured, peerMetadata) <-
           doctorRuntimeProbe socketPath configuredEntries
+        repository <- doctorRepositoryProbe socketPath (Text.pack <$> repo)
         let
             report = diagnose DoctorFacts
               { doctorCLIVersion = Text.pack (showVersion Pkg.version)
@@ -376,6 +381,7 @@ runCLI = do
               , doctorBootstrap = maybe DoctorBootstrapDisabled DoctorBootstrapChecked bootstrap
               , doctorConfiguredPeers = configured
               , doctorPeerMetadata = peerMetadata
+              , doctorRepository = repository
               }
 
         if json

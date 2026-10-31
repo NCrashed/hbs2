@@ -24,6 +24,12 @@ tests = testGroup "doctor"
       statusOf "bootstrap" report @?= Just CheckOK
       statusOf "configured-peers" report @?= Just CheckOK
       statusOf "peer-metadata" report @?= Just CheckOK
+      statusOf "repository-key" report @?= Just CheckSkipped
+      statusOf "repository-lwwref" report @?= Just CheckSkipped
+      statusOf "repository-manifest" report @?= Just CheckSkipped
+      statusOf "repository-reflog" report @?= Just CheckSkipped
+      statusOf "repository-snapshot" report @?= Just CheckSkipped
+      statusOf "repository-sigils" report @?= Just CheckSkipped
 
   , testCase "version skew names both versions and fails" do
       let report = diagnose healthy
@@ -184,6 +190,76 @@ tests = testGroup "doctor"
       doctorPassed report @?= True
       statusOf "peer-metadata" report @?= Just CheckSkipped
 
+  , testCase "a complete repository names the local peer as a provider" do
+      let report = diagnose healthy
+            { doctorRepository = completeRepository (DoctorSigilsComplete 1 2) }
+          snapshot = checkNamed "repository-snapshot" report
+          sigils = checkNamed "repository-sigils" report
+      doctorPassed report @?= True
+      doctorCheckStatus snapshot @?= CheckOK
+      assertBool "complete local storage is provider evidence"
+        ("complete local provider" `Text.isInfixOf` doctorCheckMessage snapshot)
+      doctorCheckStatus sigils @?= CheckOK
+      assertBool "required sigil count is visible"
+        ("2 required sigil" `Text.isInfixOf` doctorCheckMessage sigils)
+
+  , testCase "a missing LWWRef is the first failed repository boundary" do
+      let report = diagnose healthy
+            { doctorRepository = DoctorRepositoryChecked "repo-key" DoctorLWWRefMissing }
+      doctorPassed report @?= False
+      statusOf "repository-key" report @?= Just CheckOK
+      statusOf "repository-lwwref" report @?= Just CheckFailure
+      statusOf "repository-manifest" report @?= Just CheckSkipped
+      statusOf "repository-reflog" report @?= Just CheckSkipped
+      statusOf "repository-snapshot" report @?= Just CheckSkipped
+      statusOf "repository-sigils" report @?= Just CheckSkipped
+
+  , testCase "an incomplete snapshot reports the missing block count" do
+      let report = diagnose healthy
+            { doctorRepository = repositorySnapshot (DoctorSnapshotIncomplete 7) }
+          snapshot = checkNamed "repository-snapshot" report
+      doctorPassed report @?= False
+      statusOf "repository-reflog" report @?= Just CheckOK
+      doctorCheckStatus snapshot @?= CheckFailure
+      assertBool "the root is visible"
+        ("reflog-root" `Text.isInfixOf` doctorCheckMessage snapshot)
+      assertBool "the missing count is visible"
+        ("7 block" `Text.isInfixOf` doctorCheckMessage snapshot)
+      statusOf "repository-sigils" report @?= Just CheckSkipped
+
+  , testCase "missing required sigils fail after a complete snapshot" do
+      let report = diagnose healthy
+            { doctorRepository = completeRepository (DoctorSigilsIncomplete
+                ["mailbox-a declares no sigil", "sigil-hash is not on this peer"]) }
+          sigils = checkNamed "repository-sigils" report
+      doctorPassed report @?= False
+      statusOf "repository-snapshot" report @?= Just CheckOK
+      doctorCheckStatus sigils @?= CheckFailure
+      assertBool "every sigil problem is named"
+        ("mailbox-a" `Text.isInfixOf` doctorCheckMessage sigils
+          && "sigil-hash" `Text.isInfixOf` doctorCheckMessage sigils)
+
+  , testCase "a repository with no mailbox needs no sigil" do
+      let report = diagnose healthy
+            { doctorRepository = completeRepository (DoctorSigilsComplete 0 0) }
+      doctorPassed report @?= True
+      statusOf "repository-sigils" report @?= Just CheckSkipped
+
+  , testCase "a malformed repository key stops before RPC" do
+      let report = diagnose healthy
+            { doctorRepository = DoctorRepositoryInvalid "not-a-key" }
+      doctorPassed report @?= False
+      statusOf "repository-key" report @?= Just CheckFailure
+      statusOf "repository-lwwref" report @?= Just CheckSkipped
+
+  , testCase "unavailable repository RPC is a failed required boundary" do
+      let report = diagnose healthy
+            { doctorRepository = DoctorRepositoryUnavailable "repo-key" }
+      doctorPassed report @?= False
+      statusOf "repository-key" report @?= Just CheckOK
+      statusOf "repository-lwwref" report @?= Just CheckFailure
+      statusOf "repository-manifest" report @?= Just CheckSkipped
+
   , testCase "untrusted peer metadata is validated at the boundary" do
       let facts = doctorPeerMetadataFacts "relay" "relay:7351" ["Clearnet"] . Just $
             PeerMeta
@@ -229,6 +305,7 @@ healthy = DoctorFacts
   , doctorConfiguredPeers = DoctorConfiguredPeersChecked
       [DoctorPeerReachable "8dePeer@udp" (Just "relay-signing-key")]
   , doctorPeerMetadata = DoctorPeerMetadataChecked [healthyPeerMetadata]
+  , doctorRepository = DoctorRepositoryNotRequested
   }
 
 healthyPeerMetadata :: DoctorPeerMetadata
@@ -261,3 +338,10 @@ checkNamed :: Text.Text -> DoctorReport -> DoctorCheck
 checkNamed name report = case findCheck name report of
   Just check -> check
   Nothing -> error ("missing doctor check: " <> Text.unpack name)
+
+repositorySnapshot :: DoctorSnapshot -> DoctorRepository
+repositorySnapshot = DoctorRepositoryChecked "repo-key" . DoctorLWWRefFound
+  . DoctorManifestFound . DoctorRefLogFound "reflog-root"
+
+completeRepository :: DoctorSigils -> DoctorRepository
+completeRepository = repositorySnapshot . DoctorSnapshotComplete
