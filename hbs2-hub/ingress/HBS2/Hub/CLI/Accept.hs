@@ -61,6 +61,7 @@ module HBS2.Hub.CLI.Accept
   , forkOf
   , partEvidence
   , namedParts
+  , acceptedPullNext
   ) where
 
 import HBS2.Hub.Types
@@ -105,7 +106,8 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet qualified as HS
 import Data.List qualified as List
 import Data.List (sortOn)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isJust,listToMaybe)
+import Data.Word (Word64)
 import System.Exit (exitWith,ExitCode(..))
 import System.IO.Error (isResourceVanishedError)
 
@@ -299,6 +301,20 @@ data AcceptArgs = AcceptArgs
   , aaDry     :: Writing
   }
   deriving stock (Eq,Show)
+
+-- | What the maintainer can do after a pull request has been folded and its
+-- tip staged. Accept is intentionally not merge: making that boundary visible
+-- here prevents the successful, irreversible operation from looking like the
+-- end of the pull-request lifecycle.
+acceptedPullNext :: Maybe Word64 -> Bool -> [Doc ann]
+acceptedPullNext (Just n) True =
+  [ "pull request #" <> pretty n <+> "is accepted and staged, but not merged"
+  , "  inspect:" <+> "hbs2-hub pr show --number" <+> pretty n
+  , "  review: " <+> "hbs2-hub pr checkout --number" <+> pretty n
+  , "  rehearse merge:" <+> "hbs2-hub pr land --number" <+> pretty n <+> "--dry-run"
+  , "  merge:  " <+> "hbs2-hub pr land --number" <+> pretty n
+  ]
+acceptedPullNext _ _ = []
 
 -- | Which way a letter becomes canon.
 --
@@ -772,13 +788,13 @@ acceptEntries = do
         (\e -> if isResourceVanishedError e then Just () else Nothing)
         (\_ -> exitWith (ExitFailure 141))
         do
-          print $ vcat
+          print $ vcat $
             [ "accepted" <+> pretty (eventId (acEvent acc))
             , "seq" <+> pretty (acSeq acc)
             , maybe mempty (\n -> "number" <+> pretty n) (acNumber acc)
             , "commit" <+> pretty commit
             , "signed by" <+> signerDoc signer
-            , maybe mempty ("staged" <+>) (fmap pretty staged)
+            , maybe mempty (("staged" <+>) . pretty) staged
             , maybe ("dropped from the mailbox:" <+> pretty msg)
                     (\why -> "left in the mailbox:" <+> pretty msg
                                <+> parens (pretty (why :: Text)))
@@ -786,7 +802,7 @@ acceptEntries = do
             , either (\e -> "no acknowledgement:" <+> pretty e)
                      (\h -> "acknowledged" <+> hashDoc h)
                      acked
-            ]
+            ] <> acceptedPullNext stageAt (isJust staged)
 
       -- AND WHAT WAS NOT CHECKED, when nothing was.
       --

@@ -44,7 +44,7 @@ aHash :: String -> HashRef
 aHash s = HashRef (hashObject (LBS.pack s))
 
 spec :: Spec
-spec = spec1 >> spec2 >> spec3 >> spec4
+spec = spec1 >> spec2 >> spec3 >> spec4 >> spec5
 
 spec1 :: Spec
 spec1 = do
@@ -310,3 +310,23 @@ spec4 =
           md = letterNaming who (_peerSignSk c) [PartRef mine (PartProof mine)]
       -- named but not carried: the bridge answers that one, not this
       namedParts md [] `shouldBe` []
+
+-- Accepting a pull request is deliberately not merging it. The maintainer has
+-- just crossed the irreversible boundary (canon), so this is the point where
+-- the CLI must say what state it produced and how to continue without making
+-- them reconstruct the lifecycle from the manual.
+spec5 :: Spec
+spec5 =
+  describe "hub inbox accept: the accepted pull request's next step" $ do
+
+    it "names the staged pull request and the review and merge commands" $ do
+      let said = unlines (fmap show (acceptedPullNext (Just 7) True))
+      said `shouldContain` "pull request #7 is accepted and staged, but not merged"
+      said `shouldContain` "hbs2-hub pr show --number 7"
+      said `shouldContain` "hbs2-hub pr checkout --number 7"
+      said `shouldContain` "hbs2-hub pr land --number 7 --dry-run"
+      said `shouldContain` "hbs2-hub pr land --number 7"
+
+    it "says nothing for a non-PR or a pull request whose staging failed" $ do
+      acceptedPullNext Nothing True `shouldSatisfy` null
+      acceptedPullNext (Just 7) False `shouldSatisfy` null
