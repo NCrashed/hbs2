@@ -23,6 +23,7 @@ module HBS2.Hub.CLI.Status
     -- * The parts that decide something
   , Standing(..)
   , Publication(..)
+  , Replication(..)
   , statusDoc
   , statusContract
   , statusOrder
@@ -32,12 +33,11 @@ module HBS2.Hub.CLI.Status
 
 import HBS2.Hub.Types
 import HBS2.Hub.Fold (FoldResult(..),frMaintainers)
-import HBS2.Hub.Repo (readCanon,stCommit,stFold)
 import HBS2.Hub.Repo.Git (withGitCanon)
-import HBS2.Hub.Repo.GitBundle (remoteCanon,remoteNames,refTip)
+import HBS2.Hub.Repo.GitBundle (remoteCanon,remoteNames)
 import HBS2.Hub.Repo.Manifest (mailboxFor)
 import HBS2.Hub.Ingress
-import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagOnce,flagMaybe,flagText,flagSwitch
+import HBS2.Hub.CLI.Argv (badArgs,flagsAndSwitches,flagMaybe,flagText,flagSwitch
                          ,repoFlags,flagRepo)
 import HBS2.Hub.CLI.Common (overRpc,signerFor,withCanon,OnMissing(..))
 import HBS2.Hub.CLI.Signer (Signer(..),SignerSource(..),SignerTrouble,resolveSignerIn
@@ -49,7 +49,8 @@ import Data.Aeson.KeyMap qualified as KM
 import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
-import HBS2.Base58 (AsBase58(..))
+import HBS2.Peer.Proto.RepositoryLease (ReplicaAdvertV1(..))
+import HBS2.Peer.RPC.API.Peer
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.RPC.Client
@@ -62,6 +63,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.Maybe (isJust)
 import Data.HashSet qualified as HS
 import Data.Text qualified as Text
+import Data.Word (Word64)
 import System.Environment (lookupEnv)
 
 -- | Whether this clone's canon has reached one remote.
@@ -75,6 +77,25 @@ data Publication =
   | RemoteEmpty         -- ^ the remote holds no canon
   | Level               -- ^ the two agree
   | Diverged Text       -- ^ the remote holds something else, and what
+  deriving stock (Eq,Show)
+
+-- | What one bounded provider lookup can prove about repository replication.
+--
+-- The peer RPC deliberately returns one usable provider, not the entire
+-- advert set.  'ReplicationReady' therefore proves a lower bound of one; it
+-- must never be presented as the total number of replicas in the network.
+data Replication =
+    ReplicationUnknown Text
+      -- ^ The local peer did not answer, so even a zero lower bound is unknown.
+  | ReplicationAtRisk
+      -- ^ Lookup completed without a reachable, verified, live advert.
+  | ReplicationReady
+      { replicationProvider     :: HubKey
+      , replicationSnapshot     :: HashRef
+      , replicationIssuedAt     :: Word64
+      , replicationExpiresAt    :: Word64
+      , replicationReachableVia :: [Text]
+      }
   deriving stock (Eq,Show)
 
 -- | Everything the report is a function of.
@@ -110,6 +131,7 @@ data Standing = Standing
     -- PEP-18 allows; 'Left' means the read failed and carries what to say.
   , stMailbox   :: Maybe HubKey
   , stWaiting   :: Either Text Int
+  , stReplication :: Replication
   }
   deriving stock (Eq,Show)
 
@@ -124,6 +146,7 @@ statusDoc st =
   <> canonLines
   <> publishedLines
   <> mailboxLines
+  <> replicationLines
   where
     -- WHICH KEY, and not only whether. A delegate whose machine also holds
     -- the repository key signed as the owner without --as, and this line
@@ -188,6 +211,20 @@ statusDoc st =
              Right n -> [ "        " <+> pretty n <+> "letter(s) waiting"
                             <+> parens "hbs2-hub inbox" ]
 
+    replicationLines = case stReplication st of
+      ReplicationUnknown e ->
+        [ "replication unknown: the local peer did not answer"
+        , "            " <> pretty (safeText e)
+        ]
+      ReplicationAtRisk ->
+        [ "replication at risk: no reachable verified replica advert was found" ]
+      ReplicationReady{..} ->
+        [ "replication at least 1 verified complete replica"
+        , "            provider" <+> keyDoc replicationProvider
+        , "            advert valid from" <+> pretty replicationIssuedAt
+            <+> "until" <+> pretty replicationExpiresAt
+        ]
+
 -- | The standing as a document (@hub status --json@).
 --
 -- Not derived from canon alone: the publication and the mailbox are answers
@@ -237,6 +274,7 @@ statusContract st = object
           (Just _, Left e) -> Just e
           _                -> Nothing
       ]
+  , "replication" .= replicationContract (stReplication st)
   ]
   where
     sourceName :: SignerSource -> Text
@@ -252,18 +290,52 @@ statusContract st = object
       Level          -> [ "state" .= ("level" :: Text),  "remote_canon" .= stCanon st, "error" .= Null ]
       Diverged theirs -> [ "state" .= ("diverged" :: Text), "remote_canon" .= theirs, "error" .= Null ]
 
+    replicationContract replication =
+      let (minimumReplica, provider, snapshot, issued, expires, endpoints, atRisk, failure) =
+            case replication of
+              ReplicationUnknown e ->
+                (Null, Null, Null, Null, Null, [], Null, toJSON e)
+              ReplicationAtRisk ->
+                (toJSON (0 :: Int), Null, Null, Null, Null, [], Bool True, Null)
+              ReplicationReady{..} ->
+                ( toJSON (1 :: Int)
+                , toJSON (key58 replicationProvider)
+                , toJSON (show (pretty replicationSnapshot))
+                , toJSON replicationIssuedAt
+                , toJSON replicationExpiresAt
+                , fmap toJSON replicationReachableVia
+                , Bool False
+                , Null
+                )
+      in object
+        [ "target" .= Null
+        , "complete_replicas_minimum" .= minimumReplica
+        , "provider" .= provider
+        , "snapshot" .= snapshot
+        , "freshness" .= object [ "issued_at" .= issued, "expires_at" .= expires ]
+        , "reachable_via" .= endpoints
+        , "observed_availability" .= Null
+        , "at_risk" .= atRisk
+        , "error" .= failure
+        ]
+
 statusOrder :: [Text]
 statusOrder =
   [ "repo", "signing", "signer", "key", "source", "maintainer"
   , "canon", "commit", "threads", "events", "maintainers"
   , "published", "remotes", "name", "state", "remote_canon"
-  , "mailbox", "waiting", "error", "clone", "branch", "onto", "branches" ]
+  , "mailbox", "waiting", "error"
+  , "replication", "target", "complete_replicas_minimum", "provider", "snapshot"
+  , "freshness", "issued_at", "expires_at", "reachable_via"
+  , "observed_availability", "at_risk"
+  , "clone", "branch", "onto", "branches" ]
 
 statusEntries :: forall c m . ( IsContext c
                               , MonadUnliftIO m
                               , HasStorage m
                               , HasClientAPI MailboxAPI UNIX m
                               , HasClientAPI LWWRefAPI UNIX m
+                              , HasClientAPI PeerAPI UNIX m
                               , Exception (BadFormException c)
                               ) => MakeDictM c m ()
 statusEntries = do
@@ -278,11 +350,12 @@ statusEntries = do
              <> line <> "--local asks no remote: the signer, canon and the clone only,"
              <> line <> "and the mailbox as the peer holds it, without a fetch."
              <> line
-             <> line <> "Six facts, each of which was computable and none of"
+             <> line <> "Seven facts, each of which was computable and none of"
              <> line <> "which was askable: the repository, whether this machine"
              <> line <> "can sign for it, what canon here holds, whether that"
              <> line <> "canon has reached the remote, which mailbox the"
-             <> line <> "repository declares, and how many letters are in it."
+             <> line <> "repository declares, how many letters are in it, and"
+             <> line <> "whether a reachable verified replica is advertised."
              <> line
              <> line <> "The signing line names the key a canon write without --as"
              <> line <> "would use, and where it came from: HBS2_HUB_AS, git config"
@@ -373,6 +446,15 @@ statusEntries = do
             Left e  -> Left (Text.pack (show e))
             Right r -> Right (length (irLetters r) + irOmitted r + irDenied r)
 
+      replication <- if saLocal sa
+        then pure (ReplicationUnknown "not asked (--local)")
+        else do
+          api <- getClientAPI @PeerAPI @UNIX
+          callRpcWaitMay @RpcRepositoryAdvertFind rpcTimeout api repo <&> \case
+            Nothing -> ReplicationUnknown "repository advert lookup timed out"
+            Just Nothing -> ReplicationAtRisk
+            Just (Just advert) -> replicationFromAdvert advert
+
       let st = Standing
               { stRepo = repo
               , stCanSign = canSign
@@ -387,6 +469,7 @@ statusEntries = do
               , stPublished = published
               , stMailbox = mbox
               , stWaiting = waiting
+              , stReplication = replication
               }
 
       -- THE CLONE ITSELF, for the JSON only: what a form proposing a pull
@@ -409,6 +492,15 @@ statusEntries = do
         then LBS.putStr (renderDocument statusOrder (withClone (statusContract st)))
         else mapM_ print (statusDoc st)
 
+    replicationFromAdvert ReplicaAdvertV1{..} = ReplicationReady
+      { replicationProvider = replicaAdvertProvider
+      , replicationSnapshot = replicaAdvertSnapshotId
+      , replicationIssuedAt = replicaAdvertIssuedAt
+      , replicationExpiresAt = replicaAdvertExpiresAt
+      , replicationReachableVia =
+          fmap (Text.pack . show . pretty) replicaAdvertReachableVia
+      }
+
 -- | What one @hub status@ was asked about.
 data StatusArgs = StatusArgs
   { saRepo   :: RepoRef
@@ -429,7 +521,7 @@ statusArgs syn = do
   repo   <- flagRepo asKey kvs
   remote <- flagMaybe kvs "--remote" (fmap Text.pack . flagText)
   asJson <- flagSwitch kvs "--json"
-  local  <- flagSwitch kvs "--local"
-  pure (StatusArgs repo remote asJson local)
+  localOnly <- flagSwitch kvs "--local"
+  pure (StatusArgs repo remote asJson localOnly)
   where
     asKey = \case { SignPubKeyLike k -> Just k ; _ -> Nothing }

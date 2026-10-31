@@ -742,7 +742,23 @@ test rejects a C configuration which names B, requires clone output to report a
 selected advert provider, and verifies the cloned branch, payload, and tag.
 The earlier `repository-lease-three-node.sh` remains the direct-provider M1
 scenario; both entry points share one harness. The remaining M4 delivery work
-is hub replication UX and operator configuration.
+is the operator-facing capacity/lease UI and the later target and observed-
+availability inputs described below.
+
+The first hub UX slice is implemented on 2026-10-31. `hbs2-hub status` now
+performs the same bounded authenticated provider lookup and adds a stable
+`replication` object to its text and JSON reports. Because the RPC selects one
+usable advert rather than enumerating the network, the report calls the value
+`complete_replicas_minimum` and exposes only a proved floor of zero or one. It
+distinguishes a completed lookup with no provider (`at_risk: true`) from a
+silent local peer (`at_risk: null`), and reports the selected provider,
+snapshot, endpoints, and signed advert issue/expiry times. Replication target
+and observed availability remain explicit nulls until M5 policy and M2 evidence
+exist. The hbs2-hub browser repository page consumes this contract as a
+ready/at-risk/unknown badge and preserves those future fields without
+inventing values. The four-process offline-owner harness also checks the live
+hub JSON seam after the clone, so UI status and clone discovery cannot drift
+into two meanings of availability.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -836,8 +852,10 @@ Deliverables:
 - at least one decentralized delivery path (complete) and optional hbs2-hub
   indexing;
 - clone path which tries verified live providers (complete);
-- hub UI for replication target, complete replicas, freshness, observed
-  availability, and at-risk state;
+- hub UI for replication target, complete-replica lower bound, freshness,
+  observed availability, and at-risk state (lower bound, freshness, and
+  at-risk status complete; target and observed availability remain null until
+  their M5 and M2 inputs exist);
 - operator UI/config for donated capacity and active leases.
 
 Exit criteria:

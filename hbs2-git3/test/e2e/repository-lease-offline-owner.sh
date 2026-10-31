@@ -11,7 +11,7 @@
 # its signed replica through R and C discovers B using only the repository key.
 #
 # Usage, after `cabal build all`:
-#   BIN=$(for b in hbs2-peer hbs2-cli hbs2-keyman hbs2-git3:exe:hbs2-git3 git-remote-hbs23; do
+#   BIN=$(for b in hbs2-peer hbs2-cli hbs2-keyman hbs2-git3:exe:hbs2-git3 git-remote-hbs23 hbs2-hub; do
 #          dirname "$(cabal list-bin "$b")"
 #        done | paste -sd:) \
 #     hbs2-git3/test/e2e/repository-lease-three-node.sh
@@ -48,7 +48,9 @@ command -v flock >/dev/null 2>&1 || {
   echo "flock is required to isolate the repository lease e2e ports" >&2
   exit 2
 }
-PORT_LOCK_FILE="${TMPDIR:-/tmp}/hbs2-git3-lease-e2e.$PORT_BASE.lock"
+# Keep the lock independent of a caller-specific TMPDIR (for example, two
+# concurrent nix-shell instances) because the guarded loopback ports are global.
+PORT_LOCK_FILE="/tmp/hbs2-git3-lease-e2e.$PORT_BASE.lock"
 exec {PORT_LOCK_FD}>"$PORT_LOCK_FILE"
 flock -w "$PORT_LOCK_WAIT" "$PORT_LOCK_FD" || {
   echo "timed out waiting for repository lease e2e ports at base $PORT_BASE" >&2
@@ -111,7 +113,10 @@ stop_peer() {
   local node=$1
   local pid=${PEER_PID[$node]:-}
   if [ -n "$pid" ]; then
-    kill "$pid" 2>/dev/null || true
+    # `hbs2-peer run` supervises a `start` child.  Both live in the dedicated
+    # session created below, so stop the whole group and never leak a listener
+    # into the next e2e invocation.
+    kill -- "-$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     unset 'PEER_PID[$node]'
   fi
@@ -155,8 +160,12 @@ write_peer_config() {
     if [ -n "$public_tcp_port" ]; then
       echo "peer-public-address \"tcp://127.0.0.1:$public_tcp_port\""
     fi
-    for known_port in "$@"; do
-      echo "known-peer \"127.0.0.1:$known_port\""
+    for known_address in "$@"; do
+      if [[ "$known_address" == *://* ]]; then
+        echo "known-peer \"$known_address\""
+      else
+        echo "known-peer \"127.0.0.1:$known_address\""
+      fi
     done
   } > "$config_dir/config"
 
@@ -171,28 +180,49 @@ write_peer_config() {
 
 wait_for_authenticated_peer() {
   local node=$1
-  local expected_port=$2
-  local initiator=$3
-  local node_port=$4
+  local expected_node=$2
+  local expected_address=$3
+  local expected_port=${expected_address##*:}
+  local ping_address=$expected_address
+  local node_address=
+  local expected_key=
   local deadline=$((SECONDS + 30))
   local peers=
 
+  if [[ "$ping_address" != *://* ]]; then
+    ping_address="127.0.0.1:$ping_address"
+  fi
+  case "$node" in
+    A) node_address="127.0.0.1:$A_UDP_PORT" ;;
+    B) node_address="127.0.0.1:$B_UDP_PORT" ;;
+    C) node_address="127.0.0.1:$C_UDP_PORT" ;;
+    R) node_address="127.0.0.1:$R_UDP_PORT" ;;
+    *) fail "unknown peer node $node" ;;
+  esac
+  # Logger colour resets may directly follow the key, so extract only the
+  # Base58 alphabet instead of treating every non-space byte as key material.
+  expected_key=$(sed -n 's/.*run peer \([1-9A-HJ-NP-Za-km-z]*\).*/\1/p' "$T/$expected_node/peer.log" | head -1)
+  [ -n "$expected_key" ] || fail "node $expected_node did not report its peer key"
+
   while [ "$SECONDS" -lt "$deadline" ]; do
     peers=$(node_env "$node" hbs2-peer peers 2>/dev/null || true)
-    if grep -q ":$expected_port" <<<"$peers"; then
+    if awk -v key="$expected_key" '$1 == key { found = 1 } END { exit !found }' <<<"$peers"; then
       return 0
     fi
-    # RPC readiness precedes the first successful UDP handshake. A signed ping
-    # makes its initiator visible to the receiver, so drive it from the peer we
-    # expect toward the node whose authenticated table we are checking.
-    node_env "$initiator" timeout 5 hbs2-peer ping "127.0.0.1:$node_port" >/dev/null 2>&1 || true
-    kill -0 "${PEER_PID[$node]}" 2>/dev/null || fail "node $node exited before authenticating peer :$expected_port"
+    # RPC readiness precedes the first successful handshake. A signed ping
+    # makes its initiator visible to the receiver, so drive both directions:
+    # the current node may know a TCP endpoint while its counterpart can still
+    # reach the current node's local UDP listener.
+    node_env "$node" timeout 2 hbs2-peer ping "$ping_address" >/dev/null 2>&1 || true
+    node_env "$expected_node" timeout 2 hbs2-peer ping "$node_address" >/dev/null 2>&1 || true
+    kill -0 "${PEER_PID[$node]}" 2>/dev/null || fail "node $node exited before authenticating peer $expected_node"
     sleep 0.2
   done
 
   printf '%s\n' "$peers" >&2
+  printf 'expected peer key: %s\n' "$expected_key" >&2
   tail -60 "$T/$node/peer.log" >&2 || true
-  fail "node $node did not authenticate peer :$expected_port"
+  fail "node $node did not authenticate peer $expected_node at :$expected_port"
 }
 
 start_peer() {
@@ -202,7 +232,7 @@ start_peer() {
 
   (
     cd "$config_dir"
-    node_exec "$node" hbs2-peer run +RTS -N1 -RTS >>"$T/$node/peer.log" 2>&1
+    node_exec "$node" setsid hbs2-peer run +RTS -N1 -RTS >>"$T/$node/peer.log" 2>&1
   ) &
   PEER_PID[$node]=$!
 
@@ -262,34 +292,99 @@ wait_for_active_lease() {
   fail "node B did not reach an active lease within ${LEASE_WAIT}s"
 }
 
+assert_active_lease() {
+  local repository=$1
+  local deadline=$((SECONDS + 30))
+  local status=
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    status=$(node_env B hbs2-git3 repo:lease:show "$repository" 2>/dev/null || true)
+    if grep -q '(state active)' <<<"$status"; then
+      return 0
+    fi
+    kill -0 "${PEER_PID[B]}" 2>/dev/null || fail "provider B exited during clone"
+    sleep 0.2
+  done
+
+  printf '%s\n' "$status" >&2
+  fail "B lease is no longer active"
+}
+
+add_repository_lease() {
+  local repository=$1
+  local deadline=$((SECONDS + 30))
+
+  # Publishing the branch and tag can briefly occupy the peer RPC worker.
+  # Lease creation is idempotent by repository (a partial first call is
+  # renewed), so retry the complete CLI transaction within a fixed bound.
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if node_env B hbs2-git3 repo:lease:add \
+        --max-bytes 104857600 \
+        --max-blocks 100000 \
+        --max-update-lag 30 \
+        "$repository" >"$T/B/lease-add.out" 2>"$T/B/lease-add.err"; then
+      return 0
+    fi
+    kill -0 "${PEER_PID[B]}" 2>/dev/null || fail "node B exited while adding the lease"
+    sleep 0.2
+  done
+
+  cat "$T/B/lease-add.out" "$T/B/lease-add.err" >&2
+  fail "node B: repo:lease:add"
+}
+
+wait_for_remote_ref() {
+  local node=$1
+  local url=$2
+  local ref=$3
+  local deadline=$((SECONDS + 120))
+  local refs=
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    refs=$(node_env "$node" timeout 15 git ls-remote "$url" "$ref" \
+      2>"$T/$node/remote-ref.err" || true)
+    if grep -q "[[:space:]]$ref$" <<<"$refs"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf '%s\n' "$refs" >&2
+  cat "$T/$node/remote-ref.err" >&2 || true
+  fail "node $node did not observe $ref before the lease was requested"
+}
+
 # Every config is written up front, but C remains entirely offline until A has
 # stopped. In relay mode R is a separate cache/rendezvous node: B publishes to
 # R, while C has no configured address for B.
-write_peer_config A "$A_UDP_PORT" "$A_TCP_PORT" "" "$B_UDP_PORT"
 if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
-  write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "$B_TCP_PORT" "$A_UDP_PORT" "$R_UDP_PORT"
-  write_peer_config R "$R_UDP_PORT" "$R_TCP_PORT" "" "$B_UDP_PORT"
-  write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "" "$R_UDP_PORT"
+  write_peer_config A "$A_UDP_PORT" "$A_TCP_PORT" "$A_TCP_PORT"
+  write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "$B_TCP_PORT" \
+    "tcp://127.0.0.1:$A_TCP_PORT" "tcp://127.0.0.1:$R_TCP_PORT"
+  write_peer_config R "$R_UDP_PORT" "$R_TCP_PORT" ""
+  write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "" "tcp://127.0.0.1:$R_TCP_PORT"
 else
-  write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "" "$A_UDP_PORT"
-  write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "" "$B_UDP_PORT"
+  write_peer_config A "$A_UDP_PORT" "$A_TCP_PORT" "$A_TCP_PORT"
+  write_peer_config B "$B_UDP_PORT" "$B_TCP_PORT" "$B_TCP_PORT" \
+    "tcp://127.0.0.1:$A_TCP_PORT"
+  write_peer_config C "$C_UDP_PORT" "$C_TCP_PORT" "" \
+    "tcp://127.0.0.1:$B_TCP_PORT"
 fi
 
 if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
-  # The known-peer loop sends immediately and then every ten minutes, so the
-  # long-lived rendezvous must be listening and authenticated before B also
-  # joins A. Serialising these two startup handshakes avoids a loopback startup
-  # race without weakening the topology exercised by the test.
+  # R and A listen first; B is the sole initiator for both long-lived links.
+  # This avoids duplicate TCP flows while keeping R an advert-only rendezvous.
   start_peer R
-  start_peer B
-  wait_for_authenticated_peer R "$B_UDP_PORT" B "$R_UDP_PORT"
-  wait_for_authenticated_peer B "$R_UDP_PORT" R "$B_UDP_PORT"
   start_peer A
-  wait_for_authenticated_peer B "$A_UDP_PORT" A "$B_UDP_PORT"
-  wait_for_authenticated_peer A "$B_UDP_PORT" B "$A_UDP_PORT"
+  start_peer B
+  wait_for_authenticated_peer B R "tcp://127.0.0.1:$R_TCP_PORT"
+  wait_for_authenticated_peer B A "tcp://127.0.0.1:$A_TCP_PORT"
+  wait_for_authenticated_peer A B "tcp://127.0.0.1:$B_TCP_PORT"
 else
   start_peer A
   start_peer B
+  wait_for_authenticated_peer A B "tcp://127.0.0.1:$B_TCP_PORT"
+  wait_for_authenticated_peer B A "tcp://127.0.0.1:$A_TCP_PORT"
 fi
 wait_for_lease_rpc
 if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
@@ -319,22 +414,26 @@ node_env A git push -q "$REMOTE" --all 2>"$T/A/push.err" || {
   cat "$T/A/push.err" >&2
   fail "node A: branch push"
 }
+# Mutable-root ordering has one-second timestamp granularity. Ensure the tag
+# snapshot is causally newer instead of relying on hash tie-breaking when two
+# supported remote-helper pushes finish within the same second.
+branch_push_second=$(date +%s)
+while [ "$(date +%s)" -le "$branch_push_second" ]; do
+  sleep 0.1
+done
 node_env A git push -q "$REMOTE" --tags 2>>"$T/A/push.err" || {
   cat "$T/A/push.err" >&2
   fail "node A: tag push"
 }
+# The two supported remote-helper updates produce two repository snapshots.
+# Do not let B lease and advertise the first one merely because it completed
+# before the tag update reached B's peer.
+wait_for_remote_ref B "$URL" refs/tags/v1
 ok "A published $KEY with a branch and tag"
 
 # A lease is not useful while it is merely Syncing. Wait for the complete
 # inventory, durable pin, and provider-signed receipt on B.
-node_env B hbs2-git3 repo:lease:add \
-  --max-bytes 104857600 \
-  --max-blocks 100000 \
-  --max-update-lag 30 \
-  "$KEY" >"$T/B/lease-add.out" 2>"$T/B/lease-add.err" || {
-    cat "$T/B/lease-add.out" "$T/B/lease-add.err" >&2
-    fail "node B: repo:lease:add"
-  }
+add_repository_lease "$KEY"
 wait_for_active_lease "$KEY"
 node_env B hbs2-git3 repo:lease:receipt "$KEY" >"$T/B/receipt.out" 2>"$T/B/receipt.err" || {
   cat "$T/B/receipt.out" "$T/B/receipt.err" >&2
@@ -351,8 +450,7 @@ if node_env A hbs2-peer poke >/dev/null 2>&1; then
 fi
 start_peer C
 if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
-  wait_for_authenticated_peer R "$C_UDP_PORT" C "$R_UDP_PORT"
-  wait_for_authenticated_peer C "$R_UDP_PORT" R "$C_UDP_PORT"
+  wait_for_authenticated_peer C R "tcp://127.0.0.1:$R_TCP_PORT"
   if grep -q ":$B_UDP_PORT\|:$B_TCP_PORT" "$T/C/home/.config/hbs2-peer/config"; then
     fail "node C configuration leaks provider B's address"
   fi
@@ -378,11 +476,35 @@ fi
 [ "$(cat "$T/clone/payload.txt")" = one ] || fail "clone has the wrong payload"
 node_env C git -C "$T/clone" rev-parse -q --verify refs/tags/v1 >/dev/null || fail "clone has no v1 tag"
 kill -0 "${PEER_PID[B]}" 2>/dev/null || fail "provider B exited during clone"
-node_env B hbs2-git3 repo:lease:show "$KEY" | grep -q '(state active)' || fail "B lease is no longer active"
+assert_active_lease "$KEY"
 if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
   ok "C discovered B through R and cloned the complete repository while A was offline"
 else
   ok "C cloned the complete repository from B while A was offline"
+fi
+
+if [ "$LEASE_DISCOVERY_MODE" = relay ]; then
+  # The forge-facing status contract must expose the same live discovery fact;
+  # this is the seam consumed by hbs2-hub-browser.  It reports a lower bound,
+  # because the bounded RPC selects one authenticated provider rather than
+  # enumerating the whole network. Direct M1 intentionally has no advert: C
+  # knows B from configuration and therefore has no discovery fact to expose.
+  (
+    cd "$T/clone"
+    node_env C timeout 60 hbs2-hub status --repo "$KEY" --json
+  ) >"$T/C/hub-status.json" 2>"$T/C/hub-status.err" || {
+    cat "$T/C/hub-status.json" "$T/C/hub-status.err" >&2
+    fail "node C: hbs2-hub status could not inspect replica discovery"
+  }
+  grep -Eq '"complete_replicas_minimum"[[:space:]]*:[[:space:]]*1' "$T/C/hub-status.json" || {
+    cat "$T/C/hub-status.json" >&2
+    fail "node C: hub status did not report the proved replica floor"
+  }
+  grep -Eq '"at_risk"[[:space:]]*:[[:space:]]*false' "$T/C/hub-status.json" || {
+    cat "$T/C/hub-status.json" >&2
+    fail "node C: hub status marked a reachable verified replica at risk"
+  }
+  ok "hub status exposes the reachable verified replica while A is offline"
 fi
 
 echo "PASS: $PASS checks"

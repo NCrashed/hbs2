@@ -108,7 +108,9 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   bounded gossip, periodic publication, and peer-bound expiring client query
   fan-out completed 2026-10-31; authenticated provider selection and
   clone-path consumption completed 2026-10-31; external owner/provider/relay/
-  client acceptance completed 2026-10-31);
+  client acceptance completed 2026-10-31; `hbs2-hub status` replica floor,
+  advert freshness and at-risk contract plus the browser repository badge
+  completed 2026-10-31);
 - prove repository-key-only discovery in the external multi-process
   offline-owner acceptance scenario (completed 2026-10-31: C knows only an
   advert relay, discovers and authenticates B from its signed advert, and

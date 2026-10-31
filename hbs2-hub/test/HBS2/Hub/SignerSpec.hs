@@ -10,7 +10,7 @@ import HBS2.Hub.Types
 import HBS2.Hub.CLI.Signer
 import HBS2.Hub.CLI.Ack (AckTrouble(..))
 import HBS2.Hub.CLI.Maintainer (maintainerUseArgs,MaintainerUse(..))
-import HBS2.Hub.CLI.Status (Standing(..),Publication(..),statusDoc)
+import HBS2.Hub.CLI.Status (Standing(..),Publication(..),Replication(..),statusDoc)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
 import HBS2.Base58 (AsBase58(..))
@@ -154,7 +154,7 @@ spec = do
           { stRepo = repo, stCanSign = True, stSigner = s, stMaintains = maint
           , stCanon = Just "cafe1234", stThreads = 1, stEvents = 1, stKeys = 2
           , stPublished = Right [("origin", Level)], stMailbox = Nothing
-          , stWaiting = Right 0 }
+          , stWaiting = Right 0, stReplication = ReplicationAtRisk }
 
     it "status names the key and where it came from" $ do
       [r, c] <- sequence [aKey, aKey]

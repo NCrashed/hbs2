@@ -52,6 +52,7 @@ plain repo = Standing
   , stSigner = Right (Signer repo RepoKeyDefault), stMaintains = True
   , stThreads = 3, stEvents = 9, stKeys = 2
   , stPublished = Right [("origin", Level)], stMailbox = Nothing, stWaiting = Right 0
+  , stReplication = ReplicationAtRisk
   }
 
 spec :: Spec
@@ -118,6 +119,29 @@ spec = do
     it "says a repository that declares no mailbox declares none" $ do
       repo <- aKey
       said (statusDoc (plain repo)) `shouldSatisfy` isInfixOf "none declared"
+
+    it "distinguishes an at-risk repository from a reachable verified replica" $ do
+      repo <- aKey
+      provider <- aKey
+      let atRisk = said (statusDoc (plain repo))
+          ready = said (statusDoc (plain repo)
+                    { stReplication = ReplicationReady
+                        { replicationProvider = provider
+                        , replicationSnapshot = mh "snapshot"
+                        , replicationIssuedAt = 1000
+                        , replicationExpiresAt = 2000
+                        , replicationReachableVia = ["tcp://127.0.0.1:7351"]
+                        }
+                    })
+      atRisk `shouldSatisfy` isInfixOf "replication at risk"
+      ready `shouldSatisfy` isInfixOf "at least 1 verified complete replica"
+      ready `shouldSatisfy` isInfixOf (b58 provider)
+
+    it "does not turn a silent peer into zero replicas" $ do
+      repo <- aKey
+      said (statusDoc (plain repo)
+              { stReplication = ReplicationUnknown "peer did not answer" })
+        `shouldSatisfy` isInfixOf "replication unknown"
 
     -- A remote name and a commit both reach a terminal, and a remote chose one
     -- of them.
@@ -279,6 +303,33 @@ spec = do
       at ["mailbox","waiting"] fine `shouldBe` Just (Number 4)
       at ["mailbox","key"] fine `shouldBe` Just (str (b58 mbox))
       at ["mailbox","key"] (statusContract (plain repo)) `shouldBe` Just Null
+
+    it "reports only the replica floor that discovery can prove" $ do
+      repo <- aKey ; provider <- aKey
+      let atRisk = statusContract (plain repo)
+          ready = statusContract (plain repo)
+                    { stReplication = ReplicationReady
+                        { replicationProvider = provider
+                        , replicationSnapshot = mh "snapshot"
+                        , replicationIssuedAt = 1000
+                        , replicationExpiresAt = 2000
+                        , replicationReachableVia = ["tcp://127.0.0.1:7351"]
+                        }
+                    }
+          unknown = statusContract (plain repo)
+                    { stReplication = ReplicationUnknown "peer silent" }
+      at ["replication","complete_replicas_minimum"] atRisk `shouldBe` Just (Number 0)
+      at ["replication","at_risk"] atRisk `shouldBe` Just (Bool True)
+      at ["replication","complete_replicas_minimum"] ready `shouldBe` Just (Number 1)
+      at ["replication","provider"] ready `shouldBe` Just (str (b58 provider))
+      at ["replication","freshness","issued_at"] ready `shouldBe` Just (Number 1000)
+      at ["replication","freshness","expires_at"] ready `shouldBe` Just (Number 2000)
+      at ["replication","at_risk"] ready `shouldBe` Just (Bool False)
+      at ["replication","target"] ready `shouldBe` Just Null
+      at ["replication","observed_availability"] ready `shouldBe` Just Null
+      at ["replication","complete_replicas_minimum"] unknown `shouldBe` Just Null
+      at ["replication","at_risk"] unknown `shouldBe` Just Null
+      at ["replication","error"] unknown `shouldBe` Just (String "peer silent")
 
     it "reads --json" $ do
       repo <- aKey
