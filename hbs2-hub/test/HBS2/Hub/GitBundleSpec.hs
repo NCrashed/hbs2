@@ -216,6 +216,38 @@ spec1 = do
         -- and the objects really are here now
         void $ git theirs ["cat-file", "-e", Text.unpack tip]
 
+    -- A linked worktree and two ordinary clones of one local repository all
+    -- share an object store.  Receiving a proposal from one of them therefore
+    -- means the maintainer may already HOLD its tip even though this bundle is
+    -- the signed evidence being accepted.  Whether git copied an object during
+    -- fetch is not whether the sender put it in the bundle.
+    it "accepts an honest bundle when the repository already holds its tip" $
+      withSystemTempDirectory "hub-already" $ \root -> do
+        let ours = root <> "/contributor"
+            theirs = root <> "/maintainer"
+
+        void $ git root ["init", "-q", ours]
+        writeFile (ours <> "/a.txt") "one\n"
+        void $ git ours ["add", "a.txt"]
+        void $ git ours ["commit", "-q", "-m", "base"]
+        base <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        void $ git root ["clone", "-q", ours, theirs]
+
+        void $ git ours ["checkout", "-q", "-b", "feature"]
+        writeFile (ours <> "/b.txt") "two\n"
+        void $ git ours ["add", "b.txt"]
+        void $ git ours ["commit", "-q", "-m", "work"]
+        tip <- Text.pack <$> git ours ["rev-parse", "HEAD"]
+        bytes <- bnBytes <$> (ok =<< bundleRange (Just ours) base "feature")
+
+        -- Put the same object in the maintainer's store by another route.  The
+        -- ref is deliberately not a staged proposal: only object presence is
+        -- relevant to the regression.
+        void $ git theirs ["fetch", "-q", ours, "feature:refs/heads/already"]
+
+        got <- ok =<< acceptBundle (Just theirs) bytes "feature" tip base
+        got `shouldBe` tip
+
     -- AGAINST A MAINTAINER WHO HOLDS THE BASE, which is the whole test.
     --
     -- It used to run against a fresh `git init`, and there it proved nothing:
