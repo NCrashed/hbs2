@@ -411,6 +411,12 @@ The first executable vertical slice is now present:
    `repo:lease:show`/`status`, `repo:lease:terminate`, and
    `repo:lease:inventory`. `repo:purge` refuses to delete a repository protected
    by a non-terminated lease.
+8. `hbs2-git3/test/e2e/repository-lease-three-node.sh` exercises the complete
+   provider-local path: A publishes, B reaches `Active` with a durable pin and
+   valid receipt, A stops, and a previously offline C clones the branch and tag
+   from B as its only known peer. The scenario also covers an importer edge
+   case found by the test: a missing Merkle node in a checkpoint walk must be
+   enqueued for fetch, not merely named and retried.
 
 `repo:lease:add` accepts `--max-bytes`, `--max-blocks`,
 `--max-update-lag`, optional `--ttl`, and `--grace`. Both time limits are
@@ -475,3 +481,8 @@ PEP-06 is ready for wire implementation when:
 - a three-node test can distinguish `Syncing` from a complete pinned replica;
 - restart and GC tests demonstrate that an active snapshot survives;
 - a repository changing during scan cannot produce a mixed-state receipt.
+
+The three-node complete-replica criterion is covered by the executable e2e
+scenario above. The remaining criteria in this section are still gates for a
+wire-stable lease protocol; the provider-local test does not imply replica
+advertisement or automatic provider discovery.

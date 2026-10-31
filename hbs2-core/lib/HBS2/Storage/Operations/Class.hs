@@ -2,6 +2,7 @@
 module HBS2.Storage.Operations.Class where
 
 import HBS2.Prelude.Plated
+import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Hash
 import HBS2.Storage
 
@@ -16,6 +17,7 @@ data OperationError =
   | DecryptionError
   | MissedBlockError
   | MissedBlockError2 String
+  | MissedBlockErrorAt HashRef
   | UnsupportedFormat
   | IncompleteData
   | GroupKeyNotFound Int
@@ -32,4 +34,3 @@ class (MonadIO m, Storage storage h (ToBlockR s) m) => MerkleReader s storage h 
   type family ToBlockR s :: Type
   type family ReadResult s :: Type
   readFromMerkle :: storage -> TreeKey s -> m (ReadResult s)
-

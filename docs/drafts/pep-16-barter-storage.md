@@ -682,10 +682,15 @@ the configured interval, and only then releases them; old durable records
 decode with zero grace. Aggregate capacity admission is now enforced against
 operator byte and contract budgets, including renewal deltas and concurrent
 requests. Explicit update-lag is now durable and enforced at the exact
-contracted boundary. M1 is not yet complete by the exit criteria below: the
-three-node offline-owner clone scenario remains. The receipt encoding stays
-provider-local until the M0 golden-vector gate is complete. M2 and later are
-unchanged.
+contracted boundary. The final M1 exit scenario was completed on 2026-10-31:
+the executable three-node test publishes on A, waits until B has an `Active`
+lease with a valid receipt, stops A, starts a clean C which knows only B, and
+clones the complete branch and tag from B. That test exposed and fixed an
+import path which named a missing checkpoint Merkle block but never enqueued
+it for retrieval. M1 is therefore complete for a manually configured known
+provider. The receipt encoding stays provider-local until the M0 golden-vector
+gate is complete; replica advertisement and automatic provider discovery
+remain M4 work. M2 and later are otherwise unchanged.
 
 
 ## Milestone 0: Measurement and design fixtures

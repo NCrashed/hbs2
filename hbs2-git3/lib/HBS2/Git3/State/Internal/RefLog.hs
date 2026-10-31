@@ -83,9 +83,10 @@ txList filt mhref = do
 
     hxs <- S.toList_ $ walkMerkle @[HashRef] (coerce rv) (getBlock sto) $ \case
       -- The hash, not the name of the function it happened in. Whoever reads
-      -- this has to fetch the block or explain why it is gone, and "txList"
-      -- tells them neither which block nor which tree it belonged to.
-      Left h -> throwIO (MissedBlockError2 (show (pretty (HashRef h) <+> "in" <+> pretty rv)))
+      -- this has to fetch the block or explain why it is gone. Keep it typed:
+      -- the importer can now ask the peer for exactly this block instead of
+      -- retrying the same incomplete walk or parsing a diagnostic string.
+      Left h -> throwIO (MissedBlockErrorAt (HashRef h))
       Right hs -> filterM (lift . lift . filt) hs >>= S.each
 
     S.toList_ $ for_ hxs $ \h -> do
@@ -101,4 +102,3 @@ txListAll :: forall m . ( HBS2GitPerks m
        -> m [(HashRef, GitTx)]
 
 txListAll = txList (const $ pure True)
-

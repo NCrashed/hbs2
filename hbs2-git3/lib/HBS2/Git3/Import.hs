@@ -352,10 +352,11 @@ importGitRefLog = do
                   notice "no checkpoints found"
                   pure Nothing
 
-            -- Say which block. 'txList' goes out of its way to name the one it
-            -- could not read, and reporting "missed blocks" threw that away:
-            -- whoever hit this had a repository that would not sync and no way
-            -- to tell which block to go looking for.
+            -- A missing Merkle node in the RefLog/checkpoint walk used to be
+            -- named and then merely retried. No fetch was ever filed, so an
+            -- offline owner left a fresh clone asking the lease provider for
+            -- every surrounding block except the one it actually lacked.
+            -- Keep the hash typed through OperationError and enqueue it here.
             --
             -- Then stop. This retry used to be unbounded, on the reasoning that
             -- a missing block is usually a block still on its way. Usually. When
@@ -372,6 +373,11 @@ importGitRefLog = do
 
             case r of
               Right cp -> again $ ImportDone cp
+
+              Left  (MissedBlockErrorAt h) -> do
+                notice $ "asking for missing block" <+> pretty h
+                void $ callRpcWaitMay @RpcFetch (TimeoutSec 1) peerAPI h
+                missedAgain (show (pretty h))
 
               Left  (MissedBlockError2 s) -> missedAgain s
 
@@ -428,4 +434,3 @@ importGroupKeys = do
         val <- keyTree' & toMPlus
         liftIO $ UIO.withBinaryFileAtomic file WriteMode $ \fh -> do
           hPrint fh $ pretty (mkSym @C (show $ pretty val))
-
