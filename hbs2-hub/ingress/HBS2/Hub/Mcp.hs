@@ -97,7 +97,7 @@ import Data.Text.Encoding.Error qualified as Text
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (atomically)
 import System.IO
-import System.IO.Error (isEOFError)
+import System.IO.Error (ioeGetLocation,isDoesNotExistError,isEOFError)
 import System.Process.Typed
 import System.Process qualified as P
 import System.Posix.Signals (signalProcess,sigKILL)
@@ -1202,18 +1202,46 @@ runVerb cfg r = do
 -- every @inbox_wait@ left a follower polling the peer after the server exited.
 -- Terminating first ends the reads, and then the close has nothing to wait for.
 --
--- SIGKILL five seconds later for a child that does not take the hint.
+-- SIGKILL five seconds later for a child that does not take the hint. The
+-- typed-process waiter remains the only thread that reaps it. In 0.2.11.1 it
+-- publishes the exit code just before its Async returns; stopProcess can cancel
+-- in that final window and then try a second waitForProcess. Ignore only the
+-- resulting ECHILD (reported as does-not-exist at waitForProcess), and only
+-- after getExitCode proved the child exited. If a child does not settle even
+-- after SIGKILL, give up loudly rather than enter typed-process's unbounded
+-- wait.
 withChild :: ProcessConfig i o e -> (Process i o e -> IO a) -> IO a
-withChild pc act = withProcessTerm pc $ \p -> act p `E.finally` stop p
+withChild pc act = E.mask $ \restore -> do
+  p <- startProcess pc
+  restore (act p) `E.finally` stop p
   where
     stop p = do
       let ph = unsafeProcessHandle p
       P.terminateProcess ph
-      void $ forkIO $ do
-        threadDelay 5000000
-        getExitCode p >>= \case
-          Just _  -> pure ()
-          Nothing -> P.getPid ph >>= maybe (pure ()) (signalProcess sigKILL)
+      soft <- settle p
+      unless soft $ do
+        P.getPid ph >>= maybe (pure ()) (signalProcess sigKILL)
+        hard <- settle p
+        unless hard $ E.throwIO $ userError
+          "hbs2-hub: child did not exit within 5s after SIGKILL"
+      stopExited p
+
+    stopExited p = E.catchJust alreadyReaped (stopProcess p) (const (pure ()))
+      where
+        -- waitpid reports ECHILD as does-not-exist. At this location there is
+        -- no pathname to disappear; the child was reaped by the waiter whose
+        -- exit code settle observed immediately above.
+        alreadyReaped e
+          | isDoesNotExistError e && ioeGetLocation e == "waitForProcess" = Just ()
+          | otherwise = Nothing
+
+    settle p = waitGone (5000000 `div` step)
+      where
+        step = 20000
+        waitGone 0 = isJust <$> getExitCode p
+        waitGone n = getExitCode p >>= \case
+          Just _  -> pure True
+          Nothing -> threadDelay step >> waitGone (n - 1)
 
 decoded :: LBS.ByteString -> Text
 decoded = Text.decodeUtf8With Text.lenientDecode . LBS.toStrict
