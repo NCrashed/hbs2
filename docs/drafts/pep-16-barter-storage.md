@@ -864,19 +864,22 @@ scenario; both entry points share one harness. The remaining M4 delivery work
 was the operator-facing capacity/lease UI. Replication target and observed-
 availability remain later M5 policy and M2 evidence inputs described below.
 
-The first hub UX slice is implemented on 2026-10-31. `hbs2-hub status` now
-performs the same bounded authenticated provider lookup and adds a stable
-`replication` object to its text and JSON reports. Because the RPC selects one
-usable advert rather than enumerating the network, the report calls the value
-`complete_replicas_minimum` and exposes only a proved floor of zero or one. It
-distinguishes a completed lookup with no provider (`at_risk: true`) from a
-silent local peer (`at_risk: null`), and reports the selected provider,
-snapshot, endpoints, and signed advert issue/expiry times. Replication target
-comes from the signed M5 manifest policy when declared and remains null when
-unmanaged; observed availability remains null until M2 evidence exists. The
-hbs2-hub browser repository page consumes this contract as a
-ready/at-risk/unknown badge without inventing values. The four-process
-offline-owner harness also checks the live
+The first hub UX slice was implemented on 2026-10-31 and extended with bounded
+multiple-provider enumeration on 2026-11-02. `hbs2-hub status` performs a
+bounded authenticated provider lookup and adds a stable `replication` object
+to its text and JSON reports. The report calls the enumerated value
+`complete_replicas_minimum`: it is a proved lower bound from the adverts
+currently retained and reached through the bounded relay query, not a claim
+that every network replica was observed. It distinguishes a completed lookup
+with no provider (`at_risk: true`) from a silent local peer (`at_risk: null`),
+counts every authenticated complete provider returned by the query, and keeps
+one selected provider's snapshot, endpoints, and signed advert issue/expiry
+times as diagnostic detail. Replication target comes from the signed M5
+manifest policy when declared and remains null when unmanaged; observed
+availability remains null until M2 evidence exists. The hbs2-hub browser
+repository page consumes this contract as a ready/at-risk/unknown badge
+without inventing values. The four-process offline-owner harness also checks
+the live
 hub JSON seam after the clone, so UI status and clone discovery cannot drift
 into two meanings of availability.
 
@@ -905,8 +908,9 @@ target; a silent peer remains unknown. The browser already consumes these
 target and at-risk fields. The external relay acceptance scenario publishes a
 target of one and proves that a fresh clone reads it and observes the complete
 provider while the owner is offline. Provider selection, remote contract
-negotiation, multiple-advert enumeration, and make-before-break repair remain
-the next M5 slices.
+negotiation, time-profile and failure-domain placement, and make-before-break
+repair remain the next M5 slices. Bounded multiple-advert enumeration and the
+proved replica-count floor were completed on 2026-11-02.
 
 
 ## Milestone 0: Measurement and design fixtures
@@ -1026,8 +1030,9 @@ this PEP.
 Deliverables:
 
 - minimum replica count and availability targets (signed minimum-replica
-  manifest policy and target/deficit status complete; availability target and
-  scheduler consumption remain);
+  manifest policy, bounded authenticated replica enumeration, and
+  target/deficit status complete; availability target and scheduler
+  consumption remain);
 - generic resource/profile vocabulary and repository adapter before automatic
   placement is offered to a second application; file sync, community logs, and
   encrypted backup each require their own complete-snapshot verifier;

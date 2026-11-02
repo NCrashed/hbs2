@@ -132,6 +132,7 @@ spec = do
                         , replicationIssuedAt = 1000
                         , replicationExpiresAt = 2000
                         , replicationReachableVia = ["tcp://127.0.0.1:7351"]
+                        , replicationCompleteCount = 1
                         }
                     })
       atRisk `shouldSatisfy` isInfixOf "replication at risk"
@@ -148,7 +149,7 @@ spec = do
       repo <- aKey ; provider <- aKey
       let says target replication = said (statusDoc (plain repo)
             { stReplicationTarget = target, stReplication = replication })
-          one = ReplicationReady provider (mh "snapshot") 1000 2000 []
+          one = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
       says Nothing ReplicationAtRisk `shouldSatisfy` isInfixOf "target not declared"
       says (Just 0) ReplicationAtRisk `shouldSatisfy` isInfixOf "target satisfied"
       says (Just 2) ReplicationAtRisk `shouldSatisfy` isInfixOf "at risk"
@@ -326,6 +327,7 @@ spec = do
                         , replicationIssuedAt = 1000
                         , replicationExpiresAt = 2000
                         , replicationReachableVia = ["tcp://127.0.0.1:7351"]
+                        , replicationCompleteCount = 1
                         }
                     }
           unknown = statusContract (plain repo)
@@ -351,11 +353,15 @@ spec = do
             { stReplicationTarget = Just 2 }
           one = statusContract (plain repo)
             { stReplicationTarget = Just 2
-            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 []
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
             }
           oneEnough = statusContract (plain repo)
             { stReplicationTarget = Just 1
-            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 []
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
+            }
+          twoEnough = statusContract (plain repo)
+            { stReplicationTarget = Just 2
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 2
             }
           unknown = statusContract (plain repo)
             { stReplicationTarget = Just 2
@@ -368,6 +374,8 @@ spec = do
       at ["replication","complete_replicas_minimum"] one `shouldBe` Just (Number 1)
       at ["replication","at_risk"] one `shouldBe` Just (Bool True)
       at ["replication","at_risk"] oneEnough `shouldBe` Just (Bool False)
+      at ["replication","complete_replicas_minimum"] twoEnough `shouldBe` Just (Number 2)
+      at ["replication","at_risk"] twoEnough `shouldBe` Just (Bool False)
       at ["replication","target"] unknown `shouldBe` Just (Number 2)
       at ["replication","at_risk"] unknown `shouldBe` Just Null
 

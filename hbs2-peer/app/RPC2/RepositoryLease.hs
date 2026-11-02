@@ -59,11 +59,33 @@ instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m)
     context <- getRpcContext @PeerAPI
     liftIO $ discoverRepositoryProvider context repository
 
+instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m)
+  => HandleMethod m RpcRepositoryAdvertList where
+  handleMethod repository = do
+    context <- getRpcContext @PeerAPI
+    liftIO $ discoverRepositoryProviders context repository
+
 discoverRepositoryProvider
   :: RPC2Context
   -> PubKey 'Sign 'HBS2Basic
   -> IO (Maybe ReplicaAdvertV1)
 discoverRepositoryProvider context repository = do
+  adverts <- discoverRepositoryAdverts context repository
+  findRepositoryAdvertProvider (dialRepositoryProvider context) adverts
+
+discoverRepositoryProviders
+  :: RPC2Context
+  -> PubKey 'Sign 'HBS2Basic
+  -> IO [ReplicaAdvertV1]
+discoverRepositoryProviders context repository = do
+  adverts <- discoverRepositoryAdverts context repository
+  findRepositoryAdvertProviders (dialRepositoryProvider context) adverts
+
+discoverRepositoryAdverts
+  :: RPC2Context
+  -> PubKey 'Sign 'HBS2Basic
+  -> IO [ReplicaAdvertV1]
+discoverRepositoryAdverts context repository = do
   void $ withPeerM (rpcPeerEnv context) $
     requestRepositoryAdverts
       (rpcRepositoryAdvertQueries context)
@@ -71,12 +93,11 @@ discoverRepositoryProvider context repository = do
       repositoryAdvertMaxResults
   pause @'Seconds 1
   now <- floor <$> getPOSIXTime
-  adverts <- lookupRepositoryReplicaAdvertsAt
+  lookupRepositoryReplicaAdvertsAt
     now
     (rpcRepositoryAdvertCache context)
     repository
     repositoryAdvertMaxResults
-  findRepositoryAdvertProvider (dialRepositoryProvider context) adverts
 
 dialRepositoryProvider
   :: RPC2Context

@@ -82,9 +82,9 @@ data Publication =
 
 -- | What one bounded provider lookup can prove about repository replication.
 --
--- The peer RPC deliberately returns one usable provider, not the entire
--- advert set.  'ReplicationReady' therefore proves a lower bound of one; it
--- must never be presented as the total number of replicas in the network.
+-- The peer returns only live adverts whose endpoints authenticated as their
+-- signed providers.  Their count is still a lower bound: scoped discovery or
+-- temporarily unreachable replicas may exist outside this lookup.
 data Replication =
     ReplicationUnknown Text
       -- ^ The local peer did not answer, so even a zero lower bound is unknown.
@@ -96,6 +96,7 @@ data Replication =
       , replicationIssuedAt     :: Word64
       , replicationExpiresAt    :: Word64
       , replicationReachableVia :: [Text]
+      , replicationCompleteCount :: Int
       }
   deriving stock (Eq,Show)
 
@@ -213,28 +214,41 @@ statusDoc st =
              Right n -> [ "        " <+> pretty n <+> "letter(s) waiting"
                             <+> parens "hbs2-hub inbox" ]
 
-    targetLine = case stReplicationTarget st of
-      Nothing -> "replication target not declared"
-      Just n  -> "replication target" <+> pretty n <+> "complete external replica(s)"
+    replicationLines = replicationDoc
+      (stReplicationTarget st)
+      (stReplication st)
 
-    replicationLines = targetLine : case stReplication st of
-      ReplicationUnknown e ->
-        [ "replication unknown: the local peer did not answer"
-        , "            " <> pretty (safeText e)
-        ]
-      ReplicationAtRisk
-        | stReplicationTarget st == Just 0 ->
-            [ "replication target satisfied: no external replica is required" ]
-        | otherwise ->
-            [ "replication at risk: no reachable verified replica advert was found" ]
-      ReplicationReady{..} ->
-        [ if maybe False (> 1) (stReplicationTarget st)
-            then "replication at risk: at least 1 verified complete replica, below target"
-            else "replication at least 1 verified complete replica"
-        , "            provider" <+> keyDoc replicationProvider
-        , "            advert valid from" <+> pretty replicationIssuedAt
-            <+> "until" <+> pretty replicationExpiresAt
-        ]
+replicationDoc :: Maybe Word64 -> Replication -> [Doc ann]
+replicationDoc target replication =
+  replicationTargetDoc target : replicationSummaryDoc target replication
+
+replicationTargetDoc :: Maybe Word64 -> Doc ann
+replicationTargetDoc = \case
+  Nothing -> "replication target not declared"
+  Just n  -> "replication target" <+> pretty n
+    <+> "complete external replica(s)"
+
+replicationSummaryDoc :: Maybe Word64 -> Replication -> [Doc ann]
+replicationSummaryDoc target = \case
+  ReplicationUnknown e ->
+    [ "replication unknown: the local peer did not answer"
+    , "            " <> pretty (safeText e)
+    ]
+  ReplicationAtRisk
+    | target == Just 0 ->
+        [ "replication target satisfied: no external replica is required" ]
+    | otherwise ->
+        [ "replication at risk: no reachable verified replica advert was found" ]
+  ReplicationReady{..} ->
+    [ if maybe False (> fromIntegral replicationCompleteCount) target
+        then "replication at risk: at least" <+> pretty replicationCompleteCount
+          <+> "verified complete replica(s), below target"
+        else "replication at least" <+> pretty replicationCompleteCount
+          <+> "verified complete replica(s)"
+    , "            provider" <+> keyDoc replicationProvider
+    , "            advert valid from" <+> pretty replicationIssuedAt
+        <+> "until" <+> pretty replicationExpiresAt
+    ]
 
 -- | The standing as a document (@hub status --json@).
 --
@@ -301,35 +315,37 @@ statusContract st = object
       Level          -> [ "state" .= ("level" :: Text),  "remote_canon" .= stCanon st, "error" .= Null ]
       Diverged theirs -> [ "state" .= ("diverged" :: Text), "remote_canon" .= theirs, "error" .= Null ]
 
-    replicationContract target replication =
-      let (minimumReplica, provider, snapshot, issued, expires, endpoints, atRisk, failure) =
-            case replication of
-              ReplicationUnknown e ->
-                (Null, Null, Null, Null, Null, [], Null, toJSON e)
-              ReplicationAtRisk ->
-                (toJSON (0 :: Int), Null, Null, Null, Null, []
-                , Bool (maybe True (> 0) target), Null)
-              ReplicationReady{..} ->
-                ( toJSON (1 :: Int)
-                , toJSON (key58 replicationProvider)
-                , toJSON (show (pretty replicationSnapshot))
-                , toJSON replicationIssuedAt
-                , toJSON replicationExpiresAt
-                , fmap toJSON replicationReachableVia
-                , Bool (maybe False (> 1) target)
-                , Null
-                )
-      in object
-        [ "target" .= target
-        , "complete_replicas_minimum" .= minimumReplica
-        , "provider" .= provider
-        , "snapshot" .= snapshot
-        , "freshness" .= object [ "issued_at" .= issued, "expires_at" .= expires ]
-        , "reachable_via" .= endpoints
-        , "observed_availability" .= Null
-        , "at_risk" .= atRisk
-        , "error" .= failure
-        ]
+
+replicationContract :: Maybe Word64 -> Replication -> Value
+replicationContract target replication =
+  let (minimumReplica, provider, snapshot, issued, expires, endpoints, atRisk, failure) =
+        case replication of
+          ReplicationUnknown e ->
+            (Null, Null, Null, Null, Null, [], Null, toJSON e)
+          ReplicationAtRisk ->
+            (toJSON (0 :: Int), Null, Null, Null, Null, []
+            , Bool (maybe True (> 0) target), Null)
+          ReplicationReady{..} ->
+            ( toJSON replicationCompleteCount
+            , toJSON (key58 replicationProvider)
+            , toJSON (show (pretty replicationSnapshot))
+            , toJSON replicationIssuedAt
+            , toJSON replicationExpiresAt
+            , fmap toJSON replicationReachableVia
+            , Bool (maybe False (> fromIntegral replicationCompleteCount) target)
+            , Null
+            )
+  in object
+    [ "target" .= target
+    , "complete_replicas_minimum" .= minimumReplica
+    , "provider" .= provider
+    , "snapshot" .= snapshot
+    , "freshness" .= object [ "issued_at" .= issued, "expires_at" .= expires ]
+    , "reachable_via" .= endpoints
+    , "observed_availability" .= Null
+    , "at_risk" .= atRisk
+    , "error" .= failure
+    ]
 
 statusOrder :: [Text]
 statusOrder =
@@ -467,10 +483,10 @@ statusEntries = do
         then pure (ReplicationUnknown "not asked (--local)")
         else do
           api <- getClientAPI @PeerAPI @UNIX
-          callRpcWaitMay @RpcRepositoryAdvertFind rpcTimeout api repo <&> \case
+          callRpcWaitMay @RpcRepositoryAdvertList rpcTimeout api repo <&> \case
             Nothing -> ReplicationUnknown "repository advert lookup timed out"
-            Just Nothing -> ReplicationAtRisk
-            Just (Just advert) -> replicationFromAdvert advert
+            Just [] -> ReplicationAtRisk
+            Just adverts -> replicationFromAdverts adverts
 
       let st = Standing
               { stRepo = repo
@@ -510,13 +526,15 @@ statusEntries = do
         then LBS.putStr (renderDocument statusOrder (withClone (statusContract st)))
         else mapM_ print (statusDoc st)
 
-    replicationFromAdvert ReplicaAdvertV1{..} = ReplicationReady
+    replicationFromAdverts [] = ReplicationAtRisk
+    replicationFromAdverts adverts@(ReplicaAdvertV1{..} : _) = ReplicationReady
       { replicationProvider = replicaAdvertProvider
       , replicationSnapshot = replicaAdvertSnapshotId
       , replicationIssuedAt = replicaAdvertIssuedAt
       , replicationExpiresAt = replicaAdvertExpiresAt
       , replicationReachableVia =
           fmap (Text.pack . show . pretty) replicaAdvertReachableVia
+      , replicationCompleteCount = length adverts
       }
 
 -- | What one @hub status@ was asked about.

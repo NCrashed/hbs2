@@ -119,8 +119,9 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   clones after A is offline);
 - maintain a replica target with make-before-break replacement.
   The signed `(replication (minimum N))` repository policy, its CLI, status/UI
-  target and conservative deficit alert are complete as the first M5 slice;
-  provider selection and the make-before-break repair worker remain.
+  target, bounded authenticated provider enumeration, and conservative deficit
+  alert are complete as the first M5 slices. Time-profile and failure-domain
+  placement plus the make-before-break repair worker remain.
 - make storage leasing profile-based before it is exposed beyond Git. The
   shared layer must name an opaque resource and its profile, while each profile
   owns authenticated mutable state, deterministic inventory, pin/recovery,

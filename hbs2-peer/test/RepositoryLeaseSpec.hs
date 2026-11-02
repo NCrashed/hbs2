@@ -594,6 +594,7 @@ tests = testGroup "repository lease"
       attempts <- newIORef []
       let firstAddress = "tcp://127.0.0.1:10351"
           secondAddress = "tcp://127.0.0.1:10352"
+          thirdAddress = "tcp://127.0.0.1:10353"
           unavailable = goldenAdvert
             { replicaAdvertReachableVia = [firstAddress]
             , replicaAdvertCapabilities = 0
@@ -604,6 +605,8 @@ tests = testGroup "repository lease"
             { replicaAdvertProvider = secondProvider
             , replicaAdvertReachableVia = [firstAddress, secondAddress]
             }
+          later = goldenAdvert
+            { replicaAdvertReachableVia = [thirdAddress] }
           dial provider address = do
             modifyIORef' attempts (<> [(provider, address)])
             pure (provider == secondProvider && address == secondAddress)
@@ -613,6 +616,31 @@ tests = testGroup "repository lease"
         [ (secondProvider, firstAddress)
         , (secondProvider, secondAddress)
         ])
+      writeIORef attempts []
+      findRepositoryAdvertProvider dial [reachable, later]
+        >>= (@?= Just reachable)
+      readIORef attempts >>= (@?=
+        [ (secondProvider, firstAddress)
+        , (secondProvider, secondAddress)
+        ])
+
+  , testCase "repository advert selection keeps every authenticated provider" $ do
+      firstProvider <- newRepositoryKey
+      secondProvider <- newRepositoryKey
+      let first = goldenAdvert
+            { replicaAdvertProvider = firstProvider
+            , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+            }
+          second = goldenAdvert
+            { replicaAdvertProvider = secondProvider
+            , replicaAdvertReachableVia = ["tcp://127.0.0.1:10352"]
+            }
+          unavailable = goldenAdvert
+            { replicaAdvertReachableVia = ["tcp://127.0.0.1:10353"]
+            }
+          dial provider _ = pure (provider == firstProvider || provider == secondProvider)
+      findRepositoryAdvertProviders dial [unavailable, first, second]
+        >>= (@?= [first, second])
 
   , testCase "three nodes discover a leased repository while its owner is offline" $ do
       repository <- newRepositoryKey

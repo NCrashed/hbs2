@@ -21,6 +21,7 @@ module HBS2.Peer.RepositoryLease.Discovery
   , requestRepositoryAdverts
   , lookupRepositoryReplicaAdvertsAt
   , findRepositoryAdvertProvider
+  , findRepositoryAdvertProviders
   , repositoryAdvertProto
   ) where
 
@@ -262,14 +263,31 @@ findRepositoryAdvertProvider
 findRepositoryAdvertProvider dial = go
   where
     go [] = pure Nothing
-    go (advert : rest)
-      | not (replicaAdvertCanServeBlocks advert) = go rest
-      | otherwise = do
-          connected <- anyM
-            (dial (replicaAdvertProvider advert))
-            (replicaAdvertReachableVia advert)
-          if connected then pure (Just advert) else go rest
+    go (advert : rest) = do
+      reachable <- repositoryAdvertReachable dial advert
+      if reachable then pure (Just advert) else go rest
 
+-- | Return every advert whose provider can be authenticated at one of its
+-- declared endpoints.  Cache entries are already unique by provider; keeping
+-- their deterministic order lets callers prove a bounded replica floor.
+findRepositoryAdvertProviders
+  :: Monad m
+  => (PubKey 'Sign 'HBS2Basic -> PeerAddr L4Proto -> m Bool)
+  -> [ReplicaAdvertV1]
+  -> m [ReplicaAdvertV1]
+findRepositoryAdvertProviders dial = filterM (repositoryAdvertReachable dial)
+
+repositoryAdvertReachable
+  :: Monad m
+  => (PubKey 'Sign 'HBS2Basic -> PeerAddr L4Proto -> m Bool)
+  -> ReplicaAdvertV1
+  -> m Bool
+repositoryAdvertReachable dial advert
+  | not (replicaAdvertCanServeBlocks advert) = pure False
+  | otherwise = anyM
+      (dial (replicaAdvertProvider advert))
+      (replicaAdvertReachableVia advert)
+  where
     anyM _ [] = pure False
     anyM predicate (value : values) = do
       matched <- predicate value
