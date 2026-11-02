@@ -22,8 +22,9 @@ import HBS2.Net.Auth.Credentials
 import HBS2.Base58 (AsBase58(..))
 import Data.Config.Suckless (C,Id(..))
 
-import Control.Concurrent (forkIO,killThread)
-import Control.Monad (void,forM_)
+import Control.Concurrent (forkFinally,killThread,newEmptyMVar,putMVar,takeMVar,threadDelay)
+import Control.Exception qualified as E
+import Control.Monad (void,forM_,replicateM_)
 import Data.Aeson (Value(..),object,(.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
@@ -36,16 +37,27 @@ import Data.Maybe (fromMaybe,isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word64)
-import System.Directory (findExecutable)
+import System.Directory (doesFileExist,findExecutable)
 import System.Environment qualified as Env
 import System.IO
+import System.IO.Error (isDoesNotExistError)
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.Files (ownerModes,setFileMode)
 import System.Posix.IO qualified as Posix
+import System.Posix.Signals (nullSignal,signalProcess)
+import System.Posix.Types (ProcessID)
 import System.Process.Typed
 import System.Timeout (timeout)
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
+
+processGone :: ProcessID -> IO Bool
+processGone pid = E.try (signalProcess nullSignal pid) >>= \case
+  Left e
+    | isDoesNotExistError e -> pure True
+    | otherwise -> E.throwIO (e :: E.IOException)
+  Right () -> pure False
 
 kp :: IO KP
 kp = do
@@ -317,15 +329,32 @@ answer c i = timeout 60000000 go >>= maybe (fail "no answer within a minute") pu
         Nothing -> fail ("not JSON: " <> show l)
 
 withServer :: McpConfig -> (Client -> IO a) -> IO a
-withServer cfg act = do
-  (r1, w1) <- Posix.createPipe
-  (r2, w2) <- Posix.createPipe
-  [sin', cin, cout, sout] <- mapM Posix.fdToHandle [r1, w1, r2, w2]
-  tid <- forkIO (serveMcp cfg sin' sout)
-  a <- act (Client cin cout)
-  hClose cin
-  killThread tid
-  pure a
+withServer cfg act = E.bracket acquire release (act . client)
+  where
+    acquire = do
+      (r1, w1) <- Posix.createPipe
+      (r2, w2) <- Posix.createPipe
+      [sin', cin, cout, sout] <- mapM Posix.fdToHandle [r1, w1, r2, w2]
+      finished <- newEmptyMVar
+      tid <- forkFinally (serveMcp cfg sin' sout) (putMVar finished)
+      pure (tid, finished, [sin', cin, cout, sout], Client cin cout)
+
+    client (_, _, _, c) = c
+
+    release (tid, finished, hs@(_ : cin : _), _) =
+      serverStop `E.finally` mapM_ close hs
+      where
+        serverStop = do
+          close cin
+          timeout 15000000 (takeMVar finished) >>= \case
+            Just (Right ()) -> pure ()
+            Just (Left e) -> E.throwIO e
+            Nothing -> timeout 2000000 (killThread tid >> takeMVar finished) >>= \case
+              Just (Left e) | Just E.ThreadKilled <- E.fromException e -> pure ()
+              other -> expectationFailure ("MCP server did not stop: " <> show other)
+
+        close h = void (E.try (hClose h) :: IO (Either E.IOException ()))
+    release _ = expectationFailure "MCP server fixture lost a pipe"
 
 field :: Text -> KM.KeyMap Value -> Maybe Value
 field k = KM.lookup (Key.fromText k)
@@ -354,6 +383,113 @@ server = do
         _ -> pendingWith "needs git and an hbs2-hub binary (HBS2_HUB_EXE)"
 
   describe "hub mcp: the server, over a pipe" $ do
+
+    describe "child lifecycle" $ do
+
+      let structuredField k = \case
+            Object r -> case field "structuredContent" r of
+              Just (Object d) -> field k d
+              _ -> Nothing
+            _ -> Nothing
+
+      -- The document makes waitInbox return while the follower is still
+      -- alive. Repeated because the old teardown raced typed-process's waiter:
+      -- waitpid had reaped the child but had not yet published its ExitCode,
+      -- so cleanup tried a second waitpid and intermittently raised ECHILD.
+      it "reaps a live follower after a letter arrives" $ do
+        let cfg = (defaultMcpConfig "/bin/sh") { mcTimeout = 2 }
+            follower = ["-c", "printf '{\"letters\":[{\"message\":\"probe-letter\"}]}\\n'; exec sleep 30"]
+        replicateM_ 100 $ do
+          v <- waitInbox cfg (\_ _ -> pure ()) follower (Just mempty) 1
+          structuredField "arrived" v `shouldBe` Just (Bool True)
+
+      it "reaps a live follower after its timeout" $ do
+        let cfg = (defaultMcpConfig "/bin/sh") { mcTimeout = 2 }
+        replicateM_ 25 $ do
+          v <- waitInbox cfg (\_ _ -> pure ()) ["-c", "exec sleep 30"] Nothing 0
+          structuredField "arrived" v `shouldBe` Just (Bool False)
+
+      it "reports a follower that reaches EOF" $ do
+        let cfg = (defaultMcpConfig "/bin/sh") { mcTimeout = 2 }
+        v <- waitInbox cfg (\_ _ -> pure ())
+               ["-c", "printf 'broken follower' >&2; exit 7"] Nothing 1
+        case v of
+          Object r -> do
+            field "isError" r `shouldBe` Just (Bool True)
+            textOf r `shouldSatisfy` ("broken follower" `isInfixOf`)
+          other -> expectationFailure ("not a result: " <> show other)
+
+      it "still runs an ordinary short-lived verb" $ do
+        let cfg = (defaultMcpConfig "/bin/sh") { mcTimeout = 2 }
+            run = Run ["-c", "printf ordinary"] Nothing AsText
+        replicateM_ 25 $ do
+          o <- runVerb cfg run
+          (oCode o, oOut o, oTimedOut o) `shouldBe` (0, "ordinary", False)
+
+      it "finishes cancellation and leaves no TERM-ignoring child" $
+        withSystemTempDirectory "hub-mcp-child" $ \dir -> do
+          let pidFile = dir <> "/pid"
+              cfg = (defaultMcpConfig "/bin/sh") { mcTimeout = 2 }
+              follower = [ "-c", "trap '' TERM; echo $$ > \"$1\"; exec sleep 30"
+                         , "follower", pidFile ]
+              waitFile 0 = expectationFailure "follower did not write its pid"
+              waitFile n = doesFileExist pidFile >>= \case
+                True -> pure ()
+                False -> threadDelay 10000 >> waitFile (n - 1)
+              waitGone pid 0 = processGone pid
+              waitGone pid n = do
+                processGone pid >>= \case
+                  True -> pure True
+                  False -> threadDelay 10000 >> waitGone pid (n - 1)
+          finished <- newEmptyMVar
+          tid <- forkFinally
+                   (waitInbox cfg (\_ _ -> pure ()) follower Nothing 30)
+                   (putMVar finished)
+          waitFile (200 :: Int)
+          pid <- read <$> readFile pidFile
+          timeout 12000000 (killThread tid >> takeMVar finished) >>= \case
+            Just (Left e) -> E.fromException e `shouldBe` Just E.ThreadKilled
+            other -> expectationFailure ("cancellation did not finish: " <> show other)
+          waitGone pid (200 :: Int) `shouldReturn` True
+
+      it "cancels inbox_wait, answers ping, and shuts down at EOF" $
+        withSystemTempDirectory "hub-mcp-server-child" $ \dir -> do
+          let fake = dir <> "/fake-hub"
+              pidFile = dir <> "/pid"
+              cfg = cfg0 { mcHub = fake, mcReadOnly = True, mcTimeout = 2 }
+              waitFile 0 = expectationFailure "server follower did not write its pid"
+              waitFile n = doesFileExist pidFile >>= \case
+                True -> pure ()
+                False -> threadDelay 10000 >> waitFile (n - 1)
+              waitGone pid 0 = processGone pid
+              waitGone pid n = do
+                processGone pid >>= \case
+                  True -> pure True
+                  False -> threadDelay 10000 >> waitGone pid (n - 1)
+          writeFile fake $ unlines
+            [ "#!/bin/sh"
+            , "trap '' TERM"
+            , "echo $$ > " <> show pidFile
+            , "printf '{\"letters\":[]}\\n'"
+            , "exec sleep 30"
+            ]
+          setFileMode fake ownerModes
+          withServer cfg $ \c -> do
+            send c (object
+              [ "jsonrpc" .= ("2.0" :: Text), "id" .= (1 :: Int)
+              , "method" .= ("tools/call" :: Text)
+              , "params" .= object
+                  [ "name" .= ("inbox_wait" :: Text)
+                  , "arguments" .= object
+                      [ "known" .= ([] :: [Text]), "timeout_seconds" .= (30 :: Int) ] ] ])
+            waitFile (200 :: Int)
+            pid <- read <$> readFile pidFile
+            send c (object
+              [ "jsonrpc" .= ("2.0" :: Text)
+              , "method" .= ("notifications/cancelled" :: Text)
+              , "params" .= object ["requestId" .= (1 :: Int)] ])
+            _ <- resultOf <$> call c 2 "ping" (object [])
+            waitGone pid (800 :: Int) `shouldReturn` True
 
     it "shakes hands, lists its tools and reads canon through one" $ guarded $ \h ->
       withCanonRepo $ \dir repo -> do
