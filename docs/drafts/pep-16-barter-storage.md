@@ -396,6 +396,31 @@ probe must not create a 100% availability rating.  PEP-07 chooses a concrete
 Wilson/Beta calculation, window duration, tracking period, and minimum sample
 count after measurements on the real network.
 
+The shared placement primitive consumes this local evidence without making it
+part of a repository-specific wire type.  Each candidate has a provider id, a
+rolling availability LCB in basis points, a bounded non-empty profile of LCBs
+for equal-duration windows, and locally normalized failure-domain hints.
+Profiles in one decision must have the same width; mismatched profiles and
+duplicate provider evidence make the decision invalid rather than being merged
+silently.
+
+Selection first removes current providers and candidates below the operator's
+availability floor.  A candidate with a non-empty failure-domain set wholly
+disjoint from the selected replicas is preferred over a correlated or unknown
+candidate.  Within the same diversity class, candidates are ranked by the
+coverage they add in the current replica set's weak windows, then by rolling
+availability and deterministic provider identity.  Per-window coverage is the
+maximum observed LCB among selected providers, not a sum or an independence
+formula.  Thus two peers with the same online schedule do not manufacture an
+availability gain merely by using different keys.  Failure-domain hints remain
+soft local evidence: a self-reported label cannot establish independence.
+
+This policy is resource-neutral.  Repository repair, file sync, encrypted
+backup, and future community-log profiles may feed it only after their own
+adapter has authenticated a complete snapshot.  The scheduler is responsible
+for turning the selected provider into a lease offer and for preserving the
+make-before-break invariant.
+
 
 # Availability-qualified accounting
 
@@ -1031,12 +1056,14 @@ Deliverables:
 
 - minimum replica count and availability targets (signed minimum-replica
   manifest policy, bounded authenticated replica enumeration, and
-  target/deficit status complete; availability target and scheduler
-  consumption remain);
+  target/deficit status complete; the resource-neutral selection primitive is
+  complete, while availability-target aggregation and scheduler consumption
+  remain);
 - generic resource/profile vocabulary and repository adapter before automatic
   placement is offered to a second application; file sync, community logs, and
   encrypted backup each require their own complete-snapshot verifier;
-- time-profile and failure-domain-aware provider selection;
+- time-profile and failure-domain-aware provider selection (pure local policy
+  complete; observation-ledger and scheduler integration remain);
 - health monitor and make-before-break replacement;
 - renewal throttling and safe expiry under disk pressure;
 - explicit at-risk alerts when no replacement exists.

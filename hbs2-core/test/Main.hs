@@ -8,6 +8,7 @@ import TestDerivedKey
 import TestMerkleWalk
 import TestStorageInventory
 import TestStorageResource
+import TestStoragePlacement
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -58,6 +59,22 @@ main =
               testStorageResourceRoundTrip
           , testCase "keeps generic snapshot evidence round-trippable"
               testStorageSnapshotRoundTrip
+          ]
+      , testGroup "availability-aware storage placement"
+          [ testCase "accepts only bounded non-empty availability profiles"
+              testAvailabilityProfileValidation
+          , testCase "rejects incomparable time profiles"
+              testPlacementRejectsMismatchedProfiles
+          , testCase "rejects ambiguous duplicate provider evidence"
+              testPlacementRejectsDuplicateProviders
+          , testCase "filters incumbents and providers below the local floor"
+              testPlacementFiltersIneligibleProviders
+          , testCase "prefers a disjoint failure domain"
+              testPlacementPrefersIndependentFailureDomain
+          , testCase "prefers coverage in the incumbent's weak windows"
+              testPlacementPrefersComplementarySchedule
+          , testCase "recomputes weak windows after each selection"
+              testPlacementRecomputesCoverage
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"

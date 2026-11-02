@@ -130,6 +130,7 @@ library
                     , HBS2.Storage.Operations.Missed
                     , HBS2.Storage.Operations.Delete
                     , HBS2.Storage.Inventory
+                    , HBS2.Storage.Placement
                     , HBS2.Storage.Resource
                     , HBS2.System.Logger.Simple
                     , HBS2.System.Logger.Simple.ANSI
@@ -230,6 +231,7 @@ test-suite test
                   , TestMerkleWalk
                   , TestStorageInventory
                   , TestStorageResource
+                  , TestStoragePlacement
                   , TestKeyEncoding
                   , TestByPassFlow
                   , TestEncryptedTree
