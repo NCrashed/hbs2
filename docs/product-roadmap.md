@@ -121,6 +121,12 @@ Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
   The signed `(replication (minimum N))` repository policy, its CLI, status/UI
   target and conservative deficit alert are complete as the first M5 slice;
   provider selection and the make-before-break repair worker remain.
+- make storage leasing profile-based before it is exposed beyond Git. The
+  shared layer must name an opaque resource and its profile, while each profile
+  owns authenticated mutable state, deterministic inventory, pin/recovery,
+  freshness, and client verification. `hbs2-sync` is not yet eligible: its
+  concurrent-writer, deletion, recovery, and signed-root semantics must be
+  defined and tested first.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts
 down, and a clean C discovers B and clones the complete repository using only

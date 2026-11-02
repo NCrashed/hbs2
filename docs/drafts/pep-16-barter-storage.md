@@ -5,9 +5,11 @@ Status: draft, discussion started 2026-06-04, substantially revised
 Author: NCrashed (Anton Gushcha)
 
 This is the umbrella vision.  The concrete work is split into PEP-06..12
-below.  This revision replaces the original static-tree barter model with
-repository replication leases, measured availability, explicit replica
-discovery, and repair.
+below.  This revision replaces the original static-tree barter model with a
+resource-lease substrate: repository replication is its first implemented
+profile, not its definition.  Every profile supplies its own authenticated
+mutable state and deterministic inventory; measured availability, explicit
+replica discovery, custody, capacity, and repair remain shared.
 
 
 # Summary
@@ -19,14 +21,15 @@ space by hand.  There is no protocol by which a node can offer spare storage,
 accept repositories automatically, or tell a future clone where a live copy
 can be found.
 
-PEP-16 turns that manual mirror arrangement into a friendnet service:
+PEP-16 turns that manual mirror arrangement into a friendnet service.  The
+first vertical slice is a repository, but the service is deliberately usable
+for any authenticated content resource:
 
 1. An operator advertises a bounded amount of space it is willing to donate.
-2. Two peers create a signed lease for a mutable repository, not one static
-   tree.
-3. The provider follows the repository LWWRef and RefLog, fetches the complete
-   reachable graph, and pins the last complete snapshot against garbage
-   collection.
+2. Two peers create a signed lease for one named resource, not one static
+   tree.  A resource profile says how its mutable state is authenticated.
+3. The provider follows that state, fetches the complete reachable graph, and
+   pins the last complete snapshot against garbage collection.
 4. The provider publishes a short-lived signed replica advertisement only
    after the snapshot is complete.
 5. The consumer measures reachability, retrievability, freshness, and service
@@ -37,8 +40,10 @@ PEP-16 turns that manual mirror arrangement into a friendnet service:
    before an old replica becomes eligible for deletion.
 
 The first useful vertical slice is therefore a repository lease and a
-discoverable, complete mirror.  Proof-of-custody is supporting evidence, not
-the first product milestone.
+discoverable, complete mirror.  It proves the hard retention and discovery
+invariants before profiles for file sync, community logs, or encrypted backup
+are added.  Proof-of-custody is supporting evidence, not the first product
+milestone.
 
 
 # Goal
@@ -48,8 +53,8 @@ knows only the repository key can still find a live replica and clone the
 repository.  Operators who make that possible receive proportional storage
 service in return.
 
-This includes future updates.  A lease covers the repository identity and its
-authenticated stream of states:
+For the implemented repository profile this includes future updates.  A lease
+covers the repository identity and its authenticated stream of states:
 
 - the repository LWWRef and manifest;
 - the RefLog and repository transactions it names;
@@ -83,19 +88,31 @@ without introducing a global market.
 
 **Consumer**
   The peer buying replication service with its bilateral credit.  It need not
-  own the repository key; public repositories may be sponsored by others.
+  own the resource authority; public repositories may be sponsored by others.
 
 **Provider**
   The peer reserving local capacity, following repository updates, pinning
   complete snapshots, and serving blocks.
 
 **Repository lease**
-  A signed, time-bounded agreement to maintain a repository subject to size,
-  freshness, availability, and retention limits.
+  The first storage-resource profile: a signed, time-bounded agreement to
+  maintain a repository subject to size, freshness, availability, and
+  retention limits.
+
+**Storage resource**
+  A profile-qualified, authenticated stream of snapshots.  It has an opaque
+  resource identifier and a deterministic inventory, but it is not an account,
+  person, network address, or social-graph edge.
+
+**Storage profile**
+  A versioned rule set that turns a profile-specific locator and source state
+  into authenticated snapshots, inventories, pins, and a serving policy.
+  `hbs2-git-repository-v1` is the implemented profile.
 
 **Snapshot**
-  A particular authenticated repository state identified by at least the
-  repository key, LWWRef sequence/value, manifest, and RefLog head.
+  A particular authenticated resource state.  For the repository profile it
+  includes the repository key, LWWRef sequence/value, manifest, and RefLog
+  head.
 
 **Inventory**
   A canonical, unique list of blocks required by a snapshot under its
@@ -111,7 +128,7 @@ without introducing a global market.
   the data forever.
 
 **Replica advertisement**
-  A short-lived, signed hint that a provider is willing to serve a repository.
+  A short-lived, signed hint that a provider is willing to serve a resource.
   It is verified by retrieval; it is not trusted merely because it is signed.
 
 **Effective byte-hour**
@@ -139,8 +156,9 @@ without introducing a global market.
 
 # Architectural principles
 
-1. **The unit of service is a mutable repository lease.**  Blocks and trees
-   are implementation units, not what the user buys.
+1. **The unit of service is a profile-qualified mutable resource lease.**
+   Blocks and trees are implementation units, not what the user buys.  A
+   repository is one resource profile, not the universal wire type.
 
 2. **Complete before advertise.**  A provider must never publish an incomplete
    download as a replica.
@@ -158,10 +176,10 @@ without introducing a global market.
 6. **Local decisions and bounded exposure.**  Every peer chooses partners,
    budgets, priors, thresholds, and credit limits locally.
 
-7. **Reuse the working data plane.**  Repository replication should drive the
-   existing `repo:relay-only`, LWWRef/RefLog polling, block download, NCQ3, and
-   signed peer identity machinery rather than create a second repository
-   transport.
+7. **Reuse the working data plane.**  A profile reuses CAS block download,
+   NCQ3, pinning, and signed peer sessions.  The repository profile additionally
+   reuses `repo:relay-only` and LWWRef/RefLog polling; a file-sync profile must
+   not pretend those are universal resource primitives.
 
 8. **Discovery is part of availability.**  Stored data which a fresh clone
    cannot locate does not satisfy the primary goal.
@@ -175,10 +193,53 @@ without introducing a global market.
     complete.
 
 
-# Repository lease
+# Resource lease core and the repository profile
 
-The concrete encoding belongs to PEP-06.  The umbrella requires the following
-semantic fields:
+The concrete repository encoding belongs to PEP-06.  The shared contract is
+defined before any profile-specific locator or snapshot is interpreted:
+
+```
+StorageResourceV1
+  profile-id             ; bounded, versioned profile name
+  resource-id            ; HbSync domain-separated canonical locator digest
+```
+
+`resource-id` is opaque outside its profile.  A profile defines canonical
+locator bytes and computes it from the unambiguous canonical encoding of the
+profile/locator pair:
+
+```
+HbSync("hbs2-storage-resource-v1\0" || CBOR([profile-id, canonical-locator]))
+```
+
+The locator itself may be public (a repository signing key), private (an
+unlinked capability), or absent from discovery entirely.  It is never a
+person's root identity by default.  Relays index only the pair
+`(profile-id, resource-id)` and opaque signed advert bytes; they do not parse
+application membership, filenames, messages, or a social graph.
+
+Every profile MUST define all of the following before it is admitted to the
+shared lease, receipt, advert, or accounting machinery:
+
+1. canonical locator and resource-id derivation;
+2. an authenticated snapshot descriptor and its versioned identifier;
+3. deterministic, bounded, role-aware inventory traversal and the exact
+   logical-byte accounting rule;
+4. what event starts freshness/update-lag, which complete snapshot remains
+   servable during an update, and the retention policy;
+5. durable pin roots and recovery checks;
+6. how a client authenticates a served snapshot and whether discovery is
+   public, friendnet-scoped, or capability-only.
+
+The generic receipt and future advert carry only `StorageResourceV1`, an
+opaque profile snapshot id, inventory commitment, limits, provider identity,
+and validity interval.  Profile evidence is verified by the profile adapter;
+it is not decoded by an advert relay.  A new profile MUST use a new profile id
+or a new profile version if any of these semantics change.  Generic wire types
+will be introduced beside, not by silently rewriting, the deployed
+`RepositoryLease`/`ReplicaAdvertV1` encodings.
+
+The repository profile instantiates the core as follows:
 
 ```
 RepositoryLease
@@ -186,7 +247,7 @@ RepositoryLease
   contract-id
   consumer-peer
   provider-peer
-  repository-key
+  resource = hbs2-git-repository-v1(repository-key)
   retention-policy
   max-logical-bytes
   max-update-lag
@@ -201,7 +262,10 @@ RepositoryLease
 ```
 
 The repository key authenticates repository state; the peer keys authenticate
-the service agreement.  They are intentionally different authorities.
+the service agreement.  They are intentionally different authorities.  The
+current provider-local `RepositoryLease` stays repository-shaped for durable
+0.26 compatibility; it is the adapter's state record, not the eventual
+cross-profile contract.
 
 `max-logical-bytes` is checked against the canonical snapshot inventory.  The
 provider also reserves at least that much contract capacity even when NCQ3
@@ -222,6 +286,44 @@ atomically replaces the snapshot and clears the clock. Missing or corrupt data
 under unchanged roots is an integrity failure and degrades immediately rather
 than receiving an update allowance. A zero limit requests this same immediate
 degradation for every incomplete update.
+
+
+# Profile applicability and privacy boundary
+
+The core is applicable beyond Git only when the application can meet the six
+profile obligations above.  Merely putting files in CAS is insufficient: the
+provider must be able to tell a complete state from a partial or conflicting
+one, and a fresh client must be able to authenticate what it retrieves.
+
+| Profile | Locator and authenticated state | Status and required boundary |
+|---------|---------------------------------|------------------------------|
+| `hbs2-git-repository-v1` | Repository signing key; LWWRef, manifest, RefLog, and Git transaction graph | Implemented first profile. Public lookup by repository key is opt-in through signed adverts. |
+| `hbs2-sync-directory-v1` | A future signed directory/root authority plus a conflict-resolution epoch | Not yet a profile. `hbs2-sync` must first define a stable signed root, deterministic concurrent-writer semantics, deletion/recovery rules, and a complete inventory. Until then it remains experimental and MUST NOT claim a complete leased replica. |
+| `hbs2-community-log-v1` | A signed append-only/transparency-log root and explicit retention window | Future. Appropriate for public statements, group history, and update logs; membership and moderation are above the storage profile. |
+| `hbs2-sealed-backup-v1` | An opaque, encrypted epoch capability | Future and capability-only by default. Providers retain ciphertext and verify its commitment, but learn neither plaintext nor a public social relationship. Threshold recovery shares are distinct resources with independent placement. |
+
+This layering supports the intended decentralized-community stack without
+making PEP-16 an identity or messaging protocol:
+
+- local keys and per-community unlinkable pseudonyms live above the resource
+  locator; a client creates a different capability or signing authority for
+  each community rather than deriving storage identity from a global account;
+- ratcheted private conversations need forward secrecy, post-compromise
+  security, and deniability.  Their live transport and ratchet state are not
+  public replica adverts.  Only explicitly encrypted backup epochs may use a
+  capability-only storage profile;
+- public claims and transparency logs may use a signed log profile, preserving
+  evidence without weakening the deniability of private messages;
+- group/multi-device authorization, recovery-share threshold policy,
+  reproducible client releases, and update transparency are application
+  protocols.  They can lease their data through this core, but PEP-16 neither
+  centralizes their keys nor learns their graph;
+- peer transport addresses are provider reachability hints, never resource or
+  person identity.  Replacing Tor, TCP, relay routing, or another transport
+  does not change a resource id;
+- human-facing clients map local names and consent choices to opaque resource
+  capabilities.  They must not require a user to compare fingerprints or know
+  ratchet terminology to decide whether to back up, share, or withdraw data.
 
 
 # Lease state machine
@@ -588,9 +690,10 @@ capacity permit it, and the operator is told that the repository is at risk.
   windows, and unreasonable skew is a protocol error.
 
 **Metadata privacy**
-  Offers and adverts reveal relationships and repository interest.  Public
+  Offers and adverts reveal relationships and resource interest.  Public
   advertising is opt-in.  Contract negotiation may use PEP-05 onion transport;
-  encrypted repositories still leak keys, sizes, timing, and provider links.
+  encrypted resources still leak identifiers, sizes, timing, and provider
+  links.
 
 
 # Breakdown into sub-proposals
@@ -605,6 +708,11 @@ dependency instead.
 Defines `RepositoryLease`, snapshot identity, canonical inventory, receipts,
 the durable state machine, NCQ3 pin integration, restart recovery, size limits,
 retention, and the `repo:relay-only` integration.
+
+It is the `hbs2-git-repository-v1` storage-profile adapter.  The generic
+resource/profile contract stays in this umbrella PEP until a second profile
+needs interoperable wire messages; then the generic types must be introduced
+alongside the repository types, not by changing their frozen bytes.
 
 The detailed draft is [PEP-06](pep-06-repository-lease.md).
 
@@ -635,10 +743,12 @@ safe expiry/GC.
 
 ## PEP-10: Replica advertisements and lookup
 
-Defines `ReplicaAdvert`, expiry and withdrawal, bounded lookup, routing over
-the friendnet, and optional hbs2-hub indexing/rendering.  This PEP is required
-before the feature can claim to support a fresh clone while the owner is
-offline.
+Defines repository `ReplicaAdvert`, expiry and withdrawal, bounded lookup,
+routing over the friendnet, and optional hbs2-hub indexing/rendering. A future
+generic advert carries a profile-qualified resource id and opaque evidence;
+relays must not learn application semantics while indexing it. This PEP is
+required before the feature can claim to support a fresh clone while the owner
+is offline.
 
 
 ## PEP-11: Introductions and partner matching
@@ -694,6 +804,15 @@ were pinned by deterministic golden vectors. The remaining M0 graph fixtures,
 independent verifier, and measurements are still open. Replica advertisement
 and automatic provider discovery are delivered by the M4 implementation below.
 M2 and later are otherwise unchanged.
+
+Architecture note (2026-11-02): PEP-16 now makes the profile boundary
+explicit. Existing 0.26 repository lease and advert bytes remain a Git profile
+adapter. The next cross-profile implementation slice is a generic, versioned
+resource identity/snapshot vocabulary and a repository adapter to it; it must
+land before `hbs2-sync` or a community-data profile receives automatic
+placement. No profile may be declared merely because its blocks are
+downloadable: it must supply authenticated state, deterministic inventory,
+pin/recovery, freshness, and client verification.
 
 The first M4 artifact and relay slices are also implemented on 2026-10-31.
 `ReplicaAdvertV1` has an explicit golden-tested CBOR encoding and binds the
@@ -909,6 +1028,9 @@ Deliverables:
 - minimum replica count and availability targets (signed minimum-replica
   manifest policy and target/deficit status complete; availability target and
   scheduler consumption remain);
+- generic resource/profile vocabulary and repository adapter before automatic
+  placement is offered to a second application; file sync, community logs, and
+  encrypted backup each require their own complete-snapshot verifier;
 - time-profile and failure-domain-aware provider selection;
 - health monitor and make-before-break replacement;
 - renewal throttling and safe expiry under disk pressure;
