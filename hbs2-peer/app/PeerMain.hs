@@ -57,6 +57,7 @@ import RefLog qualified
 import RefLog (reflogWorker)
 import LWWRef (lwwRefWorker)
 import RepositoryLeaseWorker (repositoryLeaseWorker)
+import ReachabilityObservation
 import Multicast
 import MailboxProtoWorker
 import HttpWorker
@@ -899,6 +900,7 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   let leaseAdvertReachable = runReader (cfgValue @PeerPublicAddressKey) syn
         & Set.toList
         & mapMaybe (fromStringMay @(PeerAddr L4Proto))
+  let observationPolicy = reachabilityObservationPolicy conf
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
                           & fromInteger @(Timeout 'Seconds) . fromMaybe 300
 
@@ -992,6 +994,16 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                            `orDie` "assertion: localMulticastPeer not set"
 
   brains <- newBasicBrains @e conf
+
+  observationStartedAt <- liftIO $ floor <$> getPOSIXTime
+  let observationWindowSeconds =
+        reachabilityObservationWindowSeconds observationPolicy
+      observationWindowAt timestamp = timestamp `div` observationWindowSeconds
+      observationJournalPolicy = ReachabilityJournalPolicy
+        (reachabilityObservationRetentionWindows observationPolicy)
+      observationTickSeconds = min 30 observationWindowSeconds
+  reachabilityObserver <- liftIO $
+    newReachabilityObserver (observationWindowAt observationStartedAt)
 
   bProbe <- newSimpleProbe "Brains"
   addProbe bProbe
@@ -1212,6 +1224,37 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                       now repositoryAdvertCache bytes
                     broadCastMessage @e (RepositoryAdvertPublish bytes)
 
+              let persistReachabilityEvidence =
+                    foldM persistOne (Right ())
+                    where
+                      persistOne failure@Left{} _ = pure failure
+                      persistOne (Right ()) (provider, window) =
+                        putReachabilityWindow @e brains
+                          observationJournalPolicy provider window
+
+              let reportReachabilityTransition result =
+                    case result of
+                      Right () -> pure ()
+                      Left problem -> err $
+                        "reachability observation failed" <+> viaShow problem
+
+              let currentObservationWindow =
+                    liftIO $ observationWindowAt . floor <$> getPOSIXTime
+
+              let recordVerifiedReachability provider = do
+                    windowIndex <- currentObservationWindow
+                    liftIO $
+                      recordReachabilitySuccess reachabilityObserver
+                        windowIndex provider persistReachabilityEvidence
+                      >>= reportReachabilityTransition
+
+              let advanceReachabilityJournal = do
+                    windowIndex <- currentObservationWindow
+                    liftIO $
+                      advanceReachabilityObserver reachabilityObserver windowIndex
+                        persistReachabilityEvidence
+                      >>= reportReachabilityTransition
+
               pnonce <- peerNonce @e
 
               pl <- getPeerLocator @e
@@ -1275,6 +1318,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                        notice $ prettyLogPeer p <+> "banned"
 
                    | otherwise -> do
+
+                    recordVerifiedReachability (view peerSignKey pd)
 
                     update pd (KnownPeerKey p) id
 
@@ -1393,6 +1438,10 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                   acceptReport metricsProbe [("monotonicTime", fromIntegral (tx-t0) `div` round 1e9)]
 
                 peerThread "peerPingLoop" (peerPingLoop @e conf penv)
+
+                peerThread "reachabilityObservationLoop" $ forever do
+                  pause @'Seconds (fromIntegral observationTickSeconds)
+                  advanceReachabilityJournal
 
                 peerThread "knownPeersPingLoop" (knownPeersPingLoop @e conf (SomeBrains brains))
 

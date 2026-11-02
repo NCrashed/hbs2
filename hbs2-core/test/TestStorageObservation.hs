@@ -4,12 +4,17 @@ module TestStorageObservation
   , testAvailabilityConvergesWithWindows
   , testAvailabilityBuildsTimeProfile
   , testAvailabilityRejectsAmbiguousWindows
+  , testReachabilityTrackerRecordsAuthenticatedSuccess
+  , testReachabilityTrackerRecordsMissedWindow
+  , testReachabilityTrackerKeepsObserverGapUnknown
+  , testReachabilityTrackerRejectsTimeRegression
   ) where
 
 import HBS2.Storage.Observation
 import HBS2.Storage.Placement
 
 import Data.Maybe (isNothing)
+import Data.Map.Strict qualified as Map
 import Data.Word
 
 import Test.Tasty.HUnit
@@ -73,6 +78,47 @@ testAvailabilityRejectsAmbiguousWindows = do
     [window 7 WindowReachable, window 7 WindowOffline]
     @?= Left AvailabilityDuplicateWindow
 
+testReachabilityTrackerRecordsAuthenticatedSuccess :: IO ()
+testReachabilityTrackerRecordsAuthenticatedSuccess = do
+  let tracker = newReachabilityTracker 10
+  (observed, first) <- requireTracking $
+    observeReachability 10 "provider-a" tracker
+  first @?= [("provider-a", window 10 WindowReachable)]
+  requireTracking (observeReachability 10 "provider-a" observed)
+    >>= (@?= []) . snd
+
+testReachabilityTrackerRecordsMissedWindow :: IO ()
+testReachabilityTrackerRecordsMissedWindow = do
+  (observed, _) <- requireTracking $
+    observeReachability 10 "provider-a" (newReachabilityTracker 10)
+  (advanced, completed) <- requireTracking $
+    advanceReachability 11 observed
+  completed @?= []
+  reachabilityTrackerProviders advanced
+    @?= Map.fromList [("provider-a", False)]
+  requireTracking (advanceReachability 12 advanced)
+    >>= (@?= [("provider-a", window 11 WindowOffline)]) . snd
+
+testReachabilityTrackerKeepsObserverGapUnknown :: IO ()
+testReachabilityTrackerKeepsObserverGapUnknown = do
+  (observedA, _) <- requireTracking $
+    observeReachability 10 "provider-a" (newReachabilityTracker 10)
+  (observedBoth, _) <- requireTracking $
+    observeReachability 10 "provider-b" observedA
+  (_, completed) <- requireTracking $
+    advanceReachability 13 observedBoth
+  completed @?=
+    [ (provider, window index state)
+    | let state = WindowObserverOffline
+    , index <- [11, 12]
+    , provider <- ["provider-a", "provider-b"]
+    ]
+
+testReachabilityTrackerRejectsTimeRegression :: IO ()
+testReachabilityTrackerRejectsTimeRegression =
+  advanceReachability 9 (newReachabilityTracker 10)
+    @?= Left (ReachabilityWindowRegression 10 9)
+
 window :: Word64 -> ReachabilityWindowState -> ReachabilityWindow
 window index state = ReachabilityWindow
   { reachabilityWindowIndex = index
@@ -89,3 +135,9 @@ replicateWindows first count state =
 
 requireSummary :: [ReachabilityWindow] -> IO AvailabilityEvidence
 requireSummary = either (assertFailure . show) pure . summarizeReachability
+
+requireTracking
+  :: Show error
+  => Either error value
+  -> IO value
+requireTracking = either (assertFailure . show) pure

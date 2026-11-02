@@ -223,6 +223,8 @@ test-suite test
         PeerMetaSpec
         RepositoryLeaseSpec
         ReachabilityJournalSpec
+        ReachabilityObservationSpec
+        ReachabilityObservation
         MailboxConfig
         MailboxMerged
         MailboxMergedSpec
@@ -342,6 +344,7 @@ executable hbs2-peer
                     , PeerConfig
                     , RefLog
                     , RepositoryLeaseWorker
+                    , ReachabilityObservation
                     , RefChan
                     , RefChanNotifyLog
                     , LWWRef

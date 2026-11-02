@@ -396,9 +396,13 @@ probe must not create a 100% availability rating.  The first local reducer uses
 the 95% Wilson lower bound: one known-successful window is 2,065 basis points,
 not 10,000; 5,000 successful out of 10,000 known windows yields 4,902 basis
 points.  A period containing only observer-offline windows has no estimate,
-not a zero estimate.  PEP-07 still chooses the production window duration,
-tracking period, minimum sample count, and any replacement for this initial
-bound after measurements on the real network.
+not a zero estimate.  The initial production policy uses 15-minute windows and
+retains 2,688 windows (28 days).  Operators may change both positive bounds
+with `barter-observation-window-seconds` and
+`barter-observation-retention-windows`; peers comparing profiles must still
+agree on their window geometry.  PEP-07 may revise these defaults, choose a
+minimum sample count, and replace this initial bound after measurements on the
+real network.
 
 The reducer accepts at most one result for each absolute window number.
 Duplicate window evidence is invalid.  A recurring time profile groups the
@@ -417,6 +421,18 @@ keeps the newest absolute window numbers, including when delayed observations
 arrive out of order.  Producers from authenticated sessions, signed probes,
 resource-specific retrieval and freshness audits, aggregate materialization,
 and UI exposure remain PEP-07 work.
+
+The first producer reuses the peer liveness handshake.  It records a success
+only after the `PeerPong` signature has been verified, keys the observation by
+the peer signing key rather than its transport address, and excludes self and
+banned peers.  One success makes that window durably reachable; repeated
+successes replay the same result.  A live observer that crosses one normal
+window boundary records an unseen known provider as offline.  If its scheduler
+skips one or more complete windows, those skipped windows are observer-offline
+instead, so suspension and overload cannot damage a provider's score.  The
+observer serializes transitions and commits its in-memory state only after the
+journal accepts all emitted evidence; a partial journal write can therefore be
+retried safely.
 
 The shared placement primitive consumes this local evidence without making it
 part of a repository-specific wire type.  Each candidate has a provider id, a
@@ -1019,9 +1035,11 @@ Deliverables:
 - CLI and hbs2-hub read-only rendering of evidence and derived quality.
 
 Current implementation: the resource-neutral equal-window reducer, explicit
-observer-offline state, duplicate-window rejection, 95% Wilson LCB, and
-absolute-window time-profile grouping are complete.  Journal persistence,
-probe/audit producers, retention policy, and rendering remain.
+observer-offline state, duplicate-window rejection, 95% Wilson LCB,
+absolute-window time-profile grouping, bounded durable journal, configurable
+window/retention policy, and a producer from signature-verified peer pongs are
+complete.  Retrieval/freshness audit producers, aggregate materialization,
+minimum sample policy, and rendering remain.
 
 Exit criteria:
 

@@ -1,6 +1,12 @@
 module HBS2.Storage.Observation
   ( ReachabilityWindowState(..)
   , ReachabilityWindow(..)
+  , ReachabilityTracker
+  , reachabilityTrackerProviders
+  , ReachabilityTrackingError(..)
+  , newReachabilityTracker
+  , observeReachability
+  , advanceReachability
   , AvailabilityEvidence(..)
   , AvailabilityObservationError(..)
   , summarizeReachability
@@ -11,6 +17,8 @@ import HBS2.Storage.Placement
 
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (foldl')
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Word
@@ -28,6 +36,83 @@ data ReachabilityWindow = ReachabilityWindow
   , reachabilityWindowState :: ReachabilityWindowState
   }
   deriving stock (Eq, Ord, Show)
+
+-- | State for one observer.  A provider is present after its first verified
+-- success; 'False' means that no success has arrived in the current window.
+-- The pure state transition is shared by repository, file-sync, and future
+-- storage-resource producers.
+data ReachabilityTracker provider = ReachabilityTracker
+  { reachabilityTrackerWindow :: Word64
+  , reachabilityTrackerProviders :: Map provider Bool
+  }
+  deriving stock (Eq, Show)
+
+data ReachabilityTrackingError
+  = ReachabilityWindowRegression Word64 Word64
+  deriving stock (Eq, Show)
+
+newReachabilityTracker :: Word64 -> ReachabilityTracker provider
+newReachabilityTracker windowIndex = ReachabilityTracker
+  { reachabilityTrackerWindow = windowIndex
+  , reachabilityTrackerProviders = Map.empty
+  }
+
+-- | Record a verified success.  Reachability is emitted immediately because
+-- it cannot be invalidated later, making persistence crash-safe and replay
+-- idempotent.  The caller authenticates the provider before this boundary.
+observeReachability
+  :: Ord provider
+  => Word64
+  -> provider
+  -> ReachabilityTracker provider
+  -> Either ReachabilityTrackingError
+       (ReachabilityTracker provider, [(provider, ReachabilityWindow)])
+observeReachability target provider tracker = do
+  (advanced, completed) <- advanceReachability target tracker
+  let alreadyObserved = Map.findWithDefault False provider
+        (reachabilityTrackerProviders advanced)
+      observed = advanced
+        { reachabilityTrackerProviders = Map.insert provider True
+            (reachabilityTrackerProviders advanced)
+        }
+      evidence =
+        [ (provider, ReachabilityWindow target WindowReachable)
+        | not alreadyObserved
+        ]
+  pure (observed, completed <> evidence)
+
+-- | Move the observer clock forward.  A normal boundary makes a missing
+-- success a provider failure.  Skipped whole windows instead describe an
+-- observer/scheduler gap and therefore remain unknown.
+advanceReachability
+  :: Ord provider
+  => Word64
+  -> ReachabilityTracker provider
+  -> Either ReachabilityTrackingError
+       (ReachabilityTracker provider, [(provider, ReachabilityWindow)])
+advanceReachability target tracker
+  | target < current = Left (ReachabilityWindowRegression current target)
+  | target == current = Right (tracker, [])
+  | otherwise = Right
+      ( tracker
+          { reachabilityTrackerWindow = target
+          , reachabilityTrackerProviders = False <$ providers
+          }
+      , missedCurrent <> observerGap
+      )
+  where
+    current = reachabilityTrackerWindow tracker
+    providers = reachabilityTrackerProviders tracker
+    missedCurrent =
+      [ (provider, ReachabilityWindow current WindowOffline)
+      | (provider, observed) <- Map.toAscList providers
+      , not observed
+      ]
+    observerGap =
+      [ (provider, ReachabilityWindow index WindowObserverOffline)
+      | index <- [current + 1 .. target - 1]
+      , provider <- Map.keys providers
+      ]
 
 -- | Rolling evidence retains its denominator and unknown count so callers do
 -- not confuse absence of observation with measured unavailability.

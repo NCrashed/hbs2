@@ -88,6 +88,14 @@ main =
               testAvailabilityBuildsTimeProfile
           , testCase "rejects ambiguous window evidence"
               testAvailabilityRejectsAmbiguousWindows
+          , testCase "records one authenticated success idempotently"
+              testReachabilityTrackerRecordsAuthenticatedSuccess
+          , testCase "records a missed live observation window"
+              testReachabilityTrackerRecordsMissedWindow
+          , testCase "keeps observer scheduling gaps unknown"
+              testReachabilityTrackerKeepsObserverGapUnknown
+          , testCase "rejects wall-clock regression"
+              testReachabilityTrackerRejectsTimeRegression
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"

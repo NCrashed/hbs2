@@ -24,6 +24,7 @@ import HttpListen (httpListenTests)
 import PeerMetaSpec (peerMetaTests)
 import RepositoryLeaseSpec qualified
 import ReachabilityJournalSpec qualified
+import ReachabilityObservationSpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
@@ -167,6 +168,7 @@ main = do
       , peerMetaTests
       , RepositoryLeaseSpec.tests
       , ReachabilityJournalSpec.tests
+      , ReachabilityObservationSpec.tests
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests

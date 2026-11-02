@@ -57,6 +57,8 @@ data PeerNetworkClassKey
 data PeerPublicAddressKey
 data PeerBarterBudgetBytesKey
 data PeerBarterMaxContractsKey
+data PeerBarterObservationWindowSecondsKey
+data PeerBarterObservationRetentionWindowsKey
 
 
 instance HasCfgKey PeerDebugKey a where
@@ -119,6 +121,12 @@ instance HasCfgKey PeerBarterBudgetBytesKey Integer where
 
 instance HasCfgKey PeerBarterMaxContractsKey Integer where
   key = "barter-max-contracts"
+
+instance HasCfgKey PeerBarterObservationWindowSecondsKey Integer where
+  key = "barter-observation-window-seconds"
+
+instance HasCfgKey PeerBarterObservationRetentionWindowsKey Integer where
+  key = "barter-observation-retention-windows"
 
 
 
@@ -223,6 +231,28 @@ newtype PeerConfig =
   PeerConfig { fromPeerConfig :: [Syntax C] }
   deriving newtype (Monoid, Semigroup, Pretty)
 
+data ReachabilityObservationPolicy = ReachabilityObservationPolicy
+  { reachabilityObservationWindowSeconds :: Word64
+  , reachabilityObservationRetentionWindows :: Int
+  }
+  deriving stock (Eq, Show)
+
+defaultReachabilityObservationWindowSeconds :: Word64
+defaultReachabilityObservationWindowSeconds = 15 * 60
+
+defaultReachabilityObservationRetentionWindows :: Int
+defaultReachabilityObservationRetentionWindows = 28 * 24 * 4
+
+reachabilityObservationPolicy :: PeerConfig -> ReachabilityObservationPolicy
+reachabilityObservationPolicy (PeerConfig syntax) = ReachabilityObservationPolicy
+  { reachabilityObservationWindowSeconds = positiveConfigWord syntax
+      (key @PeerBarterObservationWindowSecondsKey @Integer)
+      defaultReachabilityObservationWindowSeconds
+  , reachabilityObservationRetentionWindows = positiveConfigInt syntax
+      (key @PeerBarterObservationRetentionWindowsKey @Integer)
+      defaultReachabilityObservationRetentionWindows
+  }
+
 repositoryLeaseAdmissionPolicy :: PeerConfig -> RepositoryLeaseAdmissionPolicy
 repositoryLeaseAdmissionPolicy (PeerConfig syntax) = RepositoryLeaseAdmissionPolicy
   { repositoryLeaseBudgetBytes = configWord syntax
@@ -237,6 +267,17 @@ configWord :: [Syntax C] -> Id -> Word64 -> Word64
 configWord syntax name fallback = fromMaybe fallback
   (lastMay (mapMaybe (configWordEntry name) syntax))
 
+positiveConfigWord :: [Syntax C] -> Id -> Word64 -> Word64
+positiveConfigWord syntax name fallback =
+  case configWord syntax name fallback of
+    0 -> fallback
+    value -> value
+
+positiveConfigInt :: [Syntax C] -> Id -> Int -> Int
+positiveConfigInt syntax name fallback = fromMaybe fallback do
+  value <- lastMay (mapMaybe (configInteger name) syntax)
+  positive value >>= (`within` (maxBound :: Int))
+
 configWordEntry :: Id -> Syntax C -> Maybe Word64
 configWordEntry name syntax = configInteger name syntax >>= word64May
 
@@ -247,16 +288,19 @@ configInteger name = \case
   _ -> Nothing
 
 word64May :: Integer -> Maybe Word64
-word64May value = nonNegative value >>= withinWord64
+word64May value = nonNegative value >>= (`within` (maxBound :: Word64))
 
 nonNegative :: Integer -> Maybe Integer
 nonNegative value = if value < 0 then Nothing else Just value
 
-withinWord64 :: Integer -> Maybe Word64
-withinWord64 value =
-  if value > fromIntegral (maxBound :: Word64)
+within :: Integral value => Integer -> value -> Maybe value
+within value upper =
+  if value > fromIntegral upper
     then Nothing
     else Just (fromIntegral value)
+
+positive :: Integer -> Maybe Integer
+positive value = if value <= 0 then Nothing else Just value
 
 
 peerConfigDefault :: MonadIO m => m FilePath
@@ -289,6 +333,9 @@ listen-tcp "0.0.0.0:10351"
 ; aggregate capacity reserved for repository leases
 ; barter-budget-bytes 10737418240
 ; barter-max-contracts 64
+; reachability observations: 15-minute windows retained for 28 days
+; barter-observation-window-seconds 900
+; barter-observation-retention-windows 2688
 |]
 
 peerConfigInit :: MonadIO m => Maybe FilePath -> m ()
