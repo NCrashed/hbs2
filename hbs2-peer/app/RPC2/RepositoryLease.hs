@@ -65,6 +65,20 @@ instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m)
     context <- getRpcContext @PeerAPI
     liftIO $ discoverRepositoryProviders context repository
 
+instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m)
+  => HandleMethod m RpcPeerReachability where
+  handleMethod provider = do
+    context <- getRpcContext @PeerAPI
+    let policy = reachabilityObservationPolicy (PeerConfig (rpcConfig context))
+    windows <- listReachabilityWindows @L4Proto (rpcBrains context) provider
+    pure $ if null windows
+      then Nothing
+      else either (const Nothing) Just $
+        summarizeReachabilityReport
+          (reachabilityObservationWindowSeconds policy)
+          (reachabilityObservationRetentionWindows policy)
+          windows
+
 discoverRepositoryProvider
   :: RPC2Context
   -> PubKey 'Sign 'HBS2Basic

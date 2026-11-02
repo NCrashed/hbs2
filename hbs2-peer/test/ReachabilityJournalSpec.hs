@@ -16,7 +16,21 @@ import PeerConfig
 
 tests :: TestTree
 tests = testGroup "reachability journal"
-  [ testCase "persists bounded windows across restart" $
+  [ testCase "materializes bounded evidence with its window geometry" $ do
+      summarizeReachabilityReport 900 2688
+        [ ReachabilityWindow 10 WindowReachable
+        , ReachabilityWindow 11 WindowOffline
+        , ReachabilityWindow 12 WindowObserverOffline
+        ] @?= Right ReachabilityReport
+          { reachabilityReportWindowSeconds = 900
+          , reachabilityReportRetentionWindows = 2688
+          , reachabilityReportKnownWindows = 2
+          , reachabilityReportReachableWindows = 1
+          , reachabilityReportUnknownWindows = 1
+          , reachabilityReportLowerBoundBps = Just 945
+          }
+
+  , testCase "persists bounded windows across restart" $
       withJournal $ \brains provider reopen -> do
         let policy = ReachabilityJournalPolicy 3
         mapM_ (expectStored brains policy provider)

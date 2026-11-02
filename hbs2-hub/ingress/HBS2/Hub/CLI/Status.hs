@@ -24,6 +24,7 @@ module HBS2.Hub.CLI.Status
   , Standing(..)
   , Publication(..)
   , Replication(..)
+  , Availability(..)
   , statusDoc
   , statusContract
   , statusOrder
@@ -51,6 +52,7 @@ import HBS2.CLI.Prelude
 import HBS2.CLI.Run.Internal
 
 import HBS2.Peer.Proto.RepositoryLease (ReplicaAdvertV1(..))
+import HBS2.Peer.Brains (ReachabilityReport(..))
 import HBS2.Peer.RPC.API.Peer
 import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
@@ -97,8 +99,17 @@ data Replication =
       , replicationExpiresAt    :: Word64
       , replicationReachableVia :: [Text]
       , replicationCompleteCount :: Int
+      , replicationAvailability :: Availability
       }
   deriving stock (Eq,Show)
+
+-- | Local evidence for the provider selected from the verified adverts.
+-- Transport failure and an honestly empty journal are different answers.
+data Availability
+  = AvailabilityUnknown Text
+  | AvailabilityNotMeasured
+  | AvailabilityMeasured ReachabilityReport
+  deriving stock (Eq, Show)
 
 -- | Everything the report is a function of.
 --
@@ -248,7 +259,29 @@ replicationSummaryDoc target = \case
     , "            provider" <+> keyDoc replicationProvider
     , "            advert valid from" <+> pretty replicationIssuedAt
         <+> "until" <+> pretty replicationExpiresAt
+    ] <> availabilityDoc replicationAvailability
+
+availabilityDoc :: Availability -> [Doc ann]
+availabilityDoc = \case
+  AvailabilityUnknown problem ->
+    [ "            availability unknown:" <+> pretty (safeText problem) ]
+  AvailabilityNotMeasured ->
+    [ "            availability not measured yet" ]
+  AvailabilityMeasured ReachabilityReport{..} ->
+    [ "            availability" <+> lowerBoundDoc
+        <+> "LCB;" <+> pretty reachabilityReportReachableWindows
+        <> "/" <> pretty reachabilityReportKnownWindows <+> "known windows,"
+        <+> pretty reachabilityReportUnknownWindows <+> "observer-offline"
+    , "            observation window" <+> pretty reachabilityReportWindowSeconds
+        <> "s; retention" <+> pretty reachabilityReportRetentionWindows
     ]
+    where
+      lowerBoundDoc = case reachabilityReportLowerBoundBps of
+        Nothing -> "no estimate"
+        Just basisPoints ->
+          let (whole, fraction) = basisPoints `divMod` 100
+              decimal = Text.justifyRight 2 '0' (Text.pack (show fraction))
+          in pretty whole <> "." <> pretty decimal <> "%"
 
 -- | The standing as a document (@hub status --json@).
 --
@@ -318,13 +351,13 @@ statusContract st = object
 
 replicationContract :: Maybe Word64 -> Replication -> Value
 replicationContract target replication =
-  let (minimumReplica, provider, snapshot, issued, expires, endpoints, atRisk, failure) =
+  let (minimumReplica, provider, snapshot, issued, expires, endpoints, availability, atRisk, failure) =
         case replication of
           ReplicationUnknown e ->
-            (Null, Null, Null, Null, Null, [], Null, toJSON e)
+            (Null, Null, Null, Null, Null, [], Null, Null, toJSON e)
           ReplicationAtRisk ->
             (toJSON (0 :: Int), Null, Null, Null, Null, []
-            , Bool (maybe True (> 0) target), Null)
+            , Null, Bool (maybe True (> 0) target), Null)
           ReplicationReady{..} ->
             ( toJSON replicationCompleteCount
             , toJSON (key58 replicationProvider)
@@ -332,6 +365,7 @@ replicationContract target replication =
             , toJSON replicationIssuedAt
             , toJSON replicationExpiresAt
             , fmap toJSON replicationReachableVia
+            , availabilityContract replicationAvailability
             , Bool (maybe False (> fromIntegral replicationCompleteCount) target)
             , Null
             )
@@ -342,9 +376,26 @@ replicationContract target replication =
     , "snapshot" .= snapshot
     , "freshness" .= object [ "issued_at" .= issued, "expires_at" .= expires ]
     , "reachable_via" .= endpoints
-    , "observed_availability" .= Null
+    , "observed_availability" .= availability
     , "at_risk" .= atRisk
     , "error" .= failure
+    ]
+
+availabilityContract :: Availability -> Value
+availabilityContract = \case
+  AvailabilityUnknown problem -> object
+    [ "state" .= ("unknown" :: Text), "error" .= problem ]
+  AvailabilityNotMeasured -> object
+    [ "state" .= ("not_measured" :: Text), "error" .= Null ]
+  AvailabilityMeasured ReachabilityReport{..} -> object
+    [ "state" .= ("measured" :: Text)
+    , "window_seconds" .= reachabilityReportWindowSeconds
+    , "retention_windows" .= reachabilityReportRetentionWindows
+    , "known_windows" .= reachabilityReportKnownWindows
+    , "reachable_windows" .= reachabilityReportReachableWindows
+    , "observer_offline_windows" .= reachabilityReportUnknownWindows
+    , "lower_bound_bps" .= reachabilityReportLowerBoundBps
+    , "error" .= Null
     ]
 
 statusOrder :: [Text]
@@ -355,7 +406,9 @@ statusOrder =
   , "mailbox", "waiting", "error"
   , "replication", "target", "complete_replicas_minimum", "provider", "snapshot"
   , "freshness", "issued_at", "expires_at", "reachable_via"
-  , "observed_availability", "at_risk"
+  , "observed_availability", "state", "window_seconds", "retention_windows"
+  , "known_windows", "reachable_windows", "observer_offline_windows"
+  , "lower_bound_bps", "at_risk"
   , "clone", "branch", "onto", "branches" ]
 
 statusEntries :: forall c m . ( IsContext c
@@ -483,10 +536,16 @@ statusEntries = do
         then pure (ReplicationUnknown "not asked (--local)")
         else do
           api <- getClientAPI @PeerAPI @UNIX
-          callRpcWaitMay @RpcRepositoryAdvertList rpcTimeout api repo <&> \case
-            Nothing -> ReplicationUnknown "repository advert lookup timed out"
-            Just [] -> ReplicationAtRisk
-            Just adverts -> replicationFromAdverts adverts
+          callRpcWaitMay @RpcRepositoryAdvertList rpcTimeout api repo >>= \case
+            Nothing -> pure (ReplicationUnknown "repository advert lookup timed out")
+            Just [] -> pure ReplicationAtRisk
+            Just adverts@(ReplicaAdvertV1{replicaAdvertProvider = provider} : _) -> do
+              availability <- callRpcWaitMay @RpcPeerReachability
+                rpcTimeout api provider <&> \case
+                  Nothing -> AvailabilityUnknown "reachability lookup timed out"
+                  Just Nothing -> AvailabilityNotMeasured
+                  Just (Just report) -> AvailabilityMeasured report
+              pure (replicationFromAdverts availability adverts)
 
       let st = Standing
               { stRepo = repo
@@ -526,8 +585,8 @@ statusEntries = do
         then LBS.putStr (renderDocument statusOrder (withClone (statusContract st)))
         else mapM_ print (statusDoc st)
 
-    replicationFromAdverts [] = ReplicationAtRisk
-    replicationFromAdverts adverts@(ReplicaAdvertV1{..} : _) = ReplicationReady
+    replicationFromAdverts _ [] = ReplicationAtRisk
+    replicationFromAdverts availability adverts@(ReplicaAdvertV1{..} : _) = ReplicationReady
       { replicationProvider = replicaAdvertProvider
       , replicationSnapshot = replicaAdvertSnapshotId
       , replicationIssuedAt = replicaAdvertIssuedAt
@@ -535,6 +594,7 @@ statusEntries = do
       , replicationReachableVia =
           fmap (Text.pack . show . pretty) replicaAdvertReachableVia
       , replicationCompleteCount = length adverts
+      , replicationAvailability = availability
       }
 
 -- | What one @hub status@ was asked about.

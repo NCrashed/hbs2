@@ -434,6 +434,16 @@ observer serializes transitions and commits its in-memory state only after the
 journal accepts all emitted evidence; a partial journal write can therefore be
 retried safely.
 
+The peer materializes a provider report on read rather than storing a mutable
+score.  The report carries the window duration and retention bound beside the
+known, reachable, and observer-offline counts and Wilson lower bound.  A new
+append-only local RPC exposes that report by provider signing key.  `hbs2-hub
+status` resolves the provider from its verified replica advert and renders the
+local report in both text and JSON, keeping RPC timeout, an empty journal, and
+measured evidence as three distinct states.  This first rendering qualifies
+the advert's selected provider; multi-provider aggregate placement remains a
+later slice.
+
 The shared placement primitive consumes this local evidence without making it
 part of a repository-specific wire type.  Each candidate has a provider id, a
 rolling availability LCB in basis points, a bounded non-empty profile of LCBs
@@ -1038,8 +1048,10 @@ Current implementation: the resource-neutral equal-window reducer, explicit
 observer-offline state, duplicate-window rejection, 95% Wilson LCB,
 absolute-window time-profile grouping, bounded durable journal, configurable
 window/retention policy, and a producer from signature-verified peer pongs are
-complete.  Retrieval/freshness audit producers, aggregate materialization,
-minimum sample policy, and rendering remain.
+complete.  Rolling aggregate materialization and read-only hbs2-hub rendering
+for the selected verified provider are also complete.  Retrieval/freshness
+audit producers, time-profile exposure, minimum sample policy, and
+multi-provider rendering remain.
 
 Exit criteria:
 

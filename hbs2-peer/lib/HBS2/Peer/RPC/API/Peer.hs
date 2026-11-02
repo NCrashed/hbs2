@@ -11,6 +11,7 @@ import HBS2.Net.Messaging.Encrypted.ByPass(ByPassStat)
 import HBS2.Peer.Proto.PeerMeta (PeerMeta)
 
 import HBS2.Peer.RPC.Internal.Types
+import HBS2.Peer.Brains (ReachabilityReport)
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
 
@@ -60,6 +61,7 @@ data RpcRepositoryLeaseList
 data RpcRepositoryLeaseCapacity
 data RpcRepositoryAdvertFind
 data RpcRepositoryAdvertList
+data RpcPeerReachability
 
 type PeerAPI = '[ RpcPoke
                 , RpcPing
@@ -88,6 +90,7 @@ type PeerAPI = '[ RpcPoke
                 , RpcRepositoryLeaseCapacity
                 , RpcRepositoryAdvertFind
                 , RpcRepositoryAdvertList
+                , RpcPeerReachability
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -176,6 +179,9 @@ type instance Output RpcRepositoryAdvertFind = Maybe ReplicaAdvertV1
 
 type instance Input RpcRepositoryAdvertList = PubKey 'Sign 'HBS2Basic
 type instance Output RpcRepositoryAdvertList = [ReplicaAdvertV1]
+
+type instance Input RpcPeerReachability = PubKey 'Sign 'HBS2Basic
+type instance Output RpcPeerReachability = Maybe ReachabilityReport
 
 data SetLogging =
     DebugOn Bool

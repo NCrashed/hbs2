@@ -13,6 +13,7 @@ import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
 import HBS2.Storage.Observation
+import HBS2.Storage.Placement (availabilityBps)
 
 import Data.Time.Clock (NominalDiffTime)
 
@@ -26,6 +27,38 @@ data ReachabilityJournalError
   | ReachabilityWindowConflict
   | ReachabilityJournalStorageFailure
   deriving stock (Eq, Show)
+
+-- | A resource-neutral, locally observed provider summary.  Geometry travels
+-- with the score so consumers never compare evidence gathered with different
+-- window or retention policies as if it were the same measurement.
+data ReachabilityReport = ReachabilityReport
+  { reachabilityReportWindowSeconds :: Word64
+  , reachabilityReportRetentionWindows :: Word64
+  , reachabilityReportKnownWindows :: Word64
+  , reachabilityReportReachableWindows :: Word64
+  , reachabilityReportUnknownWindows :: Word64
+  , reachabilityReportLowerBoundBps :: Maybe Word16
+  }
+  deriving stock (Eq, Generic, Show)
+
+instance Serialise ReachabilityReport
+
+summarizeReachabilityReport
+  :: Word64
+  -> Int
+  -> [ReachabilityWindow]
+  -> Either AvailabilityObservationError ReachabilityReport
+summarizeReachabilityReport windowSeconds retentionWindows windows = do
+  evidence <- summarizeReachability windows
+  pure ReachabilityReport
+    { reachabilityReportWindowSeconds = windowSeconds
+    , reachabilityReportRetentionWindows = fromIntegral retentionWindows
+    , reachabilityReportKnownWindows = availabilityKnownWindows evidence
+    , reachabilityReportReachableWindows = availabilityReachableWindows evidence
+    , reachabilityReportUnknownWindows = availabilityUnknownWindows evidence
+    , reachabilityReportLowerBoundBps =
+        availabilityBps <$> availabilityLowerBound evidence
+    }
 
 -- TODO: rename
 class HasBrains e a where

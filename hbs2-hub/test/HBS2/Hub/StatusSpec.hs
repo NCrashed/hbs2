@@ -17,6 +17,7 @@ import HBS2.Base58 (AsBase58(..))
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject)
 import HBS2.Net.Auth.Credentials
+import HBS2.Peer.Brains
 import HBS2.Prelude.Plated (Doc,pretty)
 
 import Data.Config.Suckless (C,Syntax)
@@ -133,11 +134,15 @@ spec = do
                         , replicationExpiresAt = 2000
                         , replicationReachableVia = ["tcp://127.0.0.1:7351"]
                         , replicationCompleteCount = 1
+                        , replicationAvailability = AvailabilityMeasured
+                            (ReachabilityReport 900 2688 20 15 1 (Just 5680))
                         }
                     })
       atRisk `shouldSatisfy` isInfixOf "replication at risk"
       ready `shouldSatisfy` isInfixOf "at least 1 verified complete replica"
       ready `shouldSatisfy` isInfixOf (b58 provider)
+      ready `shouldSatisfy` isInfixOf "56.80%"
+      ready `shouldSatisfy` isInfixOf "15/20 known windows"
 
     it "does not turn a silent peer into zero replicas" $ do
       repo <- aKey
@@ -149,7 +154,7 @@ spec = do
       repo <- aKey ; provider <- aKey
       let says target replication = said (statusDoc (plain repo)
             { stReplicationTarget = target, stReplication = replication })
-          one = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
+          one = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1 AvailabilityNotMeasured
       says Nothing ReplicationAtRisk `shouldSatisfy` isInfixOf "target not declared"
       says (Just 0) ReplicationAtRisk `shouldSatisfy` isInfixOf "target satisfied"
       says (Just 2) ReplicationAtRisk `shouldSatisfy` isInfixOf "at risk"
@@ -328,6 +333,8 @@ spec = do
                         , replicationExpiresAt = 2000
                         , replicationReachableVia = ["tcp://127.0.0.1:7351"]
                         , replicationCompleteCount = 1
+                        , replicationAvailability = AvailabilityMeasured
+                            (ReachabilityReport 900 2688 20 15 1 (Just 5680))
                         }
                     }
           unknown = statusContract (plain repo)
@@ -340,7 +347,8 @@ spec = do
       at ["replication","freshness","expires_at"] ready `shouldBe` Just (Number 2000)
       at ["replication","at_risk"] ready `shouldBe` Just (Bool False)
       at ["replication","target"] ready `shouldBe` Just Null
-      at ["replication","observed_availability"] ready `shouldBe` Just Null
+      at ["replication","observed_availability","lower_bound_bps"] ready
+        `shouldBe` Just (Number 5680)
       at ["replication","complete_replicas_minimum"] unknown `shouldBe` Just Null
       at ["replication","at_risk"] unknown `shouldBe` Just Null
       at ["replication","error"] unknown `shouldBe` Just (String "peer silent")
@@ -353,15 +361,15 @@ spec = do
             { stReplicationTarget = Just 2 }
           one = statusContract (plain repo)
             { stReplicationTarget = Just 2
-            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1 AvailabilityNotMeasured
             }
           oneEnough = statusContract (plain repo)
             { stReplicationTarget = Just 1
-            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 1 AvailabilityNotMeasured
             }
           twoEnough = statusContract (plain repo)
             { stReplicationTarget = Just 2
-            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 2
+            , stReplication = ReplicationReady provider (mh "snapshot") 1000 2000 [] 2 AvailabilityNotMeasured
             }
           unknown = statusContract (plain repo)
             { stReplicationTarget = Just 2
