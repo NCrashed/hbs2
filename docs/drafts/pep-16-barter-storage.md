@@ -392,9 +392,21 @@ half the week may provide almost full coverage if their schedules complement
 one another, or almost no improvement if their outages coincide.
 
 New peers use a conservative prior or a lower confidence bound.  One successful
-probe must not create a 100% availability rating.  PEP-07 chooses a concrete
-Wilson/Beta calculation, window duration, tracking period, and minimum sample
-count after measurements on the real network.
+probe must not create a 100% availability rating.  The first local reducer uses
+the 95% Wilson lower bound: one known-successful window is 2,065 basis points,
+not 10,000; 5,000 successful out of 10,000 known windows yields 4,902 basis
+points.  A period containing only observer-offline windows has no estimate,
+not a zero estimate.  PEP-07 still chooses the production window duration,
+tracking period, minimum sample count, and any replacement for this initial
+bound after measurements on the real network.
+
+The reducer accepts at most one result for each absolute window number.
+Duplicate window evidence is invalid.  A recurring time profile groups the
+absolute number modulo a locally chosen profile width, so trimming the rolling
+journal cannot shift Monday observations into Tuesday.  Profile width is
+bounded to 4,096 buckets and empty buckets retain an unknown estimate.  This
+pure reducer is shared policy; durable journals, signed probes, retrieval
+audits, and UI exposure remain PEP-07 work.
 
 The shared placement primitive consumes this local evidence without making it
 part of a repository-specific wire type.  Each candidate has a provider id, a
@@ -988,6 +1000,11 @@ Deliverables:
 - equal-duration rolling windows, conservative confidence bounds, freshness,
   RTT, and throughput metrics;
 - CLI and hbs2-hub read-only rendering of evidence and derived quality.
+
+Current implementation: the resource-neutral equal-window reducer, explicit
+observer-offline state, duplicate-window rejection, 95% Wilson LCB, and
+absolute-window time-profile grouping are complete.  Journal persistence,
+probe/audit producers, retention policy, and rendering remain.
 
 Exit criteria:
 

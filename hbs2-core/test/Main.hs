@@ -9,6 +9,7 @@ import TestMerkleWalk
 import TestStorageInventory
 import TestStorageResource
 import TestStoragePlacement
+import TestStorageObservation
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -75,6 +76,18 @@ main =
               testPlacementPrefersComplementarySchedule
           , testCase "recomputes weak windows after each selection"
               testPlacementRecomputesCoverage
+          ]
+      , testGroup "reachability observation windows"
+          [ testCase "keeps observer-offline windows unknown"
+              testAvailabilityKeepsObserverOfflineUnknown
+          , testCase "does not turn one success into perfect availability"
+              testAvailabilityUsesConservativeBound
+          , testCase "converges toward measured availability"
+              testAvailabilityConvergesWithWindows
+          , testCase "groups absolute windows into a time profile"
+              testAvailabilityBuildsTimeProfile
+          , testCase "rejects ambiguous window evidence"
+              testAvailabilityRejectsAmbiguousWindows
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"
