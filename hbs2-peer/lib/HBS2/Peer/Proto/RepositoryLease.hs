@@ -24,24 +24,30 @@ module HBS2.Peer.Proto.RepositoryLease
   , repositoryLeaseVersionSupported
   , repositoryLeaseLifetimeAt
   , repositoryLeaseUpdateOverdueAt
+  , repositoryStorageProfile
+  , repositoryStorageResource
+  , repositoryLeaseStorageSnapshot
   , makeRepositoryLeaseId
   , makeRepositorySnapshotId
   ) where
 
+import HBS2.Data.CBOR
 import HBS2.Data.Types.Refs
 import HBS2.Base58 (AsBase58(..))
 import HBS2.Hash
 import HBS2.Net.Auth.Credentials hiding (decode, encode)
 import HBS2.Prelude.Plated
+import HBS2.Storage.Resource
 
 import Codec.CBOR.Term (decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toLazyByteString)
-import Codec.CBOR.Decoding (Decoder, decodeListLen, decodeWord)
-import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeWord)
+import Codec.CBOR.Decoding (decodeListLen, decodeWord)
+import Codec.CBOR.Encoding (encodeListLen, encodeWord)
 import Codec.Serialise (Serialise(..), deserialiseOrFail)
 import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Word
 
 newtype RepositoryLeaseId = RepositoryLeaseId
@@ -284,6 +290,35 @@ repositoryLeaseUpdateOverdueAt now lease =
         lag = repositoryLeaseMaxUpdateLag lease
         updateDeadline = startedAt + min lag (maxBound - startedAt)
 
+-- | Profile adapter for the repository lease protocol.  The profile name and
+-- resource derivation are stable generic vocabulary; the repository's LWWRef
+-- and RefLog remain owned by this protocol module.
+repositoryStorageProfile :: StorageProfile
+repositoryStorageProfile =
+  case mkStorageProfile "hbs2-git-repository-v1" of
+    Just profile -> profile
+    Nothing -> error "invalid built-in repository storage profile"
+
+repositoryStorageResource
+  :: PubKey 'Sign 'HBS2Basic
+  -> StorageResource
+repositoryStorageResource repository =
+  makeStorageResource repositoryStorageProfile (LBS.toStrict (serialise repository))
+
+-- | Projects a verified repository snapshot into the profile-neutral receipt
+-- vocabulary without changing the durable repository lease encoding.
+repositoryLeaseStorageSnapshot :: RepositoryLease -> Maybe StorageSnapshot
+repositoryLeaseStorageSnapshot lease = do
+  snapshot <- repositoryLeaseSnapshot lease
+  pure StorageSnapshot
+    { storageSnapshotResource = repositoryStorageResource (repositoryLeaseRepository lease)
+    , storageSnapshotId = repositorySnapshotId snapshot
+    , storageSnapshotInventoryRoot = repositorySnapshotInventoryRoot snapshot
+    , storageSnapshotBlockCount = repositorySnapshotBlockCount snapshot
+    , storageSnapshotLogicalBytes = repositorySnapshotLogicalBytes snapshot
+    , storageSnapshotCompletedAt = repositorySnapshotCompletedAt snapshot
+    }
+
 -- | Local mutable ref which makes the inventory tree a storage root.
 newtype RepositoryLeasePin = RepositoryLeasePin RepositoryLeaseId
   deriving stock (Eq, Ord, Generic)
@@ -500,19 +535,6 @@ instance Serialise RepositoryAdvertMessage where
         when (BS.length advert > repositoryAdvertMaxBoxBytes) $
           fail "RepositoryAdvertMessage: advert box too large"
         pure advert
-
--- Generic-derived product encodings begin with a list containing a zero
--- constructor tag.  Keeping that framing makes this explicit codec compatible
--- with every lease block already written by 0.26 while rejecting other shapes.
-encodeRecordHeader :: Word -> Encoding
-encodeRecordHeader fields = encodeListLen fields <> encodeWord 0
-
-decodeRecordHeader :: String -> Int -> Decoder s ()
-decodeRecordHeader name expectedFields = do
-  fields <- decodeListLen
-  constructorTag <- decodeWord
-  unless (fields == expectedFields && constructorTag == 0) $
-    fail (name <> ": invalid CBOR record header")
 
 makeRepositoryLeaseId
   :: PubKey 'Sign 'HBS2Basic

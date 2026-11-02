@@ -20,6 +20,7 @@ import HBS2.Peer.RepositoryLease.Worker
 import HBS2.Prelude.Plated
 import HBS2.Storage
 import HBS2.Storage.Inventory
+import HBS2.Storage.Resource
 import HBS2.Storage.Simple
 
 import Codec.CBOR.Encoding (encodeListLen, encodeWord)
@@ -133,6 +134,22 @@ instance HasBrains L4Proto TestBrains where
 tests :: TestTree
 tests = testGroup "repository lease"
   [ repositoryLeaseWireGoldenTests
+
+  , testCase "adapts a repository lease to generic storage evidence" $ do
+      let inactive = repositoryLeaseFixture (makeRepositoryLeaseId goldenRepository 77)
+            goldenRepository
+          active = inactive { repositoryLeaseSnapshot = Just goldenSnapshot }
+          expected = StorageSnapshot
+            { storageSnapshotResource = repositoryStorageResource goldenRepository
+            , storageSnapshotId = repositorySnapshotId goldenSnapshot
+            , storageSnapshotInventoryRoot = repositorySnapshotInventoryRoot goldenSnapshot
+            , storageSnapshotBlockCount = repositorySnapshotBlockCount goldenSnapshot
+            , storageSnapshotLogicalBytes = repositorySnapshotLogicalBytes goldenSnapshot
+            , storageSnapshotCompletedAt = repositorySnapshotCompletedAt goldenSnapshot
+            }
+      storageProfileId repositoryStorageProfile @?= "hbs2-git-repository-v1"
+      repositoryLeaseStorageSnapshot inactive @?= Nothing
+      repositoryLeaseStorageSnapshot active @?= Just expected
 
   , testCase "a complete repository is inventoried and pinned" $
       withRepository $ \Fixture{..} -> do

@@ -7,6 +7,7 @@ import TestScheduled
 import TestDerivedKey
 import TestMerkleWalk
 import TestStorageInventory
+import TestStorageResource
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -47,6 +48,16 @@ main =
               testInventoryByteLimitIsCumulative
           , testCase "does not guess a block into the wrong protocol role"
               testTypedInventoryRejectsMalformedRole
+          ]
+      , testGroup "profile-qualified storage resources"
+          [ testCase "accepts only bounded versioned profile names"
+              testStorageProfileValidation
+          , testCase "binds both profile and canonical locator"
+              testStorageResourceBindsProfileAndLocator
+          , testCase "keeps the resource wire encoding stable"
+              testStorageResourceRoundTrip
+          , testCase "keeps generic snapshot evidence round-trippable"
+              testStorageSnapshotRoundTrip
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"

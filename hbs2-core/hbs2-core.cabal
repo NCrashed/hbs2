@@ -84,6 +84,7 @@ library
                     , HBS2.ScheduledAction
                     , HBS2.Data.KeyRing
                     , HBS2.Data.Detect
+                    , HBS2.Data.CBOR
                     , HBS2.Data.Types
                     , HBS2.Data.Types.Peer
                     , HBS2.Data.Types.Refs
@@ -129,6 +130,7 @@ library
                     , HBS2.Storage.Operations.Missed
                     , HBS2.Storage.Operations.Delete
                     , HBS2.Storage.Inventory
+                    , HBS2.Storage.Resource
                     , HBS2.System.Logger.Simple
                     , HBS2.System.Logger.Simple.ANSI
                     , HBS2.System.Logger.Simple.Class
@@ -227,6 +229,7 @@ test-suite test
                   , TestDerivedKey
                   , TestMerkleWalk
                   , TestStorageInventory
+                  , TestStorageResource
                   , TestKeyEncoding
                   , TestByPassFlow
                   , TestEncryptedTree
