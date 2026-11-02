@@ -133,6 +133,7 @@ library
                     , HBS2.Storage.Observation
                     , HBS2.Storage.Placement
                     , HBS2.Storage.Resource
+                    , HBS2.Storage.Audit
                     , HBS2.System.Logger.Simple
                     , HBS2.System.Logger.Simple.ANSI
                     , HBS2.System.Logger.Simple.Class
@@ -234,6 +235,7 @@ test-suite test
                   , TestStorageResource
                   , TestStoragePlacement
                   , TestStorageObservation
+                  , TestStorageAudit
                   , TestKeyEncoding
                   , TestByPassFlow
                   , TestEncryptedTree

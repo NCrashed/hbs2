@@ -547,6 +547,16 @@ auditor verifies it with the normal hbs2 content hash.  Challenges are
 unpredictable, bound to the contract and snapshot, expire, and cannot be
 replayed into another protocol.
 
+The resource-neutral audit envelope is now implemented independently of the
+repository adapter.  Signed requests bind a bounded non-empty block sample to
+the contract, opaque snapshot id, challenge id, nonce, requester, and expiry.
+Signed replies bind the provider to that exact challenge and may advertise
+only hashes from its sample.  The verifier then requires every advertised
+block from the targeted transport and checks its ordinary hbs2 content hash.
+The direct provider transport, adaptive scheduler, and evidence-journal
+producer remain later M2 slices; a local CAS hit is deliberately not recorded
+as remote retrieval evidence.
+
 If a fraction `d` of an inventory is absent, `k` independent samples detect the
 loss with probability:
 
@@ -1051,7 +1061,9 @@ window/retention policy, and a producer from signature-verified peer pongs are
 complete.  Rolling aggregate materialization and read-only hbs2-hub rendering
 for the selected verified provider are also complete.  Retrieval/freshness
 audit producers, time-profile exposure, minimum sample policy, and
-multi-provider rendering remain.
+multi-provider rendering remain.  The resource-neutral signed retrieval
+challenge/reply envelope and full-block verifier are complete; targeted
+provider transport and scheduling are not.
 
 Exit criteria:
 

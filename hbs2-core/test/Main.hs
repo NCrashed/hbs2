@@ -10,6 +10,7 @@ import TestStorageInventory
 import TestStorageResource
 import TestStoragePlacement
 import TestStorageObservation
+import TestStorageAudit
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -96,6 +97,18 @@ main =
               testReachabilityTrackerKeepsObserverGapUnknown
           , testCase "rejects wall-clock regression"
               testReachabilityTrackerRejectsTimeRegression
+          ]
+      , testGroup "resource-neutral retrieval audit"
+          [ testCase "accepts a live request only from its signed requester"
+              testStorageAuditAuthenticatesRequest
+          , testCase "binds the provider reply to the exact challenge"
+              testStorageAuditBindsReply
+          , testCase "verifies every challenged block by its content hash"
+              testStorageAuditVerifiesBlocks
+          , testCase "rejects malformed requests and replies"
+              testStorageAuditRejectsMalformedEvidence
+          , testCase "accepts every exact wire-format bound"
+              testStorageAuditKeepsWireBounds
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"
