@@ -25,6 +25,7 @@ import PeerMetaSpec (peerMetaTests)
 import RepositoryLeaseSpec qualified
 import ReachabilityJournalSpec qualified
 import ReachabilityObservationSpec qualified
+import StorageAuditRetrievalSpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
@@ -169,6 +170,7 @@ main = do
       , RepositoryLeaseSpec.tests
       , ReachabilityJournalSpec.tests
       , ReachabilityObservationSpec.tests
+      , StorageAuditRetrievalSpec.tests
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests
