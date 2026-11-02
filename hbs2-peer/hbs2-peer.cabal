@@ -222,6 +222,7 @@ test-suite test
         MailboxPoW
         PeerMetaSpec
         RepositoryLeaseSpec
+        ReachabilityJournalSpec
         MailboxConfig
         MailboxMerged
         MailboxMergedSpec

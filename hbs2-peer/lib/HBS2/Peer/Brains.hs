@@ -12,8 +12,20 @@ import Data.Either (isRight)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Storage.Observation
 
 import Data.Time.Clock (NominalDiffTime)
+
+newtype ReachabilityJournalPolicy = ReachabilityJournalPolicy
+  { reachabilityRetentionWindows :: Int
+  }
+  deriving stock (Eq, Show)
+
+data ReachabilityJournalError
+  = ReachabilityRetentionInvalid
+  | ReachabilityWindowConflict
+  | ReachabilityJournalStorageFailure
+  deriving stock (Eq, Show)
 
 -- TODO: rename
 class HasBrains e a where
@@ -206,6 +218,25 @@ class HasBrains e a where
     when (isRight result) (putRepositoryLease @e brains lease)
     pure result
 
+  putReachabilityWindow
+    :: MonadIO m
+    => a
+    -> ReachabilityJournalPolicy
+    -> PubKey 'Sign (Encryption e)
+    -> ReachabilityWindow
+    -> m (Either ReachabilityJournalError ())
+  putReachabilityWindow _ policy _ _
+    | reachabilityRetentionWindows policy <= 0 =
+        pure (Left ReachabilityRetentionInvalid)
+    | otherwise = pure (Right ())
+
+  listReachabilityWindows
+    :: MonadIO m
+    => a
+    -> PubKey 'Sign (Encryption e)
+    -> m [ReachabilityWindow]
+  listReachabilityWindows _ _ = pure []
+
 type NoBrains = ()
 
 instance Pretty (Peer e) => HasBrains e NoBrains  where
@@ -253,3 +284,5 @@ instance HasBrains e (SomeBrains e) where
   getRepositoryLease (SomeBrains a) = getRepositoryLease @e a
   listRepositoryLeases (SomeBrains a) = listRepositoryLeases @e a
   admitRepositoryLease (SomeBrains a) = admitRepositoryLease @e a
+  putReachabilityWindow (SomeBrains a) = putReachabilityWindow @e a
+  listReachabilityWindows (SomeBrains a) = listReachabilityWindows @e a

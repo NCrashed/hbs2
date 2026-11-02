@@ -405,8 +405,18 @@ Duplicate window evidence is invalid.  A recurring time profile groups the
 absolute number modulo a locally chosen profile width, so trimming the rolling
 journal cannot shift Monday observations into Tuesday.  Profile width is
 bounded to 4,096 buckets and empty buckets retain an unknown estimate.  This
-pure reducer is shared policy; durable journals, signed probes, retrieval
-audits, and UI exposure remain PEP-07 work.
+pure reducer is shared policy.
+
+The first durable journal is provider-scoped rather than resource- or
+repository-scoped: it records whether an authenticated peer was reachable in
+an absolute window, so the same evidence can qualify Git repositories, file
+sync, or a future community-data profile.  The journal is bounded independently
+per provider, survives peer restart, treats an identical replay as idempotent,
+and rejects a conflicting result for a retained completed window.  Retention
+keeps the newest absolute window numbers, including when delayed observations
+arrive out of order.  Producers from authenticated sessions, signed probes,
+resource-specific retrieval and freshness audits, aggregate materialization,
+and UI exposure remain PEP-07 work.
 
 The shared placement primitive consumes this local evidence without making it
 part of a repository-specific wire type.  Each candidate has a provider id, a
@@ -841,6 +851,13 @@ were pinned by deterministic golden vectors. The remaining M0 graph fixtures,
 independent verifier, and measurements are still open. Replica advertisement
 and automatic provider discovery are delivered by the M4 implementation below.
 M2 and later are otherwise unchanged.
+
+M2 progress (2026-11-02): the shared equal-window reducer and conservative
+Wilson scoring are implemented, as is a bounded provider reachability journal
+in peer Brains with restart, replay, conflict, and out-of-order retention
+coverage.  The journal deliberately contains no Git or repository identifier.
+M2 is not complete until authenticated session/probe producers feed completed
+windows and retrieval/freshness evidence is exposed to accounting and hub UX.
 
 Architecture note (2026-11-02): PEP-16 now makes the profile boundary
 explicit. Existing 0.26 repository lease and advert bytes remain a Git profile

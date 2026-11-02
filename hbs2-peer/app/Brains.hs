@@ -20,6 +20,7 @@ import HBS2.Net.IP.Addr
 import HBS2.Peer.Brains
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Storage.Observation
 
 import HBS2.Misc.PrettyStuff
 
@@ -388,6 +389,26 @@ instance ( Hashable (Peer e)
     commitNow brains False
     liftIO $ atomically (takeTMVar answer)
 
+  putReachabilityWindow brains policy provider window
+    | reachabilityRetentionWindows policy <= 0 =
+        pure (Left ReachabilityRetentionInvalid)
+    | otherwise = do
+        answer <- liftIO newEmptyTMVarIO
+        resultRef <- liftIO $ newIORef (Left ReachabilityJournalStorageFailure)
+        updateOPAfter brains
+          (insertReachabilityWindow brains policy provider window
+            >>= writeIORef resultRef)
+          (\success -> do
+            result <- if success
+              then readIORef resultRef
+              else pure (Left ReachabilityJournalStorageFailure)
+            atomically (putTMVar answer result))
+        commitNow brains False
+        liftIO $ atomically (takeTMVar answer)
+
+  listReachabilityWindows brains =
+    liftIO . selectReachabilityWindows brains
+
 commitNow :: forall e m . MonadIO m
           => BasicBrains e
           -> Bool
@@ -457,6 +478,70 @@ selectRepositoryLeases brains = do
 decodeRepositoryLease :: BS.ByteString -> Maybe RepositoryLease
 decodeRepositoryLease bytes =
   either (const Nothing) Just (deserialiseOrFail (LBS.fromStrict bytes))
+
+insertReachabilityWindow
+  :: Pretty (AsBase58 (PubKey 'Sign (Encryption e)))
+  => BasicBrains e
+  -> ReachabilityJournalPolicy
+  -> PubKey 'Sign (Encryption e)
+  -> ReachabilityWindow
+  -> IO (Either ReachabilityJournalError ())
+insertReachabilityWindow brains policy provider window = do
+  let conn = view brainsDb brains
+      peer = show (pretty (AsBase58 provider))
+      windowIndex = reachabilityWindowIndex window
+      state = encodeReachabilityState (reachabilityWindowState window)
+  existing <- query @_ @(Only Int) conn [qc|
+    select state from statedb.reachability_window
+    where peer = ? and window = ?
+  |] (peer, windowIndex)
+  case fromOnly <$> listToMaybe existing of
+    Just oldState
+      | oldState == state -> pure (Right ())
+      | otherwise -> pure (Left ReachabilityWindowConflict)
+    Nothing -> do
+      void $ execute conn [qc|
+        insert into statedb.reachability_window (peer,window,state)
+        values (?,?,?)
+      |] (peer, windowIndex, state)
+      void $ execute conn [qc|
+        delete from statedb.reachability_window
+        where peer = ? and window not in
+          ( select window from statedb.reachability_window
+            where peer = ? order by window desc limit ? )
+      |] (peer, peer, reachabilityRetentionWindows policy)
+      pure (Right ())
+
+selectReachabilityWindows
+  :: Pretty (AsBase58 (PubKey 'Sign (Encryption e)))
+  => BasicBrains e
+  -> PubKey 'Sign (Encryption e)
+  -> IO [ReachabilityWindow]
+selectReachabilityWindows brains provider = do
+  let conn = view brainsDb brains
+      peer = show (pretty (AsBase58 provider))
+  rows <- query @_ @(Word64, Int) conn [qc|
+    select window,state from statedb.reachability_window
+    where peer = ? order by window
+  |] (Only peer)
+  pure
+    [ ReachabilityWindow windowIndex state
+    | (windowIndex, encodedState) <- rows
+    , Just state <- [decodeReachabilityState encodedState]
+    ]
+
+encodeReachabilityState :: ReachabilityWindowState -> Int
+encodeReachabilityState = \case
+  WindowReachable -> 0
+  WindowOffline -> 1
+  WindowObserverOffline -> 2
+
+decodeReachabilityState :: Int -> Maybe ReachabilityWindowState
+decodeReachabilityState = \case
+  0 -> Just WindowReachable
+  1 -> Just WindowOffline
+  2 -> Just WindowObserverOffline
+  _ -> Nothing
 
 insertSize :: forall e . Pretty (Peer e)
            => BasicBrains e
@@ -1097,6 +1182,15 @@ newBasicBrains cfg = liftIO do
     , repository text not null unique
     , value      blob not null
     , updated    unsigned big int not null
+    )
+  |]
+
+  execute_ conn [qc|
+    create table if not exists statedb.reachability_window
+    ( peer   text not null
+    , window unsigned big int not null
+    , state  int not null check (state between 0 and 2)
+    , primary key (peer,window)
     )
   |]
 

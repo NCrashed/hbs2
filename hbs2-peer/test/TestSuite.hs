@@ -23,6 +23,7 @@ import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 import PeerMetaSpec (peerMetaTests)
 import RepositoryLeaseSpec qualified
+import ReachabilityJournalSpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
@@ -165,6 +166,7 @@ main = do
       , httpListenTests
       , peerMetaTests
       , RepositoryLeaseSpec.tests
+      , ReachabilityJournalSpec.tests
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests
