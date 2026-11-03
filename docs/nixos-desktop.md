@@ -10,9 +10,23 @@ from encrypted-repository access failures.
 ### Pinned imperative install (non-flake system configuration)
 
 This does not require converting `/etc/nixos/configuration.nix` to a
-flake. Pin the revision so every machine runs the same protocol build:
+flake. Add the signed cache to the existing non-flake
+`/etc/nixos/configuration.nix`:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://hbs2.cachix.org" ];
+  extra-trusted-public-keys = [
+    "hbs2.cachix.org-1:IGiwrFd/DNMG/+Oqjor6wwBh7T6EWC9uGR1Y1pD4VaI="
+  ];
+};
+```
+
+Apply it, then pin the revision so every machine runs the same protocol
+build:
 
 ```sh
+sudo nixos-rebuild switch
 HBS2_REV=ad2337b3
 nix profile install "github:NCrashed/hbs2/${HBS2_REV}#default"
 hbs2-peer --version
@@ -20,8 +34,18 @@ hbs2-git3 --version
 command -v git-remote-hbs23
 ```
 
-The first build can take several minutes because the flake currently
-declares no project binary cache.
+The system setting enables the project's signed cache:
+
+```text
+https://hbs2.cachix.org
+hbs2.cachix.org-1:IGiwrFd/DNMG/+Oqjor6wwBh7T6EWC9uGR1Y1pD4VaI=
+```
+
+Multi-user Nix restricts substituter trust, so `--accept-flake-config`
+alone only works for a trusted user; an ordinary desktop user needs the
+system setting above. Omit that setting to use the source-build fallback. See
+[`nix-cache.md`](nix-cache.md) for declarative NixOS configuration,
+supported systems, retention, and signing-key rotation.
 
 ### Home Manager (declarative user peer)
 

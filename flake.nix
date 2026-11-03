@@ -1,6 +1,18 @@
 {
 description = "hbs2";
 
+# Nix prompts before accepting flake configuration unless the user has opted
+# in with accept-flake-config. Multi-user Nix still requires an administrator
+# to allow the substituter/key because those settings are restricted; the
+# installer docs contain the corresponding NixOS configuration. The signing
+# key is public; private signing material only exists in CI secrets.
+nixConfig = {
+    extra-substituters = [ "https://hbs2.cachix.org" ];
+    extra-trusted-public-keys = [
+      "hbs2.cachix.org-1:IGiwrFd/DNMG/+Oqjor6wwBh7T6EWC9uGR1Y1pD4VaI="
+    ];
+};
+
 inputs = {
 
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
@@ -470,4 +482,3 @@ outputs = { self, nixpkgs, flake-utils, ... }@inputs:
  ));
 
 }
-

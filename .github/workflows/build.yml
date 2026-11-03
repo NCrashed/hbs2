@@ -113,6 +113,9 @@ jobs:
       - name: Documentation onboarding smoke
         run: bash test/docs-onboarding-smoke.sh
 
+      - name: Nix cache configuration smoke
+        run: bash test/nix-cache-config-smoke.sh
+
       # Suites are enabled one package at a time. `cabal test all` stays
       # off because the legacy suites have not been audited for the
       # current API and runtime environment; add a package here once its

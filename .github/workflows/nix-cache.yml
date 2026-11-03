@@ -1,0 +1,118 @@
+name: Nix binary cache
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Git revision to build, verify, and retain forever
+        required: false
+        type: string
+
+concurrency:
+  group: nix-cache-${{ github.ref }}-${{ inputs.revision || github.sha }}
+  cancel-in-progress: false
+
+env:
+  CACHE_NAME: hbs2
+  SOURCE_REF: ${{ inputs.revision || github.sha }}
+
+jobs:
+  build:
+    name: build and upload (${{ matrix.system }})
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-15-intel
+          - system: aarch64-darwin
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure signed Cachix upload
+        uses: cachix/cachix-action@v17
+        with:
+          name: hbs2
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
+
+      - name: Build and upload the default closure
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          installable="github:${GITHUB_REPOSITORY}/${SOURCE_REF}#packages.${{ matrix.system }}.default"
+          output=$(nix build "$installable" --no-link --print-out-paths -L)
+          test -x "$output/bin/hbs2-peer"
+          test -x "$output/bin/hbs2-git3"
+          test -x "$output/bin/git-remote-hbs23"
+          cachix push "$CACHE_NAME" "$output"
+          echo "output=$output" >> "$GITHUB_OUTPUT"
+
+      - name: Retain release or explicitly requested revision
+        if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.revision != '')
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            pin="release-${GITHUB_REF_NAME}-${{ matrix.system }}"
+          else
+            pin="revision-${SOURCE_REF}-${{ matrix.system }}"
+          fi
+          cachix pin "$CACHE_NAME" "$pin" '${{ steps.build.outputs.output }}' --keep-forever
+
+  verify:
+    name: clean cache-only install (${{ matrix.system }})
+    needs: build
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-15-intel
+          - system: aarch64-darwin
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure public read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: hbs2
+          skipPush: true
+
+      - name: Install pinned revision without local builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          installable="github:${GITHUB_REPOSITORY}/${SOURCE_REF}#packages.${{ matrix.system }}.default"
+          profile="$RUNNER_TEMP/hbs2-profile"
+          nix profile add "$installable" \
+            --profile "$profile" \
+            --max-jobs 0 \
+            --option fallback false \
+            -L
+          "$profile/bin/hbs2-peer" --version
+          "$profile/bin/hbs2-git3" --version
+          test -x "$profile/bin/git-remote-hbs23"
