@@ -30,9 +30,9 @@ Two consequences follow:
 The encryption keypair is distinct from the peer's signing identity.
 Conveniently, the peer keyring you generated in the quickstart
 (`~/.config/hbs2-peer/default.key`) already contains one encryption
-keypair, and `hbs2-keyman` already scans it via the mask you added in
-quickstart step 2. So each machine can use its own peer keyring as its
-group membership identity with no extra setup.
+keypair, and `hbs2-keyman update` discovers the active key path from
+the peer configuration. So each machine can use its own peer keyring
+as its group membership identity with no extra setup.
 
 ## Step 1: collect each member's public encryption key
 
@@ -107,9 +107,10 @@ hbs2-cli "(hbs2:groupkey:find-secret \"<GK_HASH>\")"
 ```
 It prints a key id when `hbs2-keyman` holds a matching member secret,
 and reports `groupkey secret not found` otherwise. The usual cause of
-the latter is that the keyring holding the member key is not in
-keyman's scan path; add it with `hbs2-keyman add-mask` and run
-`hbs2-keyman update`.
+the latter is that the machine was never added as a member, or that a
+separate keyring holding the member key is not in keyman's scan path.
+For an extra keyring, add it with `hbs2-keyman add-mask` and run
+`hbs2-keyman update`; the active peer keyring needs no mask.
 
 ## Adding or removing members
 

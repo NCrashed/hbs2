@@ -110,6 +110,9 @@ jobs:
       - name: Build
         run: cabal build all --enable-tests
 
+      - name: Documentation onboarding smoke
+        run: bash test/docs-onboarding-smoke.sh
+
       # Suites are enabled one package at a time. `cabal test all` stays
       # off because the legacy suites have not been audited for the
       # current API and runtime environment; add a package here once its

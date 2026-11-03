@@ -13,9 +13,8 @@ pushed (quickstart step 5) and **machine B** is the new one.
 
 On **both** machines, complete quickstart steps 1 to 4:
 
-- `hbs2-peer init` to generate the config,
-- register the keyring directory with `hbs2-keyman add-mask`,
-- generate the peer identity and run `hbs2-keyman update`,
+- `hbs2-peer init` to generate the config and a unique identity,
+- run `hbs2-keyman update` to index that active peer keyring,
 - start the peer with `hbs2-peer run`.
 
 Each peer gets its own identity; do not copy `default.key` between
@@ -52,6 +51,9 @@ known-peer "<A-IP>:7351"
 The address may also carry an explicit transport, for example
 `udp://<A-IP>:7351` or `tcp://<A-IP>:10351`. Bare `host:port`
 defaults to UDP.
+
+Do not pin a raw DHCP lease unless it is reserved. Prefer a DHCP
+reservation or a stable LAN DNS name such as `server.local`.
 
 Adding the reverse entry on machine A (`known-peer "<B-IP>:7351"`) is
 optional but makes the link more robust: once either side learns the
@@ -90,9 +92,10 @@ same way:
 hbs2-peer peers
 ```
 
-The compiled-in default is `bootstrap.hbs2.app`. The domain is
-reserved but the bootstrap node behind it is not deployed yet, so do
-not rely on it; use your own record or `known-peer` for now.
+The compiled-in default is `bootstrap.hbs2.app`, which currently
+publishes usable peer addresses. `hbs2-peer doctor` reports how many
+addresses it resolves. Use your own record or `known-peer` when you
+need a peer under your control.
 
 ### Approach 3: reaching a peer over Tor (outbound)
 
@@ -186,6 +189,10 @@ machines is otherwise an ordinary git concern and is beyond this
 walkthrough.
 
 ## Where to go next
+
+- **NixOS desktop setup.** For declarative and pinned imperative
+  installation, a supervised user service, encrypted clones, and
+  end-to-end verification, see [`nixos-desktop.md`](nixos-desktop.md).
 
 - **Encrypted repositories.** Restrict read access to holders of
   specific keys. See [`encrypted-repos.md`](encrypted-repos.md).
