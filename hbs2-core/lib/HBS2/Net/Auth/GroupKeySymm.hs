@@ -499,12 +499,12 @@ instance ( MonadIO m
 
   readFromMerkle sto decrypt@ToDecryptBS{..}  = do
 
-    (gk, nonceS, tree) <- decryptDataFrom decrypt
+    (gkh, gk, nonceS, tree) <- decryptDataFrom decrypt
 
     gksec' <- findSecret gk
      -- [ lookupGroupKey sk pk gk | (pk,sk) <- keys ] & catMaybes & headMay
 
-    gksec <- maybe1 gksec' (throwError (GroupKeyNotFound 2)) pure
+    gksec <- maybe1 gksec' (throwError (GroupKeySecretNotFound (HashRef gkh))) pure
 
     let prk = HKDF.extractSkip @_ @HbSyncHash (Saltine.encode gksec)
     let key0 = HKDF.expand prk nonceS typicalKeyLength & Saltine.decode & fromJust
@@ -557,7 +557,7 @@ instance ( MonadIO m
 
           gk <- either (const $ throwError (GroupKeyNotFound 1)) pure (deserialiseOrFail @(GroupKey 'Symm sch) gkbs)
 
-          pure (gk, nonceS, tree)
+          pure (gkh, gk, nonceS, tree)
 
 
 encryptBlock :: ( MonadIO m
@@ -606,7 +606,7 @@ decryptBlock sto findKey seb@(SmallEncryptedBlock{..}) = do
   gkbs <- readFromMerkle sto (SimpleKey (fromHashRef sebGK0))
   gk <- either (const $ throwError (GroupKeyNotFound 1)) pure (deserialiseOrFail @(GroupKey 'Symm s) gkbs)
   gksec' <- findKey gk
-  gksec <- maybe1 gksec' (throwError (GroupKeyNotFound 2)) pure
+  gksec <- maybe1 gksec' (throwError (GroupKeySecretNotFound sebGK0)) pure
   decryptBlockWithSecret @_ @s gksec seb
 
 decryptBlockWithSecret :: forall t s h m . ( MonadIO m
@@ -648,4 +648,3 @@ loadGroupKeyMaybe sto h = do
 
     deserialiseOrFail bs
       &  toMPlus
-

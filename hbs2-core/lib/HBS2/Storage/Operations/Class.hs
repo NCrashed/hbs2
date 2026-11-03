@@ -21,7 +21,8 @@ data OperationError =
   | UnsupportedFormat
   | IncompleteData
   | GroupKeyNotFound Int
-  deriving (Generic,Show,Data,Typeable)
+  | GroupKeySecretNotFound HashRef
+  deriving (Eq,Generic,Show,Data,Typeable)
 
 instance Exception OperationError
 
