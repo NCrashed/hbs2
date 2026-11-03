@@ -235,6 +235,7 @@ test-suite test
         BlockAnnouncePolicySpec
         BlockSizeCacheStateSpec
         DoctorSpec
+        PeerConfigSpec
         -- from app/: these exercise the config and policy the peer itself
         -- uses, so the tests read the real modules rather than copies.
         PeerConfig

@@ -311,7 +311,7 @@ peerConfigInit mbfp = liftIO do
     appendFile cfgPath ";; hbs2-peer config file"
     appendFile cfgPath defConfigData
 
-    cred0 <- newCredentials @'HBS2Basic
+    cred0 <- newCredentialsEnc @'HBS2Basic 1
     let keyname = "default.key"
     let keypath = dir</>keyname
 
