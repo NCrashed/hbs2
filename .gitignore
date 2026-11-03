@@ -5,6 +5,7 @@ dist-darwin/
 bin/
 .direnv/
 .hbs2-git3/
+.env
 
 temp/
 

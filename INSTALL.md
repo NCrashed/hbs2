@@ -246,16 +246,39 @@ already has one and shipping a second would collide with it. The
 git-facing tools (`hbs2-hub`, `hbs2-git3`, `git-remote-hbs23`) expect
 to find yours on PATH.
 
-To install the binaries into your user profile:
+hbs2 publishes signed closures at `https://hbs2.cachix.org`. The flake
+declares that URL and its public key. On the usual multi-user NixOS
+installation, substituters and trusted keys are restricted settings: add
+the explicit system opt-in before installing:
+```nix
+nix.settings = {
+  extra-substituters = [ "https://hbs2.cachix.org" ];
+  extra-trusted-public-keys = [
+    "hbs2.cachix.org-1:IGiwrFd/DNMG/+Oqjor6wwBh7T6EWC9uGR1Y1pD4VaI="
+  ];
+};
 ```
-git clone https://github.com/NCrashed/hbs2.git
-cd hbs2
-nix profile install .
+Rebuild the system, then install a pinned revision into the user profile:
+```sh
+sudo nixos-rebuild switch
+HBS2_REV=<RELEASE_TAG_OR_COMMIT>
+nix profile install \
+  "github:NCrashed/hbs2/${HBS2_REV}#default"
 ```
 
-Without a binary cache the first install builds the entire dependency
-graph and can take a couple of hours. There is no public binary cache
-for this fork yet.
+On single-user Nix, or when the current user is listed in
+`nix.settings.trusted-users`, `--accept-flake-config` is an alternative
+explicit opt-in. An ordinary multi-user account cannot grant itself a new
+trusted key; Nix warns and ignores that restricted setting.
+
+The source-build fallback remains available on a machine where the hbs2
+cache was not added to the system configuration:
+```sh
+nix profile add --no-accept-flake-config \
+  "github:NCrashed/hbs2/${HBS2_REV}#default"
+```
+See [`docs/nix-cache.md`](docs/nix-cache.md) for supported systems,
+cache-hit verification, retention, and key rotation.
 
 To open a development shell with GHC, cabal, and all build inputs:
 ```
