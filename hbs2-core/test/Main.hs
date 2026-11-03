@@ -52,6 +52,16 @@ main =
               testInventoryByteLimitIsCumulative
           , testCase "does not guess a block into the wrong protocol role"
               testTypedInventoryRejectsMalformedRole
+          , testCase "accounts shared and uniquely reclaimable bytes"
+              testInventoryAccountsForSharedBlocks
+          , testCase "does not collect a subtree retained by another root"
+              testInventoryKeepsSharedBlocksAfterRootRemoval
+          , testCase "reports but will not collect unattributed data with unknown roots"
+              testInventoryRefusesCleanupWithUnknownRoots
+          , testCase "rejects conflicting block-size evidence"
+              testInventoryRejectsConflictingSizes
+          , testCase "does not count missing blocks as reclaimable"
+              testInventorySeparatesMissingBytes
           ]
       , testGroup "profile-qualified storage resources"
           [ testCase "accepts only bounded versioned profile names"

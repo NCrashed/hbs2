@@ -4,6 +4,12 @@ module HBS2.Storage.Inventory
   , InventoryScan(..)
   , scanInventory
   , scanInventoryTyped
+  , InventoryRoot(..)
+  , InventoryRootsCoverage(..)
+  , InventoryRootAccounting(..)
+  , InventoryAccounting(..)
+  , InventoryAccountingError(..)
+  , accountInventory
   ) where
 
 import HBS2.Data.Types.Refs
@@ -16,6 +22,8 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Word
+import Data.Text (Text)
+import Control.Monad (foldM_)
 
 -- | Hard bounds for walking a graph supplied by another peer.
 --
@@ -48,6 +56,138 @@ data InventoryScan = InventoryScan
   , inventoryLogicalBytes :: Word64
   }
   deriving stock (Eq, Show)
+
+-- | One application-owned retention root and the exact blocks reachable from
+-- its current snapshot.  The root key is deliberately supplied by the owning
+-- protocol: storage accounting must not guess application identity from CAS
+-- bytes.
+data InventoryRoot root = InventoryRoot
+  { inventoryRootKey    :: root
+  , inventoryRootBlocks :: Map HashRef Word64
+  }
+  deriving stock (Eq, Show)
+
+-- | Whether every live source of retention roots participated in a snapshot.
+-- Unknown roots make unattributed bytes observable, but never reclaimable.
+data InventoryRootsCoverage
+  = InventoryRootsComplete
+  | InventoryRootsIncomplete (Set Text)
+  deriving stock (Eq, Show)
+
+data InventoryRootAccounting root = InventoryRootAccounting
+  { inventoryRootAccountingKey         :: root
+  , inventoryRootAccountingLogicalBytes :: Word64
+  , inventoryRootAccountingUniqueBytes  :: Word64
+  , inventoryRootAccountingSharedBytes  :: Word64
+  , inventoryRootAccountingMissingBytes :: Word64
+  }
+  deriving stock (Eq, Show)
+
+data InventoryAccounting root = InventoryAccounting
+  { inventoryAccountingCoverage       :: InventoryRootsCoverage
+  , inventoryAccountingRoots          :: [InventoryRootAccounting root]
+  , inventoryAccountingRetained       :: Map HashRef Word64
+  , inventoryAccountingUnattributed   :: Map HashRef Word64
+  , inventoryAccountingReclaimable    :: Map HashRef Word64
+  , inventoryAccountingPhysicalBytes  :: Word64
+  , inventoryAccountingRetainedBytes  :: Word64
+  }
+  deriving stock (Eq, Show)
+
+data InventoryAccountingError
+  = InventoryBlockSizeConflict HashRef Word64 Word64
+  deriving stock (Eq, Show)
+
+-- | Account one physical store against a complete set of application roots.
+--
+-- A hash is charged once globally.  Per-root unique bytes are blocks named by
+-- exactly one canonical root; shared bytes remain retained until the last
+-- root disappears.  An incomplete root registry is fail-closed: unattributed
+-- data is reported, while the cleanup candidate set stays empty.
+accountInventory
+  :: Ord root
+  => InventoryRootsCoverage
+  -> Map HashRef Word64
+  -> [InventoryRoot root]
+  -> Either InventoryAccountingError (InventoryAccounting root)
+accountInventory coverage physical suppliedRoots = do
+  validateBlockSizes physical suppliedRoots
+  let roots = canonicalRoots suppliedRoots
+      references = Map.unionsWith (+)
+        [ Map.map (const (1 :: Word64)) blocks
+        | blocks <- Map.elems roots
+        ]
+      retained = Map.restrictKeys physical (Map.keysSet references)
+      unattributed = Map.withoutKeys physical (Map.keysSet references)
+      reclaimable = case coverage of
+        InventoryRootsComplete -> unattributed
+        InventoryRootsIncomplete{} -> Map.empty
+      rootAccounting =
+        [ accountRoot physical references root blocks
+        | (root, blocks) <- Map.toAscList roots
+        ]
+  pure InventoryAccounting
+    { inventoryAccountingCoverage = coverage
+    , inventoryAccountingRoots = rootAccounting
+    , inventoryAccountingRetained = retained
+    , inventoryAccountingUnattributed = unattributed
+    , inventoryAccountingReclaimable = reclaimable
+    , inventoryAccountingPhysicalBytes = sum (Map.elems physical)
+    , inventoryAccountingRetainedBytes = sum (Map.elems retained)
+    }
+
+canonicalRoots
+  :: Ord root
+  => [InventoryRoot root]
+  -> Map root (Map HashRef Word64)
+canonicalRoots = Map.fromListWith Map.union
+  . fmap (\InventoryRoot{..} -> (inventoryRootKey, inventoryRootBlocks))
+
+validateBlockSizes
+  :: Map HashRef Word64
+  -> [InventoryRoot root]
+  -> Either InventoryAccountingError ()
+validateBlockSizes physical roots =
+  foldM_ addEvidence physical
+    [ entry
+    | InventoryRoot{..} <- roots
+    , entry <- Map.toList inventoryRootBlocks
+    ]
+  where
+    addEvidence known (href, size) = case Map.lookup href known of
+      Nothing -> pure (Map.insert href size known)
+      Just expected
+        | expected == size -> pure known
+        | otherwise -> Left (InventoryBlockSizeConflict href expected size)
+
+accountRoot
+  :: Map HashRef Word64
+  -> Map HashRef Word64
+  -> root
+  -> Map HashRef Word64
+  -> InventoryRootAccounting root
+accountRoot physical references root blocks = InventoryRootAccounting
+  { inventoryRootAccountingKey = root
+  , inventoryRootAccountingLogicalBytes = logical
+  , inventoryRootAccountingUniqueBytes = unique
+  , inventoryRootAccountingSharedBytes = shared
+  , inventoryRootAccountingMissingBytes = missing
+  }
+  where
+    logical = sum (Map.elems blocks)
+    unique = sum
+      [ size
+      | (href, size) <- Map.toList blocks
+      , Map.lookup href physical == Just size
+      , Map.lookup href references == Just 1
+      ]
+    shared = sum
+      [ size
+      | (href, size) <- Map.toList blocks
+      , Map.lookup href physical == Just size
+      , references Map.! href > 1
+      ]
+    missing = logical - unique - shared
 
 data InventoryWalk r = InventoryWalk
   { walkSeen       :: Set HashRef

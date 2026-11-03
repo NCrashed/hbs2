@@ -9,6 +9,11 @@ module TestStorageInventory
   , testInventoryBlockLimitStartsAtZero
   , testInventoryByteLimitIsCumulative
   , testTypedInventoryRejectsMalformedRole
+  , testInventoryAccountsForSharedBlocks
+  , testInventoryKeepsSharedBlocksAfterRootRemoval
+  , testInventoryRefusesCleanupWithUnknownRoots
+  , testInventoryRejectsConflictingSizes
+  , testInventorySeparatesMissingBytes
   ) where
 
 import HBS2.Data.Types.Refs
@@ -20,6 +25,8 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Word (Word64)
 
 import Test.Tasty.HUnit
 
@@ -153,3 +160,80 @@ testTypedInventoryRejectsMalformedRole = do
   inventoryStatus result @?= InventoryTraversalComplete
   Map.size (inventoryBlocks result) @?= 1
   inventoryMalformed result @?= Set.singleton href
+
+accountingFixture
+  :: (Map HashRef Word64, InventoryRoot Text, InventoryRoot Text, HashRef)
+accountingFixture =
+  ( Map.fromList [(rootA, 10), (rootB, 20), (shared, 5), (orphan, 7)]
+  , InventoryRoot "repository" (Map.fromList [(rootA, 10), (shared, 5)])
+  , InventoryRoot "file-sync" (Map.fromList [(rootB, 20), (shared, 5)])
+  , orphan
+  )
+  where
+    rootA = fst (block "repository-root")
+    rootB = fst (block "file-sync-root")
+    shared = fst (block "shared-subtree")
+    orphan = fst (block "unattributed")
+
+testInventoryAccountsForSharedBlocks :: IO ()
+testInventoryAccountsForSharedBlocks = do
+  let (physical, repository, fileSync, orphan) = accountingFixture
+  report <- either (assertFailure . show) pure $
+    accountInventory InventoryRootsComplete physical [repository, fileSync]
+
+  inventoryAccountingPhysicalBytes report @?= 42
+  inventoryAccountingRetainedBytes report @?= 35
+  inventoryAccountingUnattributed report @?= Map.singleton orphan 7
+  inventoryAccountingReclaimable report @?= Map.singleton orphan 7
+  inventoryAccountingRoots report @?=
+    [ InventoryRootAccounting "file-sync" 25 20 5 0
+    , InventoryRootAccounting "repository" 15 10 5 0
+    ]
+
+testInventoryKeepsSharedBlocksAfterRootRemoval :: IO ()
+testInventoryKeepsSharedBlocksAfterRootRemoval = do
+  let (physical, repository, fileSync, _) = accountingFixture
+      shared = fst (block "shared-subtree")
+      removedRoot = fst (block "repository-root")
+  report <- either (assertFailure . show) pure $
+    accountInventory InventoryRootsComplete physical [fileSync]
+
+  Map.member shared (inventoryAccountingRetained report) @? "shared block retained"
+  Map.member removedRoot (inventoryAccountingReclaimable report)
+    @? "block unique to removed root becomes reclaimable"
+  inventoryAccountingRoots report @?=
+    [InventoryRootAccounting "file-sync" 25 25 0 0]
+  inventoryRootBlocks repository @?=
+    Map.fromList [(removedRoot, 10), (shared, 5)]
+
+testInventoryRefusesCleanupWithUnknownRoots :: IO ()
+testInventoryRefusesCleanupWithUnknownRoots = do
+  let (physical, repository, fileSync, orphan) = accountingFixture
+      coverage = InventoryRootsIncomplete (Set.singleton "unknown ref")
+  report <- either (assertFailure . show) pure $
+    accountInventory coverage physical [repository, fileSync]
+
+  inventoryAccountingUnattributed report @?= Map.singleton orphan 7
+  inventoryAccountingReclaimable report @?= Map.empty
+  inventoryAccountingCoverage report @?= coverage
+
+testInventoryRejectsConflictingSizes :: IO ()
+testInventoryRejectsConflictingSizes = do
+  let href = fst (block "same-block")
+      first = InventoryRoot "first" (Map.singleton href 10)
+      second = InventoryRoot "second" (Map.singleton href 11)
+
+  accountInventory InventoryRootsComplete (Map.singleton href 10) [first, second]
+    @?= Left (InventoryBlockSizeConflict href 10 11)
+
+testInventorySeparatesMissingBytes :: IO ()
+testInventorySeparatesMissingBytes = do
+  let present = fst (block "present")
+      missing = fst (block "missing")
+      root = InventoryRoot "partial" (Map.fromList [(present, 10), (missing, 7)])
+
+  report <- either (assertFailure . show) pure $
+    accountInventory InventoryRootsComplete (Map.singleton present 10) [root]
+
+  inventoryAccountingRoots report @?=
+    [InventoryRootAccounting "partial" 17 10 0 7]
