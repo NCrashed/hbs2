@@ -27,6 +27,7 @@ import Codec.Compression.Zstd.Lazy qualified as ZstdL
 
 import Codec.Compression.Zlib qualified as Zlib
 
+import Data.Aeson qualified as Aeson
 import Data.HashPSQ qualified as HPSQ
 
 import Data.Maybe
@@ -55,6 +56,60 @@ import System.IO (hPrint)
 import UnliftIO.Concurrent
 
 {- HLINT ignore "Functor law" -}
+
+memberStatus :: MemberAddResult -> String
+memberStatus MemberAddResult{..}
+  | memberDryRun = "dry-run"
+  | null memberAdded = "unchanged"
+  | otherwise = "updated"
+
+printMemberAddResult :: Bool -> GitRepoKey -> MemberAddResult -> IO ()
+printMemberAddResult json repo result@MemberAddResult{..}
+  | json = LBS8.putStrLn $ Aeson.encode $ Aeson.object
+      [ "repository" Aeson..= show (pretty (AsBase58 repo))
+      , "status" Aeson..= memberStatus result
+      , "dryRun" Aeson..= memberDryRun
+      , "previousGroupKey" Aeson..= show (pretty memberPreviousGroupKey)
+      , "groupKey" Aeson..= fmap (show . pretty) memberCurrentGroupKey
+      , "added" Aeson..= fmap renderMemberKey memberAdded
+      , "members" Aeson..= fmap renderMemberKey memberAll
+      , "verify" Aeson..= [ "hbs2-git3 repo:member:list " <> repoText
+                           , "git clone hbs23://" <> repoText ]
+      , "grants" Aeson..= (["decrypt", "read"] :: [String])
+      , "doesNotGrant" Aeson..= (["repository-signing", "hub-maintainer"] :: [String])
+      ]
+  | otherwise = print $ pretty $ mkForm @C "member:add"
+      [ mkForm "repository" [mkStr $ show $ pretty $ AsBase58 repo]
+      , mkForm "status" [mkSym $ memberStatus result]
+      , mkForm "previous-group-key" [mkStr $ show $ pretty memberPreviousGroupKey]
+      , mkForm "group-key" $ maybe [] (pure . mkStr . show . pretty) memberCurrentGroupKey
+      , mkForm "added" $ fmap (mkStr . renderMemberKey) memberAdded
+      , mkForm "members" $ fmap (mkStr . renderMemberKey) memberAll
+      , mkForm "verify" [ mkStr $ "hbs2-git3 repo:member:list " <> repoText
+                        , mkStr $ "git clone hbs23://" <> repoText ]
+      , mkForm "grants" [mkSym "decrypt", mkSym "read"]
+      , mkForm "does-not-grant" [mkSym "repository-signing", mkSym "hub-maintainer"]
+      ]
+  where
+    repoText = show (pretty (AsBase58 repo))
+
+printMemberList
+  :: Bool
+  -> GitRepoKey
+  -> HashRef
+  -> [PubKey 'Encrypt 'HBS2Basic]
+  -> IO ()
+printMemberList json repo groupKey members
+  | json = LBS8.putStrLn $ Aeson.encode $ Aeson.object
+      [ "repository" Aeson..= show (pretty (AsBase58 repo))
+      , "groupKey" Aeson..= show (pretty groupKey)
+      , "members" Aeson..= fmap renderMemberKey members
+      ]
+  | otherwise = print $ pretty $ mkForm @C "member:list"
+      [ mkForm "repository" [mkStr $ show $ pretty $ AsBase58 repo]
+      , mkForm "group-key" [mkStr $ show $ pretty groupKey]
+      , mkForm "members" $ fmap (mkStr . renderMemberKey) members
+      ]
 
 theDict :: forall m . ( HBS2GitPerks m
                       ) => Dict C (Git3 m)
@@ -541,6 +596,45 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
 
             _ -> throwIO $ BadFormException @C nil
 
+        brief "add readers to an encrypted repository, including its existing history" $
+          args [ arg "string" "repo", arg "string" "enc:encryption-public-key ..."
+               , arg "string" "[--dry-run]", arg "string" "[--json]" ] $
+          desc ( "Requires explicitly typed enc:<base58> keys because raw signing and"
+                 <> line <> "encryption public keys have the same shape. Publishes a new"
+                 <> line <> "active group key and compatibility envelopes for old history."
+                 <> line <> "Re-running with the same members is a no-op." ) $
+          entry $ bindMatch "repo:member:add" $ nil_ $ \syn -> do
+            let (opts, argz) = splitOpts [("--dry-run", 0), ("--json", 0)] syn
+            let dryRun = any (\case ListVal [StringLike "--dry-run"] -> True; _ -> False) opts
+            let json = any (\case ListVal [StringLike "--json"] -> True; _ -> False) opts
+
+            (repoArg, memberArgs) <- case argz of
+              x@(StringLike{}) : xs@(_ : _) -> pure (x, xs)
+              _ -> throwIO $ BadFormException @C nil
+
+            members <- for memberArgs $ \case
+              StringLike raw -> either throwIO pure (parseMemberKey raw)
+              _ -> throwIO $ BadFormException @C nil
+            repo <- resolveRepoKeyThrow [repoArg]
+
+            lift $ connectedDo do
+              result <- addRepoMembers
+                (if dryRun then DryRunMemberAdd else ApplyMemberAdd)
+                repo
+                members
+              liftIO $ printMemberAddResult json repo result
+
+        brief "list readers of an encrypted repository" $
+          args [arg "string" "repo", arg "string" "[--json]"] $
+          entry $ bindMatch "repo:member:list" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [("--json", 0)] syn
+            let json = any (\case ListVal [StringLike "--json"] -> True; _ -> False) opts
+            repo <- case argz of
+              [x@(StringLike{})] -> resolveRepoKeyThrow [x]
+              _ -> throwIO $ BadFormException @C nil
+            (gkh, members) <- listRepoMembers repo
+            liftIO $ printMemberList json repo gkh members
+
         entry $ bindMatch "repo:gk:add:extra:keys" $ nil_ $ \case
           ( x@(StringLike{}) : keyHashes ) -> lift $ connectedDo do
             repo <- resolveRepoKeyThrow [x]
@@ -830,4 +924,3 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
               delBlock sto (coerce h)
 
             delBlock sto (coerce w)
-

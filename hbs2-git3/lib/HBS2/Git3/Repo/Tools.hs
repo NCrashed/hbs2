@@ -229,7 +229,7 @@ writeRepoHead keepOld repo manifest gkRefs' = do
 
 updateGroupKey :: HBS2GitPerks m => GitRepoKey -> HashRef -> Git3 m ()
 updateGroupKey repo new = do
-  waitRepo (Just 10) repo
+  waitRepo Nothing repo
   sto <- getStorage
   LWWRef{..} <- getRepoRefMaybe >>= orThrow GitRepoRefEmpty
   RepoManifest manifest <- getRepoManifest
@@ -247,7 +247,7 @@ updateGroupKey repo new = do
     lift $ for_ gkTree $ \gh -> void $ runMaybeT do
       gk <- loadGroupKeyMaybe @HBS2Basic sto gh >>= toMPlus
       gkId <- groupKeyId gk & toMPlus
-      liftIO $ print $ "gk" <+> pretty gh <+> pretty gkId
+      lift $ debug $ "gk" <+> pretty gh <+> pretty gkId
 
       let missed = HM.keysSet $ recipients gkNew `HM.difference` recipients gk
 
@@ -273,7 +273,7 @@ updateGroupKey repo new = do
     let newKeys = HS.toList $ HS.fromList ( new : oldKeys )
 
     for_ newKeys $ \k -> do
-      liftIO $ print $ "new gk" <+> pretty k
+      lift $ debug $ "new gk" <+> pretty k
 
     --
     let newManifest0 = flip mapMaybe manifest $ \case

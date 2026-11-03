@@ -113,23 +113,33 @@ keyman's scan path; add it with `hbs2-keyman add-mask` and run
 
 ## Adding or removing members
 
-You can derive a new group key from an existing one. You must be a
-current member (your secret must be in `hbs2-keyman`), because
-changing the membership requires decrypting the current key first. The
-form below loads the current key, applies the changes, and stores the
-result, printing a new hash:
+Add a machine's public encryption key to an existing repository with
+one command:
 ```
-hbs2-cli "(hbs2:groupkey:store (hbs2:groupkey:update (hbs2:groupkey:load <GK_HASH>) (list (add . <ENC_C>) (remove . <ENC_A>))))"
+hbs2-git3 repo:member:add <REPO_KEY> enc:<ENC_C>
 ```
-Each entry is `(add . <key>)` or `(remove . <key>)`; include as many
-as you need.
+The `enc:` prefix is required. Raw signing and encryption keys have
+the same base58 shape, so an unprefixed key is rejected rather than
+silently treated as the wrong kind of identity. Pass several
+`enc:<key>` arguments to add several readers at once.
 
-Two caveats:
+The command verifies that you can decrypt the current group key,
+publishes a new active key, and publishes compatibility envelopes for
+older group keys. The new member can therefore clone both existing
+history and future pushes. Repeating the command with the same members
+is a no-op. Preview a change or consume stable machine-readable output
+with `--dry-run` and `--json`; inspect the current set with:
+```
+hbs2-git3 repo:member:list --json <REPO_KEY>
+```
 
-- Re-pointing an existing repository at a new group key is not yet a
-  single command. In practice, use the new group key when you
-  initialise a fresh repository; an existing repository keeps the
-  group key it was created with.
+You must be a current member (your secret must be in `hbs2-keyman`)
+and hold the repository signing key in order to publish the change.
+
+Removing a member still requires deriving and publishing a replacement
+group key manually. It cannot revoke data that member already read.
+
+One caveat:
 
 - The scheme has no perfect forward secrecy. A member who later leaves
   can still decrypt anything that was ever encrypted to a group key

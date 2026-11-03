@@ -180,7 +180,9 @@ ok "A and B are connected only through R"
 
 GK1=$(role A hbs2-cli "(hbs2:groupkey:store (hbs2:groupkey:create $ENC_A))")
 [ -n "$GK1" ] || fail "owner group key was not created"
-role A hbs2-peer announce "$GK1"
+# Some peer builds keep announcing until interrupted; one successful interval
+# is enough for this fixture, and must not pin the whole test indefinitely.
+role A timeout 3 hbs2-peer announce "$GK1" >/dev/null 2>&1 || [ "$?" -eq 124 ]
 
 mkdir -p "$T/A/work"
 role A git -C "$T/A/work" init -q
@@ -222,13 +224,28 @@ grep -Eqi 'group.?key.*secret|secret.*group.?key|GitRepoNoAccess' "$T/preclone.e
 ok "B fails promptly with a missing group-key-secret diagnosis"
 
 OLD_HEAD=$(lww_head R "$KEY")
-GK2=$(role A hbs2-cli "(hbs2:groupkey:store (hbs2:groupkey:update (hbs2:groupkey:load $GK1) (list (add . $ENC_B))))")
-[ -n "$GK2" ] || fail "rotated group key was not created"
-role A hbs2-peer announce "$GK2"
-(cd "$T/A/work" && role A hbs2-git3 repo:gk:update "$KEY" "$GK2") >"$T/gk-update.out" 2>"$T/gk-update.err" || {
-  cat "$T/gk-update.out" "$T/gk-update.err" >&2
-  fail "repo:gk:update"
+OWNER_HEAD_BEFORE_DRY=$(lww_head A "$KEY")
+role A hbs2-git3 repo:member:add --dry-run --json "$KEY" "enc:$ENC_B" >"$T/member-dry-run.out" || {
+  cat "$T/member-dry-run.out" >&2
+  fail "repo:member:add --dry-run"
 }
+grep -q '"status":"dry-run"' "$T/member-dry-run.out" || fail "dry run did not report its status"
+[ "$(lww_head A "$KEY")" = "$OWNER_HEAD_BEFORE_DRY" ] || fail "dry run changed the repository head"
+
+role A hbs2-git3 repo:member:add --json "$KEY" "enc:$ENC_B" >"$T/member-add.out" 2>"$T/member-add.err" || {
+  cat "$T/member-add.out" "$T/member-add.err" >&2
+  fail "repo:member:add"
+}
+grep -q '"status":"updated"' "$T/member-add.out" || fail "member add did not report an update"
+GK2=$(sed -n 's/.*"groupKey":"\([^"]*\)".*/\1/p' "$T/member-add.out")
+[ -n "$GK2" ] && [ "$GK2" != "$GK1" ] || fail "member add did not publish a new group key"
+
+HEAD_AFTER_ADD=$(lww_head A "$KEY")
+role A hbs2-git3 repo:member:add --json "$KEY" "enc:$ENC_B" >"$T/member-again.out" || fail "idempotent member add"
+grep -q '"status":"unchanged"' "$T/member-again.out" || fail "repeated member add was not a no-op"
+[ "$(lww_head A "$KEY")" = "$HEAD_AFTER_ADD" ] || fail "repeated member add changed the repository head"
+ok "A added B with one high-level, dry-runnable, idempotent command"
+
 echo after-membership >> "$T/A/work/history.txt"
 role A git -C "$T/A/work" commit -qam after-membership
 role A git -C "$T/A/work" push -q "$REMOTE" master

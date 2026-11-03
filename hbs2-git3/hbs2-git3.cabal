@@ -129,6 +129,7 @@ library
       HBS2.Git3.Import
       HBS2.Git3.Repo.Init
       HBS2.Git3.Repo.Tools
+      HBS2.Git3.Repo.Member
       HBS2.Git3.Repo.Mailbox
       HBS2.Git3.Repo.About
       HBS2.Git3.Repo.Pin
@@ -202,6 +203,7 @@ test-suite spec
       HBS2.Git3.Repo.AboutSpec
       HBS2.Git3.Repo.PinSpec
       HBS2.Git3.Repo.InitSpec
+      HBS2.Git3.Repo.MemberSpec
       HBS2.Git3.State.WaitSpec
       -- HBS2.Git3.Git.PackSpec
       -- Data.Config.Suckless.KeyValueSpec
