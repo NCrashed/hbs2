@@ -1,10 +1,12 @@
 module HBS2.Git3.Repo.MemberSpec (spec) where
 
 import HBS2.Git3.Repo.Member
+import HBS2.Git3.State.Internal.Types
 
 import HBS2.Net.Auth.Credentials (CryptoAction (..), CryptoScheme (..), PubKey)
 import HBS2.Prelude.Plated (fromStringMay)
 
+import Control.Exception (displayException)
 import Data.Either (isLeft)
 import Data.HashSet qualified as HS
 import Data.Maybe (fromMaybe)
@@ -45,3 +47,13 @@ spec = describe "encrypted repository membership" do
         it "is empty when rerunning the same request" do
             membersToAdd (HS.fromList [memberA, memberB]) [memberB, memberA]
                 `shouldBe` mempty
+
+    describe "missing member secret diagnostic" do
+        it "points to keyman or membership, never storage fetch" do
+            let root = fromMaybe (error "invalid fixture hash") $
+                    fromStringMay "7aoECMib5tCp3D6eR5f51HKBG1J2sdr5ZZuP7L1Un54m"
+                message = displayException $ GitRepoGroupKeySecretNotFound root
+            message `shouldContain` "group-key secret not found"
+            message `shouldContain` "hbs2-keyman update"
+            message `shouldContain` "repo:member:add"
+            message `shouldNotContain` "hbs2-peer fetch"

@@ -7,7 +7,6 @@ import HBS2.CLI.Prelude hiding (mapMaybe)
 
 import HBS2.Data.Types.Refs
 import HBS2.Storage.Operations.Class
-import HBS2.Storage.Operations.ByteString
 import HBS2.Base58
 import HBS2.CLI.Run.Internal
 import HBS2.CLI.Run.Internal.GroupKey as G
@@ -25,7 +24,6 @@ import Data.ByteString.Lazy.Char8 as LBS8
 import Data.ByteString.Lazy as LBS
 import Data.ByteString.Char8 as BS8
 import Data.HashMap.Strict qualified as HM
-import Control.Monad.Except
 import Codec.Serialise
 
 {- HLINT ignore "Functor law" -}
@@ -41,8 +39,6 @@ groupKeyEntries = do
 
   entry $ bindMatch "hbs2:groupkey:load" $ \case
       [HashLike h] -> do
-        sto <- getStorage
-
         gk <- loadGroupKey h
                 >>= orThrowUser "can not load groupkey"
 
@@ -197,4 +193,3 @@ groupKeyEntries = do
         pure $ mkForm "blob" [mkStr (LBS8.unpack (serialise seb))]
 
     _ -> throwIO $ BadFormException @C nil
-

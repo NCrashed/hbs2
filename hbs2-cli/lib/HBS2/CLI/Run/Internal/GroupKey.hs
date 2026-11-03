@@ -6,13 +6,11 @@ module HBS2.CLI.Run.Internal.GroupKey
 import HBS2.CLI.Prelude hiding (mapMaybe)
 import HBS2.CLI.Run.Internal
 
-import HBS2.Base58
 import HBS2.Hash
 import HBS2.Storage
 import HBS2.Data.Types.Refs
 import HBS2.Data.Types.SmallEncryptedBlock
-import HBS2.Storage.Operations.Class
-import HBS2.Storage.Operations.ByteString
+import HBS2.Storage.Operations.GroupKey
 import HBS2.KeyMan.Keys.Direct
 import HBS2.Net.Auth.GroupKeySymm as Symm
 
@@ -23,10 +21,7 @@ import HBS2.Peer.RPC.API.Storage
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.Maybe
-import Control.Monad.Trans.Cont
 import Control.Monad.Except
-import Codec.Serialise
-import Data.ByteString (ByteString)
 
 groupKeyFromKeyList :: MonadUnliftIO m => [String] -> m (GroupKey 'Symm HBS2Basic)
 groupKeyFromKeyList ks = do
@@ -66,19 +61,8 @@ loadGroupKey :: ( IsContext c
                 , HasClientAPI StorageAPI UNIX m
                 ) => HashRef -> RunM c m (Maybe (GroupKey 'Symm HBS2Basic))
 loadGroupKey h = do
-
-  flip runContT pure do
-    sto <- getStorage
-
-    raw <- runExceptT (readFromMerkle sto (SimpleKey (fromHashRef h)))
-            <&> either (const Nothing) Just
-
-    bs <- ContT (maybe1 raw (pure Nothing))
-
-    let gk = deserialiseOrFail bs
-              & either (const Nothing) Just
-
-    pure gk
+  sto <- getStorage
+  loadGroupKeyChecked @'HBS2Basic sto h >>= either throwIO (pure . Just)
 
 modifyGroupKey :: (IsContext c, MonadUnliftIO m)
                => GroupKey 'Symm 'HBS2Basic
@@ -103,5 +87,3 @@ modifyGroupKey gk ins = do
   let new = x `HS.difference` r `mappend` a & HS.toList
 
   generateGroupKey @'HBS2Basic (Just gks) new
-
-

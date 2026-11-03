@@ -73,7 +73,13 @@ data HBS2GitException =
   | GitRepoNoAccess
   deriving stock (Show,Typeable)
 
-instance Exception HBS2GitException
+instance Exception HBS2GitException where
+  displayException = \case
+    GitRepoGroupKeySecretNotFound root ->
+      "group-key secret not found for " <> show (pretty root)
+        <> "; import a member encryption secret into hbs2-keyman and run `hbs2-keyman update`,"
+        <> " or add this machine with `hbs2-git3 repo:member:add` from an authorized machine"
+    other -> show other
 
 defSegmentSize :: Int
 defSegmentSize = 50 * 1024 * 1024

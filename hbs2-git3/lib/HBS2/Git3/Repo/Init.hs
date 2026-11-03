@@ -23,7 +23,7 @@ import HBS2.Git3.Export
 import HBS2.System.Dir
 
 import HBS2.Net.Auth.Credentials
-import HBS2.Net.Auth.GroupKeySymm
+import HBS2.Storage.Operations.GroupKey
 
 import HBS2.KeyMan.Keys.Direct
 
@@ -297,7 +297,8 @@ initRepo syn = do
       gkRefs <- case gkh of
                Nothing -> pure []
                Just h  -> do
-                 _ <- loadGroupKeyMaybe @'HBS2Basic sto h >>= orThrow (GroupKeyNotFound 1)
+                 _ <- liftIO (loadGroupKeyChecked @'HBS2Basic sto h)
+                        >>= either throwIO pure
                  pure [h]
 
       let manifest = [

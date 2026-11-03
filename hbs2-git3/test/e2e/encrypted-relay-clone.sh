@@ -215,6 +215,14 @@ grep -Eqi 'group.?key.*secret|secret.*group.?key|GitRepoNoAccess' "$T/preclone.e
   cat "$T/preclone.err" >&2
   fail "pre-membership clone did not identify the missing group-key secret"
 }
+grep -q 'hbs2-keyman update' "$T/preclone.err" || {
+  cat "$T/preclone.err" >&2
+  fail "pre-membership clone did not identify the keyman remediation"
+}
+! grep -q 'hbs2-peer fetch' "$T/preclone.err" || {
+  cat "$T/preclone.err" >&2
+  fail "pre-membership clone incorrectly suggested fetching storage"
+}
 ! grep -q 'ImportBlocksUnavailable' "$T/preclone.err" || {
   cat "$T/preclone.err" >&2
   fail "pre-membership clone mistook access denial for missing blocks"

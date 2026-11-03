@@ -17,7 +17,7 @@ import HBS2.Git3.Repo.Mailbox
 import HBS2.Git3.Repo.About
 import HBS2.Git3.Logger
 import HBS2.Git3.Man
-import HBS2.Net.Auth.GroupKeySymm
+import HBS2.Storage.Operations.GroupKey
 import HBS2.Peer.RPC.Client.RefLog
 
 import Data.Config.Suckless.Script
@@ -645,7 +645,8 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
             RepoManifest mf <- getRepoManifest
 
             hh <- for [ x | HashLike x <- keyHashes ] $ \k -> do
-                     _ <- loadGroupKeyMaybe @HBS2Basic sto k >>= orThrow (GitRepoNoGroupKey k)
+                     _ <- liftIO (loadGroupKeyChecked @HBS2Basic sto k)
+                            >>= either throwIO pure
                      pure k
 
             updateRepoHead repo mf hh

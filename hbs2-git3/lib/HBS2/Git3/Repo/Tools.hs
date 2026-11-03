@@ -12,6 +12,7 @@ import HBS2.Net.Auth.GroupKeySymm
 import HBS2.CLI.Run.MetaData
 import HBS2.Net.Auth.Credentials
 import HBS2.KeyMan.Keys.Direct
+import HBS2.Storage.Operations.GroupKey
 
 import HBS2.Git.Local.CLI
 
@@ -235,8 +236,8 @@ updateGroupKey repo new = do
   RepoManifest manifest <- getRepoManifest
   deps <- readLogThrow (getBlock sto) (coerce lwwValue)
 
-  gkNew <- loadGroupKeyMaybe @HBS2Basic sto new
-              >>= orThrow  (GitRepoNoGroupKey new)
+  gkNew <- liftIO (loadGroupKeyChecked @HBS2Basic sto new)
+              >>= either throwIO pure
 
   flip runContT pure do
 

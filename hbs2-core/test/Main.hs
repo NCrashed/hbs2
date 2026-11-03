@@ -13,6 +13,7 @@ import TestFrameBound
 import TestBlockSizeBound
 import TestTCPRedial
 import TestPutBlockAsked
+import TestGroupKeyLoad
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -77,10 +78,17 @@ main =
           , testCase "reads a tree written before the nonce moved into the block"
               testEncryptedTreeReadsLegacyMethod1
           ]
+      , testGroup "a group-key object is diagnosed before access is checked"
+          [ testCase "names an absent logical root and the bounded fetch command"
+              testGroupKeyMissingRoot
+          , testCase "names an absent physical descendant"
+              testGroupKeyMissingLeaf
+          , testCase "accepts the historical envelope"
+              testGroupKeyLegacyEnvelope
+          ]
       , testGroup "a TCP peer that was down when we dialled it"
           [ testCase "is dialled again once it is back"
               testTCPRedialsAfterFailedDial
           ]
       ]
-
 

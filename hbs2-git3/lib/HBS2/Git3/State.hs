@@ -16,9 +16,8 @@ import HBS2.Git3.State.Internal.Segment as Exported
 import HBS2.Git3.State.Internal.Index as Exported
 import HBS2.Git3.State.Internal.Wait as Exported
 
-import HBS2.Net.Auth.GroupKeySymm
-
 import HBS2.Storage.Operations.Missed
+import HBS2.Storage.Operations.GroupKey
 import HBS2.Net.Auth.Credentials
 import HBS2.KeyMan.Keys.Direct
 import HBS2.Data.Detect
@@ -55,7 +54,7 @@ getGK = do
   mf <- getRepoManifest
   runMaybeT do
     gkh <- headMay [ x | ListVal [SymbolVal "gk", HashLike x ] <- coerce mf ] & toMPlus
-    gk <- loadGroupKeyMaybe sto gkh >>= toMPlus
+    gk <- liftIO (loadGroupKeyChecked @'HBS2Basic sto gkh) >>= either throwIO pure
     pure (gkh,gk)
 
 getRefLog :: RepoManifest -> Maybe GitRemoteKey

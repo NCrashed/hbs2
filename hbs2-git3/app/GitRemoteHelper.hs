@@ -324,7 +324,7 @@ main =  flip runContT pure do
           liftIO $ Exit.exitWith (Exit.ExitFailure 1)
 
     handle (\(e :: RepoWaitError) -> fatal (show e)) $
-     handle (\(e :: HBS2GitException) -> fatal (show e)) $
+     handle (\(e :: HBS2GitException) -> fatal (displayException e)) $
      recover $ connectedDo $ withStateDo do
 
       waitRepo Nothing =<< getGitRepoKeyThrow
@@ -361,10 +361,10 @@ main =  flip runContT pure do
                      -- the last line this process will ever write.
                      readTVarIO out >>= \case
                        Just h  -> liftIO do
-                         hPutDoc h (line <> red "hbs2-git:" <+> viaShow e <> line)
+                         hPutDoc h (line <> red "hbs2-git:" <+> pretty (displayException e) <> line)
                          hFlush h
                        Nothing -> none
-                     die (show e)
+                     die (displayException e)
                    _ -> none
 
           next Plain
@@ -376,4 +376,3 @@ main =  flip runContT pure do
         _ -> do
           sendLine ""
           next Plain
-
