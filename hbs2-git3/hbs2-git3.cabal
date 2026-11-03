@@ -166,7 +166,8 @@ library
 executable hbs2-git3
     import:           shared-properties
     main-is:          Main.hs
-    -- other-modules:
+    autogen-modules:  Paths_hbs2_git3
+    other-modules:    Paths_hbs2_git3
     -- other-extensions:
     build-depends:
         base, hbs2-git3, hbs2-core, hbs2-peer

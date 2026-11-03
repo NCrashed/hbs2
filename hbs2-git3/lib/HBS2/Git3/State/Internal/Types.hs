@@ -70,6 +70,7 @@ data HBS2GitException =
   | GitCantGenerateRemoteName
   | GitRepoNoGroupKey HashRef
   | GitRepoGroupKeySecretNotFound HashRef
+  | Git3UsageError String
   | GitRepoNoAccess
   deriving stock (Show,Typeable)
 
@@ -79,6 +80,7 @@ instance Exception HBS2GitException where
       "group-key secret not found for " <> show (pretty root)
         <> "; import a member encryption secret into hbs2-keyman and run `hbs2-keyman update`,"
         <> " or add this machine with `hbs2-git3 repo:member:add` from an authorized machine"
+    Git3UsageError message -> message
     other -> show other
 
 defSegmentSize :: Int

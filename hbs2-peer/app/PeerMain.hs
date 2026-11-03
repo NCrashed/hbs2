@@ -295,7 +295,7 @@ runCLI :: IO ()
 runCLI = do
 
   (g, cmd) <- customExecParser (prefs showHelpOnError) $
-            info (helper <*> parser)
+            info (helper <*> versionOption <*> parser)
             (  fullDesc
             <> header "hbs2-peer daemon"
             <> progDesc "serves HBS2 protocol"
@@ -304,6 +304,9 @@ runCLI = do
   withOpts cmd g
 
   where
+
+    versionOption = infoOption (showVersion Pkg.version)
+      (long "version" <> help "show program version")
 
 
     parser ::  Parser (GOpts,IO ())

@@ -589,12 +589,16 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
 
         brief "updates group key for repo" $
           args [arg "string" "repo", arg "hash" "group-key-hash" ]  $
+          desc ( "group-key-hash is the hash of a stored GroupKey object, not a member"
+                 <> line <> "public key. Prefer repo:member:add when granting access to a machine." ) $
+          examples "repo:gk:update REPO GROUP_KEY_HASH" $
           entry $ bindMatch "repo:gk:update" $ nil_ $ \case
             [ x@(StringLike{}), HashLike h ] -> lift $ connectedDo do
               repo <- resolveRepoKeyThrow [x]
               updateGroupKey repo h
 
-            _ -> throwIO $ BadFormException @C nil
+            _ -> throwIO $ Git3UsageError
+              "repo:gk:update: expected (repo:gk:update REPO GROUP_KEY_HASH); run `hbs2-git3 repo:gk:update --help`"
 
         brief "add readers to an encrypted repository, including its existing history" $
           args [ arg "string" "repo", arg "string" "enc:encryption-public-key ..."
@@ -635,23 +639,35 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
             (gkh, members) <- listRepoMembers repo
             liftIO $ printMemberList json repo gkh members
 
-        entry $ bindMatch "repo:gk:add:extra:keys" $ nil_ $ \case
-          ( x@(StringLike{}) : keyHashes ) -> lift $ connectedDo do
-            repo <- resolveRepoKeyThrow [x]
-            setGitRepoKey repo
-            waitRepo (Just 10) =<< getGitRepoKeyThrow
+        brief "add compatibility GroupKey objects used for future pushes" $
+          args [arg "string" "repo", arg "hash" "group-key-hash ..."] $
+          desc ( "Every trailing argument is a stored GroupKey object hash, not a member"
+                 <> line <> "public key. This does not grant access to existing history; prefer"
+                 <> line <> "repo:member:add for normal encrypted-repository membership." ) $
+          examples "repo:gk:add:extra:keys REPO GROUP_KEY_HASH [GROUP_KEY_HASH ...]" $
+          entry $ bindMatch "repo:gk:add:extra:keys" $ nil_ $ \case
+            ( x@(StringLike{}) : keyHashes@(_ : _) ) -> do
+              hashes <- for keyHashes $ \case
+                HashLike hash -> pure hash
+                _ -> throwIO $ Git3UsageError
+                  "repo:gk:add:extra:keys: expected repository followed by GroupKey object hashes; run `hbs2-git3 repo:gk:add:extra:keys --help`"
+              lift $ connectedDo do
+                repo <- resolveRepoKeyThrow [x]
+                setGitRepoKey repo
+                waitRepo (Just 10) =<< getGitRepoKeyThrow
 
-            sto <- getStorage
-            RepoManifest mf <- getRepoManifest
+                sto <- getStorage
+                RepoManifest mf <- getRepoManifest
 
-            hh <- for [ x | HashLike x <- keyHashes ] $ \k -> do
-                     _ <- liftIO (loadGroupKeyChecked @HBS2Basic sto k)
-                            >>= either throwIO pure
-                     pure k
+                hh <- for hashes $ \k -> do
+                         _ <- liftIO (loadGroupKeyChecked @HBS2Basic sto k)
+                                >>= either throwIO pure
+                         pure k
 
-            updateRepoHead repo mf hh
+                updateRepoHead repo mf hh
 
-          _ -> throwIO $ BadFormException @C nil
+            _ -> throwIO $ Git3UsageError
+              "repo:gk:add:extra:keys: expected (repo:gk:add:extra:keys REPO GROUP_KEY_HASH [GROUP_KEY_HASH ...]); run `hbs2-git3 repo:gk:add:extra:keys --help`"
 
 
         -- WHERE A REPOSITORY TAKES CONTRIBUTIONS (PEP-18).
