@@ -126,6 +126,8 @@ main =
       , testGroup "an encrypted tree separates two payloads under one group key"
           [ testCase "gives back what it was given"
               testEncryptedTreeRoundTrip
+          , testCase "names the group key when the reader has no member secret"
+              testEncryptedTreeReportsMissingGroupKeySecret
           , testCase "does not reuse a nonce when two payloads share a megabyte"
               testEncryptedTreeSharedPrefixNoNonceReuse
           , testCase "still charges an append only for the blocks that changed"

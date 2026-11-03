@@ -28,11 +28,22 @@ Two consequences follow:
   decrypt automatically. There is no separate "unlock" step.
 
 The encryption keypair is distinct from the peer's signing identity.
-Conveniently, the peer keyring you generated in the quickstart
-(`~/.config/hbs2-peer/default.key`) already contains one encryption
-keypair, and `hbs2-keyman` already scans it via the mask you added in
-quickstart step 2. So each machine can use its own peer keyring as its
-group membership identity with no extra setup.
+On a fresh installation, `hbs2-peer init` creates both: the peer
+keyring (`~/.config/hbs2-peer/default.key`) contains one encryption
+keypair as well as the signing identity. `hbs2-keyman` scans that file
+via the mask added in quickstart step 2. So each machine can use its
+own peer keyring as its group membership identity with no extra setup.
+
+An older `default.key` may contain only `sign-key:`. Re-running
+`hbs2-peer init` deliberately does not overwrite existing credentials.
+Create a separate encryption-capable keyring in the key manager instead:
+
+```
+hbs2-cli '(hbs2:keyman:keys:add (hbs2:keyring:new 1))'
+```
+The command prints the new keyring path. Use that path with
+`hbs2:keyring:show` in step 1 and back up the file along with
+`default.key`.
 
 ## Step 1: collect each member's public encryption key
 

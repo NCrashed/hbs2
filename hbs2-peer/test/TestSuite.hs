@@ -26,6 +26,7 @@ import RepositoryLeaseSpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
+import PeerConfigSpec qualified
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -167,6 +168,7 @@ main = do
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests
+      , PeerConfigSpec.tests
       , messagePartsTests
       , mailboxPoWTests
       , mailboxConfigTests

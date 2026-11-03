@@ -43,6 +43,32 @@ data ImportException =
 
 instance Exception ImportException
 
+newtype ImportGroupKeyException =
+  ImportGroupKeySecretUnavailable HashRef
+  deriving stock (Eq,Typeable)
+
+instance Show ImportGroupKeyException where
+  show (ImportGroupKeySecretUnavailable gkh) =
+    "repository group-key secret unavailable for " <> show (pretty gkh)
+      <> "; check repository membership and hbs2-keyman key-files"
+
+instance Exception ImportGroupKeyException
+
+data ImportTreeReadFailure =
+    TreeGroupKeySecretUnavailable HashRef
+  | TreeOperationError OperationError
+  deriving stock (Eq,Show)
+
+classifyTreeReadError :: OperationError -> ImportTreeReadFailure
+classifyTreeReadError = \case
+  GroupKeySecretNotFound gkh -> TreeGroupKeySecretUnavailable gkh
+  operationError             -> TreeOperationError operationError
+
+throwTreeReadFailure :: MonadIO m => ImportTreeReadFailure -> m a
+throwTreeReadFailure = \case
+  TreeGroupKeySecretUnavailable gkh -> throwIO (ImportGroupKeySecretUnavailable gkh)
+  TreeOperationError operationError -> throwIO operationError
+
 writeAsGitPack :: forall m . (HBS2GitPerks m, HasStorage m)
               => FilePath
               -> HashRef
@@ -72,7 +98,7 @@ writeAsGitPack dir href = do
     seen_ <- newTVarIO (mempty :: HashSet GitHash)
 
     source <- liftIO (runExceptT (getTreeContents sto href))
-                >>= orThrow (MissedBlockError2 (show $ pretty href))
+                >>= either (throwTreeReadFailure . classifyTreeReadError) pure
 
     lbs' <- decompressSegmentLBS source
 
