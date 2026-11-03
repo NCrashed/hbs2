@@ -6,6 +6,11 @@ import TestFileLogger
 import TestScheduled
 import TestDerivedKey
 import TestMerkleWalk
+import TestStorageInventory
+import TestStorageResource
+import TestStoragePlacement
+import TestStorageObservation
+import TestStorageAudit
 import TestKeyEncoding
 import TestByPassFlow
 import TestEncryptedTree
@@ -33,6 +38,78 @@ main =
               testMerkleWalkBounded
           , testCase "still repeats a leaf that a tree names twice"
               testMerkleWalkKeepsDuplicates
+          ]
+      , testGroup "canonical storage inventory"
+          [ testCase "is a deterministic set of distinct blocks"
+              testInventoryDeterministic
+          , testCase "separates missing and corrupt frontier blocks"
+              testInventoryReportsBadFrontier
+          , testCase "stops explicitly at configured work bounds"
+              testInventoryBoundsWork
+          , testCase "rejects the first block when its budget is zero"
+              testInventoryBlockLimitStartsAtZero
+          , testCase "charges byte limits cumulatively at the exact boundary"
+              testInventoryByteLimitIsCumulative
+          , testCase "does not guess a block into the wrong protocol role"
+              testTypedInventoryRejectsMalformedRole
+          ]
+      , testGroup "profile-qualified storage resources"
+          [ testCase "accepts only bounded versioned profile names"
+              testStorageProfileValidation
+          , testCase "binds both profile and canonical locator"
+              testStorageResourceBindsProfileAndLocator
+          , testCase "keeps the resource wire encoding stable"
+              testStorageResourceRoundTrip
+          , testCase "keeps generic snapshot evidence round-trippable"
+              testStorageSnapshotRoundTrip
+          ]
+      , testGroup "availability-aware storage placement"
+          [ testCase "accepts only bounded non-empty availability profiles"
+              testAvailabilityProfileValidation
+          , testCase "rejects incomparable time profiles"
+              testPlacementRejectsMismatchedProfiles
+          , testCase "rejects ambiguous duplicate provider evidence"
+              testPlacementRejectsDuplicateProviders
+          , testCase "filters incumbents and providers below the local floor"
+              testPlacementFiltersIneligibleProviders
+          , testCase "prefers a disjoint failure domain"
+              testPlacementPrefersIndependentFailureDomain
+          , testCase "prefers coverage in the incumbent's weak windows"
+              testPlacementPrefersComplementarySchedule
+          , testCase "recomputes weak windows after each selection"
+              testPlacementRecomputesCoverage
+          ]
+      , testGroup "reachability observation windows"
+          [ testCase "keeps observer-offline windows unknown"
+              testAvailabilityKeepsObserverOfflineUnknown
+          , testCase "does not turn one success into perfect availability"
+              testAvailabilityUsesConservativeBound
+          , testCase "converges toward measured availability"
+              testAvailabilityConvergesWithWindows
+          , testCase "groups absolute windows into a time profile"
+              testAvailabilityBuildsTimeProfile
+          , testCase "rejects ambiguous window evidence"
+              testAvailabilityRejectsAmbiguousWindows
+          , testCase "records one authenticated success idempotently"
+              testReachabilityTrackerRecordsAuthenticatedSuccess
+          , testCase "records a missed live observation window"
+              testReachabilityTrackerRecordsMissedWindow
+          , testCase "keeps observer scheduling gaps unknown"
+              testReachabilityTrackerKeepsObserverGapUnknown
+          , testCase "rejects wall-clock regression"
+              testReachabilityTrackerRejectsTimeRegression
+          ]
+      , testGroup "resource-neutral retrieval audit"
+          [ testCase "accepts a live request only from its signed requester"
+              testStorageAuditAuthenticatesRequest
+          , testCase "binds the provider reply to the exact challenge"
+              testStorageAuditBindsReply
+          , testCase "verifies every challenged block by its content hash"
+              testStorageAuditVerifiesBlocks
+          , testCase "rejects malformed requests and replies"
+              testStorageAuditRejectsMalformedEvidence
+          , testCase "accepts every exact wire-format bound"
+              testStorageAuditKeepsWireBounds
           ]
       , testGroup "a key on the wire"
           [ testCase "encodes exactly as it always did"
@@ -71,6 +148,8 @@ main =
       , testGroup "an encrypted tree separates two payloads under one group key"
           [ testCase "gives back what it was given"
               testEncryptedTreeRoundTrip
+          , testCase "names the group key when the reader has no member secret"
+              testEncryptedTreeReportsMissingGroupKeySecret
           , testCase "does not reuse a nonce when two payloads share a megabyte"
               testEncryptedTreeSharedPrefixNoNonceReuse
           , testCase "still charges an append only for the blocks that changed"
@@ -91,4 +170,3 @@ main =
               testTCPRedialsAfterFailedDial
           ]
       ]
-

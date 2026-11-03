@@ -44,6 +44,32 @@ data ImportException =
 
 instance Exception ImportException
 
+newtype ImportGroupKeyException =
+  ImportGroupKeySecretUnavailable HashRef
+  deriving stock (Eq,Typeable)
+
+instance Show ImportGroupKeyException where
+  show (ImportGroupKeySecretUnavailable gkh) =
+    "repository group-key secret unavailable for " <> show (pretty gkh)
+      <> "; check repository membership and hbs2-keyman key-files"
+
+instance Exception ImportGroupKeyException
+
+data ImportTreeReadFailure =
+    TreeGroupKeySecretUnavailable HashRef
+  | TreeOperationError OperationError
+  deriving stock (Eq,Show)
+
+classifyTreeReadError :: OperationError -> ImportTreeReadFailure
+classifyTreeReadError = \case
+  GroupKeySecretNotFound gkh -> TreeGroupKeySecretUnavailable gkh
+  operationError             -> TreeOperationError operationError
+
+throwTreeReadFailure :: MonadIO m => ImportTreeReadFailure -> m a
+throwTreeReadFailure = \case
+  TreeGroupKeySecretUnavailable gkh -> throwIO (ImportGroupKeySecretUnavailable gkh)
+  TreeOperationError operationError -> throwIO operationError
+
 writeAsGitPack :: forall m . (HBS2GitPerks m, HasStorage m)
               => FilePath
               -> HashRef
@@ -52,6 +78,13 @@ writeAsGitPack :: forall m . (HBS2GitPerks m, HasStorage m)
 writeAsGitPack dir href = do
 
   sto <- getStorage
+
+  -- getTreeContents reports a generic read failure, which loses the hash of
+  -- an absent node below this pack root.  Preserve that boundary here: the
+  -- importer catches MissedBlockErrorAt and asks the selected replica for the
+  -- exact block instead of retrying an empty download queue.
+  missed <- findMissedBlocks sto href
+  for_ (headMay missed) (throwIO . MissedBlockErrorAt)
 
   file <- liftIO $ Temp.emptyTempFile dir (show (pretty href) <> ".pack")
 
@@ -66,7 +99,7 @@ writeAsGitPack dir href = do
     seen_ <- newTVarIO (mempty :: HashSet GitHash)
 
     source <- liftIO (runExceptT (getTreeContents sto href))
-                >>= orThrow (MissedBlockError2 (show $ pretty href))
+                >>= either (throwTreeReadFailure . classifyTreeReadError) pure
 
     lbs' <- decompressSegmentLBS source
 
@@ -365,10 +398,11 @@ importGitRefLog = do
                   notice "no checkpoints found"
                   pure Nothing
 
-            -- Say which block. 'txList' goes out of its way to name the one it
-            -- could not read, and reporting "missed blocks" threw that away:
-            -- whoever hit this had a repository that would not sync and no way
-            -- to tell which block to go looking for.
+            -- A missing Merkle node in the RefLog/checkpoint walk used to be
+            -- named and then merely retried. No fetch was ever filed, so an
+            -- offline owner left a fresh clone asking the lease provider for
+            -- every surrounding block except the one it actually lacked.
+            -- Keep the hash typed through OperationError and enqueue it here.
             --
             -- Then stop. This retry used to be unbounded, on the reasoning that
             -- a missing block is usually a block still on its way. Usually. When
@@ -385,6 +419,11 @@ importGitRefLog = do
 
             case r of
               Right cp -> again $ ImportDone cp
+
+              Left  (MissedBlockErrorAt h) -> do
+                notice $ "asking for missing block" <+> pretty h
+                void $ callRpcWaitMay @RpcFetch (TimeoutSec 1) peerAPI h
+                missedAgain (show (pretty h))
 
               Left  (MissedBlockError2 s) -> missedAgain s
 

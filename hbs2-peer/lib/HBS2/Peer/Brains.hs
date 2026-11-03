@@ -8,9 +8,57 @@ import HBS2.Net.Proto
 import HBS2.Hash
 
 import Data.Word
+import Data.Either (isRight)
 import HBS2.Data.Types.Refs (HashRef(..))
+import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Storage.Observation
+import HBS2.Storage.Placement (availabilityBps)
 
 import Data.Time.Clock (NominalDiffTime)
+
+newtype ReachabilityJournalPolicy = ReachabilityJournalPolicy
+  { reachabilityRetentionWindows :: Int
+  }
+  deriving stock (Eq, Show)
+
+data ReachabilityJournalError
+  = ReachabilityRetentionInvalid
+  | ReachabilityWindowConflict
+  | ReachabilityJournalStorageFailure
+  deriving stock (Eq, Show)
+
+-- | A resource-neutral, locally observed provider summary.  Geometry travels
+-- with the score so consumers never compare evidence gathered with different
+-- window or retention policies as if it were the same measurement.
+data ReachabilityReport = ReachabilityReport
+  { reachabilityReportWindowSeconds :: Word64
+  , reachabilityReportRetentionWindows :: Word64
+  , reachabilityReportKnownWindows :: Word64
+  , reachabilityReportReachableWindows :: Word64
+  , reachabilityReportUnknownWindows :: Word64
+  , reachabilityReportLowerBoundBps :: Maybe Word16
+  }
+  deriving stock (Eq, Generic, Show)
+
+instance Serialise ReachabilityReport
+
+summarizeReachabilityReport
+  :: Word64
+  -> Int
+  -> [ReachabilityWindow]
+  -> Either AvailabilityObservationError ReachabilityReport
+summarizeReachabilityReport windowSeconds retentionWindows windows = do
+  evidence <- summarizeReachability windows
+  pure ReachabilityReport
+    { reachabilityReportWindowSeconds = windowSeconds
+    , reachabilityReportRetentionWindows = fromIntegral retentionWindows
+    , reachabilityReportKnownWindows = availabilityKnownWindows evidence
+    , reachabilityReportReachableWindows = availabilityReachableWindows evidence
+    , reachabilityReportUnknownWindows = availabilityUnknownWindows evidence
+    , reachabilityReportLowerBoundBps =
+        availabilityBps <$> availabilityLowerBound evidence
+    }
 
 -- TODO: rename
 class HasBrains e a where
@@ -181,6 +229,47 @@ class HasBrains e a where
   isSeen :: (Hashed HbSync x, MonadIO m) => a -> x -> m Bool
   isSeen _ _ = pure False
 
+  putRepositoryLease :: MonadIO m => a -> RepositoryLease -> m ()
+  putRepositoryLease _ _ = pure ()
+
+  getRepositoryLease :: MonadIO m
+                     => a -> RepositoryLeaseId -> m (Maybe RepositoryLease)
+  getRepositoryLease _ _ = pure Nothing
+
+  listRepositoryLeases :: MonadIO m => a -> m [RepositoryLease]
+  listRepositoryLeases _ = pure []
+
+  admitRepositoryLease :: MonadIO m
+                       => a
+                       -> Word64
+                       -> RepositoryLeaseAdmissionPolicy
+                       -> RepositoryLease
+                       -> m (Either RepositoryLeaseAdmissionError RepositoryLeaseCapacity)
+  admitRepositoryLease brains now policy lease = do
+    leases <- listRepositoryLeases @e brains
+    let result = admitRepositoryLeaseAt now policy lease leases
+    when (isRight result) (putRepositoryLease @e brains lease)
+    pure result
+
+  putReachabilityWindow
+    :: MonadIO m
+    => a
+    -> ReachabilityJournalPolicy
+    -> PubKey 'Sign (Encryption e)
+    -> ReachabilityWindow
+    -> m (Either ReachabilityJournalError ())
+  putReachabilityWindow _ policy _ _
+    | reachabilityRetentionWindows policy <= 0 =
+        pure (Left ReachabilityRetentionInvalid)
+    | otherwise = pure (Right ())
+
+  listReachabilityWindows
+    :: MonadIO m
+    => a
+    -> PubKey 'Sign (Encryption e)
+    -> m [ReachabilityWindow]
+  listReachabilityWindows _ _ = pure []
+
 type NoBrains = ()
 
 instance Pretty (Peer e) => HasBrains e NoBrains  where
@@ -224,4 +313,9 @@ instance HasBrains e (SomeBrains e) where
 
   brainsCacheBlockSize (SomeBrains a) = brainsCacheBlockSize @e a
   brainsFindBlockSize (SomeBrains a) = brainsFindBlockSize @e a
-
+  putRepositoryLease (SomeBrains a) = putRepositoryLease @e a
+  getRepositoryLease (SomeBrains a) = getRepositoryLease @e a
+  listRepositoryLeases (SomeBrains a) = listRepositoryLeases @e a
+  admitRepositoryLease (SomeBrains a) = admitRepositoryLease @e a
+  putReachabilityWindow (SomeBrains a) = putReachabilityWindow @e a
+  listReachabilityWindows (SomeBrains a) = listReachabilityWindows @e a

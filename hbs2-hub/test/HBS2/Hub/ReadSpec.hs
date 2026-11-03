@@ -9,7 +9,7 @@ module HBS2.Hub.ReadSpec (spec) where
 import HBS2.Hub.Types
 import HBS2.Hub.Fold
 import HBS2.Hub.CLI.Read
-import HBS2.Hub.Render (threadContract,renderContract)
+import HBS2.Hub.Render (PRMergeability(..),threadContract,renderContract)
 import HBS2.Hub.Repo (threadsNumbered,numberIndexOf)
 import HBS2.Hub.CLI.Argv (argvAtom)
 
@@ -19,6 +19,7 @@ import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Hash (hashObject)
 import Data.ByteString.Lazy.Char8 qualified as LBS
 
+import Control.Monad (void)
 import Data.Config.Suckless (C,Syntax)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
@@ -27,12 +28,16 @@ import Data.Foldable (toList)
 import Data.HashSet qualified as HS
 import Data.List (isInfixOf)
 import Data.List qualified as List
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe,isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word64)
 import Prettyprinter (Doc,pretty)
+import System.Directory (findExecutable)
+import System.Environment qualified as Env
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process.Typed
 import Test.Hspec
 
 type KP = (HubKey, PrivKey 'Sign HubScheme)
@@ -61,6 +66,7 @@ rendered = unlines . fmap show
 
 spec :: Spec
 spec = repoFlagForms >> emptyListings >> do
+  hasGit <- runIO (isJust <$> findExecutable "git")
 
   describe "PEP-22 read: what is listed" $ do
 
@@ -127,7 +133,7 @@ spec = repoFlagForms >> emptyListings >> do
   describe "PEP-22 read: the coordinates a diff may be asked for" $ do
 
     let coords b t = PRCoords Nothing "refs/heads/t" t "refs/heads/master" b Nothing
-        sha c = Text.replicate 40 c
+        sha = Text.replicate 40
 
     it "asks for two object names, separated from any path" $
       diffArgv (coords (sha "a") (sha "b"))
@@ -146,7 +152,7 @@ spec = repoFlagForms >> emptyListings >> do
       theirs `shouldSatisfy` all (\a -> take 1 a /= "-")
       -- The separator the old spelling supplied for free, and which turned two
       -- harmless-looking halves into one traversal.
-      as `shouldSatisfy` all (not . isInfixOf "..")
+      as `shouldSatisfy` (not . any (isInfixOf ".."))
       -- And the terminator is there, so neither can be taken for a path.
       last as `shouldBe` "--"
 
@@ -359,6 +365,50 @@ spec = repoFlagForms >> emptyListings >> do
       rendered (listDoc [t]) `shouldSatisfy` (not . ("\ESC" `isInfixOf`))
       rendered (showDoc t)   `shouldSatisfy` (not . ("\ESC" `isInfixOf`))
 
+    it "warns in the list and names conflicting paths in the detail" $ do
+      owner <- kp
+      let repo = fst owner
+          co = PRCoords (Just "hbs23://fixture") "refs/heads/topic" "cafe" "refs/heads/master" "beef" Nothing
+          fr = foldOf owner
+                 [(1, Just 1, AOpen repo HubPR "conflicting change" [] Nothing Nothing
+                                  (Just co) 1000)]
+          t = case threadsOf HubPR noFilter fr of
+                [one] -> one
+                _ -> error "the conflicting pull-request fixture did not fold to one thread"
+          m = Just (MergeConflicting "dead" "cafe" ["docs/a.md", "src/B.hs"])
+          row = rendered (listDocChecked [(t, m)])
+          detail = rendered (showDocChecked t m)
+      row `shouldSatisfy` ("[conflicts]" `isInfixOf`)
+      detail `shouldSatisfy` ("mergeability conflicts" `isInfixOf`)
+      detail `shouldSatisfy` ("docs/a.md" `isInfixOf`)
+      detail `shouldSatisfy` ("src/B.hs" `isInfixOf`)
+
+    around_ (\act -> if hasGit then act else pendingWith "git is not on PATH") $
+      describe "mergeability against real git commits" $ do
+        it "reports a clean merge at the exact target and proposal commits" $
+          withMergeRepo False $ \dir target tip -> do
+            owner <- kp
+            mergeabilityOf (Just dir) (openPR owner "master" tip)
+              `shouldReturn` Just (MergeClean target tip)
+
+        it "reports the paths git says conflict" $
+          withMergeRepo True $ \dir target tip -> do
+            owner <- kp
+            mergeabilityOf (Just dir) (openPR owner "refs/heads/master" tip)
+              `shouldReturn` Just (MergeConflicting target tip ["a.txt"])
+
+        it "keeps a missing target distinct from a conflict" $
+          withMergeRepo False $ \dir _ tip -> do
+            owner <- kp
+            mergeabilityOf (Just dir) (openPR owner "gone" tip)
+              `shouldReturn` Just (MergeUnknown "target ref is missing: refs/heads/gone")
+
+        it "does not inspect a redacted proposal" $
+          withMergeRepo False $ \dir _ tip -> do
+            owner <- kp
+            mergeabilityOf (Just dir) ((openPR owner "master" tip) { tsRedacted = True })
+              `shouldReturn` Nothing
+
     -- A HashRef takes any width off the wire ('validHashRef' exists for that),
     -- the fold carries reply-to through unvalidated, and base58 is quadratic:
     -- 2.5 s for 64 KiB, measured in this project. One admitted comment is
@@ -423,7 +473,7 @@ spec = repoFlagForms >> emptyListings >> do
                  , e1 ]
           out = lines (rendered (logDoc Nothing fr))
       fmap (take 6) out `shouldBe` ["1     ", "2     "]
-      out !! 0 `shouldSatisfy` ("open" `isInfixOf`)
+      head out `shouldSatisfy` ("open" `isInfixOf`)
       out !! 1 `shouldSatisfy` ("comment" `isInfixOf`)
 
     -- `hub log <repo> <n>` had NO test at all, which is part of how the
@@ -478,7 +528,7 @@ spec = repoFlagForms >> emptyListings >> do
       col "op" `shouldBe` fmap (Just . Aeson.String) ["open", "comment", "delegate"]
       col "number" `shouldBe` [Just (Aeson.Number 1), Just (Aeson.Number 1), Just Aeson.Null]
       col "thread_id" !! 2 `shouldBe` Just Aeson.Null
-      col "event_id" !! 0 `shouldBe` Just (Aeson.String (fromString (show (pretty (eventId e1)))))
+      head (col "event_id") `shouldBe` Just (Aeson.String (fromString (show (pretty (eventId e1)))))
       bytes `shouldSatisfy` (not . isInfixOf "secret")
       -- Filtered the way the text log is, and says by what.
       let only = logContract repo (Just 1) (Just (HS.fromList (threadsNumbered 1 fr))) fr
@@ -616,6 +666,56 @@ repoFlagForms =
         `shouldBe` Nothing
 
 -- The argv reader's own words, which is the only shape these verbs ever see.
+-- A repository whose topic either edits beside master or edits the same line.
+-- The code under test shells out to git too; these commands only build the
+-- fixture and are sealed from a developer's signing and identity settings.
+withMergeRepo :: Bool -> (FilePath -> Text -> Text -> IO a) -> IO a
+withMergeRepo conflicting act = withSystemTempDirectory "hub-read-merge" $ \dir -> do
+  void $ fixtureGit dir ["init", "-q", "."]
+  writeFile (dir <> "/a.txt") "base\n"
+  void $ fixtureGit dir ["add", "a.txt"]
+  void $ fixtureGit dir ["commit", "-q", "-m", "base"]
+  void $ fixtureGit dir ["checkout", "-q", "-b", "topic"]
+  if conflicting
+    then writeFile (dir <> "/a.txt") "topic\n"
+    else writeFile (dir <> "/topic.txt") "topic\n"
+  void $ fixtureGit dir ["add", "."]
+  void $ fixtureGit dir ["commit", "-q", "-m", "topic"]
+  tip <- Text.pack <$> fixtureGit dir ["rev-parse", "HEAD"]
+  void $ fixtureGit dir ["checkout", "-q", "master"]
+  if conflicting
+    then writeFile (dir <> "/a.txt") "master\n"
+    else writeFile (dir <> "/master.txt") "master\n"
+  void $ fixtureGit dir ["add", "."]
+  void $ fixtureGit dir ["commit", "-q", "-m", "master"]
+  target <- Text.pack <$> fixtureGit dir ["rev-parse", "HEAD"]
+  act dir target tip
+
+fixtureGit :: FilePath -> [String] -> IO String
+fixtureGit cwd args = do
+  path <- fromMaybe "/usr/bin:/bin" <$> Env.lookupEnv "PATH"
+  let conf = [ "-c", "user.email=t@t", "-c", "user.name=t"
+             , "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=master" ]
+      cmd = setEnv [ ("GIT_CONFIG_GLOBAL", "/dev/null")
+                   , ("GIT_CONFIG_SYSTEM", "/dev/null")
+                   , ("GIT_CONFIG_NOSYSTEM", "1")
+                   , ("HOME", cwd), ("LC_ALL", "C"), ("PATH", path) ]
+              (setWorkingDir cwd (proc "git" (conf <> args)))
+  (code, out, errOut) <- readProcess (setStdin closed cmd)
+  case code of
+    ExitSuccess -> pure (takeWhile (`notElem` ("\n\r" :: String)) (LBS.unpack out))
+    _ -> fail ("git " <> unwords args <> ": " <> LBS.unpack errOut)
+
+openPR :: KP -> Text -> Text -> ThreadState
+openPR owner onto tip =
+  case threadsOf HubPR noFilter (foldOf owner [(1, Just 1, content)]) of
+    [t] -> t
+    _ -> error "the one-event pull-request fixture did not fold to one thread"
+  where
+    repo = fst owner
+    coords = PRCoords (Just "hbs23://fixture") "refs/heads/topic" tip onto tip Nothing
+    content = AOpen repo HubPR "proposal" [] Nothing Nothing (Just coords) 1000
+
 argv :: [String] -> [Syntax C]
 argv = fmap argvAtom
 

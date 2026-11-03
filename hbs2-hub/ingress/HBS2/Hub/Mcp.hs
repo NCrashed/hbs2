@@ -89,7 +89,7 @@ import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.IORef
 import Data.List qualified as List
-import Data.Maybe (fromMaybe,isJust,mapMaybe)
+import Data.Maybe (fromMaybe,isJust,isNothing,mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -139,7 +139,7 @@ protocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 -- a read-only server must not offer. The descriptions say which of those each
 -- one is, because the difference between them is the difference between a
 -- local mistake and a public one.
-data Access = Reads | Writes
+data Access = Reads | LocalReads | Writes
   deriving stock (Eq,Show)
 
 data Tool = Tool
@@ -184,7 +184,7 @@ data Action
 -- | Every tool, read-only server or not.
 tools :: [Tool]
 tools =
-  [ tStatus, tWhoami
+  [ tStatus, tLeaseStatus, tWhoami
   , tList "issue", tList "pr", tShow "issue", tShow "pr"
   , tLog, tVerify
   , tInboxList, tInboxShow, tInboxWait
@@ -399,6 +399,21 @@ tStatus = Tool
                           Nothing AsJson)
   }
 
+-- Provider capacity and lease records reveal local operating policy and repo
+-- keys, so this read is offered only by a local server.  Public read-only mode
+-- still offers ordinary repository Reads, but not LocalReads.
+tLeaseStatus :: Tool
+tLeaseStatus = Tool
+  { toolName = "lease_status", toolTitle = "Donated storage and active leases"
+  , toolDesc = "Provider-local donated byte/contract capacity and durable repository "
+      <> "leases. A silent peer is reported as unknown, never as zero. Local-only: "
+      <> "public read-only servers do not expose operator capacity or leased repository keys."
+  , toolProps = []
+  , toolRequired = []
+  , toolAccess = LocalReads, toolOpenWorld = False, toolVerb = ["lease","status"]
+  , toolPlan = \_ _ -> pure $ RunVerb (Run ["lease","status","--json"] Nothing AsJson)
+  }
+
 tWhoami :: Tool
 tWhoami = Tool
   { toolName = "whoami", toolTitle = "Which keys this machine has"
@@ -427,7 +442,8 @@ tList noun = Tool
   , toolTitle = if noun == "pr" then "List pull requests" else "List issues"
   , toolDesc = "List the repository's folded " <> what <> " by number, with status and "
       <> "labels. Read-only and needs no peer: canon is a git ref in the clone the server "
-      <> "runs in (fetch it with sync first). Filters are exact matches." <> defaultsNote
+      <> "runs in (fetch it with sync first). Pull request rows also report whether the "
+      <> "proposal merges into the target ref in that clone. Filters are exact matches." <> defaultsNote
   , toolProps = [ pRepo
                 , propEnum "status" ["open","closed","merged"] "Only threads with this status."
                 , prop "label" "Only threads carrying this applied label." ]
@@ -460,7 +476,7 @@ tShow noun = Tool
       w <- threadFlags as
       pure $ RunVerb (Run ([noun, "show", flag "repo" r] <> w <> ["--json"]) Nothing AsJson)
   }
-  where prDiff = if noun == "pr" then ", and the precomputed diff" else ""
+  where prDiff = if noun == "pr" then ", the precomputed diff, and mergeability against the target ref" else ""
 
 tLog :: Tool
 tLog = Tool
@@ -521,7 +537,7 @@ queueFlags :: McpConfig -> Args -> Either Text [String]
 queueFlags cfg as = do
   m <- keyOr "mailbox" (mcMailbox cfg) as
   r <- keyOr "repo" (mcRepo cfg) as
-  when (not (isJust m) && not (isJust r)) $
+  when (isNothing m && isNothing r) $
     Left "name the queue: pass mailbox or repo, or start the server with --mailbox or --repo"
   pure (flagM "mailbox" m <> flagM "repo" r)
 
@@ -803,7 +819,7 @@ tIssueComment = Tool
       when (Text.all isSpace body) $ Left "body is empty"
       w <- threadFlags as
       r <- keyOr "repo" (mcRepo cfg) as
-      when (any ("--number=" `List.isPrefixOf`) w && not (isJust r)) $
+      when (any ("--number=" `List.isPrefixOf`) w && isNothing r) $
         Left "a thread number needs a repository to resolve against: pass repo, or thread"
       au <- keyOr "author" (mcAuthor cfg) as
               >>= needed "author" ", or start the server with --author <key> (or HBS2_HUB_AUTHOR)"
@@ -902,7 +918,7 @@ tPrNew = Tool
       from <- optText "from" as
       base <- optText "base" as
       url <- optText "from_url" as
-      when (isJust url && not (isJust from)) $ Left "from_url needs from: the ref to fetch from it"
+      when (isJust url && isNothing from) $ Left "from_url needs from: the ref to fetch from it"
       r <- repoOf cfg as
       (au, se) <- letterKeys cfg as
       rc <- hashOr "recipient" Nothing as
@@ -1587,9 +1603,9 @@ toolJson t = object
       , "additionalProperties" .= False ]
   , "annotations" .= object
       [ "title" .= toolTitle t
-      , "readOnlyHint" .= (toolAccess t == Reads)
+      , "readOnlyHint" .= (toolAccess t /= Writes)
       , "destructiveHint" .= (toolAccess t == Writes && toolName t /= "sync")
-      , "idempotentHint" .= (toolAccess t == Reads)
+      , "idempotentHint" .= (toolAccess t /= Writes)
       , "openWorldHint" .= toolOpenWorld t ]
   ]
 

@@ -1,0 +1,567 @@
+{-# LANGUAGE UndecidableInstances #-}
+
+module HBS2.Peer.Proto.RepositoryLease
+  ( RepositoryLeaseId(..)
+  , RepositoryLeaseState(..)
+  , RepositoryLeaseLifetime(..)
+  , RepositoryInventoryEntry(..)
+  , RepositorySnapshot(..)
+  , RepositoryLease(..)
+  , RepositoryLeasePin(..)
+  , RepositoryLeaseReceipt(..)
+  , ReplicaReceiptV1(..)
+  , RepositoryReplicaAdvert(..)
+  , ReplicaAdvertV1(..)
+  , RepositoryAdvertQueryId(..)
+  , RepositoryAdvertMessage(..)
+  , repositoryAdvertMaxQueryIdBytes
+  , repositoryAdvertMaxBoxBytes
+  , repositoryAdvertMaxResults
+  , boundRepositoryAdvertResults
+  , replicaAdvertCapabilityBlockDownload
+  , replicaAdvertCanServeBlocks
+  , repositoryLeaseCurrentVersion
+  , repositoryLeaseVersionSupported
+  , repositoryLeaseLifetimeAt
+  , repositoryLeaseUpdateOverdueAt
+  , repositoryStorageProfile
+  , repositoryStorageResource
+  , repositoryLeaseStorageSnapshot
+  , makeRepositoryLeaseId
+  , makeRepositorySnapshotId
+  ) where
+
+import HBS2.Data.CBOR
+import HBS2.Data.Types.Refs
+import HBS2.Base58 (AsBase58(..))
+import HBS2.Hash
+import HBS2.Net.Auth.Credentials hiding (decode, encode)
+import HBS2.Prelude.Plated
+import HBS2.Storage.Resource
+
+import Codec.CBOR.Term (decodeTerm, encodeTerm)
+import Codec.CBOR.Write (toLazyByteString)
+import Codec.CBOR.Decoding (decodeListLen, decodeWord)
+import Codec.CBOR.Encoding (encodeListLen, encodeWord)
+import Codec.Serialise (Serialise(..), deserialiseOrFail)
+import Data.Bits ((.&.))
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
+import Data.Word
+
+newtype RepositoryLeaseId = RepositoryLeaseId
+  { fromRepositoryLeaseId :: HashRef
+  }
+  deriving stock (Eq, Ord, Generic)
+  deriving newtype (Serialise, Pretty, Hashable, FromStringMaybe, IsString)
+
+instance Show RepositoryLeaseId where
+  show = show . pretty
+
+data RepositoryLeaseState
+  = RepositoryLeaseSyncing
+  | RepositoryLeaseActive
+  | RepositoryLeaseDegraded
+  | RepositoryLeaseGrace
+  | RepositoryLeaseTerminated
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance Serialise RepositoryLeaseState
+
+data RepositoryLeaseLifetime
+  = RepositoryLeaseUnexpired
+  | RepositoryLeaseInGrace
+  | RepositoryLeaseElapsed
+  deriving stock (Eq, Ord, Show)
+
+-- | Canonically ordered inventory entry committed by the snapshot.  Its CBOR
+-- shape is frozen because the inventory root commits to these exact bytes.
+-- The pin tree is separate because its leaves must remain plain HashRefs for
+-- the storage root walker.
+data RepositoryInventoryEntry = RepositoryInventoryEntry
+  { repositoryInventoryHash   :: HashRef
+  , repositoryInventoryLength :: Word64
+  }
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance Serialise RepositoryInventoryEntry where
+  encode RepositoryInventoryEntry{..} =
+       encodeRecordHeader 3
+    <> encode repositoryInventoryHash
+    <> encode repositoryInventoryLength
+  decode = do
+    decodeRecordHeader "RepositoryInventoryEntry" 3
+    RepositoryInventoryEntry <$> decode <*> decode
+
+-- | One locally verified complete repository state.  The explicit codec
+-- preserves the original generic encoding byte-for-byte; changing it requires
+-- a new snapshot type because snapshot IDs and receipts refer to this shape.
+data RepositorySnapshot = RepositorySnapshot
+  { repositorySnapshotId            :: HashRef
+  , repositorySnapshotLWWRefBlock   :: HashRef
+  , repositorySnapshotLWWSequence   :: Word64
+  , repositorySnapshotHeadRoot      :: HashRef
+  , repositorySnapshotRefLogKey     :: PubKey 'Sign 'HBS2Basic
+  , repositorySnapshotRefLogRoot    :: HashRef
+  , repositorySnapshotInventoryRoot :: HashRef
+  , repositorySnapshotPinRoot       :: HashRef
+  , repositorySnapshotBlockCount    :: Word64
+  , repositorySnapshotLogicalBytes  :: Word64
+  , repositorySnapshotCompletedAt   :: Word64
+  }
+  deriving stock (Eq, Show, Generic)
+
+instance Serialise RepositorySnapshot where
+  encode RepositorySnapshot{..} =
+       encodeRecordHeader 12
+    <> encode repositorySnapshotId
+    <> encode repositorySnapshotLWWRefBlock
+    <> encode repositorySnapshotLWWSequence
+    <> encode repositorySnapshotHeadRoot
+    <> encode repositorySnapshotRefLogKey
+    <> encode repositorySnapshotRefLogRoot
+    <> encode repositorySnapshotInventoryRoot
+    <> encode repositorySnapshotPinRoot
+    <> encode repositorySnapshotBlockCount
+    <> encode repositorySnapshotLogicalBytes
+    <> encode repositorySnapshotCompletedAt
+  decode = do
+    decodeRecordHeader "RepositorySnapshot" 12
+    RepositorySnapshot
+      <$> decode <*> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode <*> decode
+
+-- | Durable local M1 lease.  Bilateral signatures and credit are added by
+-- PEP-08; this record is deliberately provider-local.
+data RepositoryLease = RepositoryLease
+  { repositoryLeaseVersion       :: Word16
+  , repositoryLeaseId            :: RepositoryLeaseId
+  , repositoryLeaseRepository    :: PubKey 'Sign 'HBS2Basic
+  , repositoryLeaseState         :: RepositoryLeaseState
+  , repositoryLeaseMaxBytes      :: Word64
+  , repositoryLeaseMaxBlocks     :: Word64
+  , repositoryLeaseCreatedAt     :: Word64
+  , repositoryLeaseUpdatedAt     :: Word64
+  , repositoryLeaseExpiresAt     :: Maybe Word64
+  , repositoryLeaseGracePeriod   :: Word64
+  , repositoryLeaseMaxUpdateLag  :: Word64
+  , repositoryLeaseUpdateStartedAt :: Maybe Word64
+  , repositoryLeaseSnapshot      :: Maybe RepositorySnapshot
+  , repositoryLeaseLastError     :: Maybe Text
+  }
+  deriving stock (Eq, Show, Generic)
+
+-- Version 1 records had no grace-period field.  These private wire records
+-- deliberately use the generic codec that encoded the original durable type.
+-- Decoding through a CBOR term lets us safely try both shapes without relying
+-- on decoder backtracking.
+data RepositoryLeaseWireV1 = RepositoryLeaseWireV1
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV1
+
+data RepositoryLeaseWireV2 = RepositoryLeaseWireV2
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV2
+
+data RepositoryLeaseWireV3 = RepositoryLeaseWireV3
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseWireV3
+
+instance Serialise RepositoryLease where
+  encode = encode . repositoryLeaseToWireV3
+  decode = do
+    bytes <- toLazyByteString . encodeTerm <$> decodeTerm
+    case deserialiseOrFail @RepositoryLeaseWireV3 bytes of
+      Right wire -> pure (repositoryLeaseFromWireV3 wire)
+      Left _ -> case deserialiseOrFail @RepositoryLeaseWireV2 bytes of
+        Right wire -> pure (repositoryLeaseFromWireV2 wire)
+        Left _ -> case deserialiseOrFail @RepositoryLeaseWireV1 bytes of
+          Right wire -> pure (repositoryLeaseFromWireV1 wire)
+          Left failure -> fail (show failure)
+
+repositoryLeaseToWireV3 :: RepositoryLease -> RepositoryLeaseWireV3
+repositoryLeaseToWireV3 RepositoryLease{..} = RepositoryLeaseWireV3
+  repositoryLeaseVersion
+  repositoryLeaseId
+  repositoryLeaseRepository
+  repositoryLeaseState
+  repositoryLeaseMaxBytes
+  repositoryLeaseMaxBlocks
+  repositoryLeaseCreatedAt
+  repositoryLeaseUpdatedAt
+  repositoryLeaseExpiresAt
+  repositoryLeaseGracePeriod
+  repositoryLeaseMaxUpdateLag
+  repositoryLeaseUpdateStartedAt
+  repositoryLeaseSnapshot
+  repositoryLeaseLastError
+
+repositoryLeaseFromWireV1 :: RepositoryLeaseWireV1 -> RepositoryLease
+repositoryLeaseFromWireV1
+  (RepositoryLeaseWireV1 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt snapshot lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt 0 0 Nothing snapshot lastError
+
+repositoryLeaseFromWireV2 :: RepositoryLeaseWireV2 -> RepositoryLease
+repositoryLeaseFromWireV2
+  (RepositoryLeaseWireV2 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt grace snapshot lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt grace 0 Nothing snapshot lastError
+
+repositoryLeaseFromWireV3 :: RepositoryLeaseWireV3 -> RepositoryLease
+repositoryLeaseFromWireV3
+  (RepositoryLeaseWireV3 version leaseId repository state maxBytes maxBlocks
+    createdAt updatedAt expiresAt grace maxUpdateLag updateStartedAt snapshot
+    lastError) = RepositoryLease
+      version leaseId repository state maxBytes maxBlocks createdAt updatedAt
+      expiresAt grace maxUpdateLag updateStartedAt snapshot lastError
+
+repositoryLeaseCurrentVersion :: Word16
+repositoryLeaseCurrentVersion = 3
+
+repositoryLeaseVersionSupported :: Word16 -> Bool
+repositoryLeaseVersionSupported version =
+  version == 1 || version == 2 || version == repositoryLeaseCurrentVersion
+
+repositoryLeaseLifetimeAt
+  :: Word64
+  -> RepositoryLease
+  -> RepositoryLeaseLifetime
+repositoryLeaseLifetimeAt now lease =
+  case repositoryLeaseExpiresAt lease of
+    Nothing -> RepositoryLeaseUnexpired
+    Just expiresAt
+      | now < expiresAt -> RepositoryLeaseUnexpired
+      | now < graceDeadline -> RepositoryLeaseInGrace
+      | otherwise -> RepositoryLeaseElapsed
+      where
+        grace = repositoryLeaseGracePeriod lease
+        graceDeadline = expiresAt + min grace (maxBound - expiresAt)
+
+repositoryLeaseUpdateOverdueAt :: Word64 -> RepositoryLease -> Bool
+repositoryLeaseUpdateOverdueAt now lease =
+  case repositoryLeaseUpdateStartedAt lease of
+    Nothing -> False
+    Just startedAt -> now >= updateDeadline
+      where
+        lag = repositoryLeaseMaxUpdateLag lease
+        updateDeadline = startedAt + min lag (maxBound - startedAt)
+
+-- | Profile adapter for the repository lease protocol.  The profile name and
+-- resource derivation are stable generic vocabulary; the repository's LWWRef
+-- and RefLog remain owned by this protocol module.
+repositoryStorageProfile :: StorageProfile
+repositoryStorageProfile =
+  case mkStorageProfile "hbs2-git-repository-v1" of
+    Just profile -> profile
+    Nothing -> error "invalid built-in repository storage profile"
+
+repositoryStorageResource
+  :: PubKey 'Sign 'HBS2Basic
+  -> StorageResource
+repositoryStorageResource repository =
+  makeStorageResource repositoryStorageProfile (LBS.toStrict (serialise repository))
+
+-- | Projects a verified repository snapshot into the profile-neutral receipt
+-- vocabulary without changing the durable repository lease encoding.
+repositoryLeaseStorageSnapshot :: RepositoryLease -> Maybe StorageSnapshot
+repositoryLeaseStorageSnapshot lease = do
+  snapshot <- repositoryLeaseSnapshot lease
+  pure StorageSnapshot
+    { storageSnapshotResource = repositoryStorageResource (repositoryLeaseRepository lease)
+    , storageSnapshotId = repositorySnapshotId snapshot
+    , storageSnapshotInventoryRoot = repositorySnapshotInventoryRoot snapshot
+    , storageSnapshotBlockCount = repositorySnapshotBlockCount snapshot
+    , storageSnapshotLogicalBytes = repositorySnapshotLogicalBytes snapshot
+    , storageSnapshotCompletedAt = repositorySnapshotCompletedAt snapshot
+    }
+
+-- | Local mutable ref which makes the inventory tree a storage root.
+newtype RepositoryLeasePin = RepositoryLeasePin RepositoryLeaseId
+  deriving stock (Eq, Ord, Generic)
+
+instance RefMetaData RepositoryLeasePin where
+  refMetaData _ = [("kind", "repository-lease-pin")]
+
+instance Hashed HbSync RepositoryLeasePin where
+  hashObject (RepositoryLeasePin leaseId) =
+    hashObject ("hbs2-repository-lease-pin-v1\0" <> serialise leaseId)
+
+instance Pretty RepositoryLeasePin where
+  pretty (RepositoryLeasePin leaseId) = "repository-lease-pin:" <> pretty leaseId
+
+-- | Durable local ref to the signed receipt block for a lease.  Keeping the
+-- receipt in its own root namespace makes it survive ordinary storage GC and
+-- lets recovery verify the Active invariant without trusting the state DB.
+newtype RepositoryLeaseReceipt = RepositoryLeaseReceipt RepositoryLeaseId
+  deriving stock (Eq, Ord, Generic)
+
+instance RefMetaData RepositoryLeaseReceipt where
+  refMetaData _ = [("kind", "repository-lease-receipt")]
+
+instance Hashed HbSync RepositoryLeaseReceipt where
+  hashObject (RepositoryLeaseReceipt leaseId) =
+    hashObject ("hbs2-repository-lease-receipt-v1\0" <> serialise leaseId)
+
+instance Pretty RepositoryLeaseReceipt where
+  pretty (RepositoryLeaseReceipt leaseId) =
+    "repository-lease-receipt:" <> pretty leaseId
+
+-- | Provider-signed evidence that one exact complete snapshot was pinned.
+-- This is deliberately a versioned payload: the enclosing SignedBox encoding
+-- is already wire-frozen, while later receipt versions may add policy fields.
+data ReplicaReceiptV1 = ReplicaReceiptV1
+  { replicaReceiptVersion       :: Word16
+  , replicaReceiptLeaseId       :: RepositoryLeaseId
+  , replicaReceiptRepository    :: PubKey 'Sign 'HBS2Basic
+  , replicaReceiptProvider      :: PubKey 'Sign 'HBS2Basic
+  , replicaReceiptSnapshotId    :: HashRef
+  , replicaReceiptInventoryRoot :: HashRef
+  , replicaReceiptBlockCount    :: Word64
+  , replicaReceiptLogicalBytes  :: Word64
+  , replicaReceiptCompletedAt   :: Word64
+  , replicaReceiptIssuedAt      :: Word64
+  }
+  deriving stock (Eq, Show, Generic)
+
+instance Serialise ReplicaReceiptV1 where
+  encode ReplicaReceiptV1{..} =
+       encodeRecordHeader 11
+    <> encode replicaReceiptVersion
+    <> encode replicaReceiptLeaseId
+    <> encode replicaReceiptRepository
+    <> encode replicaReceiptProvider
+    <> encode replicaReceiptSnapshotId
+    <> encode replicaReceiptInventoryRoot
+    <> encode replicaReceiptBlockCount
+    <> encode replicaReceiptLogicalBytes
+    <> encode replicaReceiptCompletedAt
+    <> encode replicaReceiptIssuedAt
+  decode = do
+    decodeRecordHeader "ReplicaReceiptV1" 11
+    ReplicaReceiptV1
+      <$> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode <*> decode
+
+-- | Provider-owned ref for its current advertisement of one repository.
+-- Deleting this ref is the local withdrawal operation; remote copies remain
+-- harmless because every advertisement has a short signed expiry.
+data RepositoryReplicaAdvert = RepositoryReplicaAdvert
+  (PubKey 'Sign 'HBS2Basic)
+  (PubKey 'Sign 'HBS2Basic)
+  deriving stock (Eq, Ord, Generic)
+
+instance RefMetaData RepositoryReplicaAdvert where
+  refMetaData _ = [("kind", "repository-replica-advert")]
+
+instance Hashed HbSync RepositoryReplicaAdvert where
+  hashObject (RepositoryReplicaAdvert repository provider) =
+    hashObject
+      ("hbs2-repository-replica-advert-v1\0"
+        <> serialise (repository, provider))
+
+instance Pretty RepositoryReplicaAdvert where
+  pretty (RepositoryReplicaAdvert repository provider) =
+    "repository-replica-advert:"
+      <> pretty (AsBase58 repository) <> ":" <> pretty (AsBase58 provider)
+
+-- | Short-lived provider statement used by replica lookup.  The receipt hash
+-- binds the discovery hint to independently verifiable evidence, while the
+-- endpoint list tells a fresh node how to reach the ordinary block plane.
+data ReplicaAdvertV1 = ReplicaAdvertV1
+  { replicaAdvertVersion       :: Word16
+  , replicaAdvertRepository    :: PubKey 'Sign 'HBS2Basic
+  , replicaAdvertProvider      :: PubKey 'Sign 'HBS2Basic
+  , replicaAdvertSnapshotId    :: HashRef
+  , replicaAdvertReceipt       :: HashRef
+  , replicaAdvertReachableVia  :: [PeerAddr L4Proto]
+  , replicaAdvertCapabilities  :: Word64
+  , replicaAdvertIssuedAt      :: Word64
+  , replicaAdvertExpiresAt     :: Word64
+  }
+  deriving stock (Eq, Show, Generic)
+
+-- Keep this codec explicit from its first release: repository lookup nodes
+-- must be able to relay the signed bytes without silently changing the shape.
+instance Serialise ReplicaAdvertV1 where
+  encode ReplicaAdvertV1{..} =
+       encodeRecordHeader 10
+    <> encode replicaAdvertVersion
+    <> encode replicaAdvertRepository
+    <> encode replicaAdvertProvider
+    <> encode replicaAdvertSnapshotId
+    <> encode replicaAdvertReceipt
+    <> encode replicaAdvertReachableVia
+    <> encode replicaAdvertCapabilities
+    <> encode replicaAdvertIssuedAt
+    <> encode replicaAdvertExpiresAt
+  decode = do
+    decodeRecordHeader "ReplicaAdvertV1" 10
+    ReplicaAdvertV1
+      <$> decode <*> decode <*> decode <*> decode <*> decode
+      <*> decode <*> decode <*> decode <*> decode
+
+replicaAdvertCapabilityBlockDownload :: Word64
+replicaAdvertCapabilityBlockDownload = 1
+
+replicaAdvertCanServeBlocks :: ReplicaAdvertV1 -> Bool
+replicaAdvertCanServeBlocks advert =
+  replicaAdvertCapabilities advert .&. replicaAdvertCapabilityBlockDownload /= 0
+
+-- | Opaque caller nonce which binds a bounded lookup response to its query.
+newtype RepositoryAdvertQueryId = RepositoryAdvertQueryId ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+repositoryAdvertMaxQueryIdBytes :: Int
+repositoryAdvertMaxQueryIdBytes = 32
+
+repositoryAdvertMaxBoxBytes :: Int
+repositoryAdvertMaxBoxBytes = 16 * 1024
+
+instance Serialise RepositoryAdvertQueryId where
+  encode (RepositoryAdvertQueryId queryId) = encode queryId
+  decode = do
+    queryId <- decode
+    when (BS.length queryId > repositoryAdvertMaxQueryIdBytes) $
+      fail "RepositoryAdvertQueryId: too long"
+    pure (RepositoryAdvertQueryId queryId)
+
+-- | Direct discovery wire messages.  Signed advert boxes stay opaque at this
+-- layer: relays do not need a provider key, and consumers verify each box
+-- before indexing or dialing it.
+data RepositoryAdvertMessage
+  = RepositoryAdvertPublish ByteString
+  | RepositoryAdvertLookup
+      RepositoryAdvertQueryId
+      (PubKey 'Sign 'HBS2Basic)
+      Word16
+  | RepositoryAdvertResults
+      RepositoryAdvertQueryId
+      (PubKey 'Sign 'HBS2Basic)
+      [ByteString]
+  deriving stock (Eq, Show, Generic)
+
+repositoryAdvertMaxResults :: Word16
+repositoryAdvertMaxResults = 8
+
+boundRepositoryAdvertResults :: [a] -> [a]
+boundRepositoryAdvertResults = take (fromIntegral repositoryAdvertMaxResults)
+
+-- Constructor tags are explicit from the first network release.  The encoder
+-- also caps results defensively; the decoder rejects an oversized remote list
+-- before decoding its elements.
+instance Serialise RepositoryAdvertMessage where
+  encode = \case
+    RepositoryAdvertPublish advert ->
+         encodeListLen 2
+      <> encodeWord 0
+      <> encode advert
+    RepositoryAdvertLookup query repository limit ->
+         encodeListLen 4
+      <> encodeWord 1
+      <> encode query
+      <> encode repository
+      <> encode limit
+    RepositoryAdvertResults query repository adverts ->
+         encodeListLen 4
+      <> encodeWord 2
+      <> encode query
+      <> encode repository
+      <> encodeAdvertList (boundRepositoryAdvertResults adverts)
+    where
+      encodeAdvertList adverts =
+        encodeListLen (fromIntegral (length adverts)) <> foldMap encode adverts
+
+  decode = do
+    arity <- decodeListLen
+    tag <- decodeWord
+    case (arity, tag) of
+      (2, 0) -> RepositoryAdvertPublish <$> decodeAdvertBox
+      (4, 1) -> RepositoryAdvertLookup <$> decode <*> decode <*> decode
+      (4, 2) -> RepositoryAdvertResults <$> decode <*> decode <*> decodeAdvertList
+      _ -> fail "RepositoryAdvertMessage: invalid record header"
+    where
+      decodeAdvertList = do
+        count <- decodeListLen
+        when (count > fromIntegral repositoryAdvertMaxResults) $
+          fail "RepositoryAdvertMessage: too many results"
+        replicateM count decodeAdvertBox
+
+      decodeAdvertBox = do
+        advert <- decode
+        when (BS.length advert > repositoryAdvertMaxBoxBytes) $
+          fail "RepositoryAdvertMessage: advert box too large"
+        pure advert
+
+makeRepositoryLeaseId
+  :: PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> RepositoryLeaseId
+makeRepositoryLeaseId repository nonce = RepositoryLeaseId . HashRef $
+  hashObject @HbSync
+    ("hbs2-repository-lease-v1\0" <> serialise (repository, nonce))
+
+makeRepositorySnapshotId
+  :: PubKey 'Sign 'HBS2Basic
+  -> HashRef
+  -> Word64
+  -> HashRef
+  -> PubKey 'Sign 'HBS2Basic
+  -> HashRef
+  -> HashRef
+makeRepositorySnapshotId repository lwwBlock lwwSeq headRoot refLog refLogRoot =
+  HashRef $ hashObject @HbSync bytes
+  where
+    bytes = "hbs2-repository-snapshot-v1\0" <> payload
+    payload = serialise
+      ( repository
+      , lwwBlock
+      , lwwSeq
+      , headRoot
+      , refLog
+      , refLogRoot
+      , 1 :: Word16 -- FullRefLogV1
+      )

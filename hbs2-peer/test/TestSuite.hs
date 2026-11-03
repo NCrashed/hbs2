@@ -22,10 +22,15 @@ import MailboxPolicyCacheSpec qualified
 import MessageParts (messagePartsTests)
 import HttpListen (httpListenTests)
 import PeerMetaSpec (peerMetaTests)
+import RepositoryLeaseSpec qualified
+import ReachabilityJournalSpec qualified
+import ReachabilityObservationSpec qualified
+import StorageAuditRetrievalSpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
 import CompleteObjectSpec qualified
+import PeerConfigSpec qualified
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -163,10 +168,15 @@ main = do
       , mailboxEntryTests
       , httpListenTests
       , peerMetaTests
+      , RepositoryLeaseSpec.tests
+      , ReachabilityJournalSpec.tests
+      , ReachabilityObservationSpec.tests
+      , StorageAuditRetrievalSpec.tests
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests
       , CompleteObjectSpec.tests
+      , PeerConfigSpec.tests
       , messagePartsTests
       , mailboxPoWTests
       , mailboxConfigTests

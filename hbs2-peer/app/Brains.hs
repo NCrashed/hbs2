@@ -18,6 +18,9 @@ import HBS2.Base58
 import HBS2.Net.IP.Addr
 
 import HBS2.Peer.Brains
+import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Storage.Observation
 
 import HBS2.Misc.PrettyStuff
 
@@ -28,17 +31,21 @@ import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Trans.Cont
+import Codec.Serialise
 import Crypto.Saltine.Core.Box qualified as Encrypt
 import Database.SQLite.Simple
 import Database.SQLite.Simple.FromField
 import Database.SQLite.Simple.ToField
 import Data.Cache (Cache)
 import Data.Cache qualified as Cache
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Either
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
+import Data.IORef
 import Data.List qualified as List
 import Data.Maybe
 import Data.Text qualified as Text
@@ -74,6 +81,11 @@ instance HasCfgKey PeerBrainsDb (Maybe String) where
 
 newtype CommitCmd = CommitCmd { onCommited :: IO () }
 
+data BrainsUpdate = BrainsUpdate
+  { runBrainsUpdate :: IO ()
+  , completeBrainsUpdate :: Bool -> IO ()
+  }
+
 data BasicBrains e =
   BasicBrains
   { _brainsPeers        :: TVar (HashSet (Peer e))
@@ -81,7 +93,7 @@ data BasicBrains e =
   , _brainsExpire       :: Cache (Hash HbSync) ()
   , _brainsRemoved      :: Cache HashRef ()
   , _brainsDb           :: Connection
-  , _brainsPipeline     :: TQueue (IO ())
+  , _brainsPipeline     :: TQueue BrainsUpdate
   , _brainsCommit       :: TQueue CommitCmd
   , _brainsDelDownload  :: TQueue (Hash HbSync)
   , _brainsSizeCache    :: Cache (Peer e, Hash HbSync) Integer
@@ -353,6 +365,50 @@ instance ( Hashable (Peer e)
        |] (hash, peer)
        pure $ fromOnly <$> listToMaybe result
 
+  putRepositoryLease brains lease = do
+    updateOP brains (insertRepositoryLease brains lease)
+    commitNow brains True
+
+  getRepositoryLease brains = liftIO . selectRepositoryLease brains
+
+  listRepositoryLeases = liftIO . selectRepositoryLeases
+
+  admitRepositoryLease brains now policy lease = do
+    answer <- liftIO newEmptyTMVarIO
+    resultRef <- liftIO $ newIORef (Left RepositoryLeaseAdmissionStorageFailure)
+    updateOPAfter brains (do
+      leases <- selectRepositoryLeases brains
+      let result = admitRepositoryLeaseAt now policy lease leases
+      when (isRight result) (insertRepositoryLease brains lease)
+      writeIORef resultRef result)
+      (\success -> do
+        result <- if success
+          then readIORef resultRef
+          else pure (Left RepositoryLeaseAdmissionStorageFailure)
+        atomically (putTMVar answer result))
+    commitNow brains False
+    liftIO $ atomically (takeTMVar answer)
+
+  putReachabilityWindow brains policy provider window
+    | reachabilityRetentionWindows policy <= 0 =
+        pure (Left ReachabilityRetentionInvalid)
+    | otherwise = do
+        answer <- liftIO newEmptyTMVarIO
+        resultRef <- liftIO $ newIORef (Left ReachabilityJournalStorageFailure)
+        updateOPAfter brains
+          (insertReachabilityWindow brains policy provider window
+            >>= writeIORef resultRef)
+          (\success -> do
+            result <- if success
+              then readIORef resultRef
+              else pure (Left ReachabilityJournalStorageFailure)
+            atomically (putTMVar answer result))
+        commitNow brains False
+        liftIO $ atomically (takeTMVar answer)
+
+  listReachabilityWindows brains =
+    liftIO . selectReachabilityWindows brains
+
 commitNow :: forall e m . MonadIO m
           => BasicBrains e
           -> Bool
@@ -372,9 +428,120 @@ commitNow br doWait = do
       readTQueue w >> flushTQueue w
 
 updateOP :: forall e m . MonadIO m => BasicBrains e -> IO () -> m ()
-updateOP br op = do
+updateOP br op = updateOPAfter br op (const none)
+
+updateOPAfter
+  :: forall e m
+   . MonadIO m
+  => BasicBrains e
+  -> IO ()
+  -> (Bool -> IO ())
+  -> m ()
+updateOPAfter br op complete = do
   let pip = view brainsPipeline br
-  liftIO $ atomically $ writeTQueue pip (liftIO op)
+  liftIO $ atomically $ writeTQueue pip (BrainsUpdate (liftIO op) complete)
+
+insertRepositoryLease :: BasicBrains e -> RepositoryLease -> IO ()
+insertRepositoryLease brains lease = do
+  let conn = view brainsDb brains
+      leaseId = show (pretty (repositoryLeaseId lease))
+      repository = show (pretty (AsBase58 (repositoryLeaseRepository lease)))
+      value = LBS.toStrict (serialise lease)
+  void $ execute conn [qc|
+    insert into statedb.repository_lease (id,repository,value,updated)
+    values (?,?,?,?)
+    on conflict(repository) do update set
+      id = excluded.id,
+      value = excluded.value,
+      updated = excluded.updated
+  |] (leaseId, repository, value, repositoryLeaseUpdatedAt lease)
+
+selectRepositoryLease
+  :: BasicBrains e
+  -> RepositoryLeaseId
+  -> IO (Maybe RepositoryLease)
+selectRepositoryLease brains leaseId = do
+  let conn = view brainsDb brains
+  rows <- query @_ @(Only BS.ByteString) conn [qc|
+    select value from statedb.repository_lease where id = ? limit 1
+  |] (Only (show (pretty leaseId)))
+  pure $ listToMaybe rows >>= decodeRepositoryLease . fromOnly
+
+selectRepositoryLeases :: BasicBrains e -> IO [RepositoryLease]
+selectRepositoryLeases brains = do
+  let conn = view brainsDb brains
+  rows <- query_ @(Only BS.ByteString) conn [qc|
+    select value from statedb.repository_lease order by repository
+  |]
+  pure $ mapMaybe (decodeRepositoryLease . fromOnly) rows
+
+decodeRepositoryLease :: BS.ByteString -> Maybe RepositoryLease
+decodeRepositoryLease bytes =
+  either (const Nothing) Just (deserialiseOrFail (LBS.fromStrict bytes))
+
+insertReachabilityWindow
+  :: Pretty (AsBase58 (PubKey 'Sign (Encryption e)))
+  => BasicBrains e
+  -> ReachabilityJournalPolicy
+  -> PubKey 'Sign (Encryption e)
+  -> ReachabilityWindow
+  -> IO (Either ReachabilityJournalError ())
+insertReachabilityWindow brains policy provider window = do
+  let conn = view brainsDb brains
+      peer = show (pretty (AsBase58 provider))
+      windowIndex = reachabilityWindowIndex window
+      state = encodeReachabilityState (reachabilityWindowState window)
+  existing <- query @_ @(Only Int) conn [qc|
+    select state from statedb.reachability_window
+    where peer = ? and window = ?
+  |] (peer, windowIndex)
+  case fromOnly <$> listToMaybe existing of
+    Just oldState
+      | oldState == state -> pure (Right ())
+      | otherwise -> pure (Left ReachabilityWindowConflict)
+    Nothing -> do
+      void $ execute conn [qc|
+        insert into statedb.reachability_window (peer,window,state)
+        values (?,?,?)
+      |] (peer, windowIndex, state)
+      void $ execute conn [qc|
+        delete from statedb.reachability_window
+        where peer = ? and window not in
+          ( select window from statedb.reachability_window
+            where peer = ? order by window desc limit ? )
+      |] (peer, peer, reachabilityRetentionWindows policy)
+      pure (Right ())
+
+selectReachabilityWindows
+  :: Pretty (AsBase58 (PubKey 'Sign (Encryption e)))
+  => BasicBrains e
+  -> PubKey 'Sign (Encryption e)
+  -> IO [ReachabilityWindow]
+selectReachabilityWindows brains provider = do
+  let conn = view brainsDb brains
+      peer = show (pretty (AsBase58 provider))
+  rows <- query @_ @(Word64, Int) conn [qc|
+    select window,state from statedb.reachability_window
+    where peer = ? order by window
+  |] (Only peer)
+  pure
+    [ ReachabilityWindow windowIndex state
+    | (windowIndex, encodedState) <- rows
+    , Just state <- [decodeReachabilityState encodedState]
+    ]
+
+encodeReachabilityState :: ReachabilityWindowState -> Int
+encodeReachabilityState = \case
+  WindowReachable -> 0
+  WindowOffline -> 1
+  WindowObserverOffline -> 2
+
+decodeReachabilityState :: Int -> Maybe ReachabilityWindowState
+decodeReachabilityState = \case
+  0 -> Just WindowReachable
+  1 -> Just WindowOffline
+  2 -> Just WindowObserverOffline
+  _ -> Nothing
 
 insertSize :: forall e . Pretty (Peer e)
            => BasicBrains e
@@ -696,18 +863,26 @@ RELEASE SAVEPOINT zzz1;
     Left (e :: SomeException) -> err $ "BRAINS: " <+> viaShow e
 
 transactional :: BasicBrains e -> IO () -> IO ()
-transactional brains action = do
+transactional brains = void . transactionalResult brains
+
+transactionalResult :: BasicBrains e -> IO () -> IO Bool
+transactionalResult brains action = do
   n <- randomRIO @Word16 (1, maxBound)
   let sp = [qc|sp{n}|] :: String
   let conn = view brainsDb brains
   execute_ conn [qc|SAVEPOINT {sp}|]
-  try action >>= \case
-    Right{} -> do
-      execute_ conn [qc|RELEASE SAVEPOINT {sp}|]
+  outcome <- try @SomeException action
+  finishTransaction conn sp outcome
 
-    Left ( e :: SomeException ) -> do
-      err $ "BRAINS: " <+> viaShow e
-      execute_ conn [qc|ROLLBACK TO SAVEPOINT {sp}|]
+finishTransaction :: Connection -> String -> Either SomeException () -> IO Bool
+finishTransaction conn sp = \case
+  Right{} -> do
+    execute_ conn [qc|RELEASE SAVEPOINT {sp}|]
+    pure True
+  Left exception -> do
+    err $ "BRAINS: " <+> viaShow exception
+    execute_ conn [qc|ROLLBACK TO SAVEPOINT {sp}|]
+    pure False
 
 ---
 
@@ -1001,6 +1176,24 @@ newBasicBrains cfg = liftIO do
     )
   |]
 
+  execute_ conn [qc|
+    create table if not exists statedb.repository_lease
+    ( id         text not null primary key
+    , repository text not null unique
+    , value      blob not null
+    , updated    unsigned big int not null
+    )
+  |]
+
+  execute_ conn [qc|
+    create table if not exists statedb.reachability_window
+    ( peer   text not null
+    , window unsigned big int not null
+    , state  int not null check (state between 0 and 2)
+    , primary key (peer,window)
+    )
+  |]
+
   BasicBrains <$> newTVarIO mempty
               <*> newTVarIO mempty
               <*> Cache.newCache (Just (toTimeSpec (30 :: Timeout 'Seconds)))
@@ -1053,8 +1246,9 @@ runBasicBrains cfg brains@BasicBrains{..} = do
 
       w  <- atomically $ readTQueue pip
       ws <- atomically $ flushTQueue pip
-
-      transactional brains (sequence_ (w:ws))
+      let updates = w : ws
+      success <- transactionalResult brains (mapM_ runBrainsUpdate updates)
+      mapM_ (\update -> completeBrainsUpdate update success) updates
       sequence_ waiters
 
     void $ ContT $ withAsync $ forever do
@@ -1122,9 +1316,3 @@ runBasicBrains cfg brains@BasicBrains{..} = do
       del <- liftIO $ atomically $ flushTQueue _brainsDelDownload
       for_ del $ \d -> do
         delDownload @e brains (HashRef d)
-
-
-
-
-
-

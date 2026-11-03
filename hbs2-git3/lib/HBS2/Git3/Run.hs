@@ -15,10 +15,13 @@ import HBS2.Git3.Repo qualified as Repo
 import HBS2.Git3.Repo
 import HBS2.Git3.Repo.Mailbox
 import HBS2.Git3.Repo.About
+import HBS2.Git3.Repo.Replication
+import HBS2.Git3.Repo.Lease
 import HBS2.Git3.Logger
 import HBS2.Git3.Man
 import HBS2.Storage.Operations.GroupKey
 import HBS2.Peer.RPC.Client.RefLog
+import HBS2.Peer.Proto.RepositoryLease
 
 import Data.Config.Suckless.Script
 import Data.Config.Suckless.Almost.RPC
@@ -774,6 +777,56 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
               , "  name        " <> maybe "(none)" pretty n
               , "  description " <> maybe "(none)" pretty d ]
 
+        brief "declare the repository's complete-replica target" $
+          args [ arg "string" "repo", arg "string" "[--minimum count]"
+               , arg "string" "[--clear-minimum]" ] $
+          desc ( "The first placement-policy field from PEP-16 M5. It is stored"
+                 <> line <> "in the signed repository manifest as (replication"
+                 <> line <> "(minimum N)). N counts complete external replicas,"
+                 <> line <> "not the owner's working copy, and is bounded to 0..32."
+                 <> line <> "Zero is an explicit target; --clear-minimum removes"
+                 <> line <> "the policy. With neither option, only reports it." ) $
+          entry $ bindMatch "repo:replication" $ nil_ $ \syn -> lift $ connectedDo do
+            let (opts, argz) = splitOpts [("--minimum",1),("--clear-minimum",0)] syn
+                minimumArgs = [ value
+                              | ListVal [StringLike "--minimum", value] <- opts ]
+                clearCount = length
+                  [ () | ListVal [StringLike "--clear-minimum"] <- opts ]
+
+            targetArgument <- case minimumArgs of
+              [] -> pure Nothing
+              [LitIntVal n]
+                | n >= 0 && n <= fromIntegral maxMinimumReplicas ->
+                    pure (Just (fromIntegral n))
+                | otherwise -> throwIO (userError "--minimum must be an integer from 0 through 32")
+              [_] -> throwIO (userError "--minimum must be an integer from 0 through 32")
+              _ -> throwIO (userError "--minimum was given more than once")
+
+            when (clearCount > 1) $
+              throwIO (userError "--clear-minimum was given more than once")
+            when (isJust targetArgument && clearCount == 1) $
+              throwIO (userError "--minimum and --clear-minimum cannot be used together")
+
+            repo <- resolveRepoKeyThrow argz
+            let requested
+                  | clearCount == 1 = Just Nothing
+                  | otherwise = Just <$> targetArgument
+
+            wrote <- withManifest repo $ \mf -> case requested of
+              Nothing -> pure mf
+              Just target -> do
+                mf' <- setMinimumReplicas target mf
+                  & either (throwIO . userError . Text.unpack) pure
+                unless (writesBackAsReplicationPolicy (ReplicationPolicy target) mf') $
+                  throwIO (userError "the replication policy would not read back; nothing was written")
+                pure mf'
+
+            RepoManifest current <- getRepoManifest
+            let ReplicationPolicy target = replicationPolicyOf current
+            liftIO $ print $
+              (if wrote then "declared:" else "as it was:") <+>
+              maybe "no automatic replica target" (\n -> pretty n <+> "complete external replica(s)") target
+
         brief "publish a sigil so contributors can seal letters to a mailbox" $
           args [arg "string" "repo", arg "string" "--key mailbox-key"
                , arg "string" "--sigil hash | --del hash" ] $
@@ -893,6 +946,43 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
         manRepoRelayOnly $
           entry $ bindMatch "repo:relay-only" $ nil_ $ lift . relayOnlyRepo
 
+        brief "create or renew a durable local repository storage lease" $
+          args [ arg "bytes" "[--max-bytes N]"
+               , arg "blocks" "[--max-blocks N]"
+               , arg "seconds" "[--max-update-lag N]"
+               , arg "seconds" "[--ttl N]"
+               , arg "seconds" "[--grace N]"
+               , arg "repository" "repo"
+               ] $
+          entry $ bindMatch "repo:lease:add" $ nil_ $ \syn ->
+            lift $ connectedDo (addRepositoryLease syn)
+
+        brief "list durable local repository storage leases" $
+          entry $ bindMatch "repo:lease:list" $ nil_ $ const $
+            lift $ connectedDo listRepositoryLeasesCLI
+
+        brief "show aggregate repository lease capacity" $
+          entry $ bindMatch "repo:lease:capacity" $ nil_ $ const $
+            lift $ connectedDo showRepositoryLeaseCapacity
+
+        brief "show a repository storage lease" $
+          entry $ bindMatch "repo:lease:show" $ nil_ $ \syn ->
+            lift $ connectedDo (showRepositoryLease syn)
+
+        entry $ bindAlias "repo:lease:status" "repo:lease:show"
+
+        brief "verify and show the provider-signed replica receipt" $
+          entry $ bindMatch "repo:lease:receipt" $ nil_ $ \syn ->
+            lift $ connectedDo (showRepositoryLeaseReceipt syn)
+
+        brief "terminate a repository storage lease and release its artifacts" $
+          entry $ bindMatch "repo:lease:terminate" $ nil_ $ \syn ->
+            lift $ connectedDo (terminateRepositoryLease syn)
+
+        brief "verify and measure the canonical local repository inventory" $
+          entry $ bindMatch "repo:lease:inventory" $ nil_ $ \syn ->
+            lift $ connectedDo (inventoryRepository syn)
+
         exportEntries "reflog:"
 
         brief "purges repo and unsubscribes" $
@@ -904,6 +994,12 @@ HBS2_GIT_REPO_WAIT=300 git push origin master
             warn "purge repo"
 
             repoKey <- getGitRepoKey >>= orThrowUser "remote not set"
+
+            activeRepositoryLease repoKey >>= mapM_ (\lease ->
+              orThrowUser
+                ("repository is protected by lease" <+> pretty (repositoryLeaseId lease)
+                  <+> "; terminate it first")
+                (Nothing :: Maybe ()))
 
             sto <- getStorage
             peerAPI <- getClientAPI @PeerAPI @UNIX

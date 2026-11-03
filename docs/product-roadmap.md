@@ -87,26 +87,53 @@ A mismatched daemon names both versions. A missing RPC peer names the socket
 and the command that starts it. See [`doctor.md`](doctor.md) for the user guide.
 
 Repository failures name the first unmet boundary rather than surfacing as a
-later missing block. D3 proves completeness on the selected peer; signed
-remote provider advertisements and provider lookup remain the next durable
-availability milestone. The hub-level D4 report extends those checks through
-forge and mailbox boundaries. It deliberately calls a sent-log row a local
-handoff rather than delivery; the intermediate network states still require
-the signed receipts described below.
+later missing block. D3 proves completeness on the selected peer. Signed
+remote provider advertisement, relay lookup, authenticated provider selection,
+and offline-owner clone are implemented and covered by the external acceptance
+scenario below. The hub-level D4 report extends those checks through forge and
+mailbox boundaries. It deliberately calls a sent-log row a local handoff rather
+than delivery; the intermediate network states still require the signed
+receipts described below.
 
 #### 2. Durable repository availability
 
 Finish the repository-lease milestones in PEP-06/PEP-16 in this order:
 
-- complete the three-node offline-owner M1 scenario;
-- freeze and test the snapshot/inventory/receipt encodings;
-- publish and retrieve signed replica advertisements;
-- find a complete provider from the repository key;
+- complete the three-node offline-owner M1 scenario (completed 2026-10-31);
+- freeze and test the snapshot/inventory/receipt encodings (completed
+  2026-10-31 for the provider-local v1 wire types);
+- publish and retrieve signed replica advertisements (wire type, verified
+  provider-local lifecycle, and worker renewal completed 2026-10-31; network
+  lookup envelope, authenticated handler, signature-verifying TTL relay cache,
+  bounded gossip, periodic publication, and peer-bound expiring client query
+  fan-out completed 2026-10-31; authenticated provider selection and
+  clone-path consumption completed 2026-10-31; external owner/provider/relay/
+  client acceptance completed 2026-10-31; `hbs2-hub status` replica floor,
+  advert freshness and at-risk contract plus the browser repository badge
+  completed 2026-10-31; local-only `hbs2-hub lease status` donated/reserved/
+  available capacity and durable lease contract plus browser operator UI
+  completed 2026-10-31);
+- prove repository-key-only discovery in the external multi-process
+  offline-owner acceptance scenario (completed 2026-10-31: C knows only an
+  advert relay, discovers and authenticates B from its signed advert, and
+  clones after A is offline);
 - maintain a replica target with make-before-break replacement.
+  The signed `(replication (minimum N))` repository policy, its CLI, status/UI
+  target, bounded authenticated provider enumeration, and conservative deficit
+  alert are complete as the first M5 slices. Time-profile and failure-domain
+  placement plus the make-before-break repair worker remain.
+- make storage leasing profile-based before it is exposed beyond Git. The
+  shared layer must name an opaque resource and its profile, while each profile
+  owns authenticated mutable state, deterministic inventory, pin/recovery,
+  freshness, and client verification. `hbs2-sync` is not yet eligible: its
+  concurrent-writer, deletion, recovery, and signed-root semantics must be
+  defined and tested first.
 
 Acceptance scenario: A publishes, B holds a verified complete lease, A shuts
 down, and a clean C discovers B and clones the complete repository using only
-the repository key and the normal bootstrap configuration.
+the repository key and the normal bootstrap configuration. The executable test
+uses a separate rendezvous R as C's only configured peer, so direct provider
+configuration cannot make the scenario pass without replica-advert lookup.
 
 #### 3. Mail delivery receipts
 
@@ -152,6 +179,16 @@ Gate releases on at least three peers and cover:
 
 #### `hbs2-hub serve` UX backlog
 
+- [x] Show proposal mergeability before the user attempts a merge. CLI proposal
+  listings/details and `serve` report `clean`, `conflicts`, or an honest
+  `unknown`; a conflicting proposal names the files involved. The observation
+  carries the exact target and proposal commits so a renderer can reject a
+  stale answer. It is computed with `git merge-tree` without changing the
+  worktree, and `pr land` recomputes against the current target immediately
+  before merge, so an old green result cannot authorize a conflicting merge.
+  If this synchronous check is later cached or moved to the background, expose
+  its transient `checking`, `stale`, and `failed` states rather than presenting
+  them as clean.
 - Make inbox attention independent of opening the Inbox route. Both the
   browser extension and the standalone UI must start or subscribe to a
   lightweight mailbox-status source in the background and show an unseen-mail

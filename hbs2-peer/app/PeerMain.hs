@@ -56,6 +56,8 @@ import CheckMetrics
 import RefLog qualified
 import RefLog (reflogWorker)
 import LWWRef (lwwRefWorker)
+import RepositoryLeaseWorker (repositoryLeaseWorker)
+import ReachabilityObservation
 import Multicast
 import MailboxProtoWorker
 import HttpWorker
@@ -86,6 +88,7 @@ import HBS2.Peer.RPC.API.LWWRef
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.Notify
 import HBS2.Peer.CLI.Doctor
+import HBS2.Peer.RepositoryLease.Discovery
 import HBS2.Peer.CLI.Doctor.Repository
 import HBS2.Peer.CompleteObject (CompleteObjectError(..))
 import HBS2.Peer.RPC.Client.Unix (withRPC2)
@@ -356,7 +359,7 @@ runCLI = do
 
       c <- optional confOpt
 
-      resp <- (optional $ flag' True ( long "no-respawn" <> short 'R' <> help "NO respawn"))
+      resp <- optional (flag' True ( long "no-respawn" <> short 'R' <> help "NO respawn"))
                      <&> isNothing
 
       -- NOTE: respawn-by-default-now
@@ -953,6 +956,10 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                           _             -> Set.fromList [Clearnet]
   let helpFetchKeys   = runReader (cfgValue @PeerProxyFetchKey) syn & toKeys
   let tcpListen       = runReader (cfgValue @PeerListenTCPKey) syn & fromMaybe ""
+  let leaseAdvertReachable = runReader (cfgValue @PeerPublicAddressKey) syn
+        & Set.toList
+        & mapMaybe (fromStringMay @(PeerAddr L4Proto))
+  let observationPolicy = reachabilityObservationPolicy conf
   let tcpProbeWait    = runReader (cfgValue @PeerTcpProbeWaitKey) syn
                           & fromInteger @(Timeout 'Seconds) . fromMaybe 300
 
@@ -1047,6 +1054,16 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
   brains <- newBasicBrains @e conf
 
+  observationStartedAt <- liftIO $ floor <$> getPOSIXTime
+  let observationWindowSeconds =
+        reachabilityObservationWindowSeconds observationPolicy
+      observationWindowAt timestamp = timestamp `div` observationWindowSeconds
+      observationJournalPolicy = ReachabilityJournalPolicy
+        (reachabilityObservationRetentionWindows observationPolicy)
+      observationTickSeconds = min 30 observationWindowSeconds
+  reachabilityObserver <- liftIO $
+    newReachabilityObserver (observationWindowAt observationStartedAt)
+
   bProbe <- newSimpleProbe "Brains"
   addProbe bProbe
   basicBrainsSetProbe brains bProbe
@@ -1092,8 +1109,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 let socks5 = useSocks5 >>= fromStringMay @(PeerAddr L4Proto)
 
                 tcpEnv <- newMessagingTCP addr
-                             <&> set tcpOnClientStarted (onClientTCPConnected brains)
                              <&> set tcpSOCKS5 socks5
+                               . set tcpOnClientStarted (onClientTCPConnected brains)
 
                 lift do
                   tcpProbe <- newSimpleProbe "MessagingTCP"
@@ -1144,6 +1161,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
   byPassMessagingSetProbe byPass byPassProbe
 
   penv <- newPeerEnv pl (AnyStorage s) (Fabriq byPass) peerSelf
+  repositoryAdvertCache <- liftIO newRepositoryAdvertCache
+  repositoryAdvertQueries <- liftIO newRepositoryAdvertQueries
   do
     probe <- newSimpleProbe "PeerEnv_Main"
     addProbe probe
@@ -1258,6 +1277,43 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
               env <- ask
 
+              let publishRepositoryAdvert bytes = withPeerM env do
+                    now <- liftIO getPOSIXTime <&> floor
+                    void $ liftIO $ insertRepositoryAdvertAt
+                      now repositoryAdvertCache bytes
+                    broadCastMessage @e (RepositoryAdvertPublish bytes)
+
+              let persistReachabilityEvidence =
+                    foldM persistOne (Right ())
+                    where
+                      persistOne failure@Left{} _ = pure failure
+                      persistOne (Right ()) (provider, window) =
+                        putReachabilityWindow @e brains
+                          observationJournalPolicy provider window
+
+              let reportReachabilityTransition result =
+                    case result of
+                      Right () -> pure ()
+                      Left problem -> err $
+                        "reachability observation failed" <+> viaShow problem
+
+              let currentObservationWindow =
+                    liftIO $ observationWindowAt . floor <$> getPOSIXTime
+
+              let recordVerifiedReachability provider = do
+                    windowIndex <- currentObservationWindow
+                    liftIO $
+                      recordReachabilitySuccess reachabilityObserver
+                        windowIndex provider persistReachabilityEvidence
+                      >>= reportReachabilityTransition
+
+              let advanceReachabilityJournal = do
+                    windowIndex <- currentObservationWindow
+                    liftIO $
+                      advanceReachabilityObserver reachabilityObserver windowIndex
+                        persistReachabilityEvidence
+                      >>= reportReachabilityTransition
+
               pnonce <- peerNonce @e
 
               pl <- getPeerLocator @e
@@ -1321,6 +1377,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                        notice $ prettyLogPeer p <+> "banned"
 
                    | otherwise -> do
+
+                    recordVerifiedReachability (view peerSignKey pd)
 
                     update pd (KnownPeerKey p) id
 
@@ -1440,6 +1498,10 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
 
                 peerThread "peerPingLoop" (peerPingLoop @e conf penv)
 
+                peerThread "reachabilityObservationLoop" $ forever do
+                  pause @'Seconds (fromIntegral observationTickSeconds)
+                  advanceReachabilityJournal
+
                 peerThread "knownPeersPingLoop" (knownPeersPingLoop @e conf (SomeBrains brains))
 
                 when bootstrapOn $
@@ -1462,6 +1524,10 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                 peerThread "refChanNotifyLogWorker" (refChanNotifyLogWorker @e conf (SomeBrains brains))
 
                 peerThread "lwwRefWorker" (lwwRefWorker @e conf (SomeBrains brains))
+
+                peerThread "repositoryLeaseWorker" $
+                  liftIO (repositoryLeaseWorker leaseAdvertReachable
+                    publishRepositoryAdvert pc (SomeBrains brains) (AnyStorage s))
 
                 -- setup mailboxes stuff
                 let PeerConfig defConf = coerce conf
@@ -1492,6 +1558,9 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                     -- TODO: change-all-to-authorized
                     , makeResponse ((authorized . subscribed (SomeBrains brains)) lwwRefProtoA)
                     , makeResponse ((authorized . mailboxProto False) mailboxWorker)
+                    , makeResponse (authorized
+                        (repositoryAdvertProto
+                          repositoryAdvertCache repositoryAdvertQueries))
                     ]
 
 
@@ -1583,6 +1652,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                            , rpcDoRefChanNotify = refChanNotifyAction
                            , rpcMailboxService = AnyMailboxService @s mailboxWorker
                            , rpcMailboxAdapter  = AnyMailboxAdapter @s mailboxWorker
+                           , rpcRepositoryAdvertCache = repositoryAdvertCache
+                           , rpcRepositoryAdvertQueries = repositoryAdvertQueries
                            }
 
   m1 <- liftIO $ asyncLinked $ runMessagingUnix rpcmsg

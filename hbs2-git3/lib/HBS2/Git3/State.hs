@@ -29,6 +29,7 @@ import HBS2.Peer.RPC.API.Storage
 import HBS2.Peer.RPC.Client.StorageClient
 import HBS2.System.Dir
 import HBS2.Peer.CLI.Detect
+import HBS2.Peer.Proto.RepositoryLease (replicaAdvertProvider)
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.HashSet (HashSet)
@@ -124,10 +125,8 @@ getRepoManifest = do
                <&> headMay
                >>= orThrow GitRepoManifestMalformed
 
-  runExceptT (getTreeContents sto mfref)
-     >>= orThrowPassIO
-     <&> TE.decodeUtf8With TE.lenientDecode . LBS.toStrict
-     <&> parseTop
+  (runExceptT (getTreeContents sto mfref) >>= orThrowPassIO)
+     <&> parseTop . TE.decodeUtf8With TE.lenientDecode . LBS.toStrict
      >>= orThrow GitRepoManifestMalformed
      <&> RepoManifest
 
@@ -155,7 +154,7 @@ withGit3Env :: Git3Perks m => Git3Env -> Git3 m a -> m a
 withGit3Env env a = runReaderT (fromGit3 a) env
 
 runGit3 :: Git3Perks m => Git3Env -> Git3 m b -> m b
-runGit3 env action = withGit3Env env action
+runGit3 = withGit3Env
 
 withStateDo :: (MonadUnliftIO m) => Git3 m a -> Git3 m a
 withStateDo action = do
@@ -279,6 +278,21 @@ waitRepo timeout repoKey = do
         when (rlv && rlog) $ done ()
 
         status "wait for peer"
+
+        -- A fresh peer often reaches its RPC socket before it has authenticated
+        -- its configured relay.  One lookup at that instant sees no peers and
+        -- permanently misses an otherwise live replica advert.  Keep discovery
+        -- beside the ordinary LWWRef polling until one provider authenticates or
+        -- this wait finishes; the ContT scope cancels the worker on every exit.
+        _ <- ContT $ withAsync $ flip fix 1 \next delay -> do
+          provider <- callRpcWaitMay @RpcRepositoryAdvertFind
+            (TimeoutSec 3) peerAPI repoKey
+          case join provider of
+            Just advert -> status $ "repository provider" <+>
+              pretty (AsBase58 (replicaAdvertProvider advert))
+            Nothing -> do
+              pause @'Seconds delay
+              next (min 10 (delay * 2))
 
         void $ lift (pollUntil limit (callRpcWaitMay @RpcPollAdd (TimeoutSec 2) peerAPI (repoKey, "lwwref", 31)))
                  >>= orThrow (RepoPeerNotAnswering limit)

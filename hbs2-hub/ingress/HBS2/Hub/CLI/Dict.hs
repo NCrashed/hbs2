@@ -24,6 +24,7 @@ import HBS2.Hub.CLI.Identity
 import HBS2.Hub.CLI.Project
 import HBS2.Hub.CLI.NativeHost
 import HBS2.Hub.CLI.Inbox
+import HBS2.Hub.CLI.Lease
 import HBS2.Hub.CLI.Maintainer
 import HBS2.Hub.CLI.Mcp
 import HBS2.Hub.CLI.Own
@@ -69,6 +70,7 @@ hubEntries :: forall c m . ( IsContext c
 hubEntries = do
   mcpEntries
   inboxEntries
+  leaseEntries
   acceptEntries
   commentEntries
   compactEntries
@@ -160,6 +162,7 @@ peerFulNames =
   , "hub:project:open"
   -- It reads the mailbox: see the mailbox line in its report.
   , "hub:status"
+  , "hub:lease:status"
   , "hub:doctor"
   -- It reads the manifest, for the name and the description.
   , "hub:code:refs"

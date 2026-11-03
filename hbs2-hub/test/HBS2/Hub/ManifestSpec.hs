@@ -80,6 +80,16 @@ spec = announce >> resolution >> do
         Left e    -> expectationFailure (show e)
         Right syn -> length (sigilsFor k syn) `shouldBe` 1
 
+    it "reads the bounded external replica target and ignores future fields" $ do
+      let readMinimum source = either (const Nothing) replicationMinimum (parseTop source)
+      readMinimum "(replication (availability-bps 9900) (minimum 3) (failure-domain site))"
+        `shouldBe` Just 3
+      readMinimum "(replication (minimum 0))" `shouldBe` Just 0
+      readMinimum "(replication (minimum 32))" `shouldBe` Just 32
+      readMinimum "(replication (minimum 33))" `shouldBe` Nothing
+      readMinimum "(replication (minimum -1))" `shouldBe` Nothing
+      readMinimum "(replication (minimum many))" `shouldBe` Nothing
+
     it "survives a text round-trip" $ do
       k <- kp
       let emitted = show (pretty (clauseOf (HubMailbox k hubRole Nothing)))

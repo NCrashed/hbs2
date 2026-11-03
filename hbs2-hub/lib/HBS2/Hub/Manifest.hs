@@ -31,6 +31,7 @@ module HBS2.Hub.Manifest
   , sigilsFor
   , mailboxClause
   , mailboxSigilClause
+  , replicationMinimum
   ) where
 
 import HBS2.Hub.Types (HubKey)
@@ -41,12 +42,14 @@ import HBS2.Data.Types.Refs (HashRef(..),pattern HashLike)
 import HBS2.Net.Auth.Credentials (pattern SignPubKeyLike)
 import HBS2.Prelude.Plated (Pretty(..))
 
+import Control.Applicative ((<|>))
 import Data.Config.Suckless.Syntax
 
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Char (isAlpha,isAlphaNum)
 import Data.Text qualified as Text
+import Data.Word (Word64)
 
 -- | A collaboration mailbox declared by the repo.
 data HubMailbox = HubMailbox
@@ -84,7 +87,7 @@ hubRole = "hub"
 -- @: _@) and the strict one in another, which is the same drift from the other
 -- side.
 mailboxes :: [Syntax c] -> [HubMailbox]
-mailboxes syn = concatMap one syn
+mailboxes = concatMap one
   where
     one = \case
       ListVal (SymbolVal "mailbox" : SignPubKeyLike k : StringLike role : rest) ->
@@ -117,7 +120,7 @@ mailboxByTier Nothing syn =
     `orElse` firstOf (const True) mbs
   where
     mbs = hubMailboxes syn
-    orElse a b = maybe b Just a
+    orElse = (<|>)
 
 firstOf :: (a -> Bool) -> [a] -> Maybe a
 firstOf p xs = case filter p xs of
@@ -126,7 +129,7 @@ firstOf p xs = case filter p xs of
 
 -- | Every @(mailbox-sigil ...)@ clause.
 sigils :: [Syntax c] -> [MailboxSigil]
-sigils syn = concatMap one syn
+sigils = concatMap one
   where
     one = \case
       -- Trailing @rest@ for the reason 'mailboxes' has one: a field added later
@@ -189,3 +192,18 @@ mailboxSigilClause :: MailboxSigil -> Syntax C
 mailboxSigilClause (MailboxSigil k h) =
   mkForm "mailbox-sigil"
     [ mkSym (show (pretty (AsBase58 k))), mkSym (show (pretty h)) ]
+
+-- | The signed M5 minimum of complete external replicas.
+--
+-- The git3 writer bounds this to 32.  Readers repeat that bound so a manifest
+-- written by hand cannot turn a future repair scheduler into unbounded work.
+-- Unknown fields in the enclosing clause are ignored, as all manifest readers
+-- do, and the first valid minimum wins.
+replicationMinimum :: [Syntax c] -> Maybe Word64
+replicationMinimum manifest = firstOf (const True)
+  [ fromIntegral n
+  | ListVal (SymbolVal "replication" : fields) <- manifest
+  , ListVal [SymbolVal "minimum", LitIntVal n] <- fields
+  , n >= 0
+  , n <= 32
+  ]

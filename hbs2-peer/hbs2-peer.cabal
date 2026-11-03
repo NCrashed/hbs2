@@ -23,6 +23,7 @@ common common-deps
         , async
         , bytestring
         , cache
+        , cborg
         , containers
         , data-default
         , deepseq
@@ -142,6 +143,11 @@ library
     exposed-modules:
       HBS2.Peer.Prelude
       HBS2.Peer.Brains
+      HBS2.Peer.RepositoryLease
+      HBS2.Peer.RepositoryLease.Admission
+      HBS2.Peer.RepositoryLease.Discovery
+      HBS2.Peer.RepositoryLease.Worker
+      HBS2.Peer.StorageAudit
       HBS2.Peer.Notify
       HBS2.Peer.RefChanNotifyLog
       HBS2.Peer.CompleteObject
@@ -171,6 +177,7 @@ library
       HBS2.Peer.Proto.Mailbox.Merge
       HBS2.Peer.Proto.Mailbox.Nonce
       HBS2.Peer.Proto.Relayed
+      HBS2.Peer.Proto.RepositoryLease
       HBS2.Peer.Proto.Mailbox.PolicyCache
       HBS2.Peer.Proto.Mailbox.Ref
       HBS2.Peer.Proto.Mailbox.Policy
@@ -209,12 +216,18 @@ test-suite test
 
     other-modules:
         MailboxFixture
+        Brains
         MailboxMerge
         MailboxStatus
         MailboxPolicy
         MailboxEntry
         MailboxPoW
         PeerMetaSpec
+        RepositoryLeaseSpec
+        ReachabilityJournalSpec
+        ReachabilityObservationSpec
+        StorageAuditRetrievalSpec
+        ReachabilityObservation
         MailboxConfig
         MailboxMerged
         MailboxMergedSpec
@@ -229,6 +242,7 @@ test-suite test
         BlockSizeCacheStateSpec
         DoctorSpec
         CompleteObjectSpec
+        PeerConfigSpec
         -- from app/: these exercise the config and policy the peer itself
         -- uses, so the tests read the real modules rather than copies.
         PeerConfig
@@ -246,8 +260,10 @@ test-suite test
           base, hbs2-peer, hbs2-core, hbs2-storage-simple
         , aeson
         , async
+        , base16-bytestring
         , bytestring
         , cache
+        , cborg
         , containers
         , db-pipe
         , directory
@@ -260,6 +276,7 @@ test-suite test
         , random
         , safe
         , serialise
+        , sqlite-simple
         , stm
         , streaming
         , tasty
@@ -276,6 +293,7 @@ test-suite test
         , string-conversions
         , filepath
         , temporary
+        , time
         , unliftio
         , resourcet
         , text
@@ -291,6 +309,7 @@ executable hbs2-peer
 
     other-modules:
                       BlockDownloadNew
+                    , StorageAuditTransport
                     , BlockSizeCacheState
                     , BrainyPeerLocator
                     , ByPassWorker
@@ -314,6 +333,7 @@ executable hbs2-peer
                     , RPC2.Die
                     , RPC2.ByPassStat
                     , RPC2.Probes
+                    , RPC2.RepositoryLease
                     , RPC2.LogLevel
                     , RPC2.Peers
                     , RPC2.PexInfo
@@ -328,6 +348,8 @@ executable hbs2-peer
                     , PeerLogger
                     , PeerConfig
                     , RefLog
+                    , RepositoryLeaseWorker
+                    , ReachabilityObservation
                     , RefChan
                     , RefChanNotifyLog
                     , LWWRef

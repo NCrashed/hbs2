@@ -11,6 +11,7 @@ module HBS2.Peer.Proto
   , module HBS2.Peer.Proto.RefLog
   , module HBS2.Peer.Proto.RefChan
   , module HBS2.Peer.Proto.AnyRef
+  , module HBS2.Peer.Proto.RepositoryLease
   , module HBS2.Net.Proto.Types
   , module HBS2.Net.Proto.Sessions
   , module HBS2.Net.Proto.Service
@@ -28,6 +29,7 @@ import HBS2.Peer.Proto.PeerExchange
 import HBS2.Peer.Proto.RefLog
 import HBS2.Peer.Proto.RefChan hiding (Notify)
 import HBS2.Peer.Proto.AnyRef
+import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.Proto.LWWRef
 import HBS2.Peer.Proto.Mailbox
 
@@ -166,6 +168,13 @@ instance HasProtocol L4Proto (MailBoxProto HBS2Basic L4Proto) where
   -- TODO: limit-request-period
   requestPeriodLim = NoLimit -- ReqLimPerMessage 1
 
+instance HasProtocol L4Proto RepositoryAdvertMessage where
+  type instance ProtocolId RepositoryAdvertMessage = 14001
+  type instance Encoded L4Proto = ByteString
+  decode = either (const Nothing) Just . deserialiseOrFail
+  encode = serialise
+  requestPeriodLim = ReqLimPerProto 1
+
 instance Serialise (RefChanValidate UNIX) => HasProtocol UNIX (RefChanValidate UNIX) where
   type instance ProtocolId (RefChanValidate UNIX) = 0xFFFA0001
   type instance Encoded UNIX = ByteString
@@ -237,4 +246,3 @@ instance MonadIO m => HasNonces () m where
   newNonce = do
     n <- liftIO ( Crypto.newNonce <&> Crypto.encode )
     pure $ BS.take 32 n
-

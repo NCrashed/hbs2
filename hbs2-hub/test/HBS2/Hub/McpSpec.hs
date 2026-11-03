@@ -102,7 +102,7 @@ tooling = describe "hub mcp: the tools" $ do
   -- "unknown verb" to every call, which nothing but a call would reveal.
   it "runs only verbs this build has" $
     forM_ tools $ \t ->
-      (toolName t, verbOf (\s -> HM.member (Id (Text.pack s)) theDict) (toolVerb t) /= Nothing)
+      (toolName t, isJust (verbOf (\s -> HM.member (Id (Text.pack s)) theDict) (toolVerb t)))
         `shouldBe` (toolName t, True)
 
   it "gives every write a dry run, and says canon is permanent where it is written" $
@@ -114,7 +114,13 @@ tooling = describe "hub mcp: the tools" $ do
   it "offers no write to a read-only server" $ do
     let ro = toolsFor cfg0 { mcReadOnly = True }
     [ toolName t | t <- ro, toolAccess t == Writes ] `shouldBe` []
+    fmap toolName ro `shouldNotContain` ["lease_status"]
     length ro `shouldSatisfy` (> 10)
+
+  it "offers provider capacity only locally" $ do
+    argvOf (plan cfg0 "lease_status" [])
+      `shouldBe` Just ["lease","status","--json"]
+    toolAccess (toolNamed "lease_status") `shouldBe` LocalReads
 
   it "fills the repository from the server's default" $
     argvOf (plan cfg0 "issue_list" [("status", "open")])

@@ -18,6 +18,7 @@ import HBS2.Net.Proto.Service
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.Class
 import HBS2.Peer.Brains
+import HBS2.Peer.RepositoryLease.Discovery
 
 import Data.Config.Suckless.Syntax
 import Data.Config.Suckless.Parse
@@ -28,7 +29,6 @@ import Control.Monad.Reader
 import Control.Concurrent (ThreadId)
 import Data.ByteString ( ByteString )
 import UnliftIO
-import HBS2.Prelude (asyncLinked)
 
 data RPC2Context =
   RPC2Context
@@ -50,6 +50,8 @@ data RPC2Context =
   , rpcDoRefChanNotify        :: (PubKey 'Sign 'HBS2Basic, SignedBox ByteString 'HBS2Basic) -> IO ()
   , rpcMailboxService         :: AnyMailboxService HBS2Basic
   , rpcMailboxAdapter         :: AnyMailboxAdapter HBS2Basic
+  , rpcRepositoryAdvertCache  :: RepositoryAdvertCache
+  , rpcRepositoryAdvertQueries :: RepositoryAdvertQueries (Peer L4Proto)
   }
 
 instance (Monad m, Messaging MessagingUnix UNIX (Encoded UNIX)) => HasFabriq UNIX (ReaderT RPC2Context m) where
@@ -61,6 +63,4 @@ instance Monad m => HasOwnPeer UNIX (ReaderT RPC2Context m) where
 instance (MonadUnliftIO m, HasProtocol UNIX (ServiceProto (api :: [Type]) UNIX))
   => HasDeferred (ServiceProto api UNIX) UNIX  m where
   deferred m = void $ async m
-
-
 

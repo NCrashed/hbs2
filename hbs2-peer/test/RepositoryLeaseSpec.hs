@@ -1,0 +1,1412 @@
+module RepositoryLeaseSpec (tests) where
+
+import HBS2.Data.Types.Refs
+import HBS2.Data.Types.SignedBox
+import HBS2.Base58
+import HBS2.Hash
+import HBS2.Merkle
+import HBS2.Net.Auth.Credentials
+import HBS2.Net.Auth.Schema()
+import HBS2.OrDie
+import HBS2.Peer.Proto ()
+import HBS2.Peer.Proto.LWWRef
+import HBS2.Peer.Proto.RefLog
+import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.Brains
+import HBS2.Peer.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Peer.RepositoryLease.Discovery
+import HBS2.Peer.RepositoryLease.Worker
+import HBS2.Prelude.Plated
+import HBS2.Storage
+import HBS2.Storage.Inventory
+import HBS2.Storage.Resource
+import HBS2.Storage.Simple
+
+import Codec.CBOR.Encoding (encodeListLen, encodeWord)
+import Codec.CBOR.Write (toLazyByteString)
+import Codec.Serialise (deserialiseOrFail)
+import Codec.Serialise qualified as CBOR
+import Control.Concurrent.Async
+import Data.ByteString.Base16 qualified as B16
+import Data.ByteString.Char8 qualified as B8
+import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Map.Strict qualified as Map
+import Data.IORef
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Either (isLeft, isRight)
+import Data.Word (Word16, Word64)
+import Lens.Micro.Platform
+import System.FilePath
+import System.IO.Temp
+import Test.Tasty
+import Test.Tasty.HUnit
+import UnliftIO (bracket)
+
+import Brains qualified as DB
+import PeerConfig
+
+data Fixture = Fixture
+  { fixtureStorage       :: AnyStorage
+  , fixtureRepository    :: PubKey 'Sign 'HBS2Basic
+  , fixturePayloadBlock  :: Hash HbSync
+  , fixtureStorageWrites :: IORef Int
+  }
+
+data CountingStorage = CountingStorage AnyStorage (IORef Int)
+
+-- The shape serialised by hbs2-peer 0.26.0.x before grace periods were
+-- introduced.  This fixture guards the durable on-disk compatibility path.
+data RepositoryLeaseV1 = RepositoryLeaseV1
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseV1
+
+-- The durable shape used after grace periods and before update-lag tracking.
+data RepositoryLeaseV2 = RepositoryLeaseV2
+  Word16
+  RepositoryLeaseId
+  (PubKey 'Sign 'HBS2Basic)
+  RepositoryLeaseState
+  Word64
+  Word64
+  Word64
+  Word64
+  (Maybe Word64)
+  Word64
+  (Maybe RepositorySnapshot)
+  (Maybe Text)
+  deriving stock (Generic)
+
+instance Serialise RepositoryLeaseV2
+
+instance Storage CountingStorage HbSync LBS.ByteString IO where
+  putBlock (CountingStorage storage writes) bytes =
+    countWrite writes (putBlock storage bytes)
+  enqueueBlock (CountingStorage storage writes) bytes =
+    countWrite writes (enqueueBlock storage bytes)
+  getBlock (CountingStorage storage _) = getBlock storage
+  delBlock (CountingStorage storage writes) hash =
+    countWrite writes (delBlock storage hash)
+  getChunk (CountingStorage storage _) = getChunk storage
+  hasBlock (CountingStorage storage _) = hasBlock storage
+  updateRef (CountingStorage storage writes) ref hash =
+    countWrite writes (updateRef storage ref hash)
+  getRef (CountingStorage storage _) = getRef storage
+  delRef (CountingStorage storage writes) ref =
+    countWrite writes (delRef storage ref)
+
+countWrite :: IORef Int -> IO a -> IO a
+countWrite writes action = atomicModifyIORef' writes (\count -> (count + 1, ()))
+  >> action
+
+data TestBrains = TestBrains
+  { testLease :: IORef RepositoryLease
+  , testPolls :: IORef [(PubKey 'Sign 'HBS2Basic, String, Int)]
+  }
+
+instance HasBrains L4Proto TestBrains where
+  putRepositoryLease brains = liftIO . writeIORef (testLease brains)
+  getRepositoryLease brains leaseId = do
+    lease <- liftIO $ readIORef (testLease brains)
+    pure $ if repositoryLeaseId lease == leaseId then Just lease else Nothing
+  listRepositoryLeases brains = liftIO $ pure <$> readIORef (testLease brains)
+  isPolledRef brains kind refKey =
+    liftIO $ any (\(storedKey, storedKind, _) ->
+      storedKey == refKey && storedKind == kind)
+      <$> readIORef (testPolls brains)
+  addPolledRef brains refKey kind priority =
+    liftIO $ atomicModifyIORef' (testPolls brains)
+      (\polls -> ((refKey, kind, priority) : polls, ()))
+
+tests :: TestTree
+tests = testGroup "repository lease"
+  [ repositoryLeaseWireGoldenTests
+
+  , testCase "adapts a repository lease to generic storage evidence" $ do
+      let inactive = repositoryLeaseFixture (makeRepositoryLeaseId goldenRepository 77)
+            goldenRepository
+          active = inactive { repositoryLeaseSnapshot = Just goldenSnapshot }
+          expected = StorageSnapshot
+            { storageSnapshotResource = repositoryStorageResource goldenRepository
+            , storageSnapshotId = repositorySnapshotId goldenSnapshot
+            , storageSnapshotInventoryRoot = repositorySnapshotInventoryRoot goldenSnapshot
+            , storageSnapshotBlockCount = repositorySnapshotBlockCount goldenSnapshot
+            , storageSnapshotLogicalBytes = repositorySnapshotLogicalBytes goldenSnapshot
+            , storageSnapshotCompletedAt = repositorySnapshotCompletedAt goldenSnapshot
+            }
+      storageProfileId repositoryStorageProfile @?= "hbs2-git-repository-v1"
+      repositoryLeaseStorageSnapshot inactive @?= Nothing
+      repositoryLeaseStorageSnapshot active @?= Just expected
+
+  , testCase "a complete repository is inventoried and pinned" $
+      withRepository $ \Fixture{..} -> do
+        discovered <- discoverRepositorySnapshot generous fixtureStorage fixtureRepository
+                        >>= expectRight
+        assertBool "payload belongs to inventory" $
+          Map.member (HashRef fixturePayloadBlock) (candidateInventory discovered)
+
+        let leaseId = makeRepositoryLeaseId fixtureRepository 1
+        snapshot <- sealRepositorySnapshot fixtureStorage leaseId discovered
+                      >>= expectRight
+        pin <- getRef fixtureStorage (RepositoryLeasePin leaseId)
+        fmap HashRef pin @?= Just (repositorySnapshotPinRoot snapshot)
+
+        commitmentBytes <- getBlock fixtureStorage
+          (fromHashRef (repositorySnapshotInventoryRoot snapshot))
+            >>= orThrowUser "inventory commitment root is missing"
+        commitment <- deserialiseOrFail @(MTree [RepositoryInventoryEntry]) commitmentBytes
+                        & either (assertFailure . show) pure
+        let expectedEntries =
+              [ RepositoryInventoryEntry hashRef size
+              | (hashRef, size) <- Map.toAscList (candidateInventory discovered)
+              ]
+        case commitment of
+          MLeaf actualEntries -> actualEntries @?= expectedEntries
+          MNode{} -> assertFailure "small inventory unexpectedly has an internal root"
+
+        providerCredentials <- newCredentials @'HBS2Basic
+        let lease = repositoryLeaseFixture leaseId fixtureRepository
+        (_, receipt) <- issueRepositoryReplicaReceipt
+          fixtureStorage providerCredentials lease snapshot >>= expectRight
+        replicaReceiptSnapshotId receipt @?= repositorySnapshotId snapshot
+        replicaReceiptInventoryRoot receipt @?=
+          repositorySnapshotInventoryRoot snapshot
+        (_, receiptSigner, storedReceipt) <-
+          readRepositoryReplicaReceipt fixtureStorage leaseId >>= expectRight
+        receiptSigner @?= view peerSignPk providerCredentials
+        storedReceipt @?= receipt
+
+        releaseRepositoryLeasePin fixtureStorage leaseId
+        getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        releaseRepositoryReplicaReceipt fixtureStorage leaseId
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
+
+  , testCase "a missing transaction payload cannot become a snapshot" $
+      withRepository $ \Fixture{..} -> do
+        delBlock fixtureStorage fixturePayloadBlock
+        discoverRepositorySnapshot generous fixtureStorage fixtureRepository >>= \case
+          Left (RepositoryInventoryIncomplete InventoryTraversalComplete 1 0 0) -> pure ()
+          other -> assertFailure ("expected one missing block, got " <> show other)
+
+  , testCase "the block limit cannot produce an apparently smaller snapshot" $
+      withRepository $ \Fixture{..} -> do
+        discoverRepositorySnapshot (InventoryLimits 1 maxBound)
+          fixtureStorage fixtureRepository >>= \case
+            Left (RepositoryInventoryIncomplete InventoryBlockLimitExceeded{} _ _ _) -> pure ()
+            other -> assertFailure ("expected the block limit, got " <> show other)
+
+  , testCase "the worker activates, degrades without dropping the old pin, and terminates" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 2
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let brains = TestBrains leaseRef pollsRef
+            someBrains = SomeBrains @L4Proto brains
+
+        active <- refreshRepositoryLease providerCredentials someBrains fixtureStorage initial
+        repositoryLeaseState active @?= RepositoryLeaseActive
+        activeSnapshot <- repositoryLeaseSnapshot active
+                            & maybe (assertFailure "active lease has no snapshot") pure
+        polls <- readIORef pollsRef
+        assertBool "LWWRef was subscribed" $
+          any (\(storedKey, storedKind, priority) ->
+            storedKey == fixtureRepository
+              && storedKind == "lwwref"
+              && priority == 1) polls
+        assertBool "RefLog was subscribed" (length polls == 2)
+
+        (receiptHash, receiptSigner, receipt) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        receiptSigner @?= view peerSignPk providerCredentials
+        replicaReceiptSnapshotId receipt @?= repositorySnapshotId activeSnapshot
+
+        writesBeforeStableRefresh <- readIORef fixtureStorageWrites
+        stable <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage active
+        stable @?= active
+        readIORef fixtureStorageWrites >>= (@?= writesBeforeStableRefresh)
+        (stableReceiptHash, _, _) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        stableReceiptHash @?= receiptHash
+
+        releaseRepositoryReplicaReceipt fixtureStorage leaseId
+        receiptRepaired <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage stable
+        (_, restoredSigner, restoredReceipt) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        restoredSigner @?= view peerSignPk providerCredentials
+        restoredReceipt @?= receipt
+
+        receiptBytes <- getBlock fixtureStorage (fromHashRef receiptHash)
+          >>= orThrowUser "receipt block disappeared"
+        receiptBox <- deserialiseOrFail
+          @(SignedBox ReplicaReceiptV1 'HBS2Basic) receiptBytes
+          & either (assertFailure . show) pure
+        let forgedSignature :: SignedBox ReplicaReceiptV1 'HBS2Basic
+            forgedSignature = case receiptBox of
+              SignedBox signer body signature ->
+                SignedBox signer (body <> "tampered") signature
+        forgedSignatureHash <- put fixtureStorage (serialise forgedSignature)
+        updateRef fixtureStorage (RepositoryLeaseReceipt leaseId)
+          forgedSignatureHash
+        readRepositoryReplicaReceipt fixtureStorage leaseId >>= \case
+          Left RepositoryReceiptInvalid{} -> pure ()
+          other -> assertFailure ("expected an invalid receipt signature, got " <> show other)
+
+        signatureRepaired <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage receiptRepaired
+        repositoryLeaseState signatureRepaired @?= RepositoryLeaseActive
+        (_, signatureRepairedSigner, signatureRepairedReceipt) <-
+          readRepositoryReplicaReceipt fixtureStorage leaseId >>= expectRight
+        signatureRepairedSigner @?= view peerSignPk providerCredentials
+        signatureRepairedReceipt @?= receipt
+
+        attacker <- newCredentials @'HBS2Basic
+        let attackerKey = view peerSignPk attacker
+            forgedPayload = receipt { replicaReceiptProvider = attackerKey }
+            forgedBox = makeSignedBox @'HBS2Basic attackerKey
+              (view peerSignSk attacker) forgedPayload
+        forgedHash <- put fixtureStorage (serialise forgedBox)
+        updateRef fixtureStorage (RepositoryLeaseReceipt leaseId) forgedHash
+        repaired <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage signatureRepaired
+        repositoryLeaseState repaired @?= RepositoryLeaseActive
+        (_, repairedSigner, _) <- readRepositoryReplicaReceipt
+          fixtureStorage leaseId >>= expectRight
+        repairedSigner @?= view peerSignPk providerCredentials
+
+        releaseRepositoryLeasePin fixtureStorage leaseId
+        repinned <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage repaired
+        repairedPin <- getRef fixtureStorage (RepositoryLeasePin leaseId)
+        fmap HashRef repairedPin @?= Just (repositorySnapshotPinRoot activeSnapshot)
+
+        delBlock fixtureStorage fixturePayloadBlock
+        degraded <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage repinned
+        repositoryLeaseState degraded @?= RepositoryLeaseDegraded
+        repositoryLeaseSnapshot degraded @?= Just activeSnapshot
+        pin <- getRef fixtureStorage (RepositoryLeasePin leaseId)
+        fmap HashRef pin @?= Just (repositorySnapshotPinRoot activeSnapshot)
+
+        let terminated = degraded { repositoryLeaseState = RepositoryLeaseTerminated }
+        writeIORef leaseRef terminated
+        staleResult <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage degraded
+        staleResult @?= terminated
+        getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
+        _ <- refreshRepositoryLease
+          providerCredentials someBrains fixtureStorage terminated
+        getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
+
+  , testCase "a complete receipt produces a signed expiring replica advert" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 3
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+            reachable = ["tcp://127.0.0.1:10351"]
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+
+        active <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage initial
+        snapshot <- repositoryLeaseSnapshot active
+          & maybe (assertFailure "active lease has no snapshot") pure
+
+        issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials initial snapshot >>= \case
+            Left RepositoryAdvertLeaseInactive -> pure ()
+            other -> assertFailure ("expected an inactive lease refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 0 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected a zero TTL refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 901 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected an excessive TTL refusal, got " <> show other)
+        assertBool "the maximum advert TTL was refused" . isRight =<<
+          issueRepositoryReplicaAdvertAt
+            100 900 reachable replicaAdvertCapabilityBlockDownload
+            fixtureStorage providerCredentials active snapshot
+        issueRepositoryReplicaAdvertAt
+          maxBound 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertInvalidLifetime -> pure ()
+            other -> assertFailure ("expected a saturated clock refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 60 [] replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertNoReachableAddress -> pure ()
+            other -> assertFailure ("expected an empty endpoint refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 60 (replicate 9 "tcp://127.0.0.1:10351")
+          replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertTooManyAddresses -> pure ()
+            other -> assertFailure ("expected an endpoint limit refusal, got " <> show other)
+        let oversizedAddress = fromString $
+              "tcp://" <> replicate repositoryAdvertMaxBoxBytes 'a' <> ":10351"
+        issueRepositoryReplicaAdvertAt
+          100 60 [oversizedAddress]
+          replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertTooLarge -> pure ()
+            other -> assertFailure ("expected an advert size refusal, got " <> show other)
+        issueRepositoryReplicaAdvertAt
+          100 60 reachable 0
+          fixtureStorage providerCredentials active snapshot >>= \case
+            Left RepositoryAdvertCannotServeBlocks -> pure ()
+            other -> assertFailure ("expected a capability refusal, got " <> show other)
+
+        (advertHash, advert) <- issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= expectRight
+        replicaAdvertRepository advert @?= fixtureRepository
+        replicaAdvertProvider advert @?= view peerSignPk providerCredentials
+        replicaAdvertSnapshotId advert @?= repositorySnapshotId snapshot
+        replicaAdvertReachableVia advert @?= reachable
+        replicaAdvertIssuedAt advert @?= 100
+        replicaAdvertExpiresAt advert @?= 160
+
+        (storedHash, signer, storedAdvert) <- readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository (view peerSignPk providerCredentials)
+          >>= expectRight
+        storedHash @?= advertHash
+        signer @?= view peerSignPk providerCredentials
+        storedAdvert @?= advert
+
+        let wrongRepository = advert
+              { replicaAdvertRepository = goldenRepository }
+            wrongRepositoryBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) wrongRepository
+        wrongRepositoryHash <- put fixtureStorage (serialise wrongRepositoryBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) wrongRepositoryHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertMismatch -> pure ()
+            other -> assertFailure ("expected an identity mismatch, got " <> show other)
+
+        let futureAdvert = advert
+              { replicaAdvertIssuedAt = 120
+              , replicaAdvertExpiresAt = 180
+              }
+            futureAdvertBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) futureAdvert
+        futureAdvertHash <- put fixtureStorage (serialise futureAdvertBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) futureAdvertHash
+        readRepositoryReplicaAdvertAt
+          119 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertNotYetValid -> pure ()
+            other -> assertFailure ("expected a future advert refusal, got " <> show other)
+
+        let invalidInterval = advert
+              { replicaAdvertIssuedAt = replicaAdvertExpiresAt advert }
+            invalidIntervalBox = makeSignedBox @'HBS2Basic signer
+              (view peerSignSk providerCredentials) invalidInterval
+        invalidIntervalHash <- put fixtureStorage (serialise invalidIntervalBox)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) invalidIntervalHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertMismatch -> pure ()
+            other -> assertFailure ("expected an invalid advert interval, got " <> show other)
+
+        advertBytes <- getBlock fixtureStorage (fromHashRef advertHash)
+          >>= orThrowUser "advert block disappeared"
+        advertBox <- deserialiseOrFail
+          @(SignedBox ReplicaAdvertV1 'HBS2Basic) advertBytes
+          & either (assertFailure . show) pure
+        let forgedSignature :: SignedBox ReplicaAdvertV1 'HBS2Basic
+            forgedSignature = case advertBox of
+              SignedBox signerKey body signature ->
+                SignedBox signerKey (body <> "tampered") signature
+        forgedHash <- put fixtureStorage (serialise forgedSignature)
+        updateRef fixtureStorage
+          (RepositoryReplicaAdvert fixtureRepository signer) forgedHash
+        readRepositoryReplicaAdvertAt
+          159 fixtureStorage fixtureRepository signer >>= \case
+            Left RepositoryAdvertInvalid{} -> pure ()
+            other -> assertFailure ("expected an invalid advert signature, got " <> show other)
+
+        _ <- issueRepositoryReplicaAdvertAt
+          100 60 reachable replicaAdvertCapabilityBlockDownload
+          fixtureStorage providerCredentials active snapshot >>= expectRight
+
+        readRepositoryReplicaAdvertAt 160 fixtureStorage fixtureRepository signer
+          >>= \case
+            Left RepositoryAdvertExpired -> pure ()
+            other -> assertFailure ("expected an expired advert, got " <> show other)
+
+        releaseRepositoryReplicaAdvert fixtureStorage fixtureRepository signer
+        readRepositoryReplicaAdvertAt 159 fixtureStorage fixtureRepository signer
+          >>= \case
+            Left RepositoryAdvertMissing -> pure ()
+            other -> assertFailure ("expected a withdrawn advert, got " <> show other)
+
+  , testCase "the relay cache verifies, bounds, renews, and expires adverts" $ do
+      repository <- newRepositoryKey
+      firstProvider <- newCredentials @'HBS2Basic
+      secondProvider <- newCredentials @'HBS2Basic
+      cache <- newRepositoryAdvertCache
+      let first = signedAdvertBytes firstProvider repository 100 160
+          stale = signedAdvertBytes firstProvider repository 90 150
+          renewed = signedAdvertBytes firstProvider repository 120 180
+          second = signedAdvertBytes secondProvider repository 100 170
+      insertRepositoryAdvertAt 100 cache first
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      insertRepositoryAdvertAt 100 cache first
+        >>= (@?= Right RepositoryAdvertCacheUnchanged)
+      insertRepositoryAdvertAt 100 cache stale
+        >>= (@?= Right RepositoryAdvertCacheStale)
+      lookupRepositoryAdvertsAt 100 cache repository 8 >>= (@?= [first])
+      insertRepositoryAdvertAt 120 cache renewed
+        >>= (@?= Right RepositoryAdvertCacheReplaced)
+      insertRepositoryAdvertAt 120 cache second
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      lookupRepositoryAdvertsAt 120 cache repository 1 >>= \results ->
+        length results @?= 1
+      lookupRepositoryAdvertsAt 120 cache repository maxBound >>= \results ->
+        length results @?= 2
+      lookupRepositoryReplicaAdvertsAt 120 cache repository maxBound
+        >>= \adverts ->
+          fmap replicaAdvertRepository adverts @?= replicate 2 repository
+      repositoryAdvertCacheSizeAt 169 cache >>= (@?= 2)
+      repositoryAdvertCacheSizeAt 170 cache >>= (@?= 1)
+      repositoryAdvertCacheSizeAt 180 cache >>= (@?= 0)
+
+  , testCase "the relay cache rejects invalid and excess providers" $ do
+      repository <- newRepositoryKey
+      cache <- newRepositoryAdvertCache
+      credentials <- replicateM
+        (repositoryAdvertCacheMaxProviders + 1)
+        (newCredentials @'HBS2Basic)
+      for_ (zip [1 :: Word64 ..] (take repositoryAdvertCacheMaxProviders credentials)) $
+        \(offset, provider) ->
+          insertRepositoryAdvertAt 110 cache
+            (signedAdvertBytes provider repository (100 + offset) (160 + offset))
+              >>= (@?= Right RepositoryAdvertCacheInserted)
+      insertRepositoryAdvertAt 110 cache
+        (signedAdvertBytes (last credentials) repository 110 170)
+          >>= (@?= Left RepositoryAdvertCacheFull)
+      let signer = head credentials
+          wrongProvider = view peerSignPk (credentials !! 1)
+          invalidPayload = (networkAdvertPayload signer repository 100 160)
+            { replicaAdvertProvider = wrongProvider }
+          invalidBox = makeSignedBox @'HBS2Basic
+            (view peerSignPk signer) (view peerSignSk signer) invalidPayload
+      insertRepositoryAdvertAt 110 cache
+        (LBS.toStrict (serialise invalidBox)) >>= \case
+          Left (RepositoryAdvertCacheInvalid RepositoryAdvertMismatch) -> pure ()
+          other -> assertFailure ("expected an invalid signed identity, got " <> show other)
+      insertRepositoryAdvertAt 110 cache
+        (B8.replicate (repositoryAdvertMaxBoxBytes + 1) 'x') >>= \case
+          Left (RepositoryAdvertCacheInvalid RepositoryAdvertTooLarge) -> pure ()
+          other -> assertFailure ("expected an oversized advert refusal, got " <> show other)
+
+  , testCase "the relay cache admits exactly its repository limit" $ do
+      provider <- newCredentials @'HBS2Basic
+      repositories <- replicateM
+        (repositoryAdvertCacheMaxRepositories + 1)
+        newRepositoryKey
+      cache <- newRepositoryAdvertCache
+      for_ (take repositoryAdvertCacheMaxRepositories repositories) $ \repository ->
+        insertRepositoryAdvertAt 100 cache
+          (signedAdvertBytes provider repository 100 160)
+            >>= (@?= Right RepositoryAdvertCacheInserted)
+      repositoryAdvertCacheSizeAt 100 cache
+        >>= (@?= repositoryAdvertCacheMaxRepositories)
+      insertRepositoryAdvertAt 100 cache
+        (signedAdvertBytes provider (last repositories) 100 160)
+          >>= (@?= Left RepositoryAdvertCacheFull)
+
+  , testCase "repository advert results are bound to a live query and peer" $ do
+      repository <- newRepositoryKey
+      wrongRepository <- newRepositoryKey
+      queries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let query = RepositoryAdvertQueryId "query-01"
+      registerRepositoryAdvertQueryAt
+        100 queries query repository [1, 2] >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 1 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 2 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        100 queries 3 query repository >>= (@?= False)
+      acceptRepositoryAdvertQueryAt
+        100 queries 1 query wrongRepository >>= (@?= False)
+      acceptRepositoryAdvertQueryAt
+        129 queries 1 query repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        130 queries 1 query repository >>= (@?= False)
+      repositoryAdvertPendingQueryCountAt 130 queries >>= (@?= 0)
+      let futureQuery = RepositoryAdvertQueryId "query-future"
+      registerRepositoryAdvertQueryAt
+        200 queries futureQuery repository [1] >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        199 queries 1 futureQuery repository >>= (@?= True)
+      acceptRepositoryAdvertQueryAt
+        169 queries 1 futureQuery repository >>= (@?= False)
+
+  , testCase "repository advert pending queries are bounded" $ do
+      repository <- newRepositoryKey
+      queries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let queryIds = RepositoryAdvertQueryId . B8.pack . ("query-" <>) . show
+            <$> [1 .. repositoryAdvertMaxPendingQueries + 1]
+      for_ (take repositoryAdvertMaxPendingQueries queryIds) $ \query ->
+        registerRepositoryAdvertQueryAt
+          100 queries query repository [1] >>= (@?= True)
+      repositoryAdvertPendingQueryCountAt 100 queries
+        >>= (@?= repositoryAdvertMaxPendingQueries)
+      registerRepositoryAdvertQueryAt
+        100 queries (last queryIds) repository [1] >>= (@?= False)
+      freshQuery <- newRepositoryAdvertQueryId
+      case freshQuery of
+        RepositoryAdvertQueryId bytes -> B8.length bytes @?= 24
+
+  , testCase "repository advert provider selection verifies a reachable endpoint" $ do
+      secondProvider <- newRepositoryKey
+      attempts <- newIORef []
+      let firstAddress = "tcp://127.0.0.1:10351"
+          secondAddress = "tcp://127.0.0.1:10352"
+          thirdAddress = "tcp://127.0.0.1:10353"
+          unavailable = goldenAdvert
+            { replicaAdvertReachableVia = [firstAddress]
+            , replicaAdvertCapabilities = 0
+            }
+          noEndpoint = goldenAdvert
+            { replicaAdvertReachableVia = [] }
+          reachable = goldenAdvert
+            { replicaAdvertProvider = secondProvider
+            , replicaAdvertReachableVia = [firstAddress, secondAddress]
+            }
+          later = goldenAdvert
+            { replicaAdvertReachableVia = [thirdAddress] }
+          dial provider address = do
+            modifyIORef' attempts (<> [(provider, address)])
+            pure (provider == secondProvider && address == secondAddress)
+      findRepositoryAdvertProvider dial [unavailable, noEndpoint, reachable]
+        >>= (@?= Just reachable)
+      readIORef attempts >>= (@?=
+        [ (secondProvider, firstAddress)
+        , (secondProvider, secondAddress)
+        ])
+      writeIORef attempts []
+      findRepositoryAdvertProvider dial [reachable, later]
+        >>= (@?= Just reachable)
+      readIORef attempts >>= (@?=
+        [ (secondProvider, firstAddress)
+        , (secondProvider, secondAddress)
+        ])
+
+  , testCase "repository advert selection keeps every authenticated provider" $ do
+      firstProvider <- newRepositoryKey
+      secondProvider <- newRepositoryKey
+      let first = goldenAdvert
+            { replicaAdvertProvider = firstProvider
+            , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+            }
+          second = goldenAdvert
+            { replicaAdvertProvider = secondProvider
+            , replicaAdvertReachableVia = ["tcp://127.0.0.1:10352"]
+            }
+          unavailable = goldenAdvert
+            { replicaAdvertReachableVia = ["tcp://127.0.0.1:10353"]
+            }
+          dial provider _ = pure (provider == firstProvider || provider == secondProvider)
+      findRepositoryAdvertProviders dial [unavailable, first, second]
+        >>= (@?= [first, second])
+
+  , testCase "three nodes discover a leased repository while its owner is offline" $ do
+      repository <- newRepositoryKey
+      providerCredentials <- newCredentials @'HBS2Basic
+      relayCache <- newRepositoryAdvertCache
+      cloneCache <- newRepositoryAdvertCache
+      cloneQueries <- newRepositoryAdvertQueries
+        :: IO (RepositoryAdvertQueries Int)
+      let relayPeer = 2
+          query = RepositoryAdvertQueryId "clone-query"
+          advertBytes = signedAdvertBytes
+            providerCredentials repository 100 160
+          provider = view peerSignPk providerCredentials
+      insertRepositoryAdvertAt 100 relayCache advertBytes
+        >>= (@?= Right RepositoryAdvertCacheInserted)
+      registerRepositoryAdvertQueryAt
+        100 cloneQueries query repository [relayPeer] >>= (@?= True)
+      relayResults <- lookupRepositoryAdvertsAt
+        100 relayCache repository repositoryAdvertMaxResults
+      acceptRepositoryAdvertResultsAt
+        100 cloneCache cloneQueries relayPeer query repository relayResults
+        >>= (@?= True)
+      cloneAdverts <- lookupRepositoryReplicaAdvertsAt
+        100 cloneCache repository repositoryAdvertMaxResults
+      findRepositoryAdvertProvider
+        (\expected _ -> pure (expected == provider))
+        cloneAdverts
+        >>= (@?= listToMaybe cloneAdverts)
+
+  , testCase "the worker advert maintainer renews only at its boundary" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 5
+            initial = repositoryLeaseFixture leaseId fixtureRepository
+            reachable = ["tcp://127.0.0.1:10351"]
+            policy = RepositoryAdvertPolicy
+              { advertPolicyReachableVia = reachable
+              , advertPolicyCapabilities = replicaAdvertCapabilityBlockDownload
+              , advertPolicyLifetime = 60
+              , advertPolicyRenewBefore = 20
+              }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+            provider = view peerSignPk providerCredentials
+
+        active <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage initial
+        (firstHash, firstAdvert) <- maintainRepositoryReplicaAdvertAt
+          100 policy fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "active lease did not produce an advert") pure
+        replicaAdvertExpiresAt firstAdvert @?= 160
+
+        writesBeforeStableRefresh <- readIORef fixtureStorageWrites
+        stable <- maintainRepositoryReplicaAdvertAt
+          139 policy fixtureStorage providerCredentials active >>= expectRight
+        fmap fst stable @?= Just firstHash
+        readIORef fixtureStorageWrites >>= (@?= writesBeforeStableRefresh)
+
+        (renewedHash, renewedAdvert) <- maintainRepositoryReplicaAdvertAt
+          140 policy fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "advert was withdrawn instead of renewed") pure
+        assertBool "renewal created a new advert block" (renewedHash /= firstHash)
+        replicaAdvertIssuedAt renewedAdvert @?= 140
+        replicaAdvertExpiresAt renewedAdvert @?= 200
+
+        let degraded = active { repositoryLeaseState = RepositoryLeaseDegraded }
+        maintainRepositoryReplicaAdvertAt
+          141 policy fixtureStorage providerCredentials degraded
+          >>= expectRight >>= (@?= Nothing)
+        readRepositoryReplicaAdvertAt
+          141 fixtureStorage fixtureRepository provider >>= \case
+            Left RepositoryAdvertMissing -> pure ()
+            other -> assertFailure ("expected a withdrawn degraded advert, got " <> show other)
+
+        let advertRef = RepositoryReplicaAdvert fixtureRepository provider
+            assertPolicyWithdrawal expected invalidPolicy invalidLease = do
+              maintainRepositoryReplicaAdvertAt
+                141 policy fixtureStorage providerCredentials active
+                >>= expectRight
+                >>= maybe (assertFailure "failed to restore an advert") pure
+              maintainRepositoryReplicaAdvertAt
+                141 invalidPolicy fixtureStorage providerCredentials invalidLease
+                >>= (@?= Left expected)
+              getRef fixtureStorage advertRef >>= (@?= Nothing)
+        assertPolicyWithdrawal RepositoryAdvertNoReachableAddress
+          policy { advertPolicyReachableVia = [] } active
+        assertPolicyWithdrawal RepositoryAdvertTooManyAddresses
+          policy { advertPolicyReachableVia = replicate 9 "tcp://127.0.0.1:10351" } active
+        assertPolicyWithdrawal RepositoryAdvertCannotServeBlocks
+          policy { advertPolicyCapabilities = 0 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyLifetime = 0 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyLifetime = 901 } active
+        assertPolicyWithdrawal RepositoryAdvertInvalidLifetime
+          policy { advertPolicyRenewBefore = 60 } active
+        assertPolicyWithdrawal RepositoryAdvertSnapshotMismatch
+          policy active { repositoryLeaseSnapshot = Nothing }
+
+        (_, shortestAdvert) <- maintainRepositoryReplicaAdvertAt
+          141 policy
+            { advertPolicyLifetime = 1
+            , advertPolicyRenewBefore = 0
+            }
+          fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "the shortest valid TTL was refused") pure
+        replicaAdvertExpiresAt shortestAdvert @?= 142
+
+        (_, longestAdvert) <- maintainRepositoryReplicaAdvertAt
+          141 policy
+            { advertPolicyLifetime = 900
+            , advertPolicyRenewBefore = 899
+            }
+          fixtureStorage providerCredentials active
+          >>= expectRight
+          >>= maybe (assertFailure "the longest valid TTL was refused") pure
+        replicaAdvertExpiresAt longestAdvert @?= 1041
+
+  , testCase "expiry keeps the replica pinned through its grace period" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 4
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseGracePeriod = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+
+        active <- refreshRepositoryLeaseAt 41
+          providerCredentials someBrains fixtureStorage initial
+        let expiring = active { repositoryLeaseExpiresAt = Just 42 }
+        writeIORef leaseRef expiring
+
+        graceLease <- refreshRepositoryLeaseAt 42
+          providerCredentials someBrains fixtureStorage expiring
+        repositoryLeaseState graceLease @?= RepositoryLeaseGrace
+        repositoryLeaseLastError graceLease @?= Just "lease grace period"
+        repositoryLeaseUpdatedAt graceLease @?= 42
+        assertBool "pin survives grace" . isJust =<<
+          getRef fixtureStorage (RepositoryLeasePin leaseId)
+        assertBool "receipt survives grace" . isJust =<<
+          getRef fixtureStorage (RepositoryLeaseReceipt leaseId)
+
+        lastGraceLease <- refreshRepositoryLeaseAt 51
+          providerCredentials someBrains fixtureStorage graceLease
+        repositoryLeaseState lastGraceLease @?= RepositoryLeaseGrace
+        assertBool "pin survives the last grace second" . isJust =<<
+          getRef fixtureStorage (RepositoryLeasePin leaseId)
+
+        expiredLease <- refreshRepositoryLeaseAt 52
+          providerCredentials someBrains fixtureStorage lastGraceLease
+        repositoryLeaseState expiredLease @?= RepositoryLeaseTerminated
+        repositoryLeaseLastError expiredLease @?= Just "lease expired"
+        repositoryLeaseUpdatedAt expiredLease @?= 52
+        getRef fixtureStorage (RepositoryLeasePin leaseId) >>= (@?= Nothing)
+        getRef fixtureStorage (RepositoryLeaseReceipt leaseId) >>= (@?= Nothing)
+
+  , testCase "update lag keeps the last complete snapshot until its boundary" $
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 6
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+        snapshot <- repositoryLeaseSnapshot active
+          & maybe (assertFailure "active lease has no snapshot") pure
+        let missingHead = hashObject @HbSync
+              ("pending-repository-update" :: LBS.ByteString)
+        updateRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+          missingHead
+
+        pending <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState pending @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt pending @?= Just 100
+        repositoryLeaseSnapshot pending @?= Just snapshot
+        assertBool "the old snapshot remains pinned while the update is fresh" . isJust
+          =<< getRef fixtureStorage (RepositoryLeasePin leaseId)
+
+        lastFresh <- refreshRepositoryLeaseAt 109
+          providerCredentials someBrains fixtureStorage pending
+        repositoryLeaseState lastFresh @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt lastFresh @?= Just 100
+
+        stale <- refreshRepositoryLeaseAt 110
+          providerCredentials someBrains fixtureStorage lastFresh
+        repositoryLeaseState stale @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt stale @?= Just 100
+        repositoryLeaseSnapshot stale @?= Just snapshot
+
+        updateRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+          (fromHashRef (repositorySnapshotLWWRefBlock snapshot))
+        caughtUp <- refreshRepositoryLeaseAt 111
+          providerCredentials someBrains fixtureStorage stale
+        repositoryLeaseState caughtUp @?= RepositoryLeaseActive
+        repositoryLeaseUpdateStartedAt caughtUp @?= Nothing
+
+  , testCase "unchanged or missing mutable roots do not receive update lag" $ do
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 9
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+
+        delBlock fixtureStorage fixturePayloadBlock
+        degraded <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState degraded @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt degraded @?= Nothing
+
+      withRepository $ \Fixture{..} -> do
+        let leaseId = makeRepositoryLeaseId fixtureRepository 10
+            initial = (repositoryLeaseFixture leaseId fixtureRepository)
+              { repositoryLeaseMaxUpdateLag = 10 }
+        providerCredentials <- newCredentials @'HBS2Basic
+        leaseRef <- newIORef initial
+        pollsRef <- newIORef []
+        let someBrains = SomeBrains @L4Proto (TestBrains leaseRef pollsRef)
+        active <- refreshRepositoryLeaseAt 50
+          providerCredentials someBrains fixtureStorage initial
+
+        delRef fixtureStorage (LWWRefKey @'HBS2Basic fixtureRepository)
+        degraded <- refreshRepositoryLeaseAt 100
+          providerCredentials someBrains fixtureStorage active
+        repositoryLeaseState degraded @?= RepositoryLeaseDegraded
+        repositoryLeaseUpdateStartedAt degraded @?= Nothing
+
+  , testCase "a durable lease is visible after Brains is reopened" $
+      withSystemTempDirectory "hbs2-repository-lease-brains" $ \directory -> do
+        credentials <- newCredentials @'HBS2Basic
+        let repository = view peerSignPk credentials
+            lease = RepositoryLease
+              { repositoryLeaseVersion = repositoryLeaseCurrentVersion
+              , repositoryLeaseId = makeRepositoryLeaseId repository 3
+              , repositoryLeaseRepository = repository
+              , repositoryLeaseState = RepositoryLeaseSyncing
+              , repositoryLeaseMaxBytes = 1024
+              , repositoryLeaseMaxBlocks = 100
+              , repositoryLeaseCreatedAt = 1
+              , repositoryLeaseUpdatedAt = 1
+              , repositoryLeaseExpiresAt = Nothing
+              , repositoryLeaseGracePeriod = 0
+              , repositoryLeaseMaxUpdateLag = 60
+              , repositoryLeaseUpdateStartedAt = Nothing
+              , repositoryLeaseSnapshot = Nothing
+              , repositoryLeaseLastError = Nothing
+              }
+            stateFile = directory </> "state.db"
+            source = "brains-db \"" <> stateFile <> "\""
+        forms <- either (assertFailure . show) pure (parseTop source)
+        let config = PeerConfig forms
+        first <- DB.newBasicBrains @L4Proto config
+        runner <- async (DB.runBasicBrains config first)
+        putRepositoryLease @L4Proto first lease
+
+        reopened <- DB.newBasicBrains @L4Proto config
+        listRepositoryLeases @L4Proto reopened >>= (@?= [lease])
+        cancel runner
+
+  , testCase "version 1 durable leases decode with no grace period" $ do
+      credentials <- newCredentials @'HBS2Basic
+      let repository = view peerSignPk credentials
+          leaseId = makeRepositoryLeaseId repository 5
+          encoded = serialise $ RepositoryLeaseV1
+            1 leaseId repository RepositoryLeaseDegraded
+            1024 100 10 20 (Just 30) Nothing (Just "old failure")
+      decoded <- deserialiseOrFail @RepositoryLease encoded
+        & either (assertFailure . show) pure
+      decoded @?= RepositoryLease
+        { repositoryLeaseVersion = 1
+        , repositoryLeaseId = leaseId
+        , repositoryLeaseRepository = repository
+        , repositoryLeaseState = RepositoryLeaseDegraded
+        , repositoryLeaseMaxBytes = 1024
+        , repositoryLeaseMaxBlocks = 100
+        , repositoryLeaseCreatedAt = 10
+        , repositoryLeaseUpdatedAt = 20
+        , repositoryLeaseExpiresAt = Just 30
+        , repositoryLeaseGracePeriod = 0
+        , repositoryLeaseMaxUpdateLag = 0
+        , repositoryLeaseUpdateStartedAt = Nothing
+        , repositoryLeaseSnapshot = Nothing
+        , repositoryLeaseLastError = Just "old failure"
+        }
+
+  , testCase "version 2 durable leases decode with immediate update lag" $ do
+      credentials <- newCredentials @'HBS2Basic
+      let repository = view peerSignPk credentials
+          leaseId = makeRepositoryLeaseId repository 7
+          encoded = serialise $ RepositoryLeaseV2
+            2 leaseId repository RepositoryLeaseDegraded
+            1024 100 10 20 (Just 30) 9 Nothing (Just "old failure")
+      decoded <- deserialiseOrFail @RepositoryLease encoded
+        & either (assertFailure . show) pure
+      repositoryLeaseGracePeriod decoded @?= 9
+      repositoryLeaseMaxUpdateLag decoded @?= 0
+      repositoryLeaseUpdateStartedAt decoded @?= Nothing
+
+  , testCase "update lag boundary saturates instead of wrapping" $ do
+      repository <- newRepositoryKey
+      let lease = (admissionLease repository 8 100)
+            { repositoryLeaseMaxUpdateLag = 10
+            , repositoryLeaseUpdateStartedAt = Just (maxBound - 2)
+            }
+      assertBool "the final representable second is the stale boundary"
+        (repositoryLeaseUpdateOverdueAt maxBound lease)
+      assertBool "a pending update before the saturated boundary remains fresh"
+        (not (repositoryLeaseUpdateOverdueAt (maxBound - 1) lease))
+      assertBool "a lease without a pending update is never stale"
+        (not (repositoryLeaseUpdateOverdueAt maxBound
+          (lease { repositoryLeaseUpdateStartedAt = Nothing })))
+
+  , testCase "grace boundary saturates instead of wrapping" $ do
+      repository <- newRepositoryKey
+      let lease = (admissionLease repository 11 100)
+            { repositoryLeaseExpiresAt = Just (maxBound - 2)
+            , repositoryLeaseGracePeriod = 10
+            }
+      repositoryLeaseLifetimeAt (maxBound - 1) lease @?= RepositoryLeaseInGrace
+      repositoryLeaseLifetimeAt maxBound lease @?= RepositoryLeaseElapsed
+
+  , testCase "only known durable lease versions are supported" $ do
+      repositoryLeaseCurrentVersion @?= 3
+      assertBool "version 1 remains readable" (repositoryLeaseVersionSupported 1)
+      assertBool "version 2 remains readable" (repositoryLeaseVersionSupported 2)
+      assertBool "version 3 is current" (repositoryLeaseVersionSupported 3)
+      assertBool "version 0 is unsupported" (not (repositoryLeaseVersionSupported 0))
+      assertBool "version 4 is unsupported" (not (repositoryLeaseVersionSupported 4))
+
+  , testCase "capacity reserves contract limits until termination or elapsed grace" $ do
+      syncingRepository <- newRepositoryKey
+      activeRepository <- newRepositoryKey
+      degradedRepository <- newRepositoryKey
+      graceRepository <- newRepositoryKey
+      terminatedRepository <- newRepositoryKey
+      let syncing = (admissionLease syncingRepository 1 10)
+            { repositoryLeaseState = RepositoryLeaseSyncing }
+          active = (admissionLease activeRepository 2 20)
+            { repositoryLeaseState = RepositoryLeaseActive }
+          degraded = (admissionLease degradedRepository 3 30)
+            { repositoryLeaseState = RepositoryLeaseDegraded }
+          grace = (admissionLease graceRepository 4 40)
+            { repositoryLeaseState = RepositoryLeaseGrace }
+          terminated = (admissionLease terminatedRepository 5 50)
+            { repositoryLeaseState = RepositoryLeaseTerminated }
+          expiring = grace
+            { repositoryLeaseExpiresAt = Just 90
+            , repositoryLeaseGracePeriod = 20
+            }
+          policy = RepositoryLeaseAdmissionPolicy 200 10
+      repositoryLeaseCapacityAt 100 policy
+        [syncing, active, degraded, expiring, terminated]
+        @?= RepositoryLeaseCapacity 200 100 100 4 10
+      repositoryLeaseCapacityAt 110 policy
+        [syncing, active, degraded, expiring, terminated]
+        @?= RepositoryLeaseCapacity 200 60 140 3 10
+
+  , testCase "capacity totals saturate instead of wrapping" $ do
+      firstRepository <- newRepositoryKey
+      secondRepository <- newRepositoryKey
+      let leases =
+            [ admissionLease firstRepository 1 maxBound
+            , admissionLease secondRepository 2 1
+            ]
+      repositoryLeaseReservedBytesAt 10 leases @?= maxBound
+      repositoryLeaseCapacityAt 10
+        (RepositoryLeaseAdmissionPolicy maxBound 2) leases
+        @?= RepositoryLeaseCapacity maxBound maxBound 0 2 2
+
+  , testCase "admission accounts for renewal delta and exact budget boundary" $ do
+      repository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      otherRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      let policy = RepositoryLeaseAdmissionPolicy 100 2
+          existing = admissionLease repository 1 60
+          other = admissionLease otherRepository 2 30
+          exactRenewal = admissionLease repository 1 70
+          oversizedRenewal = admissionLease repository 1 71
+      admitRepositoryLeaseAt 10 policy exactRenewal [existing, other]
+        @?= Right (RepositoryLeaseCapacity 100 100 0 2 2)
+      admitRepositoryLeaseAt 10 policy oversizedRenewal [existing, other]
+        @?= Left (RepositoryLeaseCapacityExceeded 71 70)
+
+  , testCase "contract limit refuses new leases but permits renewal and termination" $ do
+      repository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      otherRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      thirdRepository <- view peerSignPk <$> newCredentials @'HBS2Basic
+      let policy = RepositoryLeaseAdmissionPolicy 1000 2
+          existing = admissionLease repository 1 100
+          other = admissionLease otherRepository 2 100
+          renewal = admissionLease repository 1 200
+          third = admissionLease thirdRepository 3 100
+          terminated = existing
+            { repositoryLeaseState = RepositoryLeaseTerminated }
+      assertBool "renewal keeps the existing contract slot" $
+        isRight (admitRepositoryLeaseAt 10 policy renewal [existing, other])
+      admitRepositoryLeaseAt 10 policy third [existing, other]
+        @?= Left (RepositoryLeaseContractLimitExceeded 2)
+      admitRepositoryLeaseAt 10 policy terminated [existing, other]
+        @?= Right (RepositoryLeaseCapacity 1000 100 900 1 2)
+
+  , testCase "admission rejects malformed or already elapsed contracts" $ do
+      repository <- newRepositoryKey
+      let policy = RepositoryLeaseAdmissionPolicy 1000 10
+          lease = admissionLease repository 1 100
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseVersion = 4 } []
+        @?= Left (RepositoryLeaseUnsupportedVersion 4)
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseMaxBytes = 0 } []
+        @?= Left RepositoryLeaseInvalidLimit
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseMaxBlocks = 0 } []
+        @?= Left RepositoryLeaseInvalidLimit
+      admitRepositoryLeaseAt 10 policy
+        lease { repositoryLeaseExpiresAt = Just 10 } []
+        @?= Left RepositoryLeaseAlreadyElapsed
+      admitRepositoryLeaseAt 10
+        (RepositoryLeaseAdmissionPolicy 1000 0) lease []
+        @?= Left (RepositoryLeaseContractLimitExceeded 0)
+
+  , testCase "admission errors explain the rejected boundary" $ do
+      map repositoryLeaseAdmissionErrorMessage
+        [ RepositoryLeaseCapacityExceeded 11 10
+        , RepositoryLeaseContractLimitExceeded 2
+        , RepositoryLeaseUnsupportedVersion 3
+        , RepositoryLeaseInvalidLimit
+        , RepositoryLeaseAlreadyElapsed
+        , RepositoryLeaseAdmissionStorageFailure
+        ] @?=
+        [ "repository lease capacity exceeded: requested 11 bytes, available 10"
+        , "repository lease contract limit exceeded: 2"
+        , "unsupported repository lease version: 3"
+        , "repository lease byte and block limits must be positive"
+        , "repository lease already elapsed"
+        , "repository lease admission could not be stored"
+        ]
+
+  , testCase "peer config supplies finite aggregate lease limits" $ do
+      forms <- either (assertFailure . show) pure $ parseTop $ unlines
+        [ "barter-budget-bytes 4096"
+        , "barter-max-contracts 7"
+        ]
+      repositoryLeaseAdmissionPolicy (PeerConfig forms)
+        @?= RepositoryLeaseAdmissionPolicy 4096 7
+      repositoryLeaseAdmissionPolicy mempty
+        @?= RepositoryLeaseAdmissionPolicy
+              defaultRepositoryLeaseBudgetBytes
+              defaultRepositoryLeaseMaxContracts
+      zeroForms <- either (assertFailure . show) pure $ parseTop $ unlines
+        [ "barter-budget-bytes 0"
+        , "barter-max-contracts 0"
+        ]
+      repositoryLeaseAdmissionPolicy (PeerConfig zeroForms)
+        @?= RepositoryLeaseAdmissionPolicy 0 0
+
+  , testCase "concurrent admission cannot overcommit the durable budget" $
+      withSystemTempDirectory "hbs2-repository-lease-admission" $ \directory -> do
+        firstRepository <- newRepositoryKey
+        secondRepository <- newRepositoryKey
+        let firstLease = admissionLease firstRepository 1 60
+            secondLease = admissionLease secondRepository 2 60
+            policy = RepositoryLeaseAdmissionPolicy 100 10
+            stateFile = directory </> "state.db"
+            source = "brains-db \"" <> stateFile <> "\""
+        forms <- either (assertFailure . show) pure (parseTop source)
+        let config = PeerConfig forms
+        brains <- DB.newBasicBrains @L4Proto config
+        runner <- async (DB.runBasicBrains config brains)
+        (firstResult, secondResult) <- concurrently
+          (admitRepositoryLease @L4Proto brains 10 policy firstLease)
+          (admitRepositoryLease @L4Proto brains 10 policy secondLease)
+        assertBool "one admission succeeds" $
+          length (filter isRight [firstResult, secondResult]) == 1
+        assertBool "one admission is refused" $
+          length (filter isLeft [firstResult, secondResult]) == 1
+        durable <- listRepositoryLeases @L4Proto brains
+        length durable @?= 1
+        repositoryLeaseReservedBytesAt 10 durable @?= 60
+        cancel runner
+  ]
+  where
+    generous = InventoryLimits 1000 (1024 * 1024)
+
+repositoryLeaseWireGoldenTests :: TestTree
+repositoryLeaseWireGoldenTests = testGroup "wire golden vectors"
+  [ testCase "inventory entry encoding is frozen" $
+      goldenHex goldenInventoryEntry @?=
+        "83008200820058205ab17888689036c1d81bfddd3923f98ae30269f124320e1441cde60002ca805f1b0102030405060708"
+
+  , testCase "snapshot encoding is frozen" $
+      goldenHex goldenSnapshot @?=
+        "8c00820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f382008200582016111657b67e514d835b7ff576195b388911b31b62d1770c45d29155b1df9f6b118200820058206adb65677e467d7ab300bc7f536273ab4e4441d972d7aefeb50c3caca4bfe785820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820bf05e11feca8af74e2dbcb47f64772a100037c9f134531e45abccbf64e11f30e820082005820ff01ef556abfba43e66c4092cdee8c0ad1cfc0d943b9fdac4d87a0eecf6cf45082008200582038941aa2a96ae47fe919e4de74e9541953dc19b9fb62a8cae0bcf4ea4a77460e18221933441a55667788"
+
+  , testCase "replica receipt v1 encoding is frozen" $
+      goldenHex goldenReceipt @?=
+        "8b0001820082005820bbd41f369703c8e11972458b224028470989302894eff68a143120a470c3e9af8200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f3820082005820ff01ef556abfba43e66c4092cdee8c0ad1cfc0d943b9fdac4d87a0eecf6cf45018221933441a556677881a99aabbcc"
+
+  , testCase "replica advert v1 encoding is frozen" $
+      goldenHex goldenAdvert @?=
+        "8a00018200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf820058209b5c27ef33450233c03a890b0be97f8a58b35a4ee3adad0b012af6a31ce8df80820082005820627c3a3618c92378ab4125e396c657311b45241b01ae8d1c6f8a8b655fde16f382008200582057f0d6cc17bb8e77a4fe9fc5dc1334a5e6f5470abd436e015a87e3a0639138c99f83008101820082820082001a7f00000119286fff011a112233441a55667788"
+
+  , testCase "replica advert lookup encodings are frozen and bounded" $ do
+      repositoryAdvertMaxResults @?= 8
+      repositoryAdvertMaxQueryIdBytes @?= 32
+      repositoryAdvertMaxBoxBytes @?= 16 * 1024
+      goldenHex goldenAdvertPublish @?= "82004d7369676e65642d616476657274"
+      goldenHex goldenAdvertLookup @?=
+        "84014871756572792d30318200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf08"
+      goldenHex goldenAdvertResults @?=
+        "84024871756572792d30318200582049b3357d33655fdfbf481befe9c4e16e1ab94ae85575f0840ece3b3dfa439abf824d7369676e65642d6164766572744f7369676e65642d6164766572742d32"
+      deserialiseOrFail (serialise goldenAdvertPublish) @?=
+        Right goldenAdvertPublish
+      deserialiseOrFail (serialise goldenAdvertLookup) @?=
+        Right goldenAdvertLookup
+      let query = RepositoryAdvertQueryId "query-01"
+          overlong = replicate 9 "signed-advert"
+          encodedByUs = serialise $ RepositoryAdvertResults
+            query goldenRepository overlong
+      case deserialiseOrFail @RepositoryAdvertMessage encodedByUs of
+        Right (RepositoryAdvertResults _ _ adverts) -> length adverts @?= 8
+        other -> assertFailure ("expected bounded encoded results, got " <> show other)
+      let oversizedWire = toLazyByteString $
+               encodeListLen 4 <> encodeWord 2
+            <> CBOR.encode query <> CBOR.encode goldenRepository
+            <> encodeListLen 9 <> foldMap CBOR.encode overlong
+      assertBool "an oversized remote result list was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedWire)
+      let oversizedQuery = RepositoryAdvertQueryId (B8.replicate 33 'q')
+          oversizedQueryWire = serialise $
+            RepositoryAdvertLookup oversizedQuery goldenRepository 1
+      assertBool "an oversized remote query id was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedQueryWire)
+      let oversizedAdvertWire = serialise $
+            RepositoryAdvertPublish (B8.replicate
+              (repositoryAdvertMaxBoxBytes + 1) 'a')
+      assertBool "an oversized signed advert box was accepted" $
+        isLeft (deserialiseOrFail @RepositoryAdvertMessage oversizedAdvertWire)
+      let maximumQuery = RepositoryAdvertQueryId $
+            B8.replicate repositoryAdvertMaxQueryIdBytes 'q'
+          maximumQueryMessage = RepositoryAdvertLookup
+            maximumQuery goldenRepository 1
+      deserialiseOrFail (serialise maximumQueryMessage) @?=
+        Right maximumQueryMessage
+
+  , testCase "golden lease values round-trip" $ do
+      goldenRoundTrip goldenInventoryEntry
+      goldenRoundTrip goldenSnapshot
+      goldenRoundTrip goldenReceipt
+      goldenRoundTrip goldenAdvert
+      goldenRoundTrip goldenAdvertPublish
+      goldenRoundTrip goldenAdvertLookup
+      goldenRoundTrip goldenAdvertResults
+
+  , testCase "wire decoders reject the wrong record header" $ do
+      let encoded = serialise goldenInventoryEntry
+          wrongArity = LBS.cons 0x82 (LBS.tail encoded)
+          wrongConstructor =
+            LBS.take 1 encoded <> LBS.singleton 1 <> LBS.drop 2 encoded
+      assertBool "wrong record arity was accepted" $
+        isLeft (deserialiseOrFail @RepositoryInventoryEntry wrongArity)
+      assertBool "wrong constructor tag was accepted" $
+        isLeft (deserialiseOrFail @RepositoryInventoryEntry wrongConstructor)
+  ]
+
+goldenHex :: Serialise a => a -> String
+goldenHex = B8.unpack . B16.encode . LBS.toStrict . serialise
+
+goldenRoundTrip :: (Eq a, Show a, Serialise a) => a -> Assertion
+goldenRoundTrip value =
+  deserialiseOrFail (serialise value) @?= Right value
+
+goldenHash :: B8.ByteString -> HashRef
+goldenHash = HashRef . hashObject @HbSync
+
+goldenRepository :: PubKey 'Sign 'HBS2Basic
+goldenRepository = fromMaybe (error "invalid golden repository key") $
+  fromStringMay "5xhFoc2rEnV87GrAZzkTNGppBNKuAft363uR12Bfbqu8"
+
+goldenProvider :: PubKey 'Sign 'HBS2Basic
+goldenProvider = fromMaybe (error "invalid golden provider key") $
+  fromStringMay "BTThPdHKF8XnEq4m6wzbKHKA6geLFK4ydYhBXAqBdHSP"
+
+goldenInventoryEntry :: RepositoryInventoryEntry
+goldenInventoryEntry = RepositoryInventoryEntry
+  (goldenHash "repository-lease-golden-inventory-entry")
+  0x0102030405060708
+
+goldenSnapshot :: RepositorySnapshot
+goldenSnapshot = RepositorySnapshot
+  { repositorySnapshotId = goldenHash "repository-lease-golden-snapshot-id"
+  , repositorySnapshotLWWRefBlock = goldenHash "repository-lease-golden-lww-block"
+  , repositorySnapshotLWWSequence = 0x11
+  , repositorySnapshotHeadRoot = goldenHash "repository-lease-golden-head-root"
+  , repositorySnapshotRefLogKey = goldenProvider
+  , repositorySnapshotRefLogRoot = goldenHash "repository-lease-golden-reflog-root"
+  , repositorySnapshotInventoryRoot = goldenHash "repository-lease-golden-inventory-root"
+  , repositorySnapshotPinRoot = goldenHash "repository-lease-golden-pin-root"
+  , repositorySnapshotBlockCount = 0x22
+  , repositorySnapshotLogicalBytes = 0x3344
+  , repositorySnapshotCompletedAt = 0x55667788
+  }
+
+goldenReceipt :: ReplicaReceiptV1
+goldenReceipt = ReplicaReceiptV1
+  { replicaReceiptVersion = 1
+  , replicaReceiptLeaseId = RepositoryLeaseId $
+      goldenHash "repository-lease-golden-lease-id"
+  , replicaReceiptRepository = goldenRepository
+  , replicaReceiptProvider = goldenProvider
+  , replicaReceiptSnapshotId = repositorySnapshotId goldenSnapshot
+  , replicaReceiptInventoryRoot = repositorySnapshotInventoryRoot goldenSnapshot
+  , replicaReceiptBlockCount = repositorySnapshotBlockCount goldenSnapshot
+  , replicaReceiptLogicalBytes = repositorySnapshotLogicalBytes goldenSnapshot
+  , replicaReceiptCompletedAt = repositorySnapshotCompletedAt goldenSnapshot
+  , replicaReceiptIssuedAt = 0x99aabbcc
+  }
+
+goldenAdvert :: ReplicaAdvertV1
+goldenAdvert = ReplicaAdvertV1
+  { replicaAdvertVersion = 1
+  , replicaAdvertRepository = goldenRepository
+  , replicaAdvertProvider = goldenProvider
+  , replicaAdvertSnapshotId = repositorySnapshotId goldenSnapshot
+  , replicaAdvertReceipt = goldenHash "repository-lease-golden-receipt"
+  , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+  , replicaAdvertCapabilities = replicaAdvertCapabilityBlockDownload
+  , replicaAdvertIssuedAt = 0x11223344
+  , replicaAdvertExpiresAt = 0x55667788
+  }
+
+networkAdvertPayload
+  :: PeerCredentials 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> ReplicaAdvertV1
+networkAdvertPayload credentials repository issuedAt expiresAt = goldenAdvert
+  { replicaAdvertRepository = repository
+  , replicaAdvertProvider = view peerSignPk credentials
+  , replicaAdvertReachableVia = ["tcp://127.0.0.1:10351"]
+  , replicaAdvertIssuedAt = issuedAt
+  , replicaAdvertExpiresAt = expiresAt
+  }
+
+signedAdvertBytes
+  :: PeerCredentials 'HBS2Basic
+  -> PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> B8.ByteString
+signedAdvertBytes credentials repository issuedAt expiresAt =
+  LBS.toStrict $ serialise $ makeSignedBox @'HBS2Basic
+    (view peerSignPk credentials)
+    (view peerSignSk credentials)
+    (networkAdvertPayload credentials repository issuedAt expiresAt)
+
+goldenAdvertPublish :: RepositoryAdvertMessage
+goldenAdvertPublish = RepositoryAdvertPublish "signed-advert"
+
+goldenAdvertLookup :: RepositoryAdvertMessage
+goldenAdvertLookup = RepositoryAdvertLookup
+  (RepositoryAdvertQueryId "query-01") goldenRepository 8
+
+goldenAdvertResults :: RepositoryAdvertMessage
+goldenAdvertResults = RepositoryAdvertResults
+  (RepositoryAdvertQueryId "query-01") goldenRepository
+  ["signed-advert", "signed-advert-2"]
+
+withRepository :: (Fixture -> IO a) -> IO a
+withRepository action =
+  withSystemTempDirectory "hbs2-repository-lease-test" $ \directory -> do
+    simple <- simpleStorageInit @HbSync [StoragePrefix (directory </> "storage")]
+    writes <- newIORef 0
+    let storage = AnyStorage (CountingStorage (AnyStorage simple) writes)
+    bracket (replicateM 2 (async (simpleStorageWorker simple)))
+      (mapM_ cancel)
+      (const (buildRepository storage writes >>= action))
+
+buildRepository :: AnyStorage -> IORef Int -> IO Fixture
+buildRepository storage writes = do
+  repositoryCredentials <- newCredentials @'HBS2Basic
+  refLogCredentials <- newCredentials @'HBS2Basic
+  let repository = view peerSignPk repositoryCredentials
+      refLog = view peerSignPk refLogCredentials
+
+  payloadBlock <- put storage "git pack payload"
+  transactionRoot <- put storage . serialise $
+    MTreeAnn (ShortMetadata "") NullEncryption
+      (MLeaf [HashRef payloadBlock] :: MTree [HashRef])
+
+  update <- makeRefLogUpdate @L4Proto @'HBS2Basic
+              refLog (view peerSignSk refLogCredentials)
+              (LBS.toStrict (serialise (AnnotatedHashRef Nothing (HashRef transactionRoot))))
+  updateBlock <- put storage (serialise update)
+  refLogRoot <- put storage (serialise (MLeaf [HashRef updateBlock] :: MTree [HashRef]))
+  updateRef storage (RefLogKey @'HBS2Basic refLog) refLogRoot
+
+  manifestBytes <- put storage . LBS8.pack $
+    "(reflog " <> show (pretty (AsBase58 refLog)) <> ")"
+  manifestRoot <- put storage . serialise $
+    MTreeAnn (ShortMetadata "") NullEncryption
+      (MLeaf [HashRef manifestBytes] :: MTree [HashRef])
+  headRoot <- put storage (serialise (MLeaf [HashRef manifestRoot] :: MTree [HashRef]))
+
+  let lww = LWWRef 1 (HashRef headRoot) Nothing :: LWWRef 'HBS2Basic
+      box = makeSignedBox @'HBS2Basic repository
+              (view peerSignSk repositoryCredentials) lww
+  lwwBlock <- put storage (serialise box)
+  updateRef storage (LWWRefKey @'HBS2Basic repository) lwwBlock
+
+  pure Fixture
+    { fixtureStorage = storage
+    , fixtureRepository = repository
+    , fixturePayloadBlock = payloadBlock
+    , fixtureStorageWrites = writes
+    }
+
+put :: AnyStorage -> LBS.ByteString -> IO (Hash HbSync)
+put storage bytes = putBlock storage bytes >>= orThrowUser "test storage write failed"
+
+expectRight :: Show e => Either e a -> IO a
+expectRight = either (assertFailure . show) pure
+
+repositoryLeaseFixture
+  :: RepositoryLeaseId
+  -> PubKey 'Sign 'HBS2Basic
+  -> RepositoryLease
+repositoryLeaseFixture leaseId repository = RepositoryLease
+  { repositoryLeaseVersion = repositoryLeaseCurrentVersion
+  , repositoryLeaseId = leaseId
+  , repositoryLeaseRepository = repository
+  , repositoryLeaseState = RepositoryLeaseSyncing
+  , repositoryLeaseMaxBytes = 1024 * 1024
+  , repositoryLeaseMaxBlocks = 1000
+  , repositoryLeaseCreatedAt = 1
+  , repositoryLeaseUpdatedAt = 1
+  , repositoryLeaseExpiresAt = Nothing
+  , repositoryLeaseGracePeriod = 0
+  , repositoryLeaseMaxUpdateLag = 0
+  , repositoryLeaseUpdateStartedAt = Nothing
+  , repositoryLeaseSnapshot = Nothing
+  , repositoryLeaseLastError = Nothing
+  }
+
+admissionLease
+  :: PubKey 'Sign 'HBS2Basic
+  -> Word64
+  -> Word64
+  -> RepositoryLease
+admissionLease repository nonce maxBytes =
+  (repositoryLeaseFixture (makeRepositoryLeaseId repository nonce) repository)
+    { repositoryLeaseMaxBytes = maxBytes }
+
+newRepositoryKey :: IO (PubKey 'Sign 'HBS2Basic)
+newRepositoryKey = view peerSignPk <$> newCredentials @'HBS2Basic

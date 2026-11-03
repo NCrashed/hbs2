@@ -84,8 +84,7 @@ aCoords = PRCoords
 -- box. The two used to be withheld by different rules, and that is what made
 -- one document carry the same 32 bytes twice.
 aPR :: HubKey -> HubKey -> PRState
-aPR author canonBy =
-  PRState aCoords (mkPartSecret (BS.replicate 32 7)) Nothing author canonBy
+aPR = PRState aCoords (mkPartSecret (BS.replicate 32 7)) Nothing
 
 aComment :: HubKey -> HubKey -> Comment
 aComment author canonBy = Comment
@@ -302,7 +301,7 @@ spec = do
     -- survives whatever the shape becomes.
     it "does not put a redacted proposal's text anywhere in the bytes" $ do
       k <- aKey
-      let co = (aCoords) { prOnto = "the-secret-branch", prSourceRef = "the-secret-ref" }
+      let co = aCoords { prOnto = "the-secret-branch", prSourceRef = "the-secret-ref" }
           t = (aThread k k) { tsRedacted = True, tsKind = HubPR
                             , tsPR = Just (aPR k k) { psCoords = co } }
           out = LBS8.unpack (renderContract (threadContract t Nothing))
@@ -328,10 +327,10 @@ spec = do
       -- Not the hash order aeson would choose, which is neither stable across
       -- versions nor readable.
       out `shouldSatisfy` \s ->
-        maybe False id (do i <- idx "\"contract\"" s
-                           j <- idx "\"kind\"" s
-                           l <- idx "\"comments\"" s
-                           pure (i < j && j < l))
+        fromMaybe False (do i <- idx "\"contract\"" s
+                            j <- idx "\"kind\"" s
+                            l <- idx "\"comments\"" s
+                            pure (i < j && j < l))
 
     it "ends with a newline, so a file is a line-oriented tool's file too" $ do
       k <- aKey
@@ -386,12 +385,32 @@ spec = do
       field d "truncated"    `shouldBe` A.Bool True
       field d "text"         `shouldBe` A.String "@@"
 
+    it "carries the commits and paths a mergeability check actually compared" $ do
+      k <- aKey
+      let co = PRCoords Nothing "refs/heads/t" "cafe" "refs/heads/master" "beef" Nothing
+          t = (aThread k k) { tsKind = HubPR
+                            , tsPR = Just (PRState co Nothing Nothing k k) }
+          m = field (field (threadContractChecked t Nothing
+                             (Just (MergeConflicting "dead" "cafe" ["a.md", "src/b.hs"])))
+                    "pr") "mergeability"
+      field m "state"     `shouldBe` A.String "conflicts"
+      field m "target"    `shouldBe` A.String "dead"
+      field m "head"      `shouldBe` A.String "cafe"
+      field m "conflicts" `shouldBe` A.toJSON (["a.md", "src/b.hs"] :: [Text])
+
+    it "does not invent mergeability when the caller could not check" $ do
+      k <- aKey
+      let t = (aThread k k) { tsKind = HubPR, tsPR = Just (aPR k k) }
+          m = field (field (threadContract t Nothing) "pr") "mergeability"
+      field m "state" `shouldBe` A.String "unknown"
+      field m "reason" `shouldBe` A.String "not checked"
+
     it "has no pr object on an issue" $ do
       k <- aKey
       at (threadContract (aThread k k) Nothing) "pr" `shouldBe` Nothing
 
 idx :: String -> String -> Maybe Int
-idx needle hay = go 0 hay
+idx needle = go 0
   where
     go _ [] = Nothing
     go n s@(_:rest) | needle `isPrefixOf'` s = Just n

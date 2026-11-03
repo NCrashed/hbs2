@@ -144,6 +144,7 @@ library hub-ingress
       HBS2.Hub.CLI.Drop
       HBS2.Hub.CLI.Accept
       HBS2.Hub.CLI.Inbox
+      HBS2.Hub.CLI.Lease
       HBS2.Hub.CLI.Maintainer
       HBS2.Hub.CLI.Mcp
       HBS2.Hub.CLI.Own
@@ -259,6 +260,7 @@ test-suite spec
       HBS2.Hub.CodeSpec
       HBS2.Hub.ComposeSpec
       HBS2.Hub.InboxSpec
+      HBS2.Hub.LeaseSpec
       HBS2.Hub.StatusSpec
       HBS2.Hub.SyncSpec
       HBS2.Hub.TextSpec

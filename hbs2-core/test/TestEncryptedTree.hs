@@ -26,6 +26,7 @@
 -- did not still encrypts to the same bytes and deduplicates.
 module TestEncryptedTree
   ( testEncryptedTreeRoundTrip
+  , testEncryptedTreeReportsMissingGroupKeySecret
   , testEncryptedTreeSharedPrefixNoNonceReuse
   , testEncryptedTreeAppendStillDedups
   , testEncryptedTreeReadsLegacyMethod1
@@ -135,6 +136,24 @@ readTree :: AnyStorage -> GroupSecret -> HashRef -> IO LBS.ByteString
 readTree sto gks h =
   runExceptT (readFromMerkle sto (ToDecryptBS (fromHashRef h) (\_ -> pure (Just gks))))
     >>= either (assertFailure . ("cannot read back: " <>) . show) pure
+
+-- | A reader without a matching member secret learns which group key it
+-- needs.  This is authorization state, not a missing Merkle block.
+testEncryptedTreeReportsMissingGroupKeySecret :: IO ()
+testEncryptedTreeReportsMissingGroupKeySecret = do
+  sto <- newMemStorage
+  (gks, gk) <- newGroup
+  h <- writeTree sto gks gk "name: \"private\"" "private payload"
+  ann <- annOf sto h
+
+  gkh <- case _mtaCrypt ann of
+    EncryptGroupNaClSymm hash _ -> pure (HashRef hash)
+    _                           -> assertFailure "tree is not group encrypted"
+
+  result <- runExceptT
+    (readFromMerkle sto (ToDecryptBS (fromHashRef h) (\_ -> pure Nothing)))
+
+  assertEqual "missing member secret" (Left (GroupKeySecretNotFound gkh)) result
 
 annOf :: AnyStorage -> HashRef -> IO (MTreeAnn [HashRef])
 annOf sto h = do

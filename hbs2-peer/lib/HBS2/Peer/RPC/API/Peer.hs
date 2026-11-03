@@ -12,6 +12,9 @@ import HBS2.Peer.Proto.PeerMeta (PeerMeta)
 import HBS2.Peer.CompleteObject (CompleteObjectError)
 
 import HBS2.Peer.RPC.Internal.Types
+import HBS2.Peer.Brains (ReachabilityReport)
+import HBS2.Peer.Proto.RepositoryLease
+import HBS2.Peer.RepositoryLease.Admission
 
 import Control.Monad.Reader
 import Data.ByteString.Lazy (ByteString)
@@ -55,6 +58,14 @@ data PeerDiagnostic = PeerDiagnostic
 
 instance Serialise PeerDiagnostic
 
+data RpcRepositoryLeasePut
+data RpcRepositoryLeaseGet
+data RpcRepositoryLeaseList
+data RpcRepositoryLeaseCapacity
+data RpcRepositoryAdvertFind
+data RpcRepositoryAdvertList
+data RpcPeerReachability
+
 type PeerAPI = '[ RpcPoke
                 , RpcPing
                 , RpcAnnounce
@@ -78,6 +89,13 @@ type PeerAPI = '[ RpcPoke
                 , RpcPeerDiagnostics
                 , RpcAnnounceTree
                 , RpcFetchTree
+                , RpcRepositoryLeasePut
+                , RpcRepositoryLeaseGet
+                , RpcRepositoryLeaseList
+                , RpcRepositoryLeaseCapacity
+                , RpcRepositoryAdvertFind
+                , RpcRepositoryAdvertList
+                , RpcPeerReachability
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -153,6 +171,28 @@ type instance Output RpcRunScript = Text
 
 type instance Input RpcPeerDiagnostics = ()
 type instance Output RpcPeerDiagnostics = [PeerDiagnostic]
+
+type instance Input RpcRepositoryLeasePut = RepositoryLease
+type instance Output RpcRepositoryLeasePut =
+  Either RepositoryLeaseAdmissionError RepositoryLeaseCapacity
+
+type instance Input RpcRepositoryLeaseGet = RepositoryLeaseId
+type instance Output RpcRepositoryLeaseGet = Maybe RepositoryLease
+
+type instance Input RpcRepositoryLeaseList = ()
+type instance Output RpcRepositoryLeaseList = [RepositoryLease]
+
+type instance Input RpcRepositoryLeaseCapacity = ()
+type instance Output RpcRepositoryLeaseCapacity = RepositoryLeaseCapacity
+
+type instance Input RpcRepositoryAdvertFind = PubKey 'Sign 'HBS2Basic
+type instance Output RpcRepositoryAdvertFind = Maybe ReplicaAdvertV1
+
+type instance Input RpcRepositoryAdvertList = PubKey 'Sign 'HBS2Basic
+type instance Output RpcRepositoryAdvertList = [ReplicaAdvertV1]
+
+type instance Input RpcPeerReachability = PubKey 'Sign 'HBS2Basic
+type instance Output RpcPeerReachability = Maybe ReachabilityReport
 
 data SetLogging =
     DebugOn Bool

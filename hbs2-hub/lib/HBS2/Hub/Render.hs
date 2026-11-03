@@ -8,10 +8,11 @@
 -- hbs2-hub@ found nothing -- so a web UI had nothing to read and every reader
 -- would have had to parse the columns meant for a person.
 --
--- DERIVED AND NEVER A SOURCE OF TRUTH. Everything here comes out of
--- 'ThreadState', which comes out of the fold, which comes out of canon. Two
--- clones produce the same bytes from the same log. There is no cache to
--- invalidate and nothing to keep in step.
+-- DERIVED AND NEVER A SOURCE OF TRUTH. Thread content comes out of
+-- 'ThreadState', which comes out of the fold, which comes out of canon. The
+-- optional mergeability observation comes from the caller's git refs and
+-- carries the exact commits it compared; it never feeds the fold or authorizes
+-- a merge. There is no cache in this module to invalidate.
 --
 -- NO @verified@ FIELD, which is PEP-22's own reasoning and worth repeating
 -- where somebody might add one: everything in the contract has already passed
@@ -34,7 +35,10 @@ module HBS2.Hub.Render
   ( contractVersion
   , PRDiff(..)
   , DiffAvailability(..)
+  , PRMergeability(..)
   , threadContract
+  , threadContractChecked
+  , mergeabilityContract
   , renderContract
     -- | @issue@ or @pr@, in the one spelling every surface uses.
     --
@@ -60,7 +64,6 @@ import HBS2.Hub.Types
 import HBS2.Hub.Fold (ThreadState(..),Comment(..),PRState(..),tsTitle)
 
 import HBS2.Base58 (AsBase58(..))
-import HBS2.Data.Types.Refs (HashRef)
 import HBS2.Prelude.Plated (Pretty(..))
 
 import Data.Aeson (Value(..),object,(.=),encode)
@@ -124,12 +127,33 @@ data PRDiff = PRDiff
   }
   deriving stock (Eq,Show)
 
+-- | Whether the proposal merges into the target ref as it stands in this
+-- clone.  The commits are carried with the answer because mergeability is not
+-- a property of a pull request alone: either ref moving makes an old answer
+-- stale, and a renderer must be able to notice that rather than keep a green
+-- badge beside newer coordinates.
+--
+-- 'MergeUnknown' is an honest read failure (a missing object, target ref or a
+-- git refusal), not a conflict.  A caller may still offer the merge action:
+-- @hub pr land@ repeats the check immediately before it writes anything.
+data PRMergeability
+  = MergeClean Text Text
+  | MergeConflicting Text Text [Text]
+  | MergeUnknown Text
+  deriving stock (Eq,Show)
+
 -- | One thread, as the contract.
 --
 -- Pure. Give it what the fold materialized and, for a pull request, whatever
 -- the caller could work out about the objects.
 threadContract :: ThreadState -> Maybe PRDiff -> Value
-threadContract t mdiff = object $
+threadContract t mdiff = threadContractChecked t mdiff Nothing
+
+-- | 'threadContract' with a mergeability observation made by the caller.
+-- Git stays outside this pure module; the coordinates that observation used
+-- are serialized beside it so a long-lived UI can discard a stale answer.
+threadContractChecked :: ThreadState -> Maybe PRDiff -> Maybe PRMergeability -> Value
+threadContractChecked t mdiff mmerge = object $
   [ "contract"    .= contractVersion
     -- WHICH DOCUMENT THIS IS. One counter for three document types (PEP-22
     -- leaves an index and an activity document open) and no way to tell them
@@ -163,7 +187,7 @@ threadContract t mdiff = object $
   , "origin"      .= fmap b58 (tsOrigin t)
   , "comments"    .= fmap commentContract (tsComments t)
   ]
-  <> maybe [] (\pr -> ["pr" .= prContract (tsRedacted t) pr mdiff]) (tsPR t)
+  <> maybe [] (\pr -> ["pr" .= prContract (tsRedacted t) pr mdiff mmerge]) (tsPR t)
   where
     attr k d = fromMaybe d (HM.lookup k (tsAttrs t))
     multi k  = maybe [] decodeLabels (HM.lookup k (tsAttrs t))
@@ -209,8 +233,8 @@ commentContract c = object
 -- The hashes stay: @bundle_part@ and the merge commit are not text somebody
 -- wrote, and a renderer offering to rebuild a withdrawn proposal still needs to
 -- say there was one. What goes is what a person composed.
-prContract :: Bool -> PRState -> Maybe PRDiff -> Value
-prContract redacted pr mdiff = object
+prContract :: Bool -> PRState -> Maybe PRDiff -> Maybe PRMergeability -> Value
+prContract redacted pr mdiff mmerge = object
   [ "onto"        .= text (prOnto co)
   , "base"        .= text (prBase co)
   , "tip"         .= text (prSourceTip co)
@@ -226,6 +250,7 @@ prContract redacted pr mdiff = object
   , "coords_author"   .= key58 (psAuthor pr)
   , "coords_canon_by" .= key58 (psCanonBy pr)
   , "diff"        .= diffContract (if redacted then Nothing else mdiff)
+  , "mergeability" .= mergeabilityContract mmerge
   ]
   where
     co = psCoords pr
@@ -250,6 +275,33 @@ diffContract (Just d) = object
   , "truncated" .= pdTruncated d
   , "text" .= pdText d
   ]
+
+mergeabilityContract :: Maybe PRMergeability -> Value
+mergeabilityContract Nothing = object
+  [ "state" .= ("unknown" :: Text)
+  , "target" .= Null
+  , "head" .= Null
+  , "conflicts" .= ([] :: [Text])
+  , "reason" .= ("not checked" :: Text)
+  ]
+mergeabilityContract (Just m) = case m of
+  MergeClean target head' -> checked "clean" target head' ([] :: [Text])
+  MergeConflicting target head' paths -> checked "conflicts" target head' paths
+  MergeUnknown why -> object
+    [ "state" .= ("unknown" :: Text)
+    , "target" .= Null
+    , "head" .= Null
+    , "conflicts" .= ([] :: [Text])
+    , "reason" .= why
+    ]
+  where
+    checked state target head' paths = object
+      [ "state" .= (state :: Text)
+      , "target" .= target
+      , "head" .= head'
+      , "conflicts" .= paths
+      , "reason" .= Null
+      ]
 
 kindOf :: HubKind -> Text
 kindOf = \case

@@ -1,7 +1,14 @@
 {-# Language UndecidableInstances #-}
 {-# Language AllowAmbiguousTypes #-}
 
-module HBS2.Git3.Export (exportEntries,export,genRefLogUpdate,postNullTx) where
+module HBS2.Git3.Export
+  ( exportEntries
+  , export
+  , genRefLogUpdate
+  , indexedObjectsBackedByStorage
+  , indexedObjectsIfComplete
+  , postNullTx
+  ) where
 
 import HBS2.Git3.Prelude
 import HBS2.Git3.State
@@ -9,6 +16,7 @@ import HBS2.Git3.Git
 import HBS2.Data.Detect
 
 import HBS2.Data.Log.Structured
+import HBS2.Storage.Operations.Missed (findMissedBlocks)
 
 import HBS2.CLI.Run.Internal.Merkle (createTreeWithMetadata)
 -- import HBS2.CLI.Run.RefLog (mkRefLogUpdateFrom)
@@ -55,6 +63,43 @@ data ECC =
     ECCInit
   | ECCWrite Int FilePath Handle Result
   | ECCFinalize Int Bool FilePath Handle Result
+
+-- | An object index is an incremental-export boundary only while every
+-- transaction behind it is readable.  One missing old segment invalidates the
+-- whole boundary: stopping at a newer indexed commit would otherwise hide a
+-- missing ancestor.  In that case the caller must export the full history.
+indexedObjectsIfComplete
+  :: ( Monad m
+     , Eq object, Hashable object
+     , Eq transaction, Hashable transaction
+     )
+  => (transaction -> m Bool)
+  -> [(object, transaction)]
+  -> m (Either (HashSet transaction) (HashSet object))
+indexedObjectsIfComplete available entries = do
+  checked <- for (HS.toList transactions) $ \transaction ->
+    (transaction,) <$> available transaction
+
+  let missing = HS.fromList [ transaction | (transaction, False) <- checked ]
+  pure $ if HS.null missing
+    then Right (HS.fromList (fmap fst entries))
+    else Left missing
+  where
+    transactions = HS.fromList (fmap snd entries)
+
+indexedTransactionAvailable :: MonadIO m => AnyStorage -> HashRef -> m Bool
+indexedTransactionAvailable storage transaction =
+  readTxMay storage transaction >>= \case
+    Just (TxSegment tree) -> L.null <$> findMissedBlocks storage tree
+    _ -> pure False
+
+indexedObjectsBackedByStorage
+  :: MonadIO m
+  => AnyStorage
+  -> [(GitHash, HashRef)]
+  -> m (Either (HashSet HashRef) (HashSet GitHash))
+indexedObjectsBackedByStorage storage =
+  indexedObjectsIfComplete (indexedTransactionAvailable storage)
 
 
 genRefLogUpdate :: forall m . MonadUnliftIO m => ByteString -> Git3 m (RefLogUpdate L4Proto)
@@ -109,12 +154,24 @@ export mbh refs extras = withStateDo do
       updateReflogIndex
 
       idx <- openIndex
+      storage <- getStorage
 
       _already <- newTVarIO ( mempty :: HashSet GitHash )
       _exported <- newTVarIO 0
 
+      indexed_ <- newTVarIO (mempty :: [(GitHash, HashRef)])
       enumEntries idx $ \bs -> do
-        atomically $ modifyTVar _already (HS.insert (coerce $ BS.take 20 bs))
+        let object = coerce (BS.take 20 bs)
+            transaction = coerce (BS.take 32 (BS.drop 20 bs))
+        atomically $ modifyTVar indexed_ ((object, transaction) :)
+
+      indexed <- readTVarIO indexed_
+      indexedObjectsBackedByStorage storage indexed
+        >>= \case
+          Right objects -> atomically $ writeTVar _already objects
+          Left missing -> notice $
+            "object index refers to" <+> pretty (HS.size missing)
+              <+> "unavailable transaction(s); exporting full history"
 
       level    <- getCompressionLevel
       segment  <- getPackedSegmetSize
@@ -429,5 +486,3 @@ export mbh refs extras = withStateDo do
            >>= orThrow ExportWriteTimeout
 
          pure $ Just $ HashRef (hashObject @HbSync (serialise tx))
-
-
