@@ -9,6 +9,7 @@ import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Actors.Peer
 import HBS2.Net.Messaging.Encrypted.ByPass(ByPassStat)
 import HBS2.Peer.Proto.PeerMeta (PeerMeta)
+import HBS2.Peer.CompleteObject (CompleteObjectError)
 
 import HBS2.Peer.RPC.Internal.Types
 
@@ -41,6 +42,8 @@ data RpcGetProbes
 
 data RpcRunScript
 data RpcPeerDiagnostics
+data RpcAnnounceTree
+data RpcFetchTree
 
 data PeerDiagnostic = PeerDiagnostic
   { peerDiagnosticKey :: PubKey 'Sign 'HBS2Basic
@@ -73,6 +76,8 @@ type PeerAPI = '[ RpcPoke
                 -- Append-only: service method positions are part of the local
                 -- daemon/client wire contract. Older method indices must not move.
                 , RpcPeerDiagnostics
+                , RpcAnnounceTree
+                , RpcFetchTree
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -106,6 +111,12 @@ type instance Output RpcPeers = [(PubKey 'Sign 'HBS2Basic, PeerAddr L4Proto)]
 
 type instance Input RpcFetch = HashRef
 type instance Output RpcFetch = ()
+
+type instance Input RpcAnnounceTree = HashRef
+type instance Output RpcAnnounceTree = Either CompleteObjectError ()
+
+type instance Input RpcFetchTree = (HashRef, Int)
+type instance Output RpcFetchTree = Either CompleteObjectError ()
 
 type instance Input RpcPollList= ()
 type instance Output RpcPollList = [(PubKey 'Sign 'HBS2Basic, String, Int)]

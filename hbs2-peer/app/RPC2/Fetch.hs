@@ -9,6 +9,7 @@ import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.RPC.API.Peer
 
 import PeerLogger
+import Fetch (fetchCompleteObject)
 
 instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m) => HandleMethod m RpcFetch where
 
@@ -17,5 +18,11 @@ instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m) => HandleMethod m RpcF
     debug $ "rpc.fetch:"  <+> pretty href
     liftIO $ rpcDoFetch co href
 
+instance (MonadIO m, HasRpcContext PeerAPI RPC2Context m) => HandleMethod m RpcFetchTree where
+
+  handleMethod (href, seconds) = do
+    co <- getRpcContext @PeerAPI
+    debug $ "rpc.fetch-tree:" <+> pretty href
+    liftIO $ fetchCompleteObject (rpcPeerEnv co) seconds href
 
 

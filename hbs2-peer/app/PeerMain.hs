@@ -87,6 +87,7 @@ import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Peer.Notify
 import HBS2.Peer.CLI.Doctor
 import HBS2.Peer.CLI.Doctor.Repository
+import HBS2.Peer.CompleteObject (CompleteObjectError(..))
 import HBS2.Peer.RPC.Client.Unix (withRPC2)
 import HBS2.Peer.RPC.Client.StorageClient
 
@@ -294,9 +295,11 @@ runCLI = do
                 <> command "poke"      (info pPoke (progDesc "poke peer by rpc"))
                 <> command "doctor"    (info pDoctor (progDesc "diagnose local peer health"))
                 <> command "die"       (info pDie (progDesc "die cmd"))
-                <> command "announce"  (info pAnnounce (progDesc "announce block"))
+                <> command "announce"  (info pAnnounce (progDesc "announce complete Merkle object"))
+                <> command "announce-block" (info pAnnounceBlock (progDesc "announce one physical block"))
                 <> command "ping"      (info pPing (progDesc "ping another peer"))
-                <> command "fetch"     (info pFetch (progDesc "fetch block"))
+                <> command "fetch"     (info pFetch (progDesc "fetch complete Merkle object"))
+                <> command "fetch-block" (info pFetchBlock (progDesc "schedule one physical block for download"))
                 <> command "reflog"    (info pRefLog (progDesc "reflog commands"))
                 <> command "refchan"   (info pRefChan (progDesc "refchan commands"))
                 <> command "lwwref"    (info pLwwRef (progDesc "lwwref commands"))
@@ -433,12 +436,28 @@ runCLI = do
       rpc <- pRpcCommon
       h   <- strArgument ( metavar "HASH" )
       pure $ withMyRPC @PeerAPI rpc $ \caller -> do
+        callService @RpcAnnounceTree caller h >>=
+          either serviceFailure (either completeObjectFailure pure)
+
+    pAnnounceBlock = do
+      rpc <- pRpcCommon
+      h   <- strArgument ( metavar "HASH" )
+      pure $ withMyRPC @PeerAPI rpc $ \caller -> do
         void $ callService @RpcAnnounce caller h
+
+    pFetchBlock = do
+      rpc <- pRpcCommon
+      h   <- strArgument ( metavar "HASH" )
+      pure $ withMyRPC @PeerAPI rpc $ \caller -> do
+        void $ callService @RpcFetch caller h
 
     pFetch = do
       rpc <- pRpcCommon
       pro   <- optional (switch (short 'p' <> long "progress" <> help "display progress"))
                  <&> fromMaybe False
+      timeoutSeconds <- option auto
+        (long "timeout" <> metavar "SECONDS" <> value 60 <> showDefault
+          <> help "fail unless the complete object arrives within this time")
       h   <- strArgument ( metavar "HASH" )
 
       pure $ flip runContT pure do
@@ -460,7 +479,8 @@ runCLI = do
 
         t0 <- getTimeCoarse
 
-        void $ callService @RpcFetch peerAPI h
+        result <- callService @RpcFetchTree peerAPI (h, timeoutSeconds)
+        liftIO $ either serviceFailure (either completeObjectFailure pure) result
 
         liftIO do
 
@@ -503,6 +523,16 @@ runCLI = do
 
             void $ waitAnyCatchCancel [poller, inp]
             liftIO $ Vty.shutdown vty
+
+    completeObjectFailure CompleteObjectIncomplete{..} = do
+      hPutStrLn stderr $ "incomplete Merkle object " <> show incompleteRoot
+      for_ incompleteDescendants $ \missing ->
+        hPutStrLn stderr $ "missing descendant " <> show missing
+      exitFailure
+
+    serviceFailure problem = do
+      hPutStrLn stderr $ "peer RPC failed: " <> show problem
+      exitFailure
 
     pPing = do
       rpc <- pRpcCommon

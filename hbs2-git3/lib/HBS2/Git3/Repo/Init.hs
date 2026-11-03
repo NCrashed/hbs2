@@ -31,6 +31,7 @@ import Data.Config.Suckless.Script
 import Data.Config.Suckless.Almost.RPC
 
 import Data.Maybe
+import Data.HashSet qualified as HS
 import Data.Word
 import Data.Text qualified as Text
 import Lens.Micro.Platform
@@ -106,7 +107,20 @@ relayOnlyRepo syn = connectedDo do
   case syn of
     [ SignPubKeyLike repo ] -> do
       setGitRepoKey repo
-      waitRepo (Just 10) =<< getGitRepoKeyThrow
+      waitRepo Nothing =<< getGitRepoKeyThrow
+
+      -- A reflog is complete when its transaction records are present, but the
+      -- Git pack trees named by those records are application-level references
+      -- and therefore invisible to the generic reflog poller.  A storage-only
+      -- relay must explicitly fetch each complete tree; it need not possess the
+      -- group-key secret to store and forward the encrypted blocks.
+      peer <- getClientAPI @PeerAPI @UNIX
+      trees <- txListAll Nothing <&> HS.fromList . fmap (gitTxTree . snd)
+      for_ trees $ \tree -> do
+        callRpcWaitMay @RpcFetchTree (TimeoutSec 65) peer (tree, 60) >>= \case
+          Just (Right ()) -> pure ()
+          Just (Left e)   -> throwIO (RepoInitError (show e))
+          Nothing         -> throwIO RpcTimeout
 
     e -> throwIO (BadFormException (mkList e))
 

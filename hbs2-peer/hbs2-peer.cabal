@@ -144,6 +144,7 @@ library
       HBS2.Peer.Brains
       HBS2.Peer.Notify
       HBS2.Peer.RefChanNotifyLog
+      HBS2.Peer.CompleteObject
 
       HBS2.Peer.Proto
       HBS2.Peer.Proto.Peer
@@ -227,6 +228,7 @@ test-suite test
         BlockAnnouncePolicySpec
         BlockSizeCacheStateSpec
         DoctorSpec
+        CompleteObjectSpec
         -- from app/: these exercise the config and policy the peer itself
         -- uses, so the tests read the real modules rather than copies.
         PeerConfig

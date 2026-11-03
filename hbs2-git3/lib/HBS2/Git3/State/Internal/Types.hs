@@ -69,6 +69,7 @@ data HBS2GitException =
   | GitRemoteKeyNotResolved String
   | GitCantGenerateRemoteName
   | GitRepoNoGroupKey HashRef
+  | GitRepoGroupKeySecretNotFound HashRef
   | GitRepoNoAccess
   deriving stock (Show,Typeable)
 

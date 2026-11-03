@@ -21,5 +21,11 @@ instance (MonadIO m,HasRpcContext PeerAPI RPC2Context m) => HandleMethod m RpcAn
     debug $ "rpc.announce:"  <+> pretty href
     sendBlockAnnounce (rpcPeerEnv co) (rpcLocalMultiCast co) (fromHashRef href)
 
+instance (MonadIO m,HasRpcContext PeerAPI RPC2Context m) => HandleMethod m RpcAnnounceTree where
+
+  handleMethod href = do
+    co <- getRpcContext @PeerAPI
+    debug $ "rpc.announce-tree:"  <+> pretty href
+    liftIO $ sendCompleteObjectAnnounce (rpcPeerEnv co) (rpcLocalMultiCast co) href
 
 

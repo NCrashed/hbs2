@@ -25,6 +25,7 @@ import PeerMetaSpec (peerMetaTests)
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
+import CompleteObjectSpec qualified
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -165,6 +166,7 @@ main = do
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests
+      , CompleteObjectSpec.tests
       , messagePartsTests
       , mailboxPoWTests
       , mailboxConfigTests

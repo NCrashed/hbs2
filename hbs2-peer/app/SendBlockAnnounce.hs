@@ -2,10 +2,12 @@ module SendBlockAnnounce where
 
 import HBS2.Prelude
 import HBS2.Hash
+import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Actors.Peer
 import HBS2.Storage(Storage(..))
 import HBS2.Net.Proto.Types
 import HBS2.Peer.Proto.BlockAnnounce
+import HBS2.Peer.CompleteObject
 
 import PeerTypes
 
@@ -33,3 +35,14 @@ sendBlockAnnounce env mcast h = liftIO $ withPeerM env do
       debug $ "send single-cast announces" <+> pretty p
       request @e p announce
 
+sendCompleteObjectAnnounce :: PeerEnv L4Proto
+                           -> Peer L4Proto
+                           -> HashRef
+                           -> IO (Either CompleteObjectError ())
+sendCompleteObjectAnnounce env mcast root = do
+  storage <- withPeerM env getStorage
+  inspectCompleteObject storage root >>= \case
+    Left problem -> pure (Left problem)
+    Right blocks -> do
+      for_ blocks $ sendBlockAnnounce env mcast . fromHashRef
+      pure (Right ())

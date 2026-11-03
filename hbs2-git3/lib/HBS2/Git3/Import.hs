@@ -13,6 +13,7 @@ import HBS2.Data.Detect (readLogThrow,deepScan,ScanLevel(..))
 import HBS2.Storage.Operations.Missed
 import HBS2.CLI.Run.Internal.Merkle (getTreeContents)
 import HBS2.Data.Log.Structured
+import HBS2.KeyMan.Keys.Direct (findMatchedGroupKeySecret, runKeymanClientRO)
 
 import HBS2.System.Dir
 import Data.Config.Suckless.Almost.RPC
@@ -246,6 +247,18 @@ importGitRefLog = do
 
             importGroupKeys
 
+            -- Importing an encrypted pack without its group-key secret turns
+            -- decryption failure into a "missing block" and used to retry until
+            -- the outer git process timed out.  The manifest already tells us
+            -- which key protects the repository, so fail before touching packs
+            -- and give a new member (or a non-member) an actionable error.
+            getGK >>= \case
+              Nothing -> pure ()
+              Just (gkh, gk) -> do
+                secret <- runKeymanClientRO (findMatchedGroupKeySecret sto gk)
+                when (isNothing secret) do
+                  throwIO (GitRepoGroupKeySecretNotFound gkh)
+
             prev <- importedCheckpoint
 
             if | isNothing prev -> again $ ImportWIP 1.0 0 prev
@@ -428,4 +441,3 @@ importGroupKeys = do
         val <- keyTree' & toMPlus
         liftIO $ UIO.withBinaryFileAtomic file WriteMode $ \fh -> do
           hPrint fh $ pretty (mkSym @C (show $ pretty val))
-
