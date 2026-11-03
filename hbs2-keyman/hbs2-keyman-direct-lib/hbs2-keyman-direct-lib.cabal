@@ -106,3 +106,12 @@ library
     build-depends:    base
     hs-source-dirs:   .
     default-language: GHC2021
+
+test-suite spec
+    import:           warnings
+    import:           common-deps
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:    base, hbs2-keyman-direct-lib
+    default-language: GHC2021

@@ -292,7 +292,8 @@ updateKeys = do
       conf <- getConf
       defaultMask <- getDefaultKeyMask conf
       masks <- cfgValue @KeyFilesOpt @(Set String) <&> (Set.toList . Set.insert defaultMask)
-      files <- KeyRing.findFilesBy masks
+      peerKey <- readPeerKeyFile
+      files <- KeyRing.findFilesBy (maybeToList peerKey <> masks)
 
       when prune do
         -- here <- doesPathExist fn
@@ -344,4 +345,3 @@ main :: IO ()
 main = do
   (_, action) <- execParser opts
   runApp action
-

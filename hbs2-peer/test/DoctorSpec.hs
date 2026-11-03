@@ -5,6 +5,7 @@ module DoctorSpec (tests) where
 import HBS2.Peer.CLI.Doctor
 import HBS2.Peer.Proto.PeerMeta (PeerMeta(..))
 
+import Control.Monad (forM_)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types qualified as AesonTypes
 import Data.List (find)
@@ -18,6 +19,7 @@ tests = testGroup "doctor"
       let report = diagnose healthy
       doctorPassed report @?= True
       statusOf "config" report @?= Just CheckOK
+      statusOf "peer-keyring" report @?= Just CheckOK
       statusOf "rpc" report @?= Just CheckOK
       statusOf "version" report @?= Just CheckOK
       statusOf "peers" report @?= Just CheckOK
@@ -30,6 +32,22 @@ tests = testGroup "doctor"
       statusOf "repository-reflog" report @?= Just CheckSkipped
       statusOf "repository-snapshot" report @?= Just CheckSkipped
       statusOf "repository-sigils" report @?= Just CheckSkipped
+
+  , testCase "peer keyring failures are distinct and actionable" do
+      let cases =
+            [ (DoctorKeyringMissing "/keys/peer.key", "does not exist")
+            , (DoctorKeyringUnreadable "/keys/peer.key", "cannot be read")
+            , (DoctorKeyringMissingEncryptionKey "/keys/peer.key", "no encryption key")
+            , (DoctorKeyringNotIndexed "/keys/peer.key", "not indexed")
+            ]
+      forM_ cases $ \(state, message) -> do
+        let check = checkNamed "peer-keyring" $ diagnose healthy { doctorKeyring = state }
+        doctorCheckStatus check @?= CheckFailure
+        assertBool (Text.unpack message) (message `Text.isInfixOf` doctorCheckMessage check)
+      let notIndexed = checkNamed "peer-keyring" $ diagnose healthy
+            { doctorKeyring = DoctorKeyringNotIndexed "/keys/peer.key" }
+      doctorCheckRemedy notIndexed @?=
+        Just "run `hbs2-keyman update`; it discovers the active peer keyring from the peer configuration"
 
   , testCase "version skew names both versions and fails" do
       let report = diagnose healthy
@@ -298,6 +316,7 @@ healthy = DoctorFacts
   { doctorCLIVersion = "0.26.0.6"
   , doctorConfigPath = "/home/alice/.config/hbs2-peer/config"
   , doctorConfigPresent = True
+  , doctorKeyring = DoctorKeyringIndexed "/home/alice/.config/hbs2-peer/default.key" 1
   , doctorRPCSocket = "/tmp/hbs2-rpc.socket"
   , doctorPoke = Just (poke "0.26.0.6")
   , doctorPeerCount = Just 2

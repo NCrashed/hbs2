@@ -267,6 +267,30 @@ peerMetadataFacts PeerDiagnostic{..} = doctorPeerMetadataFacts
   (fmap (Text.pack . show) peerDiagnosticNetworkClasses)
   peerDiagnosticMetadata
 
+doctorKeyringProbe :: PeerConfig -> IO DoctorKeyring
+doctorKeyringProbe (PeerConfig syn) = case lastMay
+  [ Text.unpack path | ListVal (Key "key" [LitStrVal path]) <- syn ] of
+    Nothing -> pure DoctorKeyringNotConfigured
+    Just path -> do
+      exists <- Directory.doesFileExist path
+      if not exists
+        then pure (DoctorKeyringMissing path)
+        else Exception.try @IOException (BS.readFile path) >>= \case
+          Left _ -> pure (DoctorKeyringUnreadable path)
+          Right bytes -> case parseCredentials @'HBS2Basic (AsCredFile bytes) of
+            Nothing -> pure (DoctorKeyringUnreadable path)
+            Just credentials -> do
+              let keyEntries = view peerKeyring credentials
+              if null keyEntries
+                then pure (DoctorKeyringMissingEncryptionKey path)
+                else do
+                  indexed <- Exception.try @SomeException $ runKeymanClientRO $
+                    for keyEntries $ \(KeyringEntry publicKey _ _) ->
+                      isJust <$> loadKeyRingEntry publicKey
+                  pure $ case indexed of
+                    Right found | and found -> DoctorKeyringIndexed path (length found)
+                    _ -> DoctorKeyringNotIndexed path
+
 runCLI :: IO ()
 runCLI = do
 
@@ -365,6 +389,7 @@ runCLI = do
         configPath <- peerConfigPath configArg
         configPresent <- Directory.doesFileExist configPath
         conf <- peerConfigReadOnly configArg
+        keyring <- doctorKeyringProbe conf
         let socketPath = fromMaybe (getRpcSocketName conf) (view rpcOptAddr rpc)
 
         bootstrap <- bootstrapDnsProbe conf
@@ -378,6 +403,7 @@ runCLI = do
               { doctorCLIVersion = Text.pack (showVersion Pkg.version)
               , doctorConfigPath = configPath
               , doctorConfigPresent = configPresent
+              , doctorKeyring = keyring
               , doctorRPCSocket = socketPath
               , doctorPoke = poke
               , doctorPeerCount = peers

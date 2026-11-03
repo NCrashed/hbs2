@@ -259,7 +259,10 @@ peerConfigInit mbfp = liftIO do
     appendFile cfgPath ";; hbs2-peer config file"
     appendFile cfgPath defConfigData
 
-    cred0 <- newCredentials @'HBS2Basic
+    -- The peer identity is also the natural per-device identity for encrypted
+    -- repositories. Generate its encryption entry up front so a clean init can
+    -- be indexed by keyman without replacing or copying the peer keyring later.
+    cred0 <- newCredentialsEnc @'HBS2Basic 1
     let keyname = "default.key"
     let keypath = dir</>keyname
 

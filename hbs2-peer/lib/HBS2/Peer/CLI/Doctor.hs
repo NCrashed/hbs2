@@ -8,6 +8,7 @@
 module HBS2.Peer.CLI.Doctor
   ( CheckStatus(..)
   , DoctorCheck(..)
+  , DoctorKeyring(..)
   , DoctorBootstrap(..)
   , DoctorConfiguredPeer(..)
   , DoctorConfiguredPeers(..)
@@ -44,6 +45,15 @@ data CheckStatus
   | CheckWarning
   | CheckFailure
   | CheckSkipped
+  deriving stock (Eq, Show)
+
+data DoctorKeyring
+  = DoctorKeyringNotConfigured
+  | DoctorKeyringMissing FilePath
+  | DoctorKeyringUnreadable FilePath
+  | DoctorKeyringMissingEncryptionKey FilePath
+  | DoctorKeyringNotIndexed FilePath
+  | DoctorKeyringIndexed FilePath Int
   deriving stock (Eq, Show)
 
 data DoctorCheck = DoctorCheck
@@ -188,6 +198,7 @@ data DoctorFacts = DoctorFacts
   { doctorCLIVersion :: Text
   , doctorConfigPath :: FilePath
   , doctorConfigPresent :: Bool
+  , doctorKeyring :: DoctorKeyring
   , doctorRPCSocket :: FilePath
   , doctorPoke :: Maybe Text
   , doctorPeerCount :: Maybe Int
@@ -206,6 +217,7 @@ newtype DoctorReport = DoctorReport
 diagnose :: DoctorFacts -> DoctorReport
 diagnose facts = DoctorReport $
   [ configCheck facts
+  , keyringCheck (doctorKeyring facts)
   , rpcCheck facts
   , versionCheck facts
   , peersCheck facts
@@ -261,6 +273,27 @@ configCheck facts
   | otherwise = mkCheck "config" CheckWarning
       ("configuration file not found: " <> pathText (doctorConfigPath facts))
       (Just "run `hbs2-peer init`")
+
+keyringCheck :: DoctorKeyring -> DoctorCheck
+keyringCheck = \case
+  DoctorKeyringNotConfigured -> mkCheck "peer-keyring" CheckFailure
+    "the selected peer configuration has no key entry"
+    (Just "run `hbs2-peer init`, or add `key \"PATH\"` to the peer configuration")
+  DoctorKeyringMissing path -> mkCheck "peer-keyring" CheckFailure
+    (pathText path <> " does not exist")
+    (Just $ "restore the peer keyring at " <> pathText path <> ", then run `hbs2-keyman update`")
+  DoctorKeyringUnreadable path -> mkCheck "peer-keyring" CheckFailure
+    (pathText path <> " cannot be read as an hbs2 keyring")
+    (Just $ "fix ownership, permissions, or keyring contents at " <> pathText path)
+  DoctorKeyringMissingEncryptionKey path -> mkCheck "peer-keyring" CheckFailure
+    (pathText path <> " has no encryption key")
+    (Just "use a peer keyring containing an encryption entry; do not overwrite an identity that is already in use")
+  DoctorKeyringNotIndexed path -> mkCheck "peer-keyring" CheckFailure
+    (pathText path <> " is not indexed by hbs2-keyman")
+    (Just "run `hbs2-keyman update`; it discovers the active peer keyring from the peer configuration")
+  DoctorKeyringIndexed path count -> mkCheck "peer-keyring" CheckOK
+    (pathText path <> " is indexed by hbs2-keyman ("
+      <> tshow count <> " encryption key(s))") Nothing
 
 rpcCheck :: DoctorFacts -> DoctorCheck
 rpcCheck facts = case doctorPoke facts of

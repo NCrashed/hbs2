@@ -4,6 +4,9 @@ module HBS2.KeyMan.Config
   , getDefaultKeyPath
   , getDefaultKeyPath0
   , getDefaultKeyMask
+  , getPeerConfigPath
+  , readPeerKeyFile
+  , peerKeyFileFromConfig
   , getStatePath
   , readConfig
   , KeyFilesOpt
@@ -31,6 +34,25 @@ keymanAppName = "hbs2-keyman"
 
 getConfigPath :: MonadIO m => m FilePath
 getConfigPath = liftIO (getXdgDirectory XdgConfig keymanAppName) <&> (</> "config")
+
+getPeerConfigPath :: MonadIO m => m FilePath
+getPeerConfigPath = liftIO (getXdgDirectory XdgConfig "hbs2-peer") <&> (</> "config")
+
+-- | The one effective peer identity file, resolved exactly as the peer resolves
+-- a relative @key@ entry. Deliberately do not glob the peer config directory or
+-- any wider part of HOME: only the path the peer was explicitly told to use is
+-- eligible for automatic discovery.
+peerKeyFileFromConfig :: FilePath -> [Syntax C] -> Maybe FilePath
+peerKeyFileFromConfig configPath config =
+  normalise . (takeDirectory configPath </>) <$> lastMay
+    [ p | ListVal [SymbolVal "key", StringLike p] <- config ]
+
+readPeerKeyFile :: MonadIO m => m (Maybe FilePath)
+readPeerKeyFile = do
+  configPath <- getPeerConfigPath
+  source <- liftIO (try @IOError $ Text.readFile configPath)
+  let config = fromRight mempty $ parseTop $ fromRight "" source
+  pure $ peerKeyFileFromConfig configPath config
 
 getDefaultKeyPath0 :: MonadIO m => m FilePath
 getDefaultKeyPath0 = do

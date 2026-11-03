@@ -140,10 +140,8 @@ lww_head() {
 for name in A R B; do
   mkdir -p "$T/$name/home"
   role "$name" hbs2-peer init >/dev/null
-  # `hbs2-peer init` makes a signing-only identity.  Encrypted repository
-  # membership needs an encryption pair in the same peer keyring.
-  role "$name" hbs2-cli '(hbs2:keyring:new 1)' > "$T/$name/home/.config/hbs2-peer/default.key"
-  role "$name" hbs2-keyman add-mask "$T/$name/home/.config/hbs2-peer/*.key" >/dev/null
+  # Keyman discovers the exact key path from the effective peer config; there
+  # is no broad HOME scan and no separate add-mask onboarding step.
   role "$name" hbs2-keyman update >/dev/null
   role "$name" git config --global user.name "$name-e2e"
   role "$name" git config --global user.email "$name-e2e@localhost"
