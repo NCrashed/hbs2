@@ -70,6 +70,7 @@ library
       HBS2.Storage.NCQ3.Internal.Run
       HBS2.Storage.NCQ3.Internal.Memtable
       HBS2.Storage.NCQ3.Internal.Index
+      HBS2.Storage.NCQ3.Internal.Inventory
       HBS2.Storage.NCQ3.Internal.MMapCache
       HBS2.Storage.NCQ3.Internal.Files
       HBS2.Storage.NCQ3.Internal.Fossil
@@ -193,7 +194,8 @@ test-suite test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   tests
     main-is:          Main.hs
-    other-modules:    TestStateRecovery
+    other-modules:    TestInventory
+                      TestStateRecovery
 
     build-depends:    base, hbs2-core, hbs2-storage-ncq
                     , async

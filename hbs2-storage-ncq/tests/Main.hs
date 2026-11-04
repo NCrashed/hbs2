@@ -1,6 +1,7 @@
 module Main where
 
 import TestStateRecovery
+import TestInventory
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -25,5 +26,13 @@ main = defaultMain $
             testUnloadableStateIsKeptAside
         , testCase "a pending fact for a missing file does not stop start-up"
             testMissingPendingFileDoesNotStopStart
+        ]
+    , testGroup "storage inventory"
+        [ testCase "lists live blocks and refs but not tombstones"
+            testInventoryListsCurrentEntries
+        , testCase "reports the same logical entries after reopen"
+            testInventorySurvivesReopen
+        , testCase "newer index refs shadow older index refs"
+            testInventoryNewestReferenceWins
         ]
     ]
