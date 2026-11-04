@@ -12,6 +12,7 @@ import Data.Either (isRight)
 import HBS2.Data.Types.Refs (HashRef(..))
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Peer.StorageInventory (StoragePin)
 import HBS2.Storage.Observation
 import HBS2.Storage.Placement (availabilityBps)
 
@@ -239,6 +240,15 @@ class HasBrains e a where
   listRepositoryLeases :: MonadIO m => a -> m [RepositoryLease]
   listRepositoryLeases _ = pure []
 
+  putStoragePin :: MonadIO m => a -> StoragePin -> m ()
+  putStoragePin _ _ = pure ()
+
+  deleteStoragePin :: MonadIO m => a -> Text -> m ()
+  deleteStoragePin _ _ = pure ()
+
+  listStoragePins :: MonadIO m => a -> m [StoragePin]
+  listStoragePins _ = pure []
+
   admitRepositoryLease :: MonadIO m
                        => a
                        -> Word64
@@ -316,6 +326,9 @@ instance HasBrains e (SomeBrains e) where
   putRepositoryLease (SomeBrains a) = putRepositoryLease @e a
   getRepositoryLease (SomeBrains a) = getRepositoryLease @e a
   listRepositoryLeases (SomeBrains a) = listRepositoryLeases @e a
+  putStoragePin (SomeBrains a) = putStoragePin @e a
+  deleteStoragePin (SomeBrains a) = deleteStoragePin @e a
+  listStoragePins (SomeBrains a) = listStoragePins @e a
   admitRepositoryLease (SomeBrains a) = admitRepositoryLease @e a
   putReachabilityWindow (SomeBrains a) = putReachabilityWindow @e a
   listReachabilityWindows (SomeBrains a) = listReachabilityWindows @e a

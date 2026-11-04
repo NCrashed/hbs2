@@ -26,6 +26,7 @@ import RepositoryLeaseSpec qualified
 import ReachabilityJournalSpec qualified
 import ReachabilityObservationSpec qualified
 import StorageAuditRetrievalSpec qualified
+import StorageInventorySpec qualified
 import BlockAnnouncePolicySpec qualified
 import BlockSizeCacheStateSpec qualified
 import DoctorSpec qualified
@@ -172,6 +173,7 @@ main = do
       , ReachabilityJournalSpec.tests
       , ReachabilityObservationSpec.tests
       , StorageAuditRetrievalSpec.tests
+      , StorageInventorySpec.tests
       , BlockAnnouncePolicySpec.tests
       , BlockSizeCacheStateSpec.tests
       , DoctorSpec.tests

@@ -36,6 +36,8 @@ import HBS2.Storage.NCQ3
 -- import HBS2.Storage.NCQ
 import HBS2.Storage.Operations.Missed
 import HBS2.Data.Detect
+import HBS2.Peer.StorageInventory
+import HBS2.Peer.StorageInventory.Collector
 
 import HBS2.KeyMan.Keys.Direct
 
@@ -104,7 +106,7 @@ import Data.Config.Suckless.System as Sy
 import Data.Config.Suckless.Almost.RPC
 
 import Codec.Serialise as Serialise
-import Control.Concurrent (myThreadId)
+import Control.Concurrent (myThreadId, newMVar)
 import Control.Concurrent.STM
 import Control.Exception as Exception
 import Control.Monad.Reader
@@ -324,6 +326,7 @@ runCLI = do
                 <> command "start"     (info pRunStart  (progDesc "run peer"))
                 <> command "poke"      (info pPoke (progDesc "poke peer by rpc"))
                 <> command "doctor"    (info pDoctor (progDesc "diagnose local peer health"))
+                <> command "storage"   (info pStorage (progDesc "storage inventory and cleanup"))
                 <> command "die"       (info pDie (progDesc "die cmd"))
                 <> command "announce"  (info pAnnounce (progDesc "announce complete Merkle object"))
                 <> command "announce-block" (info pAnnounceBlock (progDesc "announce one physical block"))
@@ -424,6 +427,86 @@ runCLI = do
           else Text.putStr (renderDoctor report)
 
         unless (doctorPassed report) exitFailure
+
+    pStorage = hsubparser
+      (command "inventory" (info pStorageInventory
+        (progDesc "show retained and reclaimable storage")) <>
+       command "cleanup" (info pStorageCleanup
+        (progDesc "plan or execute safe logical cleanup")) <>
+       command "pin" (info pStoragePin
+        (progDesc "retain an explicit Merkle or opaque root")) <>
+       command "unpin" (info pStorageUnpin
+        (progDesc "remove an explicit retention root")) <>
+       command "pins" (info pStoragePins
+        (progDesc "list explicit retention roots")))
+
+    pStorageInventory = do
+      rpc <- pRpcCommon
+      json <- switch (long "json" <> help "print a stable JSON report")
+      explain <- optional $ option (maybeReader (fromStringMay @HashRef))
+        (long "explain" <> metavar "HASH"
+          <> help "explain why one physical block is retained or reclaimable")
+      pure $ withMyRPC @PeerAPI rpc $ \caller -> do
+        result <- callRpcWaitRetry @RpcStorageInventory
+          (TimeoutSec 60) 1 caller () >>= orThrowUser "rpc timeout"
+        report <- either
+          (\problem -> Text.hPutStrLn stderr problem >> exitFailure)
+          pure result
+        case explain of
+          Nothing
+            | json -> LBS.putStr (Aeson.encode report)
+            | otherwise -> Text.putStr (renderStorageInventory report)
+          Just hash
+            | json -> LBS.putStr . Aeson.encode $
+                storageHashDisposition report hash
+            | otherwise -> Text.putStr $
+                renderStorageHashDisposition hash
+                  (storageHashDisposition report hash)
+
+    pStorageCleanup = do
+      rpc <- pRpcCommon
+      json <- switch (long "json" <> help "print a stable JSON report")
+      execute <- switch
+        (long "execute" <> help "write tombstones for the validated plan")
+      pure $ withMyRPC @PeerAPI rpc $ \caller -> do
+        result <- callRpcWaitRetry @RpcStorageCleanup
+          (TimeoutSec 120) 1 caller execute >>= orThrowUser "rpc timeout"
+        cleanup <- either
+          (\problem -> Text.hPutStrLn stderr problem >> exitFailure)
+          pure result
+        if json
+          then LBS.putStr (Aeson.encode cleanup)
+          else Text.putStr (renderStorageCleanup cleanup)
+
+    pStoragePin = do
+      rpc <- pRpcCommon
+      name <- Text.pack <$> strArgument (metavar "NAME")
+      root <- argument (maybeReader (fromStringMay @HashRef)) (metavar "HASH")
+      kind <- Text.pack <$> strOption
+        (long "kind" <> metavar "TYPE" <> value "object" <> showDefault
+          <> help "application root type shown by inventory")
+      pure $ withMyRPC @PeerAPI rpc $ \caller ->
+        callService @RpcStoragePinPut caller (StoragePin name kind root) >>=
+          either serviceFailure pure
+
+    pStorageUnpin = do
+      rpc <- pRpcCommon
+      name <- Text.pack <$> strArgument (metavar "NAME")
+      pure $ withMyRPC @PeerAPI rpc $ \caller ->
+        callService @RpcStoragePinDelete caller name >>=
+          either serviceFailure pure
+
+    pStoragePins = do
+      rpc <- pRpcCommon
+      json <- switch (long "json" <> help "print stable JSON")
+      pure $ withMyRPC @PeerAPI rpc $ \caller -> do
+        pins <- callRpcWaitRetry @RpcStoragePinList
+          (TimeoutSec 5) 1 caller () >>= orThrowUser "rpc timeout"
+        if json
+          then LBS.putStr (Aeson.encode pins)
+          else for_ pins $ \StoragePin{..} -> Text.putStrLn $
+            storagePinName <> "  " <> Text.pack (show storagePinRoot)
+              <> "  " <> storagePinKind
 
     pPubKeySign = maybeReader (fromStringMay @(PubKey 'Sign 'HBS2Basic))
 
@@ -1634,6 +1717,8 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
         pips <- getKnownPeers @L4Proto
         cleanupByPassMessaging byPass pips
 
+  storageCleanupLock <- liftIO (newMVar ())
+
   let rpcctx = RPC2Context { rpcSelf = myself
                            , rpcConfig = fromPeerConfig conf
                            , rpcMessaging = rpcmsg
@@ -1654,6 +1739,11 @@ runPeer opts = respawnOnError opts $ flip runContT pure do
                            , rpcMailboxAdapter  = AnyMailboxAdapter @s mailboxWorker
                            , rpcRepositoryAdvertCache = repositoryAdvertCache
                            , rpcRepositoryAdvertQueries = repositoryAdvertQueries
+                           , rpcCollectStorageInventory =
+                               collectStorageInventory s (AnyStorage s) (SomeBrains brains)
+                           , rpcCleanupStorageInventory =
+                               cleanupStorageInventory storageCleanupLock s
+                                 (AnyStorage s) (SomeBrains brains)
                            }
 
   m1 <- liftIO $ asyncLinked $ runMessagingUnix rpcmsg

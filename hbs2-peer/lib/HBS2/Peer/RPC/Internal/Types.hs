@@ -19,6 +19,7 @@ import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.RPC.Class
 import HBS2.Peer.Brains
 import HBS2.Peer.RepositoryLease.Discovery
+import HBS2.Peer.StorageInventory
 
 import Data.Config.Suckless.Syntax
 import Data.Config.Suckless.Parse
@@ -52,6 +53,8 @@ data RPC2Context =
   , rpcMailboxAdapter         :: AnyMailboxAdapter HBS2Basic
   , rpcRepositoryAdvertCache  :: RepositoryAdvertCache
   , rpcRepositoryAdvertQueries :: RepositoryAdvertQueries (Peer L4Proto)
+  , rpcCollectStorageInventory :: IO (Either Text StorageInventoryReport)
+  , rpcCleanupStorageInventory :: Bool -> IO (Either Text StorageCleanupResult)
   }
 
 instance (Monad m, Messaging MessagingUnix UNIX (Encoded UNIX)) => HasFabriq UNIX (ReaderT RPC2Context m) where
@@ -63,4 +66,3 @@ instance Monad m => HasOwnPeer UNIX (ReaderT RPC2Context m) where
 instance (MonadUnliftIO m, HasProtocol UNIX (ServiceProto (api :: [Type]) UNIX))
   => HasDeferred (ServiceProto api UNIX) UNIX  m where
   deferred m = void $ async m
-

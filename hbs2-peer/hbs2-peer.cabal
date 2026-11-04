@@ -148,6 +148,8 @@ library
       HBS2.Peer.RepositoryLease.Discovery
       HBS2.Peer.RepositoryLease.Worker
       HBS2.Peer.StorageAudit
+      HBS2.Peer.StorageInventory
+      HBS2.Peer.StorageInventory.Collector
       HBS2.Peer.Notify
       HBS2.Peer.RefChanNotifyLog
       HBS2.Peer.CompleteObject
@@ -227,6 +229,7 @@ test-suite test
         ReachabilityJournalSpec
         ReachabilityObservationSpec
         StorageAuditRetrievalSpec
+        StorageInventorySpec
         ReachabilityObservation
         MailboxConfig
         MailboxMerged
@@ -334,6 +337,7 @@ executable hbs2-peer
                     , RPC2.ByPassStat
                     , RPC2.Probes
                     , RPC2.RepositoryLease
+                    , RPC2.StorageInventory
                     , RPC2.LogLevel
                     , RPC2.Peers
                     , RPC2.PexInfo

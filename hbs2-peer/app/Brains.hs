@@ -20,6 +20,7 @@ import HBS2.Net.IP.Addr
 import HBS2.Peer.Brains
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Peer.StorageInventory
 import HBS2.Storage.Observation
 
 import HBS2.Misc.PrettyStuff
@@ -372,6 +373,36 @@ instance ( Hashable (Peer e)
   getRepositoryLease brains = liftIO . selectRepositoryLease brains
 
   listRepositoryLeases = liftIO . selectRepositoryLeases
+
+  putStoragePin brains pin = do
+    updateOP brains $ do
+      let conn = view brainsDb brains
+      execute conn [qc|
+        insert into statedb.storage_pin (name,kind,root)
+        values (?,?,?)
+        on conflict (name) do update set
+          kind = excluded.kind,
+          root = excluded.root
+      |] ( storagePinName pin
+         , storagePinKind pin
+         , show (storagePinRoot pin)
+         )
+    commitNow brains True
+
+  deleteStoragePin brains name = do
+    updateOP brains $ do
+      let conn = view brainsDb brains
+      execute conn [qc|delete from statedb.storage_pin where name = ?|]
+        (Only name)
+    commitNow brains True
+
+  listStoragePins brains = liftIO do
+    let conn = view brainsDb brains
+    rows <- query_ conn [qc|
+      select name,kind,root from statedb.storage_pin order by name
+    |]
+    pure $ mapMaybe (\(name, kind, root) ->
+      StoragePin name kind <$> fromStringMay root) rows
 
   admitRepositoryLease brains now policy lease = do
     answer <- liftIO newEmptyTMVarIO
@@ -1182,6 +1213,14 @@ newBasicBrains cfg = liftIO do
     , repository text not null unique
     , value      blob not null
     , updated    unsigned big int not null
+    )
+  |]
+
+  execute_ conn [qc|
+    create table if not exists statedb.storage_pin
+    ( name text not null primary key
+    , kind text not null
+    , root text not null
     )
   |]
 

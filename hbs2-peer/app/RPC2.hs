@@ -47,6 +47,7 @@ import RPC2.RefLog
 import RPC2.RefChan
 import RPC2.LWWRef
 import RPC2.Mailbox()
+import RPC2.StorageInventory()
 
 import PeerTypes
 import PeerInfo
@@ -278,5 +279,4 @@ instance (e ~ L4Proto, MonadUnliftIO m, HasRpcContext PeerAPI RPC2Context m) => 
               pure $ mkList @C [mkSym "peer", peerStaff ]
 
             pure $ mkList r
-
 

@@ -17,6 +17,7 @@ import HBS2.Peer.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
 import HBS2.Peer.RepositoryLease.Discovery
 import HBS2.Peer.RepositoryLease.Worker
+import HBS2.Peer.StorageInventory
 import HBS2.Prelude.Plated
 import HBS2.Storage
 import HBS2.Storage.Inventory
@@ -912,6 +913,27 @@ tests = testGroup "repository lease"
 
         reopened <- DB.newBasicBrains @L4Proto config
         listRepositoryLeases @L4Proto reopened >>= (@?= [lease])
+        cancel runner
+
+  , testCase "explicit storage pins survive updates and reopen" $
+      withSystemTempDirectory "hbs2-storage-pin-brains" $ \directory -> do
+        let root1 = HashRef $ hashObject @HbSync ("first-root" :: LBS.ByteString)
+            root2 = HashRef $ hashObject @HbSync ("second-root" :: LBS.ByteString)
+            firstPin = StoragePin "desktop-sync" "file-sync" root1
+            updatedPin = firstPin { storagePinRoot = root2 }
+            stateFile = directory </> "state.db"
+            source = "brains-db \"" <> stateFile <> "\""
+        forms <- either (assertFailure . show) pure (parseTop source)
+        let config = PeerConfig forms
+        first <- DB.newBasicBrains @L4Proto config
+        runner <- async (DB.runBasicBrains config first)
+        putStoragePin @L4Proto first firstPin
+        putStoragePin @L4Proto first updatedPin
+
+        reopened <- DB.newBasicBrains @L4Proto config
+        listStoragePins @L4Proto reopened >>= (@?= [updatedPin])
+        deleteStoragePin @L4Proto first "desktop-sync"
+        listStoragePins @L4Proto first >>= (@?= [])
         cancel runner
 
   , testCase "version 1 durable leases decode with no grace period" $ do

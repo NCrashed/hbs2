@@ -15,6 +15,7 @@ import HBS2.Peer.RPC.Internal.Types
 import HBS2.Peer.Brains (ReachabilityReport)
 import HBS2.Peer.Proto.RepositoryLease
 import HBS2.Peer.RepositoryLease.Admission
+import HBS2.Peer.StorageInventory
 
 import Control.Monad.Reader
 import Data.ByteString.Lazy (ByteString)
@@ -65,6 +66,11 @@ data RpcRepositoryLeaseCapacity
 data RpcRepositoryAdvertFind
 data RpcRepositoryAdvertList
 data RpcPeerReachability
+data RpcStorageInventory
+data RpcStorageCleanup
+data RpcStoragePinPut
+data RpcStoragePinDelete
+data RpcStoragePinList
 
 type PeerAPI = '[ RpcPoke
                 , RpcPing
@@ -96,6 +102,11 @@ type PeerAPI = '[ RpcPoke
                 , RpcRepositoryAdvertFind
                 , RpcRepositoryAdvertList
                 , RpcPeerReachability
+                , RpcStorageInventory
+                , RpcStorageCleanup
+                , RpcStoragePinPut
+                , RpcStoragePinDelete
+                , RpcStoragePinList
                 ]
 
 instance HasProtocol UNIX  (ServiceProto PeerAPI UNIX) where
@@ -193,6 +204,21 @@ type instance Output RpcRepositoryAdvertList = [ReplicaAdvertV1]
 
 type instance Input RpcPeerReachability = PubKey 'Sign 'HBS2Basic
 type instance Output RpcPeerReachability = Maybe ReachabilityReport
+
+type instance Input RpcStorageInventory = ()
+type instance Output RpcStorageInventory = Either Text StorageInventoryReport
+
+type instance Input RpcStorageCleanup = Bool
+type instance Output RpcStorageCleanup = Either Text StorageCleanupResult
+
+type instance Input RpcStoragePinPut = StoragePin
+type instance Output RpcStoragePinPut = ()
+
+type instance Input RpcStoragePinDelete = Text
+type instance Output RpcStoragePinDelete = ()
+
+type instance Input RpcStoragePinList = ()
+type instance Output RpcStoragePinList = [StoragePin]
 
 data SetLogging =
     DebugOn Bool
