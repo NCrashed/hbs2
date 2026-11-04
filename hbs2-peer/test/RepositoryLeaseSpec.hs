@@ -251,7 +251,7 @@ tests = testGroup "repository lease"
         (_, restoredSigner, restoredReceipt) <- readRepositoryReplicaReceipt
           fixtureStorage leaseId >>= expectRight
         restoredSigner @?= view peerSignPk providerCredentials
-        restoredReceipt @?= receipt
+        assertReissuedReceipt receipt restoredReceipt
 
         receiptBytes <- getBlock fixtureStorage (fromHashRef receiptHash)
           >>= orThrowUser "receipt block disappeared"
@@ -275,7 +275,7 @@ tests = testGroup "repository lease"
         (_, signatureRepairedSigner, signatureRepairedReceipt) <-
           readRepositoryReplicaReceipt fixtureStorage leaseId >>= expectRight
         signatureRepairedSigner @?= view peerSignPk providerCredentials
-        signatureRepairedReceipt @?= receipt
+        assertReissuedReceipt receipt signatureRepairedReceipt
 
         attacker <- newCredentials @'HBS2Basic
         let attackerKey = view peerSignPk attacker
@@ -1399,6 +1399,13 @@ put storage bytes = putBlock storage bytes >>= orThrowUser "test storage write f
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = either (assertFailure . show) pure
+
+assertReissuedReceipt :: ReplicaReceiptV1 -> ReplicaReceiptV1 -> Assertion
+assertReissuedReceipt expected actual = do
+  actual { replicaReceiptIssuedAt = replicaReceiptIssuedAt expected }
+    @?= expected
+  assertBool "a replacement receipt is not older than the one it replaces" $
+    replicaReceiptIssuedAt actual >= replicaReceiptIssuedAt expected
 
 repositoryLeaseFixture
   :: RepositoryLeaseId
