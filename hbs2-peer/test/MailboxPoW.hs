@@ -263,7 +263,7 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
       assertBool "and it names the mailbox the box is signed by"
         (stampNamesDelete mbox st)
 
-  , testCase "work for a letter is not work for a delete" $
+  , testCase "a letter and a delete have different work preimages" $
       withStore $ \sto -> do
         alice <- aPeer
         (bobC, bobS) <- aPeer
@@ -271,14 +271,16 @@ mailboxPoWTests = testGroup "mailbox proof-of-work"
 
         msg <- aMessage sto alice [bobS] (B8.pack "a letter")
 
-        -- The two identities are digests of differently-typed values, so a
-        -- solution cannot be moved between them. Asserted rather than argued,
-        -- because the preimage function is deliberately shared and sharing it
-        -- is exactly how a domain separation gets lost.
+        -- The two identities are digests of differently-typed values, so the
+        -- same nonce is hashed over a different preimage.  Do not assert that
+        -- it can never meet both difficulties: proof-of-work is probabilistic,
+        -- and an unrelated hash has a 1/64 chance of carrying six bits too.
         let box = deleteBoxOf bobC (messageKey msg)
             forLetter = solveStamp 6 bob msg
-        assertBool "a letter's stamp does not pay for a delete"
-          (deleteStampBits box forLetter < 6 || stampBits msg forLetter /= 6)
+            nonce = msNonce forLetter
+        assertBool "the two work preimages differ"
+          (stampPreimage @S bob (messageKey msg) nonce
+             /= stampPreimage @S bob (deleteKey box) nonce)
         assertBool "the two keys differ"
           (deleteKey box /= messageKey msg)
 
