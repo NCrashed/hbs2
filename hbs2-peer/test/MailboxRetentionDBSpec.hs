@@ -30,24 +30,43 @@ tests = testGroup "mailbox retention journal"
         markRetentionPurged dbe mailbox message
         purged <- map retentionPurged <$> retentionRows @HBS2Basic dbe
         purged @?= [True]
-  , testCase "a purged entry remains merged after restart, so an old peer cannot replay it" $
+  , testCase "an old peer cannot replay expired or deleted entries after reconnect" $
       withSystemTempDirectory "mailbox-retention-replay" $ \dir -> do
         (creds,_) <- aPeer
-        let path = dir </> "state.db"
+        let hostPath = dir </> "host.db"
+            oldPeerPath = dir </> "old-peer.db"
             mailbox = MailboxRefKey @HBS2Basic (view peerSignPk creds)
-            message = fromString "11111111111111111111111111111111"
-            entry = fromString "22222222222222222222222222222222"
-        dbe0 <- newDBPipeEnv dbPipeOptsDef path
-        withDB dbe0 (transactional (mergedDDL >> retentionDDL))
-        markMerged dbe0 mailbox entry
-        observeRetention dbe0 mailbox message RetentionTTL 100 200
-        markRetentionPurged dbe0 mailbox message
+            expiredMessage = fromString "11111111111111111111111111111111"
+            deletedMessage = fromString "22222222222222222222222222222222"
+            expiredEntry = fromString "33333333333333333333333333333333"
+            deletedEntry = fromString "44444444444444444444444444444444"
+            entries = [expiredEntry,deletedEntry]
 
-        dbe1 <- newDBPipeEnv dbPipeOptsDef path
-        withDB dbe1 (transactional (mergedDDL >> retentionDDL))
-        isMerged dbe1 mailbox entry >>= (@?= True)
-        rows <- retentionRows @HBS2Basic dbe1
-        map retentionPurged rows @?= [True]
+        -- The disconnected peer still has the entries it will offer when it
+        -- reconnects.  The host has already merged the same entry identities.
+        oldPeer <- newDBPipeEnv dbPipeOptsDef oldPeerPath
+        withDB oldPeer (transactional (mergedDDL >> retentionDDL))
+        for_ entries (markMerged oldPeer mailbox)
+
+        host0 <- newDBPipeEnv dbPipeOptsDef hostPath
+        withDB host0 (transactional (mergedDDL >> retentionDDL))
+        for_ entries (markMerged host0 mailbox)
+        observeRetention host0 mailbox expiredMessage RetentionTTL 100 200
+        observeRetention host0 mailbox deletedMessage RetentionDeleted 100 200
+        markRetentionPurged host0 mailbox expiredMessage
+        markRetentionPurged host0 mailbox deletedMessage
+
+        -- Restart the host, then model the old peer offering both entries on
+        -- reconnect.  The durable merge boundary refuses both before either
+        -- can re-enter the compacted mailbox tree.
+        host1 <- newDBPipeEnv dbPipeOptsDef hostPath
+        withDB host1 (transactional (mergedDDL >> retentionDDL))
+        for_ entries $ \entry -> do
+          isMerged oldPeer mailbox entry >>= (@?= True)
+          isMerged host1 mailbox entry >>= (@?= True)
+        rows <- retentionRows @HBS2Basic host1
+        map retentionCause rows @?= [RetentionTTL,RetentionDeleted]
+        map retentionPurged rows @?= [True,True]
   ]
 
 withJournal :: (DBPipeEnv -> IO a) -> IO a
