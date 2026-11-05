@@ -1,3 +1,78 @@
+# 0.26.0.7  2026-11-05
+
+hbs2 can now keep repositories available after their owner goes offline:
+peers accept durable, capacity-bounded repository leases, advertise verified
+replicas through relays, and let clones discover those replicas. This release
+also turns the desktop encrypted-repository setup report into supported
+workflows: one command diagnoses the complete path, a machine can be added to
+an existing encrypted repository without sharing another machine's secret,
+and the Nix flake publishes signed binary-cache results.
+
+## Added
+
+  - **Durable repository leasing and replica discovery (PEP-16).** A storage
+    peer can accept a repository lease, retain its complete live inventory,
+    issue signed receipts, renew replica adverts, and enforce capacity,
+    lifetime, update-lag and grace policies. `hbs2-git3 repo:lease:*` manages
+    leases, `repo:replication` declares replica targets, and clones can find a
+    healthy replica through a relay while the repository owner is offline.
+
+  - **End-to-end health diagnostics.** `hbs2-peer doctor` checks local config,
+    key discovery, RPC/version agreement, bootstrap DNS, configured peers,
+    advertised metadata and repository readability. `hbs2-hub doctor` extends
+    that report through the forge contribution path. Both have stable JSON
+    output and print actionable remedies.
+
+  - **Safe storage inspection and cleanup.** `hbs2-peer storage inventory`
+    streams the live NCQ inventory, accounts for repository leases and other
+    retention roots, and `hbs2-peer storage cleanup` previews reclaimable
+    blocks before `--execute` removes them.
+
+  - **Mailbox retention and physical purge.** Expired or explicitly deleted
+    mailbox messages are hidden immediately, recorded durably, and become
+    eligible for canon-aware physical purge after a configurable grace period.
+    Old peer replay cannot make a purged message live again.
+
+  - **Signed Nix binary cache.** CI publishes Linux builds to the configured
+    Cachix cache, signs store paths with the project's own key, and retains
+    release builds permanently. The desktop guide covers pinned imperative,
+    Home Manager and NixOS installations.
+
+## Changed
+
+  - `hbs2-peer init` creates both signing and encryption keys without
+    overwriting an existing identity. `hbs2-keyman update` discovers the
+    active peer keyring from peer configuration, so the normal setup no longer
+    needs a manually maintained scan mask.
+
+  - CLI discovery is consistent across the main programs: `--help`,
+    command-specific help and `--version`/`version` now work without treating
+    help flags as s-expression arguments.
+
+  - hbs2-hub exposes lease, provider-availability and inbox-retention state,
+    reports pull-request mergeability, and gives actionable output when inbox
+    listings are truncated.
+
+## Fixed
+
+  - **Existing encrypted repositories can grant a new machine access.**
+    `hbs2-git3 repo:member:add` rotates the group key to include encryption
+    public keys while preserving current members, verifies access, and is
+    idempotent. The lower-level group-key commands now name the object type
+    they actually expect.
+
+  - **Encrypted-repository failures identify the missing layer.** A clone now
+    distinguishes an unavailable group-key object from a missing local member
+    secret instead of succeeding as an unexplained empty repository.
+
+  - **Relays fetch complete Merkle objects.** A relay no longer stops after
+    receiving only an object's root block, so encrypted repository history can
+    be cloned through it after the owner goes offline.
+
+  - Missing indexed repository segments are republished, Git bundle acceptance
+    handles an already-local tip, and MCP child processes are settled and
+    reaped during cleanup.
+
 # 0.26.0.6  2026-10-31
 
 Peers now retry a block after a fresh announcement, even when an earlier

@@ -56,7 +56,7 @@ tests = testGroup "doctor"
       doctorPassed report @?= False
       doctorCheckStatus versionCheck @?= CheckFailure
       assertBool "CLI version is reported"
-        ("0.26.0.6" `Text.isInfixOf` doctorCheckMessage versionCheck)
+        ("0.26.0.7" `Text.isInfixOf` doctorCheckMessage versionCheck)
       assertBool "daemon version is reported"
         ("0.25.5.0" `Text.isInfixOf` doctorCheckMessage versionCheck)
 
@@ -313,12 +313,12 @@ tests = testGroup "doctor"
 
 healthy :: DoctorFacts
 healthy = DoctorFacts
-  { doctorCLIVersion = "0.26.0.6"
+  { doctorCLIVersion = "0.26.0.7"
   , doctorConfigPath = "/home/alice/.config/hbs2-peer/config"
   , doctorConfigPresent = True
   , doctorKeyring = DoctorKeyringIndexed "/home/alice/.config/hbs2-peer/default.key" 1
   , doctorRPCSocket = "/tmp/hbs2-rpc.socket"
-  , doctorPoke = Just (poke "0.26.0.6")
+  , doctorPoke = Just (poke "0.26.0.7")
   , doctorPeerCount = Just 2
   , doctorBootstrap = DoctorBootstrapChecked [("bootstrap.hbs2.app", 1)]
   , doctorConfiguredPeers = DoctorConfiguredPeersChecked
