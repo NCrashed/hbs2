@@ -15,6 +15,8 @@ module MailboxProtoWorker ( mailboxProtoWorker
 import HBS2.Prelude.Plated
 import MailboxConfig
 import MailboxMerged
+import MailboxRetention
+import MailboxPurge
 import MailboxQueue
 import HBS2.OrDie
 import HBS2.Actors.Peer
@@ -40,6 +42,7 @@ import HBS2.Peer.Proto.Mailbox.PolicyCache
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.Policy.Basic
 import HBS2.Peer.Proto.Mailbox.PoW
+import HBS2.Peer.Proto.Mailbox.Retention
 import HBS2.Net.Messaging.Unix
 import HBS2.Net.Auth.Credentials
 
@@ -73,6 +76,7 @@ import Data.List qualified as L
 import Data.Maybe
 import Data.Word
 import Data.Hashable
+import Data.Text qualified as Text
 import Codec.Serialise
 import Lens.Micro.Platform
 import Text.InterpolatedString.Perl6 (qc)
@@ -205,6 +209,9 @@ data MailboxProtoWorker (s :: CryptoScheme) e =
     -- | Peers this one takes replication from for a charging mailbox, from
     -- 'hbs2MailboxReplicateFromOpt'. Read from the config like the floor above.
   , mpwReplicateFrom      :: TVar (HashSet (PubKey 'Sign s))
+  , mpwClockSkew          :: TVar Word64
+  , mpwPurgeGrace         :: TVar Word64
+  , mpwRetentionLock      :: MVar ()
     -- | What is in the queue right now, by message hash. Not a dedup of
     -- everything ever seen: see 'mailboxAcceptMessage' for why it is exactly
     -- as long-lived as one batch.
@@ -975,6 +982,15 @@ instance ( s ~ Encryption e, e ~ L4Proto
                           , readTVar inMessageMerging ]
         pure $ Right $ Just $ MailboxPending downs (merge || any (HS.member ref) marks)
 
+  mailboxRetention worker@MailboxProtoWorker{..} retentionRequest = liftIO do
+    mdbe <- readTVarIO mailboxDB
+    case mdbe of
+      Nothing -> pure (Left (MailboxOperationError "database not ready"))
+      Just dbe -> tryAny (withMVar mpwRetentionLock $ \_ ->
+                    runMailboxRetention dbe worker retentionRequest) <&> \case
+        Left problem -> Left (MailboxOperationError (displayException problem))
+        Right report -> Right report
+
 startDownloadStuff :: forall s e m . (ForMailbox s, s ~ Encryption e, MyPeer e, MonadIO m)
               => MailboxProtoWorker s e
               -> HashRef
@@ -985,6 +1001,173 @@ startDownloadStuff MailboxProtoWorker{..} href = do
     $ do
       debug $ "startDownloadStuff" <+> pretty href
       addDownload @e Nothing (coerce href)
+
+data MailboxSnapshot s = MailboxSnapshot
+  { snapshotMailbox :: MailboxRefKey s
+  , snapshotRoot    :: Maybe HashRef
+  , snapshotEntries :: [(HashRef,MailboxEntry)]
+  }
+
+runMailboxRetention :: forall s e . (ForMailbox s, s ~ HBS2Basic)
+                    => DBPipeEnv
+                    -> MailboxProtoWorker s e
+                    -> MailboxRetentionRequest
+                    -> IO MailboxRetentionReport
+runMailboxRetention dbe MailboxProtoWorker{..} MailboxRetentionRequest{..} = do
+  when (retentionExecute && isNothing retentionTargetMailbox) $
+    throwIO (userError "physical purge requires a target mailbox")
+  now <- round <$> getPOSIXTime
+  skew <- readTVarIO mpwClockSkew
+  grace <- readTVarIO mpwPurgeGrace
+  allMailboxes <- map fst <$> listMailboxes @s dbe
+  let targetMailboxes = case retentionTargetMailbox of
+        Nothing -> allMailboxes
+        Just mailbox -> filter (== mailbox) allMailboxes
+  when (retentionExecute && null targetMailboxes) $
+    throwIO (userError "target mailbox is not hosted by this peer")
+  allSnapshots <- traverse loadSnapshot allMailboxes
+  let targetSnapshots = filter
+        ((`elem` targetMailboxes) . snapshotMailbox) allSnapshots
+
+  -- Discover TTL expiry in mailboxes that predate the retention journal.
+  for_ targetSnapshots $ \MailboxSnapshot{..} ->
+    for_ snapshotEntries $ \(_,mailboxEntry) -> case mailboxEntry of
+      Deleted{} -> pure ()
+      Exists _ message -> loadContent message >>= \case
+        Just content
+          | mailboxLifetime skew now (messageFlags content) == MessageExpired ->
+              observeRetention dbe snapshotMailbox message RetentionTTL now
+                (saturatingSeconds now grace)
+        _ -> pure ()
+
+  allRows <- retentionRows @s dbe
+  let rows = filter ((`elem` targetMailboxes) . retentionMailbox) allRows
+      eligibleRows =
+        [ row
+        | row <- rows
+        , not (retentionPurged row)
+        , retentionPurgeAfter row <= now
+        ]
+      keepEntry mailbox (_,mailboxEntry) =
+        maybe True (not . eligibleFor mailbox)
+          (entryMessage mailboxEntry)
+      eligibleFor mailbox message = any
+        (\row -> retentionMailbox row == mailbox && retentionMessage row == message)
+        eligibleRows
+      kept mailboxSnapshot = filter (keepEntry (snapshotMailbox mailboxSnapshot))
+                             (snapshotEntries mailboxSnapshot)
+      protectedEntries mailboxSnapshot
+        | snapshotMailbox mailboxSnapshot `elem` targetMailboxes = kept mailboxSnapshot
+        | otherwise = snapshotEntries mailboxSnapshot
+      live = Set.fromList
+        [ message
+        | mailboxSnapshot <- allSnapshots
+        , message <- Set.toList
+            (liveEntryMessages (map snd (protectedEntries mailboxSnapshot)))
+        ]
+      victims = Set.fromList (map retentionMessage eligibleRows)
+
+  victimRoots <- Set.unions <$> traverse relatedRoots (Set.toList victims)
+  liveRoots <- Set.unions <$> traverse relatedRoots (Set.toList live)
+
+  -- A missing canon root makes reachability unknowable.  Refuse both planning
+  -- and execution rather than displaying a plan that would become unsafe as
+  -- soon as the absent tree arrived.
+  protectedMissing <- concat <$> traverse (findMissedBlocks mpwStorage)
+                                      (Set.toList retentionProtectedParts)
+  unless (null protectedMissing) $
+    throwIO (userError ("canon-protected attachment is incomplete: "
+                      <> show (head protectedMissing)))
+
+  victimClosure <- Set.union victims <$> mailboxObjectClosure mpwStorage victimRoots
+  liveClosure <- mailboxObjectClosure mpwStorage liveRoots
+  canonClosure <- mailboxObjectClosure mpwStorage retentionProtectedParts
+  let candidates = mailboxPurgeCandidates
+        victims (Set.difference victimClosure victims)
+        live liveClosure canonClosure
+
+  semanticOrder <- mailboxObjectOrder mpwStorage victimRoots
+  let orderedSemantic = filter (`Set.member` candidates) semanticOrder
+      unordered = candidates `Set.difference` Set.fromList orderedSemantic
+      deletionOrder = orderedSemantic <> Set.toList unordered
+
+  when retentionExecute $ for_ targetSnapshots $ \mailboxSnapshot@MailboxSnapshot{..} -> do
+    let remaining = kept mailboxSnapshot
+    when (length remaining /= length snapshotEntries) do
+      current <- getRef mpwStorage snapshotMailbox <&> fmap HashRef
+      unless (current == snapshotRoot) $
+        throwIO (userError "mailbox changed while retention was planned")
+      let hashes = L.sort (map fst remaining)
+          pt = toPTree (MaxSize 6000) (MaxNum 1024) hashes
+      newRoot <- makeMerkle 0 pt $ \(_,_,bytes) ->
+        void (putBlock mpwStorage bytes)
+      updateRef mpwStorage snapshotMailbox newRoot
+
+  (deleted,failures) <- if retentionExecute
+    then deleteMailboxBlocks mpwStorage deletionOrder
+    else pure (0,[])
+
+  when (retentionExecute && null failures) $
+    for_ eligibleRows $ \row ->
+      markRetentionPurged dbe (retentionMailbox row) (retentionMessage row)
+
+  finalRows <- filter ((`elem` targetMailboxes) . retentionMailbox)
+                 <$> retentionRows @s dbe
+  pure MailboxRetentionReport
+    { retentionReportNow = now
+    , retentionReportClockSkew = skew
+    , retentionReportPurgeGrace = grace
+    , retentionReportEntries = map reportEntry finalRows
+    , retentionReportEligible = length eligibleRows
+    , retentionReportProtectedParts = Set.size retentionProtectedParts
+    , retentionReportCandidateBlocks = Set.size candidates
+    , retentionReportDeletedBlocks = deleted
+    , retentionReportFailures = failures
+    }
+  where
+    loadSnapshot mailbox = getRef mpwStorage mailbox <&> fmap HashRef >>= \case
+      Nothing -> pure (MailboxSnapshot mailbox Nothing [])
+      Just root -> do
+        missing <- findMissedBlocks mpwStorage root
+        unless (null missing) $
+          throwIO (userError ("mailbox tree is incomplete: " <> show (head missing)))
+        hashes <- readLog (getBlock mpwStorage) root
+        entries <- for hashes $ \entryHash -> do
+          block <- getBlock mpwStorage (fromHashRef entryHash)
+                     >>= maybe (throwIO (userError "missing mailbox entry")) pure
+          mailboxEntry <- deserialiseOrFail block
+                     & either (throwIO . userError . ("invalid mailbox entry: " <>) . show) pure
+          pure (entryHash,mailboxEntry)
+        pure (MailboxSnapshot mailbox (Just root) entries)
+
+    loadContent message = getBlock mpwStorage (fromHashRef message) <&> (>>= \bytes -> do
+      signed <- either (const Nothing) Just (deserialiseOrFail @(Message s) bytes)
+      snd <$> unboxSignedBox0 (messageContent signed))
+
+    relatedRoots message = loadContent message <&> \case
+      Nothing -> mempty
+      Just content -> messageObjectRoots content
+
+    entryMessage = \case
+      Exists _ message -> Just message
+      Deleted _ message -> Just message
+
+    liveEntryMessages entries =
+      Set.fromList [ message | Exists _ message <- entries ]
+        `Set.difference`
+      Set.fromList [ message | Deleted _ message <- entries ]
+
+    reportEntry RetentionRow{..} = MailboxRetentionEntry
+      { retentionEntryMailbox = case retentionMailbox of
+          MailboxRefKey mailboxKey -> Text.pack (show (pretty (AsBase58 mailboxKey)))
+      , retentionEntryMessage = retentionMessage
+      , retentionEntryCause = Text.pack $ case retentionCause of
+          RetentionTTL -> "ttl"
+          RetentionDeleted -> "deleted"
+      , retentionEntryObservedAt = retentionObservedAt
+      , retentionEntryPurgeAfter = retentionPurgeAfter
+      , retentionEntryPurged = retentionPurged
+      }
 
 listMailboxes :: forall s m . (ForMailbox s, MonadIO m)
               => DBPipeEnv
@@ -1116,6 +1299,9 @@ createMailboxProtoWorker pc pe sto = do
     <*> newTVarIO 0                 -- mpwPoWFloor
     <*> newTVarIO 0                 -- mpwPoWNotForwarded
     <*> newTVarIO mempty            -- mpwReplicateFrom
+    <*> newTVarIO defaultMailboxClockSkew
+    <*> newTVarIO defaultMailboxPurgeGrace
+    <*> newMVar ()
     <*> newTVarIO mempty            -- inMessageQueueSeen
     <*> newTVarIO mempty            -- inMessageQueuePeers
     <*> newTVarIO mempty            -- mpwPoWKnown
@@ -1163,14 +1349,21 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
     -- Порог берётся один раз, на старте, как и всё остальное из конфига здесь.
     lift do
-      floorD <- readConf <&> poWFloorFrom
+      conf <- readConf
+      let floorD = poWFloorFrom conf
       atomically $ writeTVar mpwPoWFloor floorD
       when (floorD > 0) do
         debug $ "mailbox: will not forward messages under"
                   <+> pretty floorD <+> "bits of work"
 
-      hosts <- readConf <&> replicateFromIn @s
+      let hosts = replicateFromIn @s conf
       atomically $ writeTVar mpwReplicateFrom hosts
+      let (skew, grace) = retentionWindowsFrom conf
+      atomically do
+        writeTVar mpwClockSkew skew
+        writeTVar mpwPurgeGrace grace
+      debug $ "mailbox: retention clock skew" <+> pretty skew
+                <+> "seconds; purge grace" <+> pretty grace <+> "seconds"
       -- Said out loud on both sides, because the silent half is the one that
       -- surprises: a mailbox that charges work and names no co-hosts simply
       -- stops taking replication, which looks like a mailbox that will not sync.
@@ -1317,7 +1510,26 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
 
           -- TODO: process-with-policy
 
-          for_ (messageRecipients s) $ \rcpt -> void $ runMaybeT do
+          now <- round <$> liftIO getPOSIXTime
+          skew <- readTVarIO mpwClockSkew
+          let lifetime = mailboxLifetime skew now (messageFlags s)
+          when (lifetime /= MessageLive) $
+            warn $ red "mailbox: refusing message outside its signed lifetime"
+                     <+> viaShow lifetime
+                     <+> pretty (HashRef (hashObject (serialise m)))
+
+          when (lifetime == MessageExpired) do
+            grace <- readTVarIO mpwPurgeGrace
+            let message = HashRef (hashObject (serialise m))
+                purgeAfter = saturatingSeconds now grace
+            for_ (messageRecipients s) $ \recipient -> do
+              let mailbox = MailboxRefKey @s recipient
+              hosted <- isJust <$> getMailboxType_ @s dbe mailbox
+              when hosted $
+                observeRetention dbe mailbox message RetentionTTL now purgeAfter
+
+          for_ [() | lifetime == MessageLive] $ \() ->
+           for_ (messageRecipients s) $ \rcpt -> void $ runMaybeT do
 
             let theMailbox  = MailboxRefKey @s rcpt
 
@@ -1480,6 +1692,7 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
       -- off once the ref is written, or once this gives up: see
       -- 'inMessageMerging'.
       polling (Polling 2 5) mboxes $ \r ->
+       withMVar mpwRetentionLock $ \_ ->
        flip finally (atomically (modifyTVar inMessageMerging (HS.delete r))) $
         void $ runMaybeT do
         debug $ yellow "mailbox: merge-poll" <+> pretty r
@@ -1513,8 +1726,35 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                 err $ red "mailbox (invalid block)"
                 markMerged dbe r th
 
-              -- maybe to something more sophisticated
-              Right (Exists{}) -> lift $ S.yield th
+              Right (Exists _ message) -> do
+                block <- getBlock sto (coerce message)
+                case block >>= either (const Nothing) Just
+                                . deserialiseOrFail @(Message s) of
+                  Nothing -> do
+                    warn $ red "mailbox: refusing an Exists entry with no valid message"
+                             <+> pretty th <+> "for" <+> pretty r
+                    markMerged dbe r th
+                  Just signed -> case unboxSignedBox0 (messageContent signed) of
+                    Nothing -> do
+                      warn $ red "mailbox: refusing an Exists entry with an invalid signature"
+                               <+> pretty th <+> "for" <+> pretty r
+                      markMerged dbe r th
+                    Just (_, content) -> do
+                      now <- round <$> liftIO getPOSIXTime
+                      skew <- readTVarIO mpwClockSkew
+                      case mailboxLifetime skew now (messageFlags content) of
+                        MessageLive -> lift $ S.yield th
+                        MessageExpired -> do
+                          grace <- readTVarIO mpwPurgeGrace
+                          observeRetention dbe r message RetentionTTL now
+                            (saturatingSeconds now grace)
+                          markMerged dbe r th
+                          debug $ "mailbox: expired Exists entry not merged"
+                                    <+> pretty th <+> "for" <+> pretty r
+                        MessageNotYetValid -> do
+                          markMerged dbe r th
+                          warn $ red "mailbox: future-dated Exists entry not merged"
+                                   <+> pretty th <+> "for" <+> pretty r
 
               -- The entry's TARGET is bound now. It used to be matched as a `_`
               -- here, and the payload's own predicate was never read on this
@@ -1565,6 +1805,10 @@ mailboxProtoWorker readConf me@MailboxProtoWorker{..} = do
                   case admitDeleted r what bs of
                     MergeAccept -> do
                       debug $ red "<<***>> mailbox:" <+> "PROVEN message deleting" <+> pretty h
+                      now <- round <$> liftIO getPOSIXTime
+                      grace <- readTVarIO mpwPurgeGrace
+                      observeRetention dbe r what RetentionDeleted now
+                        (saturatingSeconds now grace)
                       lift $ S.yield th
 
                     -- Said out loud. A failing guard inside runMaybeT dropped
@@ -1890,6 +2134,7 @@ mailboxStateEvolve readConf MailboxProtoWorker{..}  = do
            |]
 
     mergedDDL
+    retentionDDL
 
   atomically $ writeTVar mailboxDB (Just dbe)
 
@@ -1902,4 +2147,8 @@ mailboxStateEvolve readConf MailboxProtoWorker{..}  = do
 instance FromField MailboxType where
   fromField w = fromField @String w <&> fromString @MailboxType
 
-
+saturatingSeconds :: Word64 -> Word64 -> Word64
+saturatingSeconds a b
+  | a >= maximumMailboxRetentionSecond = maximumMailboxRetentionSecond
+  | maximumMailboxRetentionSecond - a < b = maximumMailboxRetentionSecond
+  | otherwise = a + b

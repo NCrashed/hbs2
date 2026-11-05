@@ -17,6 +17,7 @@ import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.PoW (solveStamp,solveDeleteStamp,maxPayableFloor,payableFloor,powBudget)
+import HBS2.Peer.Proto.Mailbox.Retention
 
 import HBS2.Peer.RPC.API.Mailbox
 import HBS2.Net.Messaging.Unix (UNIX)
@@ -112,8 +113,8 @@ runMailboxCLI rpc s = do
                       "relay semantics (a bounded store that evicts the"
                         <+> "oldest) are NOT implemented in this build. This mailbox"
                         <+> "will behave exactly like a hub: it accumulates without"
-                        <+> "bound. messageTTL and messageCreated are signed and"
-                        <+> "stored, and read by nothing."
+                        <+> "bound except for signed message TTL and explicit"
+                        <+> "deletion; configure purge grace for your sync horizon."
 
                 -- A refusal, not an `error`. These are documented in --help and
                 -- in the examples, so they are spellings somebody types on
@@ -257,6 +258,16 @@ runMailboxCLI rpc s = do
                              <+> "(create it with `mailbox create --key ... hub`)"
 
              _ -> throwIO $ BadFormException @C nil
+
+        brief "inspect mailbox retention (physical purge is canon-aware and runs through hbs2-hub)"
+          $ entry $ bindMatch "retention" $ nil_ $ \case
+            [] -> do
+              report <- callRpcWaitMay @RpcMailboxRetention (TimeoutSec 120) api
+                          (MailboxRetentionRequest Nothing mempty False)
+                          >>= orThrowUser "rpc call timeout (an older peer does not answer this)"
+                          >>= orThrowPassIO
+              liftIO $ print $ retentionDoc False report
+            _ -> throwIO $ BadFormException @C nil
 
         brief "fetch mailbox"
           $ entry $ bindMatch "fetch" $ nil_ $ \case
@@ -658,3 +669,25 @@ stampWithin floorD what search
                         ( "cannot solve" <+> pretty floorD <+> "bits of work for"
                             <+> what <+> "in" <+> pretty powBudget )
           Right st -> pure (Just st)
+
+retentionDoc :: Bool -> MailboxRetentionReport -> Doc AnsiStyle
+retentionDoc execute MailboxRetentionReport{..} = vsep $
+  [ "mailbox retention" <+> if execute then "executed" else "plan"
+  , "clock skew:" <+> pretty retentionReportClockSkew <+> "seconds"
+  , "purge grace:" <+> pretty retentionReportPurgeGrace <+> "seconds"
+  , "tracked:" <+> pretty (length retentionReportEntries)
+      <> "; eligible:" <+> pretty retentionReportEligible
+  , "canon-protected roots:" <+> pretty retentionReportProtectedParts
+  , "candidate blocks:" <+> pretty retentionReportCandidateBlocks
+      <> "; deleted:" <+> pretty retentionReportDeletedBlocks
+  ]
+  <> [ "failure:" <+> pretty failure
+     | failure <- retentionReportFailures
+     ]
+  <> [ pretty retentionEntryMessage
+         <+> pretty retentionEntryCause
+         <+> "mailbox" <+> pretty retentionEntryMailbox
+         <+> "purge-after" <+> pretty retentionEntryPurgeAfter
+         <+> if retentionEntryPurged then "purged" else "pending"
+     | MailboxRetentionEntry{..} <- retentionReportEntries
+     ]

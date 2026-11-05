@@ -32,6 +32,7 @@ import HBS2.Hub.CLI.Policy
 import HBS2.Hub.CLI.Pr
 import HBS2.Hub.CLI.Publish
 import HBS2.Hub.CLI.Read
+import HBS2.Hub.CLI.Retention
 import HBS2.Hub.CLI.Reject
 import HBS2.Hub.CLI.Sent
 import HBS2.Hub.CLI.Show
@@ -70,6 +71,7 @@ hubEntries :: forall c m . ( IsContext c
 hubEntries = do
   mcpEntries
   inboxEntries
+  retentionEntries
   leaseEntries
   acceptEntries
   commentEntries
@@ -151,7 +153,7 @@ ours (Id t) =
 peerFulNames :: [Id]
 peerFulNames =
   [ "hub:inbox", "hub:inbox:show", "hub:inbox:accept", "hub:inbox:honour"
-  , "hub:inbox:reject"
+  , "hub:inbox:reject", "hub:inbox:retention"
   , "hub:issue:new", "hub:issue:comment"
   , "hub:pr:new", "hub:pr:revise", "hub:pr:comment"
   , "hub:updates"

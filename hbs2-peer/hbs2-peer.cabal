@@ -175,6 +175,7 @@ library
       HBS2.Peer.Proto.Mailbox
       HBS2.Peer.Proto.Mailbox.Types
       HBS2.Peer.Proto.Mailbox.Message
+      HBS2.Peer.Proto.Mailbox.Retention
       HBS2.Peer.Proto.Mailbox.Entry
       HBS2.Peer.Proto.Mailbox.Merge
       HBS2.Peer.Proto.Mailbox.Nonce
@@ -233,7 +234,12 @@ test-suite test
         ReachabilityObservation
         MailboxConfig
         MailboxMerged
+        MailboxRetention
+        MailboxPurge
         MailboxMergedSpec
+        MailboxRetentionSpec
+        MailboxRetentionDBSpec
+        MailboxPurgeSpec
         MailboxQueue
         MailboxQueueSpec
         RelayedSpec
@@ -359,6 +365,8 @@ executable hbs2-peer
                     , LWWRef
                     , MailboxConfig
                     , MailboxMerged
+                    , MailboxRetention
+                    , MailboxPurge
                     , MailboxQueue
                     , MailboxProtoWorker
                     , Multicast

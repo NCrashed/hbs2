@@ -15,6 +15,9 @@ import MailboxPolicy (mailboxPolicyTests)
 import MailboxEntry (mailboxEntryTests)
 import MailboxPoW (mailboxPoWTests, mailboxConfigTests)
 import MailboxMergedSpec qualified
+import MailboxRetentionSpec qualified
+import MailboxRetentionDBSpec qualified
+import MailboxPurgeSpec qualified
 import MailboxQueueSpec qualified
 import RelayedSpec qualified
 import PingNonceSpec qualified
@@ -184,6 +187,9 @@ main = do
       , mailboxConfigTests
       , MailboxQueueSpec.tests
       , MailboxMergedSpec.tests
+      , MailboxRetentionSpec.tests
+      , MailboxRetentionDBSpec.tests
+      , MailboxPurgeSpec.tests
       , RelayedSpec.tests
       , PingNonceSpec.tests
       , MailboxPolicyCacheSpec.tests

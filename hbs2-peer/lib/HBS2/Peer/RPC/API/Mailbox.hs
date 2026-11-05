@@ -9,6 +9,7 @@ import HBS2.Data.Types.SignedBox
 
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox
+import HBS2.Peer.Proto.Mailbox.Retention
 
 import Data.ByteString.Lazy ( ByteString )
 import Data.ByteString qualified as BS
@@ -26,6 +27,7 @@ data RpcMailboxDeleteMessages
 data RpcMailboxGet
 data RpcMailboxPoWFloor
 data RpcMailboxPending
+data RpcMailboxRetention
 
 -- APPENDED, AND NEW ENTRIES GO AT THE END. A call is addressed by the method's
 -- INDEX in this list ('findMethodIndex'), so inserting one above renumbers
@@ -43,6 +45,7 @@ type MailboxAPI = '[ RpcMailboxPoke
                    , RpcMailboxGet
                    , RpcMailboxPoWFloor
                    , RpcMailboxPending
+                   , RpcMailboxRetention
                    ]
 
 -- Bumped when four methods stopped answering () for everything (see below). The
@@ -156,3 +159,6 @@ type instance Output RpcMailboxPoWFloor = PoWDifficulty
 -- peer cannot say", which is exactly what that peer could say before.
 type instance Input RpcMailboxPending = (PubKey 'Sign HBS2Basic)
 type instance Output RpcMailboxPending = Either MailboxServiceError (Maybe MailboxPending)
+
+type instance Input RpcMailboxRetention = MailboxRetentionRequest
+type instance Output RpcMailboxRetention = Either MailboxServiceError MailboxRetentionReport

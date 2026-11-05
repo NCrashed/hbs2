@@ -644,6 +644,18 @@ spec3 :: Spec
 spec3 =
   describe "PEP-18 mailbox ingress: a letter this node can open" $ do
 
+    it "omits a correctly signed message whose TTL has expired" $ do
+      alice <- newCredentials @'HBS2Basic
+      owner <- aKey
+      (live, gks) <- opened alice "payload"
+      let expired = withMessageFlags alice
+            (MessageFlags1 (MessageTimestamp 0) (Just (MessageTTL 0)) Nothing Nothing)
+            live
+          expiredHash = HashRef (hashObject (serialise expired))
+      queue <- mailboxLive (servingAll [expired] gks) owner
+      mlLive queue `shouldBe` HS.empty
+      mlLive queue `shouldNotSatisfy` HS.member expiredHash
+
     it "opens a real letter and reports what it turned out to be" $ do
       alice <- newCredentials @'HBS2Basic
       owner <- aKey
@@ -817,6 +829,16 @@ rewrap (MessageBasic box) creds =
   case unboxSignedBox0 @(MessageContent 'HBS2Basic) box of
     Just (_, content) ->
       MessageBasic (makeSignedBox @'HBS2Basic (_peerSignPk creds) (_peerSignSk creds) content)
+    Nothing -> error "the fixture built an envelope that will not open"
+
+withMessageFlags :: PeerCredentials 'HBS2Basic
+                 -> MessageFlags
+                 -> Message 'HBS2Basic
+                 -> Message 'HBS2Basic
+withMessageFlags creds flags (MessageBasic box) =
+  case unboxSignedBox0 @(MessageContent 'HBS2Basic) box of
+    Just (_, content) -> MessageBasic (makeSignedBox @'HBS2Basic
+      (_peerSignPk creds) (_peerSignSk creds) content { messageFlags = flags })
     Nothing -> error "the fixture built an envelope that will not open"
 
 -- | A mailbox holding these messages, each at its own hash, with one group key

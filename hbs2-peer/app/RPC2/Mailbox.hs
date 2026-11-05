@@ -129,3 +129,9 @@ instance (ForMailboxRPC m) => HandleMethod m RpcMailboxPending where
     AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
     debug $ "rpc.RpcMailboxPending" <+> pretty (AsBase58 puk)
     mailboxPending @HBS2Basic mbs (MailboxRefKey puk)
+
+instance (ForMailboxRPC m) => HandleMethod m RpcMailboxRetention where
+  handleMethod request = do
+    AnyMailboxService mbs <- getRpcContext @MailboxAPI @RPC2Context <&> rpcMailboxService
+    debug "rpc.RpcMailboxRetention"
+    mailboxRetention @HBS2Basic mbs request

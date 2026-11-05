@@ -75,6 +75,7 @@ import HBS2.Hash (hashObject,Hash,HbSync)
 import HBS2.Data.Types.SignedBox (unboxSignedBox0)
 import HBS2.Peer.Proto.Mailbox
 import HBS2.Peer.Proto.Mailbox.Entry
+import HBS2.Peer.Proto.Mailbox.Retention
 import HBS2.Storage.Operations.Class (OperationError)
 
 import Codec.Serialise (deserialiseOrFail,serialise)
@@ -785,7 +786,9 @@ mailboxLiveWith fresh ig mbox = do
     Nothing   -> pure (MailboxLive mempty [] settled False)
     Just tree -> do
       (entries, misses, cut) <- readEntries tree
-      pure (MailboxLive (liveMessages entries) misses settled cut)
+      now <- round <$> liftIO getPOSIXTime
+      current <- HS.fromList <$> filterM (liveAt now) (HS.toList (liveMessages entries))
+      pure (MailboxLive current misses settled cut)
 
   where
     readEntries tree = do
@@ -829,6 +832,16 @@ mailboxLiveWith fresh ig mbox = do
     readEntry h = igBlock ig h
                     <&> (>>= either (const Nothing) Just
                            . deserialiseOrFail @MailboxEntry)
+
+    -- Missing or malformed blocks remain visible as such.  Only an
+    -- authenticated MessageContent has a signed clock claim that can expire
+    -- it; treating arbitrary bytes as expired would turn TTL into a hiding
+    -- primitive for corruption.
+    liveAt now h = igBlock ig h <&> \block -> fromMaybe True do
+      bytes <- block
+      msg <- either (const Nothing) Just (deserialiseOrFail @(Message HBS2Basic) bytes)
+      (_, content) <- unboxSignedBox0 (messageContent msg)
+      pure (messageIsLive defaultMailboxClockSkew now (messageFlags content))
 
 -- | What one message in a mailbox turns out to be.
 --

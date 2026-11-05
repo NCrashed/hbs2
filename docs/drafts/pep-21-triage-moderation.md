@@ -605,8 +605,13 @@ it hands out.
     a folded canon event. This is what makes the storage bound real rather than
     monotonic without breaking canon references.
 
-Must be built: compound-predicate handling, TTL expiry, the purge/GC pass, and
-the canon-referenced-part pin set.
+Implemented by issue #18: TTL expiry and the canon-aware purge/GC pass. The
+authoritative clock rule, durable local grace journal, operator command, and
+the distinction between logical deletion, tombstone grace, and physical purge
+are documented in @docs/mailbox-retention.md@. Protection is derived from the
+fold's @frParts@ at each run; no mutable canon pin table was introduced.
+
+Still to be built separately: compound-predicate handling.
 
 Fold-then-delete is DONE, as the hub behaviour this predicted: `hub inbox
 accept` drops the letter it folded (`--keep` opts out), and `hub inbox reject`

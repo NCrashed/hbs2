@@ -152,6 +152,7 @@ library hub-ingress
       HBS2.Hub.CLI.Pr
       HBS2.Hub.CLI.Publish
       HBS2.Hub.CLI.Read
+      HBS2.Hub.CLI.Retention
       HBS2.Hub.CLI.Say
       HBS2.Hub.CLI.Sent
       HBS2.Hub.CLI.Status

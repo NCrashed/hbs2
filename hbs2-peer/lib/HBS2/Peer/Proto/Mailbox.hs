@@ -27,6 +27,7 @@ import HBS2.Peer.Proto.Mailbox.Entry
 import HBS2.Peer.Proto.Mailbox.Nonce
 import HBS2.Peer.Proto.Mailbox.Policy
 import HBS2.Peer.Proto.Mailbox.PoW
+import HBS2.Peer.Proto.Mailbox.Retention
 import HBS2.Peer.Proto.Mailbox.Ref
 
 import HBS2.Misc.PrettyStuff
@@ -236,6 +237,15 @@ class ForMailbox s => IsMailboxService s a where
   mailboxRelayFloor :: forall m . MonadIO m => a -> m PoWDifficulty
   mailboxRelayFloor _ = pure 0
 
+  -- | Inspect retention, or execute a canon-aware purge.  The protected set is
+  -- supplied by the application that owns canon; a peer cannot derive it from
+  -- opaque Git repository data.
+  mailboxRetention :: forall m . MonadIO m
+                   => a
+                   -> MailboxRetentionRequest
+                   -> m (Either MailboxServiceError MailboxRetentionReport)
+  mailboxRetention _ _ = pure (Left (MailboxOperationError "mailbox retention is unavailable"))
+
 data AnyMailboxService s =
   forall a  . (IsMailboxService s a) => AnyMailboxService { mailboxService :: a }
 
@@ -254,6 +264,7 @@ instance ForMailbox s => IsMailboxService s (AnyMailboxService s) where
   mailboxFetch (AnyMailboxService a) = mailboxFetch @s a
   mailboxPending (AnyMailboxService a) = mailboxPending @s a
   mailboxRelayFloor (AnyMailboxService a) = mailboxRelayFloor @s a
+  mailboxRetention (AnyMailboxService a) = mailboxRetention @s a
 
 instance ForMailbox s => IsMailboxProtoAdapter s (AnyMailboxAdapter s) where
   mailboxGetCredentials (AnyMailboxAdapter a) = mailboxGetCredentials @s a
@@ -309,6 +320,12 @@ mailboxProto inner adapter mess = deferred @p do
     -- общее и обязано остаться общим.
     let takeMessageWith relay origin msg content h = do
 
+          -- Lifetime is an admission rule, so it runs before both gossip and
+          -- the local queue.  Checking only in the queue let an already
+          -- expired message travel one more hop before the ten-second drain
+          -- refused it.
+          let live = messageIsLive defaultMailboxClockSkew now (messageFlags content)
+
           -- Отметка гейтит ТОЛЬКО пересылку, и это исправление.
           --
           -- Раньше он гейтил и приём тоже, а приём -- это очередь, за которой
@@ -353,7 +370,7 @@ mailboxProto inner adapter mess = deferred @p do
           -- между отправителем и хабом, и выбранное письмо переставало
           -- пересылаться, молча. И он никогда не удалялся, что и был соседний
           -- $class: leak. См. заголовок "HBS2.Peer.Proto.Relayed".
-          when relay do
+          when (live && relay) do
             fresh <- lift $ mailboxRelayOnce @s adapter h
 
             when fresh $ lift do
@@ -373,7 +390,7 @@ mailboxProto inner adapter mess = deferred @p do
               -- сообщение без штампа несёт ноль бит работы, а не «столько,
               -- сколько нужно».
 
-          lift do
+          when live $ lift do
             let whoever = if inner then Nothing else Just pip
             void $ mailboxAcceptMessage adapter whoever origin msg content
 
@@ -795,4 +812,3 @@ mailboxProto inner adapter mess = deferred @p do
 
       -- Тот же delete, но с доказательством работы.
       DeleteMessagesStamped box stamp -> takeDeleteWith (Just stamp) box
-

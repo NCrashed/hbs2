@@ -12,19 +12,25 @@ module MailboxConfig
   , poWFloorFrom
   , hbs2MailboxReplicateFromOpt
   , replicateFromIn
+  , hbs2MailboxPurgeGraceOpt
+  , defaultMailboxPurgeGrace
+  , maximumMailboxRetentionSecond
+  , retentionWindowsFrom
   ) where
 
 import HBS2.Prelude.Plated
 import HBS2.Net.Auth.Credentials
 import HBS2.Peer.Proto.Mailbox.Types
 import HBS2.Peer.Proto.Mailbox.PoW (defRelayFloor)
+import HBS2.Peer.Proto.Mailbox.Retention (defaultMailboxClockSkew)
 
 import Data.Config.Suckless
 
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
+import Data.Int (Int64)
 import Data.Maybe
-import Safe (lastMay)
+import Data.Word (Word64)
 
 -- | The least proof-of-work this peer will FORWARD, in leading zero bits.
 --
@@ -103,3 +109,36 @@ replicateFromIn conf =
               , o == hbs2MailboxReplicateFromOpt
               , Just k <- [fromStringMay @(PubKey 'Sign s) v]
               ]
+
+hbs2MailboxPurgeGraceOpt :: String
+hbs2MailboxPurgeGraceOpt = "hbs2:mailbox:purge-grace"
+
+-- | Seven days.  Long enough for an ordinary intermittently connected peer to
+-- observe a replicated tombstone; operators with a longer sync horizon must
+-- raise it explicitly.
+defaultMailboxPurgeGrace :: Word64
+defaultMailboxPurgeGrace = 7 * 24 * 60 * 60
+
+-- | SQLite INTEGER is signed.  Retention timestamps are persisted there, so
+-- accepting a larger unsigned value would wrap or fail only when the first
+-- message expires.
+maximumMailboxRetentionSecond :: Word64
+maximumMailboxRetentionSecond = fromIntegral (maxBound :: Int64)
+
+-- | @(clock skew, tombstone/purge grace)@ in seconds.
+--
+-- Skew is a protocol constant: making it local would let hub listing and peer
+-- admission disagree.  Grace is operational and follows the operator's real
+-- offline/synchronisation horizon, so it is configurable.
+retentionWindowsFrom :: [Syntax C] -> (Word64,Word64)
+retentionWindowsFrom conf =
+  ( defaultMailboxClockSkew
+  , seconds hbs2MailboxPurgeGraceOpt defaultMailboxPurgeGrace )
+  where
+    seconds option fallback = fromMaybe fallback $ lastMay
+      [ fromIntegral n
+      | ListVal [StringLike o, LitIntVal n] <- conf
+      , o == option
+      , n >= 0
+      , toInteger maximumMailboxRetentionSecond >= n
+      ]
